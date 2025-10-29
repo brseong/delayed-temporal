@@ -1,0 +1,3 @@
+git+https://user@bitbucket.org/repo-name/scripts.git#subdirectory=spikingjelly
+jupyter
+scikit-learn

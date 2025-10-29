@@ -1,0 +1,3 @@
+[submodule "spikingjelly"]
+	path = spikingjelly
+	url = https://github.com/brseong/spikingjelly.git
