@@ -3,3 +3,4 @@ git+https://github.com/brseong/spikingjelly.git#egg=spikingjelly
 jupyter
 scikit-learn
 jaxtyping
+cupy
