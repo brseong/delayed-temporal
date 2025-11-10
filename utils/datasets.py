@@ -30,6 +30,33 @@ def generate_lp_dataset(num_samples: int,
     
     return X, y
 
+def generate_cosine_dataset(num_samples: int, 
+                        vector_dim: int,
+                        max_val: float = 10.0) -> tuple[np.ndarray, np.ndarray]:
+    """
+    거리 예측을 위한 데이터셋을 생성합니다.
+
+    Args:
+        num_samples: 생성할 샘플의 수.
+        vector_dim: 각 벡터의 차원.
+        p: 거리 척도 (기본값: 2, L2 거리).
+        max_val: 벡터 요소의 최대값.
+
+    Returns:
+        X: 입력 데이터 (두 벡터가 수평으로 결합됨). Shape: (num_samples, vector_dim * 2)
+        y: 출력 레이블 (Lp 거리). Shape: (num_samples, 1)
+    """
+    
+    # 1. 두 개의 랜덤 벡터 세트 생성
+    # np.random.uniform을 사용하여 (num_samples, vector_dim) 크기의 행렬 두 개를 생성
+    X = np.random.uniform(0, max_val, size=(num_samples, 2, vector_dim))
+
+    # 2. Lp 거리 계산 (레이블 y)
+    # axis=1을 기준으로 합산하여 각 샘플(행)의 Lp 거리를 계산
+    x1, x2 = X[:, 0], X[:, 1]
+    y = np.vecdot(x1, x2) / (np.linalg.norm(x1, axis=1) * np.linalg.norm(x2, axis=1))
+    return X, y
+
 def encode_temporal(X_data:np.ndarray, time_steps:int, time_norm:bool=False):
     """
     입력 데이터를 Latency Coding(TTFS)으로 변환합니다.
