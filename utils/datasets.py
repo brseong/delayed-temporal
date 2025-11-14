@@ -16,17 +16,17 @@ def generate_lp_dataset(num_samples: int,
         max_val: 벡터 요소의 최대값.
 
     Returns:
-        X: 입력 데이터 (두 벡터가 수평으로 결합됨). Shape: (num_samples, vector_dim * 2)
+        X: 입력 데이터 (두 벡터가 수평으로 결합됨). Shape: (num_samples, 2, vector_dim)
         y: 출력 레이블 (Lp 거리). Shape: (num_samples, 1)
     """
     
     # 1. 두 개의 랜덤 벡터 세트 생성
     # np.random.uniform을 사용하여 (num_samples, vector_dim) 크기의 행렬 두 개를 생성
-    X = np.random.uniform(0, max_val, size=(num_samples, 2 * vector_dim))
+    X = np.random.uniform(0, vector_dim**(-1/p), size=(num_samples, 2, vector_dim))
 
     # 2. Lp 거리 계산 (레이블 y)
     # axis=1을 기준으로 합산하여 각 샘플(행)의 Lp 거리를 계산
-    y = np.linalg.norm(X[:, :vector_dim] - X[:, vector_dim:], ord=p, axis=1, keepdims=True)
+    y = np.linalg.norm(X[:, 0, :] - X[:, 1, :], ord=p, axis=1, keepdims=True)
     
     return X, y
 
@@ -67,7 +67,7 @@ def generate_cosine_dataset(num_samples: int,
         max_val: 벡터 요소의 최대값.
 
     Returns:
-        X: 입력 데이터 (두 벡터가 수평으로 결합됨). Shape: (num_samples, vector_dim * 2)
+        X: 입력 데이터 (두 벡터가 수평으로 결합됨). Shape: (num_samples, 2, vector_dim)
         y: 출력 레이블 (Lp 거리). Shape: (num_samples, 1)
     """
     
