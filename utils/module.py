@@ -50,12 +50,12 @@ class TransposeLayer(torch.nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return input.transpose(*self.dims)
 
-class SynapticDelayConvolution(torch.autograd.Function):
+class SynapsewiseDelay(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input: torch.Tensor, delay: torch.nn.Parameter) -> torch.Tensor:
         """Apply synaptic delay to the one-hot coded input tensor.
         
-        :param ctx: 설명
+        :param ctx: Context to save information for backward pass
         :param input: The input tensor to apply delay to. shape: (T, N, C, D_out, D_in)
         :type input: torch.Tensor
         :param delay: The delay tensor to apply. shape: (D_out, D_in)
@@ -67,9 +67,14 @@ class SynapticDelayConvolution(torch.autograd.Function):
         T, N, C, D_out, D_in = output.shape
         rounded_delay:Int64[Tensor, "N C D_out D_in"] = StochasticRound.apply(delay[None,None,...].repeat(N, C, 1, 1)) # type: ignore
         rounded_delay = rounded_delay.clamp(max= (T - 1) - output.argmax(dim=0)) # Prevent delay overflow
-
+        
+        # Apply delay by shifting the time dimension, using torch.gather
         mat = torch.arange(T, device=output.device).view(T,1,1,1,1).repeat(1,N,C,D_out,D_in)
         output = torch.gather(output, 0, (mat - rounded_delay[None,...]) % T)
+        # Equivalently, we can use roll (very slow):
+        # for d_out in range(D_out):
+        #     for d_in in range(D_in):
+        #         output[..., d_out, d_in] = torch.roll(output[..., d_out, d_in], shifts=rounded_delay[0,0,d_out,d_in].item(), dims=0)
         
         # ctx.save_for_backward(output, rounded_delay)
         
@@ -99,12 +104,24 @@ class SynapticDelayConvolution(torch.autograd.Function):
 
 class SDCLinear(torch.nn.Module):
     def __init__(self, out_features: int, tau: float = 2., bias = False) -> None:
+        """
+        Synaptic Delay Convolutional Linear Layer.
+        Applies synaptic delay convolution followed by a learnable synapse filter.
+        Linear transformation is performed with synapse-wise delays.
+        
+        :param self: Self
+        :param out_features: Number of output features
+        :type out_features: int
+        :param tau: Time constant for the synapse filter
+        :type tau: float
+        :param bias: Whether to include a bias term
+        """
         super().__init__()
         self.in_features = 2
         self.out_features = out_features
         self.bias = bias
-        self._delay = torch.nn.Parameter((torch.linspace(0, out_features-1, out_features).view(-1, 1).float()), requires_grad=False) # For symmetry
-        self.weight = torch.nn.Parameter(torch.tensor(3.5).exp()) # For symmetry
+        self._delay = torch.nn.Parameter(torch.linspace(0, out_features-1, out_features).view(-1, 1).float()) # For symmetry
+        self.weight = torch.nn.Parameter(torch.tensor(3.5).exp())
         # if bias:
         #     self.log_bias = torch.nn.Parameter(torch.tensor(0.))
 
@@ -119,13 +136,29 @@ class SDCLinear(torch.nn.Module):
         return torch.cat([self._delay.relu(), self._delay.flip(0).relu()], dim=1)
 
     def forward(self, input: torch.Tensor, reset: bool=True) -> torch.Tensor:
+        """
+        forward의 Docstring
+        
+        :param self: Self
+        :param input: Input tensor
+        :type input: torch.Tensor
+        :param reset: Whether to reset the filter state before forward pass
+        :type reset: bool
+        :return: Output tensor after synaptic delay convolution and filtering
+        :rtype: Tensor
+        """
         if reset:
             self.filter.reset()
         
+        # Duplicate last dimension for D_out and D_in, to apply synapse-wise delay.
+        # a out spikes from each input neuron map to d_out output neurons: total d_out output delays.
         output = input.unsqueeze(-2).repeat([1] * (len(input.shape) - 1) + [self.out_features, 1]) # ..., 2 -> ..., d_out, 2
-        output = SynapticDelayConvolution.apply(output, self.delay); assert isinstance(output, torch.Tensor)
+        # Apply synapse-wise delay
+        output = SynapsewiseDelay.apply(output, self.delay); assert isinstance(output, torch.Tensor)
+        # Apply synapse filter (postsynaptic current kernel) and weight
         output = self.filter(output)
         output.mul_(self.weight)
+        # Sum over input dimension to get output current.
         output = output.sum(dim=-1)
         # if self.bias:
         #     output += self.log_bias.exp()

@@ -1,5 +1,5 @@
 import numpy as np
-
+from itertools import product
 import matplotlib.pyplot as plt
 
 def generate_lp_dataset(num_samples: int, 
@@ -29,6 +29,30 @@ def generate_lp_dataset(num_samples: int,
     y = np.linalg.norm(X[:, :vector_dim] - X[:, vector_dim:], ord=p, axis=1, keepdims=True)
     
     return X, y
+
+def generate_1d_dot_classification_dataset(num_samples: int, num_classes: int, dim: int = 1) -> tuple[np.ndarray, np.ndarray]:
+    """
+    거리 예측을 위한 데이터셋을 생성합니다.
+
+    Args:
+        num_samples: 생성할 샘플의 수.
+    Returns:
+        X: 입력 데이터 (두 벡터가 수평으로 결합됨). Shape: (num_samples, 2)
+        y: 출력 레이블 (Lp 거리). Shape: (num_samples, 1)
+    """
+    
+    # 1. 두 개의 랜덤 벡터 세트 생성
+    # np.random.uniform을 사용하여 (num_samples, vector_dim) 크기의 행렬 두 개를 생성
+    X = np.random.uniform(0, 1, size=(num_samples, 2*dim))
+    X = X / (dim**0.5)  # Normalize to unit length
+
+    # 2. Lp 거리 계산 (레이블 y)
+    # axis=1을 기준으로 합산하여 각 샘플(행)의 Lp 거리를 계산
+    x1, x2 = X[:, 0:dim], X[:, dim:2*dim] # Shape: (num_samples, dim), to keep 2D shape - inner product only in last dim
+    y:np.ndarray = np.vecdot(x1, x2)
+    y = (y * (num_classes-1)).round().reshape(-1, 1)
+    return X, y
+
 
 def generate_cosine_dataset(num_samples: int, 
                         vector_dim: int,
@@ -64,24 +88,22 @@ def encode_temporal(X_data:np.ndarray, time_steps:int, time_norm:bool=False):
     음수와 양수를 별도 채널로 분리합니다.
 
     Args:
-        X_data (np.ndarray): 입력 데이터 (N, num_features)
+        X_data (np.ndarray): 입력 데이터 (*,)
         time_steps (int): 총 시뮬레이션 시간 단계.
 
     Returns:
-        np.ndarray: 인코딩된 스파이크 데이터 (time_steps, N, num_features)
+        np.ndarray: 인코딩된 스파이크 데이터 (time_steps, *X_data.shape)
     """
-    num_samples, num_features = X_data.shape
     max_val = np.max(X_data)
     
     if time_norm:
         X_data -= np.min(X_data, axis=1, keepdims=True)
     X_norm = (X_data * (time_steps-1)) / max_val
     X_pos = np.floor(X_norm).astype(np.int32)
-    spikes_out = np.zeros((time_steps, num_samples, num_features), dtype=np.float32)
+    spikes_out = np.zeros((time_steps, *X_data.shape), dtype=np.float32)
 
-    for i in range(num_samples):
-        for j in range(num_features):
-            spikes_out[X_pos[i, j], i, j] = 1.0
+    for indices in product(*[range(dim) for dim in X_data.shape]):
+        spikes_out[X_pos[*indices], *indices] = 1.0
 
     return spikes_out
 
