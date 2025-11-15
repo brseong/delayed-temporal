@@ -6,7 +6,7 @@ from spikingjelly.activation_based.functional import set_step_mode
 from spikingjelly.activation_based.surrogate import LeakyKReLU, MultiArgsSurrogateFunctionBase, SurrogateFunctionBase, ATan, Sigmoid
 from spikingjelly.activation_based.monitor import OutputMonitor
 
-from .module import TransposeLayer, SDCLinear
+from .module import TransposeLayer, JeffressLinear
 from jaxtyping import Float
 
 class CCN(torch.nn.Module):
@@ -41,8 +41,8 @@ class CCN(torch.nn.Module):
         
         self.model = torch.nn.Sequential(
             TransposeLayer((2,3)), # T,N,2,C -> T,N,C,2
-            SDCLinear(cc_acc, tau=2., bias=True), # T,N,C,2 -> T,N,C,cc_acc
-            neuron(tau=2., v_reset=0., surrogate_function=surrogate(), backend=backend, step_mode="m", store_v_seq=True), # T,N,C,cc_acc -> T,N,C,cc_acc
+            JeffressLinear(cc_acc, tau=2., bias=True), # T,N,C,2 -> T,N,C,cc_acc
+            LIFNode(tau=2., v_reset=0., surrogate_function=surrogate(), backend=backend, step_mode="m", store_v_seq=True), # T,N,C,cc_acc -> T,N,C,cc_acc
             
             SynapseFilter(tau=10.0, step_mode="m", learnable=True), # T,N,C,cc_acc -> T,N,C,cc_acc
             # Dimension-wise Linear Layer, to compute the similarity of each layer.
@@ -56,8 +56,8 @@ class CCN(torch.nn.Module):
             self.model.extend(
                 [
                     SynapseFilter(tau=10.0, step_mode="m", learnable=True), # T,N,C,cc_acc -> T,N,C,cc_acc
-                    Linear(in_dim, out_dim),
-                    neuron(v_reset=0., surrogate_function=surrogate(), backend=self.backend)
+                    Linear(in_dim, out_dim, step_mode="m"), # T,N,C,in_dim -> T,N,C,out_dim
+                    neuron(tau=2., v_reset=0., surrogate_function=surrogate(), backend=backend, step_mode="m")
                 ]
             )
         
@@ -66,7 +66,7 @@ class CCN(torch.nn.Module):
         # Final non-spiking neuron to accumulate the voltage
         self.out_neuron = NonSpikingIFNode()
         
-        self.stats = OutputMonitor(self, (neuron, SynapseFilter))
+        self.stats = OutputMonitor(self, (IFNode, LIFNode, ParametricLIFNode, SynapseFilter))
         
     #     self._loss = None
     
@@ -95,6 +95,7 @@ class CCN(torch.nn.Module):
             for layer in self.model:
                 if isinstance(layer, (BaseNode, MemoryModule)):
                     layer.reset()
+            self.stats.clear_recorded_data()
             
         for i, layer in enumerate(self.model):
             x = layer(x)

@@ -76,7 +76,7 @@ class SynapsewiseDelay(torch.autograd.Function):
         #     for d_in in range(D_in):
         #         output[..., d_out, d_in] = torch.roll(output[..., d_out, d_in], shifts=rounded_delay[0,0,d_out,d_in].item(), dims=0)
         
-        # ctx.save_for_backward(output, rounded_delay)
+        ctx.save_for_backward(input - output)
         
         return output
 
@@ -89,20 +89,20 @@ class SynapsewiseDelay(torch.autograd.Function):
         """
         
         #TODO: Gradient of clamped delay?
-        # output, delay = ctx.saved_tensors
-        # T, N, C, D_in, D_out = output.shape
+        output_minus_input, = ctx.saved_tensors
+        # T, N, C, D_out, D_in = output_minus_input.shape
         
         # 'delay'에 대한 그래디언트만 계산 (vec의 그래디언트는 None)
         grad_delay = None
         
         # 'delay'가 그래디언트를 요구할 때만 (needs_input_grad[1]) 계산
         if ctx.needs_input_grad[1]:
-            grad_delay = grad_output.sum(dim=(0, 1, 2))
+            grad_delay = (grad_output * output_minus_input).sum(dim=(0, 1, 2))
         
         # vec의 그래디언트(None), d의 그래디언트 순서로 반환
         return None, grad_delay
 
-class SDCLinear(torch.nn.Module):
+class JeffressLinear(torch.nn.Module):
     def __init__(self, out_features: int, tau: float = 2., bias = False) -> None:
         """
         Synaptic Delay Convolutional Linear Layer.
@@ -120,8 +120,14 @@ class SDCLinear(torch.nn.Module):
         self.in_features = 2
         self.out_features = out_features
         self.bias = bias
-        self._delay = torch.nn.Parameter(torch.linspace(0, out_features-1, out_features).view(-1, 1).float()) # For symmetry
-        self.weight = torch.nn.Parameter(torch.tensor(3.5).exp())
+        self._log_delay = torch.nn.Parameter(
+            torch.cat([
+                torch.empty(out_features//2),
+                torch.linspace(-4, 0, out_features//2)
+            ])
+            ).view(-1,1) # For symmetry
+        # self.weight = torch.nn.Parameter(torch.rand(out_features, 2).exp())
+        self._log_weight = torch.nn.Parameter(torch.log(torch.tensor(2.0))) # For only one weight
         # if bias:
         #     self.log_bias = torch.nn.Parameter(torch.tensor(0.))
 
@@ -133,14 +139,23 @@ class SDCLinear(torch.nn.Module):
     
     @property
     def delay(self):
-        return torch.cat([self._delay.relu(), self._delay.flip(0).relu()], dim=1)
+        self._delay_mask = torch.cat([
+            torch.zeros(self.out_features//2),
+            torch.ones(self.out_features//2)
+        ])
+        self._delay_mask = torch.stack([self._delay_mask, self._delay_mask.flip(0)], dim=-1)  # Shape: (out_features, 2)
+        return torch.cat([self._log_delay, self._log_delay.flip(0)], dim=1).exp() * self._delay_mask
+
+    @property
+    def weight(self):
+        return self._log_weight.exp()
 
     def forward(self, input: torch.Tensor, reset: bool=True) -> torch.Tensor:
         """
         forward의 Docstring
         
         :param self: Self
-        :param input: Input tensor
+        :param input: Input tensor, shape: (T, N, C, 2)
         :type input: torch.Tensor
         :param reset: Whether to reset the filter state before forward pass
         :type reset: bool
@@ -154,10 +169,11 @@ class SDCLinear(torch.nn.Module):
         # a out spikes from each input neuron map to d_out output neurons: total d_out output delays.
         output = input.unsqueeze(-2).repeat([1] * (len(input.shape) - 1) + [self.out_features, 1]) # ..., 2 -> ..., d_out, 2
         # Apply synapse-wise delay
-        output = SynapsewiseDelay.apply(output, self.delay); assert isinstance(output, torch.Tensor)
+        output = SynapsewiseDelay.apply(output, input.shape[0] * self.delay.to(output.device)); assert isinstance(output, torch.Tensor)
         # Apply synapse filter (postsynaptic current kernel) and weight
         output = self.filter(output)
-        output.mul_(self.weight)
+        output.mul_(self.weight) # For only one weight
+        # output.mul_(self.weight[None, None, None, :, :])
         # Sum over input dimension to get output current.
         output = output.sum(dim=-1)
         # if self.bias:

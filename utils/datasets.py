@@ -81,7 +81,7 @@ def generate_cosine_dataset(num_samples: int,
     y = np.vecdot(x1, x2) / (np.linalg.norm(x1, axis=1) * np.linalg.norm(x2, axis=1))
     return X, y
 
-def encode_temporal(X_data:np.ndarray, time_steps:int, time_norm:bool=False):
+def encode_temporal(X_data:np.ndarray, time_steps:int, time_norm:bool=False, ):
     """
     입력 데이터를 Latency Coding(TTFS)으로 변환합니다.
     강한 입력(절댓값) -> 빠른 스파이크, 약한 입력 -> 늦은 스파이크.
@@ -98,7 +98,7 @@ def encode_temporal(X_data:np.ndarray, time_steps:int, time_norm:bool=False):
     
     if time_norm:
         X_data -= np.min(X_data, axis=1, keepdims=True)
-    X_norm = (X_data * (time_steps-1)) / max_val
+    X_norm = ((max_val - X_data) * (time_steps-1)) / max_val
     X_pos = np.floor(X_norm).astype(np.int32)
     spikes_out = np.zeros((time_steps, *X_data.shape), dtype=np.float32)
 
