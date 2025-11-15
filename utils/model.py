@@ -48,7 +48,7 @@ class CCN(torch.nn.Module):
             # Dimension-wise Linear Layer, to compute the similarity of each layer.
             Linear(cc_acc, 1, step_mode="m"), # T,N,C,cc_acc -> T,N,C,1
             torch.nn.Flatten(start_dim=2), # T,N,C,1 -> T,N,C
-            neuron(tau=2., v_reset=0., surrogate_function=surrogate(), backend=backend, step_mode="m"), # T,N,C -> T,N,C
+            neuron(tau=10., v_reset=0., surrogate_function=surrogate(), backend=backend, step_mode="m"), # T,N,C -> T,N,C
         )
 
         feature_dims = [self.vector_dim] + self.feature_dims
@@ -57,7 +57,7 @@ class CCN(torch.nn.Module):
                 [
                     SynapseFilter(tau=10.0, step_mode="m", learnable=True), # T,N,C,cc_acc -> T,N,C,cc_acc
                     Linear(in_dim, out_dim, step_mode="m"), # T,N,C,in_dim -> T,N,C,out_dim
-                    neuron(tau=2., v_reset=0., surrogate_function=surrogate(), backend=backend, step_mode="m")
+                    neuron(tau=10., v_reset=0., surrogate_function=surrogate(), backend=backend, step_mode="m")
                 ]
             )
         
