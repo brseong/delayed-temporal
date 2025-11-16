@@ -28,7 +28,7 @@ class StochasticRound(torch.autograd.Function):
         # 아니면 (1-p의 확률로 발생) floor(x)
         rounded_x = torch.where(torch.bernoulli(p).bool(), x_floor + 1.0, x_floor)
         
-        return rounded_x.long()
+        return rounded_x
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor): # type: ignore
@@ -38,7 +38,6 @@ class StochasticRound(torch.autograd.Function):
         """
         # (d_loss / d_rounded_x) * (d_rounded_x / d_x)
         # STE는 d_rounded_x / d_x 를 1로 가정함
-        print("StochasticRound backward called")
         return grad_output
     
 class TransposeLayer(torch.nn.Module):
@@ -76,7 +75,7 @@ def _shift_vec(input: torch.Tensor, delay: torch.Tensor) -> torch.Tensor:
 
 class JeffressDelay(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input: torch.Tensor, delay: torch.nn.Parameter) -> torch.Tensor:
+    def forward(ctx, input: torch.Tensor, delay: torch.Tensor) -> torch.Tensor:
         """Apply synaptic delay to the one-hot coded input tensor.
         
         :param ctx: Context to save information for backward pass
@@ -89,6 +88,7 @@ class JeffressDelay(torch.autograd.Function):
         """
         output = input.clone()
         T, N, C, D_out, _ = output.shape
+        delay = delay.long()
         
         # Apply delay by shifting the time dimension, using torch.gather
         output = _shift_vec(output, delay)
@@ -100,7 +100,7 @@ class JeffressDelay(torch.autograd.Function):
         #     for d_in in range(D_in):
         #         output[..., d_out, d_in] = torch.roll(output[..., d_out, d_in], shifts=rounded_delay[0,0,d_out,d_in].item(), dims=0)
         
-        ctx.save_for_backward(output.clone(), delay.clone())
+        ctx.save_for_backward(input.clone(), output.clone(), delay.clone())
         
         return output
 
@@ -113,9 +113,10 @@ class JeffressDelay(torch.autograd.Function):
         """
         
         #TODO: Gradient of clamped delay?
-        output, delay, = ctx.saved_tensors
-        # T, N, C, D_out, _ = output.shape
-        # N, C, D_out, D_in = delay.shape
+        input, output, delay, = ctx.saved_tensors
+        # T, N, C, D_out, _2 = input.shape
+        T, N, C, D_out, _2 = output.shape
+        # N, C, D_out, _2 = delay.shape
         
         # # 'delay'에 대한 그래디언트만 계산 (vec의 그래디언트는 None)
         grad_input = None
@@ -126,21 +127,27 @@ class JeffressDelay(torch.autograd.Function):
         
         # # 'delay'가 그래디언트를 요구할 때만 (needs_input_grad[1]) 계산
         if ctx.needs_input_grad[1]:
-            # arange = torch.arange(output.shape[0], device=output.device).view(-1,1,1,1,1)
-            # score = torch.sum(output * arange, dim=0)  # shape: (N, C, D_out, 2)
+            # score = torch.argmax(output, dim=0)  # shape: (N, C, D_out, 2)
             # score = torch.square(score[...,0] - score[...,1])  # shape: (N, C, D_out)
             # score = torch.exp(-score)  # shape: (N, C, D_out)
             
             # score = torch.softmax(output, dim=0) # shape: (T, N, C, D_out, 2)
             # score = torch.linalg.vecdot(score[...,0], score[...,1], dim=0)  # shape: (N, C, D_out)
-                
-            # grad_delay = (grad_output * score[None,...,None]).sum(dim=(0, 1, 2))
             
-            # vec의 그래디언트(None), d의 그래디언트 순서로 반환
-            grad_delay = output * grad_output
+            # grad_delay = (grad_output * score[None,...,None])
+            
+            # diff = torch.argmax(output, dim=0)  # shape: (N, C, D_out, 2)
+            # diff = (diff[...,1] - diff[...,0]) # shape: (N, C, D_out)
+            # score = torch.exp(-torch.square(diff) / 2).unsqueeze(-1)  # shape: (N, C, D_out, 1)
+            # diff = torch.stack([diff, -diff], dim=-1)  # shape: (N, C, D_out, 2)
+            # grad_delay = (grad_output.sum(dim=0) * (score * diff)) # shape: (N, C, D_out, 2)
+            
+            # grad_delay = (torch.argmax(output, dim=0) - torch.argmax(input, dim=0)).float()  # shape: (N, C, D_out, 2)
+            
+            grad_delay = grad_output
         
-        print("JeffressDelay backward called", grad_input.shape, grad_delay.shape)
-        return grad_input, grad_delay.sum(dim=(0))
+        # vec의 그래디언트(None), d의 그래디언트 순서로 반환
+        return grad_input, grad_delay
 
 class JeffressLinear(torch.nn.Module):
     def __init__(self, out_features: int, tau: float = 2., bias = False) -> None:
@@ -160,31 +167,34 @@ class JeffressLinear(torch.nn.Module):
         self.in_features = 2
         self.out_features = out_features
         self.bias = bias
-        self._log_delay = torch.nn.Parameter(torch.linspace(-4, 0, out_features).view(-1,1).float()) # For symmetry
+        _delay = torch.linspace(1e-7, 1, out_features, dtype=torch.float32, requires_grad=True).view(-1,1)
+        self._log_delay = torch.nn.Parameter(torch.log(_delay)) # For symmetry
         # self.weight = torch.nn.Parameter(torch.rand(out_features, 2).exp())
-        self._log_weight = torch.nn.Parameter(torch.log(torch.tensor(2.0))) # For only one weight
-        # if bias:
-        #     self.log_bias = torch.nn.Parameter(torch.tensor(0.))
+        _weight = torch.tensor(2., requires_grad=True).float()
+        self._log_weight = torch.nn.Parameter(torch.log(_weight)) # For only one weight
+        if bias:
+            self.log_bias = torch.nn.Parameter(torch.tensor(0.))
 
         self.filter = SynapseFilter(tau=tau, learnable=False, step_mode="m")
-        self._loss = None
+        
+        self.min_diff = None
 
     def extra_repr(self):
         return f'in_features={self.in_features}, out_features={self.out_features}'
     
     @property
     def delay(self):
-        # self._delay_mask = torch.cat([
-        #     torch.zeros(self.out_features//2),
-        #     torch.ones(self.out_features//2)
-        # ])
-        # self._delay_mask = torch.stack([self._delay_mask, self._delay_mask.flip(0)], dim=-1)  # Shape: (out_features, 2)
-        # return torch.cat([self._log_delay, self._log_delay.flip(0)], dim=1).exp() * self._delay_mask
         return torch.cat([self._log_delay.exp(), self._log_delay.flip(0).exp()], dim=1)
 
     @property
     def weight(self):
         return self._log_weight.exp()
+    
+    def get_loss(self):
+        if self.min_diff is not None:
+            return self.min_diff.mean()
+        else:
+            raise ValueError("Loss has not been computed yet.")
 
     def forward(self, input: torch.Tensor, reset: bool=True) -> torch.Tensor:
         """
@@ -210,21 +220,33 @@ class JeffressLinear(torch.nn.Module):
         # Sample synaptic delays
         rounded_delay:Int64[Tensor, "N C D_out D_in"]\
             = StochasticRound.apply(
-                    self.delay[None,None,...].to(output.device)\
+                    (output.shape[0] * self.delay[None,None,...])\
+                        .to(output.device)\
                         .repeat(N, C, 1, 1)
                     ) # type: ignore
                 # Shape: (N, C, D_out, D_in)
         rounded_delay = rounded_delay.clamp(max= (T - 1) - output.argmax(dim=0)) # Prevent delay overflow
         
         # Apply synapse-wise delay
-        output = JeffressDelay.apply(output, rounded_delay.to(output.device)); assert isinstance(output, torch.Tensor)
+        output = JeffressDelay.apply(output, rounded_delay) # output shape: (T, N, C, D_out, 2)
+        assert isinstance(output, torch.Tensor)
+        
+        # # Loss: Minimum time difference between two spikes
+        # _diff = output[...,1].softmax(dim=0) - output[...,0].softmax(dim=0) # Shape: (T, N, C, D_out)
+        # _diff = torch.arange(T, device=output.device).view(T,1,1,1) / T * _diff # Shape: (T, N, C, D_out)
+        # _diff = _diff.sum(dim=0)  # Shape: (N, C, D_out)
+        # _diff = (1 - _diff).softmax(dim=-1) # Shape: (N, C, D_out)
+        # _diff = torch.arange(output.shape[-2], device=output.device).view(1,1,-1) * _diff # Shape: (N, C, D_out)
+        # self.min_diff = _diff.sum(dim=-1) # Shape: (N, C)
+        
         # Apply synapse filter (postsynaptic current kernel) and weight
-        # output = self.filter(output)
+        output = self.filter(output)
         output.mul_(self.weight) # For only one weight
         # output.mul_(self.weight[None, None, None, :, :])
         # Sum over input dimension to get output current.
         output = output.sum(dim=-1)
-        # if self.bias:
-        #     output += self.log_bias.exp()
+        
+        if self.bias:
+            output += self.log_bias.exp()
 
         return output
