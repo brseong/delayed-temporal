@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 def generate_lp_dataset(num_samples: int, 
                         vector_dim: int, 
-                        p: float = 2,
+                        p: float = 2.,
                         max_val: float = 10.0) -> tuple[np.ndarray, np.ndarray]:
     """
     거리 예측을 위한 데이터셋을 생성합니다.
@@ -81,7 +81,7 @@ def generate_cosine_dataset(num_samples: int,
     y = np.vecdot(x1, x2) / (np.linalg.norm(x1, axis=1) * np.linalg.norm(x2, axis=1))
     return X, y
 
-def encode_temporal(X_data:np.ndarray, time_steps:int, time_norm:bool=False, ):
+def encode_temporal(X_data:np.ndarray, time_steps:int, time_norm:bool=False, p:float=2.):
     """
     입력 데이터를 Latency Coding(TTFS)으로 변환합니다.
     강한 입력(절댓값) -> 빠른 스파이크, 약한 입력 -> 늦은 스파이크.
@@ -94,7 +94,7 @@ def encode_temporal(X_data:np.ndarray, time_steps:int, time_norm:bool=False, ):
     Returns:
         np.ndarray: 인코딩된 스파이크 데이터 (time_steps, *X_data.shape)
     """
-    max_val = np.max(X_data)
+    max_val = (X_data.shape[-1] ** (1/p))
     
     if time_norm:
         X_data -= np.min(X_data, axis=1, keepdims=True)
