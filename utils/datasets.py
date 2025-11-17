@@ -22,7 +22,7 @@ def generate_lp_dataset(num_samples: int,
     
     # 1. 두 개의 랜덤 벡터 세트 생성
     # np.random.uniform을 사용하여 (num_samples, vector_dim) 크기의 행렬 두 개를 생성
-    X = np.random.uniform(0, vector_dim**(-1/p), size=(num_samples, 2, vector_dim))
+    X = np.random.uniform(0, 1, size=(num_samples, 2, vector_dim))
 
     # 2. Lp 거리 계산 (레이블 y)
     # axis=1을 기준으로 합산하여 각 샘플(행)의 Lp 거리를 계산
@@ -81,7 +81,7 @@ def generate_cosine_dataset(num_samples: int,
     y = np.vecdot(x1, x2) / (np.linalg.norm(x1, axis=1) * np.linalg.norm(x2, axis=1))
     return X, y
 
-def encode_temporal(X_data:np.ndarray, time_steps:int, time_norm:bool=False, p:float=2.):
+def encode_temporal(X_data:np.ndarray, time_steps:int, time_norm:bool=False):
     """
     입력 데이터를 Latency Coding(TTFS)으로 변환합니다.
     강한 입력(절댓값) -> 빠른 스파이크, 약한 입력 -> 늦은 스파이크.
@@ -94,10 +94,11 @@ def encode_temporal(X_data:np.ndarray, time_steps:int, time_norm:bool=False, p:f
     Returns:
         np.ndarray: 인코딩된 스파이크 데이터 (time_steps, *X_data.shape)
     """
-    max_val = (X_data.shape[-1] ** (1/p))
+    max_val = 1.0
     
     if time_norm:
-        X_data -= np.min(X_data, axis=1, keepdims=True)
+        # X_data -= np.min(X_data, axis=1, keepdims=True)
+        X_data -= 0.0
     X_norm = ((max_val - X_data) * (time_steps-1)) / max_val
     X_pos = np.floor(X_norm).astype(np.int32)
     spikes_out = np.zeros((time_steps, *X_data.shape), dtype=np.float32)

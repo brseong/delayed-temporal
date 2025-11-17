@@ -171,7 +171,7 @@ class JeffressDelay(torch.autograd.Function):
             
             # grad_delay = (torch.argmax(output, dim=0) - torch.argmax(input, dim=0)).float()  # shape: (N, C, D_out, 2)
             
-            grad_delay = grad_output.sum((0,1,2))
+            grad_delay = (grad_output).sum(dim=(0,1,2))
         
         # vec의 그래디언트(None), d의 그래디언트 순서로 반환
         return grad_input, grad_delay
@@ -195,9 +195,9 @@ class JeffressLinear(torch.nn.Module):
         self.out_features = out_features
         self.has_bias = bias
         _delay = torch.linspace(-1, 1, out_features, dtype=torch.float32, requires_grad=True).view(-1,1)
-        self._delay = torch.nn.Parameter(_delay) # For symmetry
+        self._delay = torch.nn.Parameter(_delay, requires_grad=False) # For symmetry
         # self.weight = torch.nn.Parameter(torch.rand(out_features, 2).exp())
-        _weight = torch.tensor(2., requires_grad=True).float()
+        _weight = torch.tensor(1., requires_grad=True).float()
         self._log_weight = torch.nn.Parameter(torch.log(_weight)) # For only one weight
         if bias:
             self.log_bias = torch.nn.Parameter(torch.tensor(0.))
@@ -244,30 +244,12 @@ class JeffressLinear(torch.nn.Module):
         # a out spikes from each input neuron map to d_out output neurons: total d_out output delays.
         output = input.unsqueeze(-2).repeat([1] * (len(input.shape) - 1) + [self.out_features, 1]) # ..., 2 -> ..., d_out, 2
         
-        # # Sample synaptic delays
-        # rounded_delay:Int64[Tensor, "N C D_out D_in"]\
-        #     = StochasticRound.apply(
-        #             (output.shape[0] * self.delay[None,None,...])\
-        #                 .to(output.device)\
-        #                 .repeat(N, C, 1, 1)
-        #             ) # type: ignore
-        #         # Shape: (N, C, D_out, D_in)
-        # rounded_delay = rounded_delay.clamp(max= (T - 1) - output.argmax(dim=0)) # Prevent delay overflow
-        
         # Apply synapse-wise delay
         output = JeffressDelay.apply(output, self.delay) # output shape: (T, N, C, D_out, 2)
         assert isinstance(output, torch.Tensor)
         
-        # # Loss: Minimum time difference between two spikes
-        # _diff = output[...,1].softmax(dim=0) - output[...,0].softmax(dim=0) # Shape: (T, N, C, D_out)
-        # _diff = torch.arange(T, device=output.device).view(T,1,1,1) / T * _diff # Shape: (T, N, C, D_out)
-        # _diff = _diff.sum(dim=0)  # Shape: (N, C, D_out)
-        # _diff = (1 - _diff).softmax(dim=-1) # Shape: (N, C, D_out)
-        # _diff = torch.arange(output.shape[-2], device=output.device).view(1,1,-1) * _diff # Shape: (N, C, D_out)
-        # self.min_diff = _diff.sum(dim=-1) # Shape: (N, C)
-        
         # Apply synapse filter (postsynaptic current kernel) and weight
-        output = self.filter(output)
+        # output = self.filter(output)
         output.mul_(self.weight) # For only one weight
         # output.mul_(self.weight[None, None, None, :, :])
         # Sum over input dimension to get output current.
