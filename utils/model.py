@@ -17,7 +17,7 @@ class CCN(torch.nn.Module):
                  step_mode:str = "m",
                  backend:str = "torch",
                  neuron = IFNode,
-                 surrogate = Rect):
+                 surrogate = Rect()):
         """
         Cross-correlation network initialization.
         
@@ -42,13 +42,13 @@ class CCN(torch.nn.Module):
         self.model = torch.nn.Sequential(
             TransposeLayer((2,3)), # T,N,2,C -> T,N,C,2
             JeffressLinear(cc_acc, tau=2., bias=False), # T,N,C,2 -> T,N,C,cc_acc
-            LIFNode(tau=1.5, v_reset=0., surrogate_function=surrogate(), backend=backend, step_mode="m", store_v_seq=True), # T,N,C,cc_acc -> T,N,C,cc_acc
+            LIFNode(tau=1.5, v_reset=0., surrogate_function=surrogate, backend=backend, step_mode="m", store_v_seq=True), # T,N,C,cc_acc -> T,N,C,cc_acc
             
             SynapseFilter(tau=10.0, step_mode="m", learnable=True), # T,N,C,cc_acc -> T,N,C,cc_acc
             # Dimension-wise Linear Layer, to compute the similarity of each layer.
             Linear(cc_acc, 1, step_mode="m", bias=False), # T,N,C,cc_acc -> T,N,C,1
             torch.nn.Flatten(start_dim=2), # T,N,C,1 -> T,N,C
-            neuron(v_reset=0., surrogate_function=surrogate(), backend=backend, step_mode="m"), # T,N,C -> T,N,C
+            neuron(v_reset=0., surrogate_function=surrogate, backend=backend, step_mode="m"), # T,N,C -> T,N,C
         )
 
         feature_dims = [self.vector_dim] + self.feature_dims
@@ -57,7 +57,7 @@ class CCN(torch.nn.Module):
                 [
                     SynapseFilter(tau=10.0, step_mode="m", learnable=True), # T,N,C,cc_acc -> T,N,C,cc_acc
                     Linear(in_dim, out_dim, step_mode="m", bias=False), # T,N,C,in_dim -> T,N,C,out_dim
-                    neuron(v_reset=0., surrogate_function=surrogate(), backend=backend, step_mode="m")
+                    neuron(v_reset=0., surrogate_function=surrogate, backend=backend, step_mode="m")
                 ]
             )
         
