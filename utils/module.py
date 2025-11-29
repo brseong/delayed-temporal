@@ -3,6 +3,7 @@ import torch
 from jaxtyping import Int64, Float
 from spikingjelly.activation_based.layer import SynapseFilter
 from torch import Tensor
+from .layer import LIF_Filter
 
 class StochasticRound(torch.autograd.Function):
     """
@@ -74,6 +75,97 @@ def _shift_vec(input: torch.Tensor, delay: torch.Tensor) -> torch.Tensor:
     
     return output
 
+class WrapperFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, params, forward, backward):
+        ctx.backward = backward
+        pack, output = forward(input)
+        ctx.save_for_backward(*pack)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        backward = ctx.backward
+        pack = ctx.saved_tensors
+        grad_input, grad_weight = backward(grad_output, *pack)
+        return grad_input, grad_weight, None, None
+
+class EventPropLinear(torch.nn.Module):
+    def __init__(self, input_dim, output_dim, T, dt, tau_m, tau_s, mu):
+        """
+        EventProp Linear Layer with Spiking Neuron Dynamics.
+        https://github.com/lolemacs/pytorch-eventprop
+        
+        :param self: 설명
+        :param input_dim: 설명
+        :param output_dim: 설명
+        :param T: 설명
+        :param dt: 설명
+        :param tau_m: 설명
+        :param tau_s: 설명
+        :param mu: 설명
+        """
+        super(EventPropLinear, self).__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.T = T
+        self.dt = dt
+        self.tau_m = tau_m
+        self.tau_s = tau_s
+        
+        self.weight = torch.nn.Parameter(torch.Tensor(output_dim, input_dim))
+        torch.nn.init.normal_(self.weight, mu, mu)
+        
+    def forward(self, input): # type: ignore
+        return WrapperFunction.apply(input, self.weight, self.manual_forward, self.manual_backward)
+        
+    def manual_forward(self, input):
+        steps = int(self.T / self.dt)
+        input = input.permute(1,2,3,0)  # N, C_in, D, T
+    
+        V = torch.zeros(input.shape[0], self.output_dim, steps).cuda()
+        I = torch.zeros(input.shape[0], self.output_dim, steps).cuda()
+        output = torch.zeros(input.shape[0], self.output_dim, steps).cuda()
+
+        while True:
+            for i in range(1, steps):
+                t = i * self.dt
+                V[:,:,i] = (1 - self.dt / self.tau_m) * V[:,:,i-1] + (self.dt / self.tau_m) * I[:,:,i-1]
+                I[:,:,i] = (1 - self.dt / self.tau_s) * I[:,:,i-1] + torch.nn.functional.linear(input[:,:,i-1].float(), self.weight)
+                spikes = (V[:,:,i] > 1.0).float()
+                output[:,:,i] = spikes
+                V[:,:,i] = (1-spikes) * V[:,:,i]
+
+            if self.training:
+                is_silent = output.sum(2).min(0)[0] == 0
+                self.weight.data[is_silent] = self.weight.data[is_silent] + 1e-1
+                if is_silent.sum() == 0:
+                    break
+            else:
+                break
+
+        return (input, I, output), output
+    
+    def manual_backward(self, grad_output, input, I, post_spikes):
+        steps = int(self.T / self.dt)
+                
+        lV = torch.zeros(input.shape[0], self.output_dim, steps).cuda()
+        lI = torch.zeros(input.shape[0], self.output_dim, steps).cuda()
+        
+        grad_input = torch.zeros(input.shape[0], input.shape[1], steps).cuda()
+        grad_weight = torch.zeros(input.shape[0], *self.weight.shape).cuda()
+        
+        for i in range(steps-2, -1, -1):
+            t = i * self.dt
+            delta = lV[:,:,i+1] - lI[:,:,i+1]
+            grad_input[:,:,i] = torch.nn.functional.linear(delta, self.weight.t())
+            lV[:,:,i] = (1 - self.dt / self.tau_m) * lV[:,:,i+1] + post_spikes[:,:,i+1] * (lV[:,:,i+1] + grad_output[:,:,i+1]) / (I[:,:,i] - 1 + 1e-10)
+            lI[:,:,i] = lI[:,:,i+1] + (self.dt / self.tau_s) * (lV[:,:,i+1] - lI[:,:,i+1])
+            spike_bool = input[:,:,i].float()
+            grad_weight -= (spike_bool.unsqueeze(1) * lI[:,:,i].unsqueeze(2))
+
+        return grad_input, grad_weight
+
 class JeffressDelay(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input: torch.Tensor, delay: torch.Tensor) -> torch.Tensor:
@@ -91,7 +183,8 @@ class JeffressDelay(torch.autograd.Function):
         T, N, C, D_out, _ = output.shape
         # Sample synaptic delays
         
-        batch_delay = output.shape[0] * delay[None,None,...].repeat(N, C, 1, 1) # Shape: (N, C, D_out, 2)
+        # batch_delay = (T-1) * delay[None,None,...].repeat(N, C, 1, 1) # Shape: (N, C, D_out, 2)
+        batch_delay = delay[None,None,...].repeat(N, C, 1, 1) # Shape: (N, C, D_out, 2)
         
         delay_floor = torch.floor(batch_delay)
         p = batch_delay - delay_floor  # ceil(x)가 될 확률
@@ -177,7 +270,7 @@ class JeffressDelay(torch.autograd.Function):
         return grad_input, grad_delay
 
 class JeffressLinear(torch.nn.Module):
-    def __init__(self, out_features: int, tau: float = 2., bias = False) -> None:
+    def __init__(self, radius: int, tau: float = 2., bias = False) -> None:
         """
         Synaptic Delay Convolutional Linear Layer.
         Applies synaptic delay convolution followed by a learnable synapse filter.
@@ -192,36 +285,29 @@ class JeffressLinear(torch.nn.Module):
         """
         super().__init__()
         self.in_features = 2
-        self.out_features = out_features
+        self.radius = radius
+        self.out_features = 2 * radius + 1
         self.has_bias = bias
-        _delay = torch.linspace(-1, 1, out_features, dtype=torch.float32, requires_grad=True).view(-1,1)
+        _delay = torch.arange(-radius, radius+1, dtype=torch.float32, requires_grad=True).view(-1,1)
         self._delay = torch.nn.Parameter(_delay, requires_grad=False) # For symmetry
-        # self.weight = torch.nn.Parameter(torch.rand(out_features, 2).exp())
-        _weight = torch.tensor(1., requires_grad=True).float()
-        self._log_weight = torch.nn.Parameter(torch.log(_weight)) # For only one weight
+        self._weight = torch.nn.Parameter(torch.tensor(6.53543197272069), requires_grad=False)
         if bias:
             self.log_bias = torch.nn.Parameter(torch.tensor(0.))
 
-        self.filter = SynapseFilter(tau=tau, learnable=False, step_mode="m")
+        self.filter = LIF_Filter(step_mode="m")
         
         self.min_diff = None
 
     def extra_repr(self):
-        return f'in_features={self.in_features}, out_features={self.out_features}'
+        return f'in_features={self.in_features}, out_features={self.radius}'
     
     @property
     def delay(self):
-        return torch.cat([self._delay, -self._delay], dim=1).atan().relu() * 2 / torch.pi
+        return torch.cat([self._delay, -self._delay], dim=1).relu()
 
     @property
     def weight(self):
-        return self._log_weight.exp()
-    
-    # def get_loss(self):
-    #     if self.min_diff is not None:
-    #         return self.min_diff.mean()
-    #     else:
-    #         raise ValueError("Loss has not been computed yet.")
+        return self._weight
 
     def forward(self, input: torch.Tensor, reset: bool=True) -> torch.Tensor:
         """
@@ -248,12 +334,13 @@ class JeffressLinear(torch.nn.Module):
         output = JeffressDelay.apply(output, self.delay) # output shape: (T, N, C, D_out, 2)
         assert isinstance(output, torch.Tensor)
         
+        output = self.filter(output)  # Apply LIF_Filter, shape: (T, N, C, D_out, 2)
+        
         # Apply synapse filter (postsynaptic current kernel) and weight
-        # output = self.filter(output)
-        output.mul_(self.weight) # For only one weight
-        # output.mul_(self.weight[None, None, None, :, :])
+        output = torch.mul(output, self.weight) # For only one weight
+        
         # Sum over input dimension to get output current.
-        output = output.sum(dim=-1)
+        output = torch.sum(output, dim=-1)
         
         if self.has_bias:
             output += self.log_bias.exp()

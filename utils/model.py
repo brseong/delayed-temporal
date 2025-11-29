@@ -6,18 +6,19 @@ from spikingjelly.activation_based.functional import set_step_mode
 from spikingjelly.activation_based.surrogate import LeakyKReLU, MultiArgsSurrogateFunctionBase, SurrogateFunctionBase, ATan, Sigmoid, Rect
 from spikingjelly.activation_based.monitor import OutputMonitor
 
-from .module import TransposeLayer, JeffressLinear
+from .module import TransposeLayer, JeffressLinear, EventPropLinear
 from jaxtyping import Float
 
-class CCN(torch.nn.Module):
+class L2Net(torch.nn.Module):
     def __init__(self,
                  vector_dim:int,
-                 cc_acc:int,
+                 jeffress_dim:int,
                  feature_dims:list[int],
                  step_mode:str = "m",
                  backend:str = "torch",
                  neuron = IFNode,
-                 surrogate = Rect()):
+                 surrogate = ATan,
+                 filter_tau:float = 2.0):
         """
         Cross-correlation network initialization.
         
@@ -30,57 +31,78 @@ class CCN(torch.nn.Module):
         :param neuron: Neuron model to be used (default: LIFNode)
         :param surrogate: Surrogate gradient function to be used (default: ATan)
         """
-        super(CCN, self).__init__()
+        super(L2Net, self).__init__()
         self.vector_dim = vector_dim
-        self.cc_acc = cc_acc
+        self.jeffress_dim = jeffress_dim
         self.feature_dims = feature_dims
         self.step_mode = step_mode
         self.backend = backend
         self.neuron = neuron
         self.surrogate = surrogate
+        self.filter_tau = filter_tau
         
-        self.model = torch.nn.Sequential(
-            TransposeLayer((2,3)), # T,N,2,C -> T,N,C,2
-            JeffressLinear(cc_acc, tau=2., bias=False), # T,N,C,2 -> T,N,C,cc_acc
-            LIFNode(tau=1.5, v_reset=0., surrogate_function=surrogate, backend=backend, step_mode="m", store_v_seq=True), # T,N,C,cc_acc -> T,N,C,cc_acc
+        def _make_synapse_filter():
+            return SynapseFilter(tau=filter_tau, step_mode=step_mode, learnable=False)
+        def _make_neuron():
+            return neuron(v_reset=0., surrogate_function=surrogate(), backend=backend, step_mode=step_mode)
+        
+        self.jeffress_model = torch.nn.Sequential(
+            JeffressLinear(jeffress_dim, tau=2., bias=False), # T,N,C,2 -> T,N,C,cc_acc
+            LIFNode(tau=20., v_reset=0., surrogate_function=ATan(), backend=backend, step_mode="m", store_v_seq=True), # T,N,C,cc_acc -> T,N,C,cc_acc
             
-            SynapseFilter(tau=10.0, step_mode="m", learnable=True), # T,N,C,cc_acc -> T,N,C,cc_acc
-            # Dimension-wise Linear Layer, to compute the similarity of each layer.
-            Linear(cc_acc, 1, step_mode="m", bias=False), # T,N,C,cc_acc -> T,N,C,1
-            torch.nn.Flatten(start_dim=2), # T,N,C,1 -> T,N,C
-            neuron(v_reset=0., surrogate_function=surrogate, backend=backend, step_mode="m"), # T,N,C -> T,N,C
+            # _make_synapse_filter(), # T,N,C,cc_acc -> T,N,C,cc_acc
         )
-
-        feature_dims = [self.vector_dim] + self.feature_dims
+        self.jeffress_integrator = None
+        self.jeffress_integrator_neuron = _make_neuron()
+            
+        # Dimension-wise Linear Layer (or can be seen as convolution), to compute the similarity of each layer.
+        self.square_model = torch.nn.Sequential(
+            _make_synapse_filter(), # T,N,C,1 -> T,N,C,1
+            Linear(1, 10, step_mode="m", bias=True), # T,N,C,1 -> T,N,C,10
+            _make_neuron(), # T,N,C,10 -> T,N,C,10
+            
+            _make_synapse_filter(), # T,N,C,10 -> T,N,C,10
+            Linear(10, 1, step_mode="m", bias=True), # T,N,C,10 -> T,N,C,1
+            _make_neuron(), # T,N,C,1 -> T,N,C,1
+        )
+        
+        self.sum_filter = _make_synapse_filter()  # T,N,C -> T,N,1
+        self.sum_neuron = _make_neuron() # T,N,1 -> T,N,1
+        self.sqrt_model = torch.nn.Sequential()
+        feature_dims = [1] + self.feature_dims
         for in_dim, out_dim in zip(feature_dims[:-1], feature_dims[1:]):
-            self.model.extend(
+            self.sqrt_model.extend(
                 [
-                    SynapseFilter(tau=10.0, step_mode="m", learnable=True), # T,N,C,cc_acc -> T,N,C,cc_acc
-                    Linear(in_dim, out_dim, step_mode="m", bias=False), # T,N,C,in_dim -> T,N,C,out_dim
-                    neuron(v_reset=0., surrogate_function=surrogate, backend=backend, step_mode="m")
+                    _make_synapse_filter(), # T,N,C -> T,N,C
+                    Linear(in_dim, out_dim, step_mode="m", bias=True), # T,N,C_in -> T,N,C_out
+                    _make_neuron()
                 ]
             )
         
-        # Final linear layer to output a single value
-        self.linear = Linear(feature_dims[-1], 1, step_mode="m", bias=True)
-        # Final non-spiking neuron to accumulate the voltage
-        self.out_neuron = NonSpikingIFNode()
+        self.sqrt_model.extend(
+            [
+                _make_synapse_filter(), # T,N,C -> T,N,C
+                Linear(feature_dims[-1], 1, step_mode="m", bias=True), # T,N,C -> T,N,1
+                NonSpikingIFNode()
+            ]
+        )
         
         self.stats = OutputMonitor(self, (IFNode, LIFNode, ParametricLIFNode, SynapseFilter))
-        
-    #     self._loss = None
     
-    # @property
-    # def loss(self):
-    #     if self._loss is not None:
-    #         return self._loss
-    #     else:
-    #         raise ValueError("Loss has not been computed yet.")
+        # with torch.no_grad():
+        #     for layer in self.modules():
+        #         if isinstance(layer, Linear):
+        #             layer.weight.div_(5.).abs_()
+        #             if layer.bias is not None:
+        #                 layer.bias.abs_()
     
     # def get_loss(self):
     #     return self.model[1].get_loss()
     
-    def forward(self, x:Float[torch.Tensor, "T N 2 C"], reset:bool=True, v_seq_pt:list=[]):
+    def forward(self, x:Float[torch.Tensor, "T N 2 C"],
+                reset:bool=True,
+                return_l2:list[torch.Tensor]|None=None,
+                return_v_seq:list[torch.Tensor]|None=None) -> Float[torch.Tensor, "T N 1"]:
         """
         Compute the correlation between two input tensors.
         
@@ -91,22 +113,40 @@ class CCN(torch.nn.Module):
         :return: Output tensor of shape (T, N, 1)
         :type x: torch.Tensor
         :type reset: bool
-        :type v_seq_pt: list
+        :type return_l2: list[torch.Tensor]|None
+        :type return_v_seq: list[torch.Tensor]|None
         :rtype: torch.Tensor
         """
         if reset:
-            for layer in self.model:
-                if isinstance(layer, (BaseNode, MemoryModule)):
+            for layer in self.modules():
+                if isinstance(layer, (MemoryModule)):
                     layer.reset()
             self.stats.clear_recorded_data()
-            
-        for i, layer in enumerate(self.model):
-            x = layer(x)
         
-        x = self.linear(x)
-        x = self.out_neuron(x)
+        x = torch.transpose(x, 2, 3)  # T,N,C,2
+        x = self.jeffress_model(x)  # T,N,C,cc_acc
+        print(x.sum(dim=(0,-1)).mean())
+        if self.jeffress_integrator is None:
+            _kernel = torch.arange(0, x.shape[-1], dtype=torch.float32, device=x.device) - x.shape[-1]//2
+            _kernel = -torch.abs(_kernel) / self.filter_tau
+            self.jeffress_integrator = (1/(1-torch.exp(_kernel))).reshape(1, -1)  # 1,cc_acc
+        x = torch.nn.functional.linear(x, self.jeffress_integrator)
+        x = self.jeffress_integrator_neuron(x)  # T,N,C,1
         
-        v_seq_pt.append(self.model[2].v_seq)
+        x = self.square_model(x)  # T,N,C,1 -> T,N,C,1
+        x = torch.flatten(x, start_dim=2) # T,N,C,1 -> T,N,C
+        
+        if return_l2 is not None:
+            return_l2.append(x.clone())
+        
+        x = self.sum_filter(x)  # T,N,C
+        x = x.sum(dim=2, keepdim=True)  # T,N,1
+        x = self.sum_neuron(x)  # T,N,1
+        
+        x = self.sqrt_model(x.detach())  # T,N,1
+        
+        if return_v_seq is not None:
+            return_v_seq.append(self.jeffress_model[1].v_seq.clone().detach())
 
         return x
 
