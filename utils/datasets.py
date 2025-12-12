@@ -90,6 +90,7 @@ def encode_temporal(X_data:np.ndarray, time_steps:int, time_pad:int, time_norm:b
     Args:
         X_data (np.ndarray): 입력 데이터 (*,)
         time_steps (int): 총 시뮬레이션 시간 단계.
+        time_pad (int): 시간 패딩 크기.
 
     Returns:
         np.ndarray: 인코딩된 스파이크 데이터 (time_steps, *X_data.shape)

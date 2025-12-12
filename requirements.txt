@@ -2,6 +2,7 @@
 git+https://github.com/brseong/spikingjelly.git#egg=spikingjelly
 jupyter
 scikit-learn
+jax[cuda13]
 jaxtyping
 cupy
 wandb
