@@ -6,8 +6,8 @@ from math import log
 
 class LIF_Filter(MemoryModule):
     def __init__(self,
-                 lif_gamma:float = 10.508331944775,
-                 filter_gamma:float = 1.58197670686933,
+                 gamma_m:float = 10.508331944775,
+                 gamma_s:float = 1.58197670686933,
                  step_mode:str = "m"):
         """
         Combined LIF neuron and Synapse Filter module.
@@ -22,12 +22,12 @@ class LIF_Filter(MemoryModule):
         super(LIF_Filter, self).__init__()
         
         self.step_mode = step_mode
-        self.lif_gamma = lif_gamma
-        self.filter_gamma = filter_gamma
-        self.lif_tau = 1/log(lif_gamma / (lif_gamma - 1))
-        self.filter_tau = 1/log(filter_gamma / (filter_gamma - 1))
-        self.synapse_filter = SynapseFilter(tau=filter_gamma, step_mode=step_mode, learnable=False)
-        self.lif_filter = SynapseFilter(tau=lif_gamma, step_mode=step_mode, learnable=False)
+        self.gamma_m = gamma_m
+        self.gamma_s = gamma_s
+        self.lif_tau = 1/log(gamma_m / (gamma_m - 1))
+        self.filter_tau = 1/log(gamma_s / (gamma_s - 1))
+        self.synapse_filter = SynapseFilter(tau=gamma_s, step_mode=step_mode, learnable=False)
+        self.lif_filter = SynapseFilter(tau=gamma_m, step_mode=step_mode, learnable=False)
         
     def forward(self, x:Float[torch.Tensor, "..."]) -> Float[torch.Tensor, "..."]:
         if self.step_mode == "m":

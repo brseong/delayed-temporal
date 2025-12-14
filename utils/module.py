@@ -269,7 +269,7 @@ class StochasticDelay(torch.autograd.Function):
         :param ctx: Context to save information for backward pass
         :param input: The input tensor to apply delay to. shape: (T, N, C, D_out, 2)
         :type input: torch.Tensor
-        :param delay: The `float` delay tensor to apply. Delay must be in range [0, 1], and will be multiplied to (T-1).
+        :param delay: The `float` delay tensor to apply. Delay must be in range [0, T-1].
             It will be rounded stochastically. shape: (D_out, 2)
         :type delay: torch.nn.Parameter
         :return: The output tensor after synaptic delay. shape: (T, N, C, D_out, 2)
@@ -279,7 +279,7 @@ class StochasticDelay(torch.autograd.Function):
         T, N, C, D_out, D_in = output.shape
         # Sample synaptic delays
         
-        batch_delay_latent = (T-1) * delay[None,None,...].repeat(N, C, 1, 1) # Shape: (N, C, D_out, 2)
+        batch_delay_latent = delay[None,None,...].repeat(N, C, 1, 1) # Shape: (N, C, D_out, 2)
         
         batch_delay_floored = torch.floor(batch_delay_latent)
         p = batch_delay_latent - batch_delay_floored  # The probability that delay is ceiled
@@ -433,14 +433,12 @@ class JeffressLinear(torch.nn.Module):
         self.has_bias = bias
         _delay = torch.arange(-radius, radius+1, dtype=torch.float32, requires_grad=True).view(-1,1)
         self._delay = torch.nn.Parameter(_delay, requires_grad=False) # For symmetry
-        self._weight = torch.nn.Parameter(torch.tensor(6.53543197272069), requires_grad=True)
+        self._weight = torch.nn.Parameter(torch.tensor(6.53543197272069), requires_grad=False)
         if bias:
             self.log_bias = torch.nn.Parameter(torch.tensor(0.))
 
         self.filter = LIF_Filter(step_mode="m")
         
-        self.min_diff = None
-
     def extra_repr(self):
         return f'in_features={self.in_features}, out_features={self.radius}'
     
@@ -490,8 +488,7 @@ class JeffressLinear(torch.nn.Module):
 
 class SpikeAmplifier(torch.nn.Module):
     def __init__(self,
-                 in_features:int,
-                 out_features:int,
+                 num_features:int,
                  backend:str="torch") -> None:
         """
         Jeffress Model for Temporal Correlation Detection.
@@ -503,13 +500,9 @@ class SpikeAmplifier(torch.nn.Module):
         :param backend: Backend for spiking neurons
         """
         super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
+        self.num_features = num_features
         
-        # self.recurrent_decay = torch.nn.Parameter(torch.full((out_features,), 2.), requires_grad=True) # Shape: (J,)
-        # self.recurrent_delay = torch.nn.Parameter(torch.ones(out_features,), requires_grad=False) # Shape: (J,)
-        # self.afferent_weight = torch.nn.Parameter(torch.full((in_features,), 10.), requires_grad=True) # Shape: (J,)
-        self.lateral_weight = torch.nn.Parameter(torch.full((out_features,), 10.), requires_grad=False) # Shape: (J,)
+        self.lateral_weight = torch.nn.Parameter(torch.full((num_features,), 10.), requires_grad=False) # Shape: (J,)
         self.single_step_delay = None
         self.neuron = IFNode(v_reset=0., surrogate_function=ATan(), backend=backend, step_mode="s", store_v_seq=True)
         self.i_seq = []
@@ -527,7 +520,7 @@ class SpikeAmplifier(torch.nn.Module):
         """
         
         if self.single_step_delay is None:
-            self.single_step_delay = SingleStepDelay(queue_shape=input.shape[:3]+(1,self.out_features), backend=self.neuron.backend)
+            self.single_step_delay = SingleStepDelay(queue_shape=input.shape[:3]+(1,self.num_features), backend=self.neuron.backend)
         self.single_step_delay.reset()
         self.i_seq = input.unbind(dim=0)  # Time series of (N, C, J)
         self.v_seq = []
@@ -535,13 +528,14 @@ class SpikeAmplifier(torch.nn.Module):
         reset_net(self.neuron)
         
         T = input.shape[0]
-        y_seq = torch.zeros(T+1, *input.shape[1:-1], self.out_features, device=input.device) # T+1, N, C, J
-        h = torch.zeros(*input.shape[1:-1], self.out_features, device=input.device)  # N, C, J
+        y_seq = torch.zeros(T+1, *input.shape[1:-1], self.num_features, device=input.device) # T+1, N, C, J
+        h = torch.zeros(*input.shape[1:-1], self.num_features, device=input.device)  # N, C, J
         for t in range(T):
-            h = h - (1. - y_seq[t]) * h + self.lateral_weight * y_seq[-1]  # N, C, J
+            h = h - (1. - y_seq[t]) * h + self.lateral_weight * y_seq[t]  # N, C, J
             x = input[t,...] + h  # N, C, J
             y = self.neuron(x) # N, C, J
             # y = self.single_step_delay(y.unsqueeze(-2), torch.nn.functional.softplus(self.recurrent_delay))  # N, C, 1, J
-            y_seq[t+1] = y.squeeze(-2) # List of (N, C, J)
+            # y = y.squeeze(-2) # N, C, J
+            y_seq[t+1] = y # List of (N, C, J)
             self.v_seq.append(self.neuron.v.clone())
         return y_seq[1:] # T, N, C, J

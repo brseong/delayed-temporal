@@ -11,7 +11,6 @@ from jaxtyping import Float
 
 class L2Net(torch.nn.Module):
     def __init__(self,
-                 time_steps:int,
                  time_padding:int,
                  vector_dim:int,
                  jeffress_radius:int,
@@ -19,8 +18,8 @@ class L2Net(torch.nn.Module):
                  step_mode:str = "m",
                  backend:str = "torch",
                  neuron = LIFNode,
-                 tau_m:float = 10.0,
-                 tau_s:float = 2.0):
+                 gamma_m:float = 20.,
+                 gamma_s:float = 2.):
         """
         Cross-correlation network initialization.
         
@@ -34,7 +33,6 @@ class L2Net(torch.nn.Module):
         :param surrogate: Surrogate gradient function to be used (default: ATan)
         """
         super(L2Net, self).__init__()
-        self.time_steps = time_steps
         self.time_padding = time_padding
         self.vector_dim = vector_dim
         self.jeffress_radius = jeffress_radius
@@ -42,31 +40,28 @@ class L2Net(torch.nn.Module):
         self.step_mode = step_mode
         self.backend = backend
         self.neuron = neuron
-        self.tau_m = tau_m
-        self.tau_s = tau_s
+        self.gamma_m = gamma_m
+        self.gamma_s = gamma_s
         
         def _get_surrogate():
             return ATan(alpha=4.0)
         
+        _linear = Linear(jeffress_radius*2+1, 1, bias=False, step_mode=step_mode)
+        with torch.no_grad():
+            _linear.weight[:] = torch.arange(-jeffress_radius, jeffress_radius+1).view(1, -1).square()
+        
         self.jeffress_model = torch.nn.Sequential(
             TimePadding(time_padding),  # T,N,C,2 -> T+Tp,N,C,2
             JeffressLinear(jeffress_radius, bias=False), # T+Tp,N,C,2 -> T+Tp,N,C,J
-            SpikeAmplifier(2*jeffress_radius+1, 2*jeffress_radius+1, backend=backend),  # T+Tp,N,C,J -> T+Tp,N,C,1
-            TimeCrop(time_padding),  # T+Tp,N,C,1 -> T,N,C,1
+            SpikeAmplifier(2*jeffress_radius+1, backend=backend),  # T+Tp,N,C,J -> T+Tp,N,C,J
+            TimeCrop(time_padding),  # T+Tp,N,C,J -> T,N,C,J
             
-            TimePadding(time_padding),  # T,N,C,J -> T+Tp,N,C,J
-            SynapseFilter(tau=2., step_mode=step_mode, learnable=True),
-            Linear(jeffress_radius*2+1, 1, bias=False),  # T+Tp,N,C,J -> T+Tp,N,C,1
-            LIFNode(tau=10., surrogate_function=_get_surrogate(), backend=backend, step_mode="m"),  # T,N,C,1 -> T,N,C,1
-            TimeCrop(time_padding),  # T+Tp,N,C,1 -> T,N,C,1
-        )
-
-        self.weighted_filter = torch.nn.Sequential(
-            SynapseFilter(tau=tau_s, step_mode=step_mode, learnable=True),
-            Linear(1, 1, bias=False),
+            SynapseFilter(tau=gamma_s, step_mode=step_mode, learnable=True),
+            _linear,  # T,N,C,J -> T,N,C,1
+            LIFNode(tau=gamma_m, surrogate_function=_get_surrogate(), backend=backend, step_mode=step_mode),  # T,N,C,1 -> T,N,C,1
         )
         
-        self.out_neuron = NonSpikingLIFNode(tau=10)
+        self.out_neuron = NonSpikingLIFNode(tau=gamma_m, decode="mean-mem")
         
         self.stats = OutputMonitor(self, (IFNode, LIFNode, ParametricLIFNode, SynapseFilter))
     
@@ -103,11 +98,7 @@ class L2Net(torch.nn.Module):
         x = torch.transpose(x, 2, 3)  # T,N,C,2
         x = self.jeffress_model(x)  # T,N,C,1
         
-        # if return_l2 is not None:
-        #     return_l2.append(x.clone())
-        
-        x = self.weighted_filter(x).squeeze(-1) # T,N,C,1 -> T,N,C
-        x = x.sum(dim=2, keepdim=True) # T,N,C -> T,N,1
+        x = x.squeeze(-1).sum(dim=2, keepdim=True) # T,N,C -> T,N,1
         x = self.out_neuron(x)  # T,N,1 -> N,1
         
         if return_v_seq is not None:
