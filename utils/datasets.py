@@ -1,11 +1,13 @@
 import numpy as np
+import torch
 from itertools import product
 import matplotlib.pyplot as plt
 
 def generate_lp_dataset(num_samples: int, 
                         vector_dim: int, 
                         p: float = 2.,
-                        max_val: float = 10.0) -> tuple[np.ndarray, np.ndarray]:
+                        low: float = 0.0,
+                        high: float = 10.0) -> tuple[np.ndarray, np.ndarray]:
     """
     거리 예측을 위한 데이터셋을 생성합니다.
 
@@ -22,7 +24,7 @@ def generate_lp_dataset(num_samples: int,
     
     # 1. 두 개의 랜덤 벡터 세트 생성
     # np.random.uniform을 사용하여 (num_samples, vector_dim) 크기의 행렬 두 개를 생성
-    X = np.random.uniform(0, 1, size=(num_samples, 2, vector_dim))
+    X = np.random.uniform(low, high, size=(num_samples, 2, vector_dim))
 
     # 2. Lp 거리 계산 (레이블 y)
     # axis=1을 기준으로 합산하여 각 샘플(행)의 Lp 거리를 계산
@@ -81,7 +83,8 @@ def generate_cosine_dataset(num_samples: int,
     y = np.vecdot(x1, x2) / (np.linalg.norm(x1, axis=1) * np.linalg.norm(x2, axis=1))
     return X, y
 
-def encode_temporal(X_data:np.ndarray, time_steps:int, time_pad:int, time_norm:bool=False):
+def encode_temporal(X_data:np.ndarray|torch.Tensor, time_steps:int, time_pad:int, min_val:float=0.0, max_val:float=1.0, backend="numpy")\
+        -> np.ndarray | torch.Tensor:
     """
     입력 데이터를 Latency Coding(TTFS)으로 변환합니다.
     강한 입력(절댓값) -> 빠른 스파이크, 약한 입력 -> 늦은 스파이크.
@@ -95,18 +98,32 @@ def encode_temporal(X_data:np.ndarray, time_steps:int, time_pad:int, time_norm:b
     Returns:
         np.ndarray: 인코딩된 스파이크 데이터 (time_steps, *X_data.shape)
     """
-    max_val = 1.0
     
-    if time_norm:
-        # X_data -= np.min(X_data, axis=1, keepdims=True)
-        X_data -= 0.0
-    X_norm = ((max_val - X_data) * (time_steps-1)) / max_val
-    X_pos = np.floor(X_norm).astype(np.int32)
-    spikes_out = np.zeros((time_steps + time_pad, *X_data.shape), dtype=np.float32)
+    X_data = X_data - min_val
+    X_data = X_data / (max_val - min_val)
+    
+    if backend == "numpy":
+        assert isinstance(X_data, np.ndarray)
+        X_norm = ((max_val - X_data) * (time_steps-1)) / max_val
+        X_pos = np.floor(X_norm).astype(np.int32)
+        spikes_out = np.zeros((time_steps + time_pad, *X_data.shape), dtype=np.float32)
 
-    for indices in product(*[range(dim) for dim in X_data.shape]):
-        spikes_out[X_pos[*indices], *indices] = 1.0
-
+        for indices in product(*[range(dim) for dim in X_data.shape]):
+            spikes_out[X_pos[*indices], *indices] = 1.0
+    elif backend == "torch":
+        assert isinstance(X_data, torch.Tensor)
+        X_norm = ((max_val - X_data) * (time_steps-1)) / max_val
+        X_pos = torch.floor(X_norm).long()
+        
+        breakpoint()
+        spikes_out = torch.scatter(
+            torch.zeros((time_steps + time_pad, *X_data.shape), dtype=X_data.dtype, device=X_data.device),
+            dim=0,
+            index=X_pos.unsqueeze(0),
+            value=1.)
+    else:
+        raise ValueError("Unsupported backend. Choose 'numpy' or 'torch'.")
+    
     return spikes_out
 
 if __name__ == "__main__":

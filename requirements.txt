@@ -1,8 +1,13 @@
 # Python 3.12
-git+https://github.com/brseong/spikingjelly.git#egg=spikingjelly
 jupyter
 scikit-learn
 jax[cuda13]
 jaxtyping
 cupy
 wandb
+datasets
+evaluate
+scikit-learn
+tqdm
+-e git+https://github.com/huggingface/transformers.git#egg=transformers  --use-pep517
+-e git+https://github.com/brseong/spikingjelly.git#egg=spikingjelly --use-pep517

@@ -1,3 +1,6 @@
 [submodule "spikingjelly"]
 	path = spikingjelly
 	url = https://github.com/brseong/spikingjelly.git
+[submodule "SpikingBERT"]
+	path = SpikingBERT
+	url = https://github.com/NeuroCompLab-psu/SpikingBERT.git

@@ -209,3 +209,7 @@ __marimo__/
 
 wandb/
 temp.ipynb
+models/
+data/
+logs/
+src/

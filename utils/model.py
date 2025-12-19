@@ -14,7 +14,6 @@ class L2Net(torch.nn.Module):
                  time_padding:int,
                  vector_dim:int,
                  jeffress_radius:int,
-                 feature_dims:list[int],
                  step_mode:str = "m",
                  backend:str = "torch",
                  neuron = LIFNode,
@@ -25,8 +24,7 @@ class L2Net(torch.nn.Module):
         
         :param self: Self
         :param vector_dim: Vector dimension to be processed
-        :param J: Cross-correlation accuracy
-        :param feature_dims: List of feature dimensions for each layer
+        :param jeffress_radius: Number of Jeffress neurons 
         :param step_mode: Step mode for spiking neurons. Options: "s" (single time-step), "m" (multi time-step)
         :param backend: Backend for spiking neurons. Options: "torch", "cupy"
         :param neuron: Neuron model to be used (default: LIFNode)
@@ -36,7 +34,6 @@ class L2Net(torch.nn.Module):
         self.time_padding = time_padding
         self.vector_dim = vector_dim
         self.jeffress_radius = jeffress_radius
-        self.feature_dims = feature_dims
         self.step_mode = step_mode
         self.backend = backend
         self.neuron = neuron
@@ -44,7 +41,7 @@ class L2Net(torch.nn.Module):
         self.gamma_s = gamma_s
         
         def _get_surrogate():
-            return ATan(alpha=4.0)
+            return ATan(alpha=2.0)
         
         _linear = Linear(jeffress_radius*2+1, 1, bias=False, step_mode=step_mode)
         with torch.no_grad():
@@ -58,10 +55,10 @@ class L2Net(torch.nn.Module):
             
             SynapseFilter(tau=gamma_s, step_mode=step_mode, learnable=True),
             _linear,  # T,N,C,J -> T,N,C,1
-            LIFNode(tau=gamma_m, surrogate_function=_get_surrogate(), backend=backend, step_mode=step_mode),  # T,N,C,1 -> T,N,C,1
         )
         
-        self.out_neuron = NonSpikingLIFNode(tau=gamma_m, decode="mean-mem")
+        # self.out_neuron = NonSpikingLIFNode(tau=gamma_m, decode="mean-mem")
+        self.out_neuron = LIFNode(tau=gamma_m, surrogate_function=_get_surrogate(), backend=backend, step_mode=step_mode)
         
         self.stats = OutputMonitor(self, (IFNode, LIFNode, ParametricLIFNode, SynapseFilter))
     
@@ -100,6 +97,9 @@ class L2Net(torch.nn.Module):
         
         x = x.squeeze(-1).sum(dim=2, keepdim=True) # T,N,C -> T,N,1
         x = self.out_neuron(x)  # T,N,1 -> N,1
+        # If not non-spiking neuron, average over time dimension
+        if x.ndim == 3:
+            x = x.mean(dim=0)  # T,N,1 -> N,1
         
         if return_v_seq is not None:
             return_v_seq.append(self.jeffress_model[1].v_seq.clone().detach())
