@@ -151,7 +151,7 @@ def _shift_vec(input: torch.Tensor, delay: torch.Tensor) -> torch.Tensor:
     T, N, C, D_out, D_in = input.shape
     
     # Apply delay by shifting the time dimension, using torch.gather
-    mat = torch.arange(T, device=input.device).view(T,1,1,1,1).repeat(1,N,C,D_out,D_in)
+    mat = torch.arange(T, device=input.device).view(T,1,1,1,1)#.repeat(1,N,C,D_out,D_in)
     output = torch.gather(input, 0, (mat - delay[None,...]) % T)
     # Equivalently, we can use roll (very slow):
     # for d_out in range(D_out):
@@ -275,7 +275,7 @@ class StochasticDelay(torch.autograd.Function):
         :return: The output tensor after synaptic delay. shape: (T, N, C, D_out, 2)
         :rtype: torch.Tensor
         """
-        output = input.clone()
+        output = input#.clone()
         T, N, C, D_out, D_in = output.shape
         # Sample synaptic delays
         
@@ -293,7 +293,7 @@ class StochasticDelay(torch.autograd.Function):
         output = _shift_vec(output, batch_delay_rounded)
         
         # For backward pass, use real-valued delay (not rounded)
-        ctx.save_for_backward(input.clone(), output.clone(), batch_delay_rounded.clone())
+        ctx.save_for_backward(batch_delay_rounded.clone())
         
         return output
 
@@ -310,7 +310,7 @@ class StochasticDelay(torch.autograd.Function):
         """
         
         #TODO: Gradient of clamped delay?
-        input, output, delay, = ctx.saved_tensors
+        delay, = ctx.saved_tensors
         # T, N, C, D_out, _2 = input.shape
         # T, N, C, D_out, _2 = output.shape
         # D_out, _2 = delay.shape

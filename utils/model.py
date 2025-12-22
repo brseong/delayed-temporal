@@ -14,6 +14,8 @@ class L2Net(torch.nn.Module):
                  time_padding:int,
                  vector_dim:int,
                  jeffress_radius:int,
+                 temporal_min:float = 0.0,
+                 temporal_max:float = 1.0,
                  step_mode:str = "m",
                  backend:str = "torch",
                  neuron = LIFNode,
@@ -45,7 +47,10 @@ class L2Net(torch.nn.Module):
         
         _linear = Linear(jeffress_radius*2+1, 1, bias=False, step_mode=step_mode)
         with torch.no_grad():
-            _linear.weight[:] = torch.arange(-jeffress_radius, jeffress_radius+1).view(1, -1).square()
+            _linear.weight[:] = torch.linspace(
+                temporal_min-temporal_max,
+                temporal_max-temporal_min,
+                jeffress_radius*2+1).view(1, -1).square()
         
         self.jeffress_model = torch.nn.Sequential(
             TimePadding(time_padding),  # T,N,C,2 -> T+Tp,N,C,2
@@ -60,14 +65,7 @@ class L2Net(torch.nn.Module):
         # self.out_neuron = NonSpikingLIFNode(tau=gamma_m, decode="mean-mem")
         self.out_neuron = LIFNode(tau=gamma_m, surrogate_function=_get_surrogate(), backend=backend, step_mode=step_mode)
         
-        self.stats = OutputMonitor(self, (IFNode, LIFNode, ParametricLIFNode, SynapseFilter))
-    
-        # with torch.no_grad():
-        #     for layer in self.modules():
-        #         if isinstance(layer, Linear):
-        #             layer.weight.div_(5.).abs_()
-        #             if layer.bias is not None:
-        #                 layer.bias.abs_()
+        # self.stats = OutputMonitor(self, (IFNode, LIFNode, ParametricLIFNode, SynapseFilter))
     
     def forward(self, x:Float[torch.Tensor, "T N 2 C"],
                 reset:bool=True,
@@ -90,7 +88,7 @@ class L2Net(torch.nn.Module):
             for layer in self.modules():
                 if isinstance(layer, (MemoryModule)):
                     layer.reset()
-            self.stats.clear_recorded_data()
+            # self.stats.clear_recorded_data()
         
         x = torch.transpose(x, 2, 3)  # T,N,C,2
         x = self.jeffress_model(x)  # T,N,C,1
@@ -101,8 +99,8 @@ class L2Net(torch.nn.Module):
         if x.ndim == 3:
             x = x.mean(dim=0)  # T,N,1 -> N,1
         
-        if return_v_seq is not None:
-            return_v_seq.append(self.jeffress_model[1].v_seq.clone().detach())
+        # if return_v_seq is not None:
+        #     return_v_seq.append(self.jeffress_model[1].v_seq.clone().detach())
 
-        return x
+        return x.view(1, -1)
 

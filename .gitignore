@@ -212,4 +212,6 @@ temp.ipynb
 models/
 data/
 logs/
+runs/
 src/
+venv/

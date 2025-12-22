@@ -1,14 +1,14 @@
 import torch, math
+from torch.nn import DataParallel
 # from torch.utils.tensorboard import SummaryWriter
 
 from transformers.utils import is_torch_npu_available, is_torch_xpu_available, logging
 from transformers.utils.import_utils import is_torch_greater_or_equal
-from transformers import AttentionInterface
-from utils.datasets import encode_temporal
+from utils.datasets import encode_temporal, unnormalize_net_output
 from utils.model import L2Net
 
 logger = logging.get_logger(__name__)
-writer = SummaryWriter(log_dir="logs/spiking_sdpa_attention")
+# writer = SummaryWriter(log_dir="runs/spiking_sdpa_attention")
 
 _is_torch_greater_or_equal_than_2_5 = is_torch_greater_or_equal("2.5", accept_dev=True)
 _is_torch_greater_or_equal_than_2_8 = is_torch_greater_or_equal("2.8", accept_dev=True)
@@ -16,11 +16,15 @@ _is_torch_xpu_available = is_torch_xpu_available()
 _is_torch_npu_available = is_torch_npu_available()
 
 l2net_cfg = torch.load("models/l2net.cfg")
-l2net = L2Net(l2net_cfg["time_steps"], l2net_cfg["vector_dim"], l2net_cfg["time_steps"]-1)
-l2net.load_state_dict(torch.load("models/l2net.pt"), strict=False)
+l2net = L2Net(l2net_cfg["time_steps"], l2net_cfg["vector_dim"], l2net_cfg["time_steps"]-1).eval()
+l2net.load_state_dict(torch.load("models/l2net.pt"))
+l2net = DataParallel(l2net, dim=1) # First dimension is for time steps, so we parallelize on the second dimension (batch dimension)
+dev_counts = torch.cuda.device_count()
+print("L2Net loaded with following configuration:")
+print(l2net_cfg)
 min_val, max_val = l2net_cfg["min_val"], l2net_cfg["max_val"]
 
-def get_l2_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+def get_sum_square_error(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
     get_l2_distance의 Docstring
     
@@ -34,7 +38,11 @@ def get_l2_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
                             min_val=min_val,
                             max_val=max_val,
                             backend="torch") # To make shape in form (T, S, 2, D)
-    return l2net(input).squeeze(-1) # To make shape in form (T, S, 2, D) -> (S,)
+    input = torch.nn.functional.pad(input, (0,0,0,0,0,(dev_counts - input.shape[1] % dev_counts) % dev_counts))  # Pad batch dimension to multiple of device count
+    out = l2net.to(a.device)(input).squeeze(-1) # (T, S+p, 2, D) -> (T, S+p)
+    out = out[:,:a.shape[0]]  # Remove padding to make shape in form (T, S+p) -> (T, S)
+    out = unnormalize_net_output(out, l2net_cfg["vector_dim"], min_val, max_val)
+    return out # To make shape in form (T, S, 2, D) -> (S,)
 
 def get_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
@@ -44,16 +52,38 @@ def get_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     :param b: Shape: (B, H, S, D)
     """
     batch, num_attention_heads, seqlen, head_dim = a.shape
+    # dev_counts = torch.cuda.device_count()
+    # pad = (dev_counts - seqlen % dev_counts) % dev_counts  # Pad to multiple of 8 for better performance on some hardware
+    # a = torch.nn.functional.pad(a, (0,0,0,pad))
+    # b = torch.nn.functional.pad(b, (0,0,0,pad))
     output = torch.zeros((batch, num_attention_heads, seqlen, seqlen), device=a.device, dtype=a.dtype)
-    zeros = torch.zeros((seqlen, head_dim), device=a.device, dtype=a.dtype)
+    
+    # Inefficient version:
+    # zeros = torch.zeros((seqlen, head_dim), device=a.device, dtype=a.dtype)
+    # for n in range(batch):
+    #     for h in range(num_attention_heads):
+            # for s in range(seqlen):
+            #     Q, k = a[n,h], b[n,h,s] # Shape: (S, D), (,D)
+            #     K = k.unsqueeze(0).expand(seqlen, head_dim) # Shape: (S, D)
+            #     output[n,h,s,:] = (
+            #         get_sum_square_error(Q, zeros) + get_sum_square_error(K, zeros) - get_sum_square_error(Q, K)
+            #     ) / 2
+    
+    # More efficient version:
+    Q = a[:,:,None,:,:].expand(batch, num_attention_heads, seqlen, seqlen, head_dim)  # Shape: (B, H, S, S, D)
+    zeros = torch.zeros((seqlen * seqlen, head_dim), device=a.device, dtype=a.dtype) # Shape: (S*S, D)
     for n in range(batch):
         for h in range(num_attention_heads):
-            for s in range(seqlen):
-                Q, k = a[n,h], b[n,h,s] # Shape: (S, D), (,D)
-                K = k.unsqueeze(0).expand(seqlen, head_dim) # Shape: (S, D)
-                output[n,h,s,:] = (
-                    get_l2_distance(Q, zeros) + get_l2_distance(K, zeros) - get_l2_distance(Q, K)
-                ) / 2
+            Q_nh = Q[n, h].reshape(seqlen*seqlen, head_dim)  # Shape: (S*S, D)
+            K_nh = b[None,n,h].expand(seqlen, seqlen, head_dim).reshape(seqlen*seqlen, head_dim)  # Shape: (S*S, D)
+            
+            sse_Q = get_sum_square_error(Q_nh, zeros)  # Shape: (S*S, D) -> (S*S,)
+            sse_K = get_sum_square_error(K_nh, zeros)  # Shape: (S*S, D) -> (S*S,)
+            sse_QK = get_sum_square_error(Q_nh, K_nh)     # Shape: (S*S, D) -> (S*S,)
+            
+            inner_product = (sse_Q + sse_K - sse_QK) / 2  # Shape: (S*S)
+            output[n, h] = inner_product.reshape(seqlen, seqlen)
+    
     return output
     
 
@@ -169,8 +199,9 @@ def spiking_sdpa_attention_forward(
     # writer.add_histogram("spiking_sdpa_attention/key", key)
     # writer.add_histogram("spiking_sdpa_attention/value", value)
     # writer.flush()
+    print("Spiking SDPA Attention - query.shape:", query.shape, "key.shape:", key.shape, "value.shape:", value.shape)
     
-    attn_output = torch.nn.functional.scaled_dot_product_attention(
+    attn_output = spiking_scaled_dot_product_attention(
         query,
         key,
         value,

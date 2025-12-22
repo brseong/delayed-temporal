@@ -9,17 +9,18 @@ import evaluate
 from tqdm import tqdm
 
 AttentionInterface.register("spiking_sdpa", spiking_sdpa_attention_forward)
-import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+# import os
+# os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 def evaluate_vit_model():
     # ---------------------------------------------------------
     # 1. 설정 (Configuration)
     # ---------------------------------------------------------
     # 예시: CIFAR-10에 파인튜닝된 ViT 모델 사용 (가장 일반적인 예시)
-    model_id = "nateraw/vit-base-patch16-224-cifar10"
+    # model_id = "nateraw/vit-base-patch16-224-cifar10"
+    model_id = "MF21377197/vit-small-patch16-224-finetuned-Cifar10"
     dataset_id = "cifar10"
-    batch_size = 16
+    batch_size = 1
     
     # GPU 사용 가능 여부 확인
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

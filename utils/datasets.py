@@ -9,17 +9,18 @@ def generate_lp_dataset(num_samples: int,
                         low: float = 0.0,
                         high: float = 10.0) -> tuple[np.ndarray, np.ndarray]:
     """
-    거리 예측을 위한 데이터셋을 생성합니다.
+    Generate a dataset for distance prediction using Lp squared distance.
 
     Args:
-        num_samples: 생성할 샘플의 수.
-        vector_dim: 각 벡터의 차원.
-        p: 거리 척도 (기본값: 2, L2 거리).
-        max_val: 벡터 요소의 최대값.
+        num_samples: The number of samples to generate.
+        vector_dim: The dimension of each vector.
+        p: The distance metric (default: 2, L2 distance).
+        low: The minimum value of vector elements.
+        high: The maximum value of vector elements.
 
     Returns:
-        X: 입력 데이터 (두 벡터가 수평으로 결합됨). Shape: (num_samples, 2, vector_dim)
-        y: 출력 레이블 (Lp 거리). Shape: (num_samples, 1)
+        X: Input data (two vectors concatenated horizontally). Shape: (num_samples, 2, vector_dim)
+        y: Output labels (Square of Lp distance). Shape: (num_samples, 1)
     """
     
     # 1. 두 개의 랜덤 벡터 세트 생성
@@ -29,59 +30,31 @@ def generate_lp_dataset(num_samples: int,
     # 2. Lp 거리 계산 (레이블 y)
     # axis=1을 기준으로 합산하여 각 샘플(행)의 Lp 거리를 계산
     y = np.linalg.norm(X[:, 0, :] - X[:, 1, :], ord=p, axis=1, keepdims=True)
-    
     return X, y
 
-def generate_1d_dot_classification_dataset(num_samples: int, num_classes: int, dim: int = 1) -> tuple[np.ndarray, np.ndarray]:
-    """
-    거리 예측을 위한 데이터셋을 생성합니다.
-
-    Args:
-        num_samples: 생성할 샘플의 수.
-    Returns:
-        X: 입력 데이터 (두 벡터가 수평으로 결합됨). Shape: (num_samples, 2)
-        y: 출력 레이블 (Lp 거리). Shape: (num_samples, 1)
-    """
-    
-    # 1. 두 개의 랜덤 벡터 세트 생성
-    # np.random.uniform을 사용하여 (num_samples, vector_dim) 크기의 행렬 두 개를 생성
-    X = np.random.uniform(0, 1, size=(num_samples, 2*dim))
-    X = X / (dim**0.5)  # Normalize to unit length
-
-    # 2. Lp 거리 계산 (레이블 y)
-    # axis=1을 기준으로 합산하여 각 샘플(행)의 Lp 거리를 계산
-    x1, x2 = X[:, 0:dim], X[:, dim:2*dim] # Shape: (num_samples, dim), to keep 2D shape - inner product only in last dim
-    y:np.ndarray = np.vecdot(x1, x2)
-    y = (y * (num_classes-1)).round().reshape(-1, 1)
+def generate_l2_square_dataset(num_samples: int, 
+                        vector_dim: int, 
+                        low: float = 0.0,
+                        high: float = 10.0,
+                        normalize: bool = False) -> tuple[np.ndarray, np.ndarray]:
+    X, y = generate_lp_dataset(num_samples, vector_dim, p=2., low=low, high=high)
+    if normalize:
+        y = y**2 / (vector_dim * (high - low)**2)
+    else:
+        y = y**2
     return X, y
 
-
-def generate_cosine_dataset(num_samples: int, 
-                        vector_dim: int,
-                        max_val: float = 10.0) -> tuple[np.ndarray, np.ndarray]:
+def unnormalize_net_output(y_pred:torch.Tensor, vector_dim:int, min_val:float, max_val:float) -> torch.Tensor:
     """
-    거리 예측을 위한 데이터셋을 생성합니다.
-
-    Args:
-        num_samples: 생성할 샘플의 수.
-        vector_dim: 각 벡터의 차원.
-        p: 거리 척도 (기본값: 2, L2 거리).
-        max_val: 벡터 요소의 최대값.
-
-    Returns:
-        X: 입력 데이터 (두 벡터가 수평으로 결합됨). Shape: (num_samples, 2, vector_dim)
-        y: 출력 레이블 (Lp 거리). Shape: (num_samples, 1)
-    """
+    Restore the original scale of the L2 squared distance from the normalized output of L2Net.
     
-    # 1. 두 개의 랜덤 벡터 세트 생성
-    # np.random.uniform을 사용하여 (num_samples, vector_dim) 크기의 행렬 두 개를 생성
-    X = np.random.uniform(0, max_val, size=(num_samples, 2, vector_dim))
-
-    # 2. Lp 거리 계산 (레이블 y)
-    # axis=1을 기준으로 합산하여 각 샘플(행)의 Lp 거리를 계산
-    x1, x2 = X[:, 0], X[:, 1]
-    y = np.vecdot(x1, x2) / (np.linalg.norm(x1, axis=1) * np.linalg.norm(x2, axis=1))
-    return X, y
+    :param y_pred: Normalized L2 squared distance predicted by L2Net
+    :param vector_dim: The dimension of the vectors
+    :param min_val: The minimum value of the input data
+    :param max_val: The maximum value of the input data
+    :return: Unnormalized L2 squared distance
+    """
+    return torch.mul(y_pred, vector_dim * (max_val - min_val)**2)
 
 def encode_temporal(X_data:np.ndarray|torch.Tensor, time_steps:int, time_pad:int, min_val:float=0.0, max_val:float=1.0, backend="numpy")\
         -> np.ndarray | torch.Tensor:
@@ -115,7 +88,6 @@ def encode_temporal(X_data:np.ndarray|torch.Tensor, time_steps:int, time_pad:int
         X_norm = ((max_val - X_data) * (time_steps-1)) / max_val
         X_pos = torch.floor(X_norm).long()
         
-        breakpoint()
         spikes_out = torch.scatter(
             torch.zeros((time_steps + time_pad, *X_data.shape), dtype=X_data.dtype, device=X_data.device),
             dim=0,
