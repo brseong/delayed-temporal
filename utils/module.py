@@ -157,11 +157,11 @@ def _shift_vec(input: torch.Tensor, delay: torch.Tensor) -> torch.Tensor:
     # Equivalently, we can use roll (very slow):
     # for d_out in range(D_out):
     #     for d_in in range(D_in):
-    #         output[..., d_out, d_in] = torch.roll(output[..., d_out, d_in], shifts=rounded_delay[0,0,d_out,d_in].item(), dims=0)
+    #         output[..., d_out, d_in] = torch.roll(output[..., d_out, d_in], shifts=delay[0,0,d_out,d_in].item(), dims=0)
     
     return output
 
-class StochasticDelay(torch.autograd.Function):    
+class SpikeDelay(torch.autograd.Function):    
     @staticmethod
     def forward(ctx, input: torch.Tensor, delay: torch.Tensor) -> torch.Tensor:
         """Apply synaptic delay to the one-hot coded input tensor.
@@ -169,7 +169,7 @@ class StochasticDelay(torch.autograd.Function):
         :param ctx: Context to save information for backward pass
         :param input: The input tensor to apply delay to. shape: (T, N, C, D_out, D_in)
         :type input: torch.Tensor
-        :param delay: The `float` delay tensor to apply. Delay must be in range [0, T-1].
+        :param delay: The `long` delay tensor to apply. Delay must be in range [0, T-1].
             It will be rounded stochastically. shape: (D_out, D_in)
         :type delay: torch.nn.Parameter
         :return: The output tensor after synaptic delay. shape: (T, N, C, D_out, D_in)
@@ -178,21 +178,16 @@ class StochasticDelay(torch.autograd.Function):
         T = input.shape[0]
         # Sample synaptic delays
         
-        batch_delay_latent = delay[*([None]*(input.ndim-3)),...].expand(*input.shape[1:-2],-1,-1) # Shape: (N, C, D_out, D_in)
+        batch_delay = delay[*([None]*(input.ndim-3)),...].expand(*input.shape[1:-2],-1,-1) # Shape: (N, C, D_out, D_in)
         
-        batch_delay_floored = torch.floor(batch_delay_latent)
-        p = batch_delay_latent - batch_delay_floored  # The probability that delay is ceiled
-        
-        batch_delay_rounded = torch.where(torch.bernoulli(p).bool(), batch_delay_floored + 1.0, batch_delay_floored)
-        batch_delay_rounded = batch_delay_rounded.to(input.device) # Shape: (N, C, D_out, D_in)
-        batch_delay_rounded = batch_delay_rounded.clamp(max= (T - 1) - input.argmax(dim=0)) # Prevent delay overflow
-        batch_delay_rounded = batch_delay_rounded.long()
+        batch_delay = batch_delay.to(input.device) # Shape: (N, C, D_out, D_in)
+        batch_delay = batch_delay.clamp(max= (T - 1) - input.argmax(dim=0)) # Prevent delay overflow
         
         # For backward pass
-        ctx.save_for_backward(batch_delay_rounded.clone())
+        ctx.save_for_backward(batch_delay.clone())
         
         # Apply delay by shifting the time dimension, using torch.gather
-        return _shift_vec(input, batch_delay_rounded)
+        return _shift_vec(input, batch_delay)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor): # type: ignore
@@ -205,12 +200,7 @@ class StochasticDelay(torch.autograd.Function):
         :rtype: Tuple[torch.Tensor, torch.Tensor]
         
         """
-        
-        #TODO: Gradient of clamped delay?
         delay, = ctx.saved_tensors
-        # T, N, C, D_out, _2 = input.shape
-        # T, N, C, D_out, _2 = output.shape
-        # D_out, _2 = delay.shape
         
         # 'delay'에 대한 그래디언트만 계산 (vec의 그래디언트는 None)
         grad_input = None
@@ -221,36 +211,6 @@ class StochasticDelay(torch.autograd.Function):
         
         # 'delay'가 그래디언트를 요구할 때만 (needs_input_grad[1]) 계산
         if ctx.needs_input_grad[1]:
-            # score = torch.argmax(output, dim=0)  # shape: (N, C, D_out, 2)
-            # score = torch.square(score[...,0] - score[...,1])  # shape: (N, C, D_out)
-            # score = torch.exp(-score)  # shape: (N, C, D_out)
-            
-            # score = torch.softmax(output, dim=0) # shape: (T, N, C, D_out, 2)
-            # score = torch.linalg.vecdot(score[...,0], score[...,1], dim=0)  # shape: (N, C, D_out)
-            
-            # grad_delay = (grad_output * score[None,...,None])
-            
-            # delay_ceil_prob = delay - torch.floor(delay)  # P(ceil), shape: (D_out, 2)
-            # delay_floor_prob = 1.0 - delay_ceil_prob      # P(floor), shape: (D_out, 2)
-            # delay_ceil_map = torch.nn.functional.one_hot(torch.ceil(delay).long(), T) # shape: (D_out, 2, T_in)
-            # delay_ceil_map = torch.nn.functional.one_hot(delay_ceil_map.transpose(0,-1), T).permute(0, 3, 2, 1) # shape: (T_in, T_out, D_out, 2)
-            # delay_floor_map = torch.nn.functional.one_hot(torch.floor(delay).long(), T) # shape: (D_out, 2, T_in)
-            # delay_floor_map = torch.nn.functional.one_hot(delay_floor_map.transpose(0,-1), T).permute(0, 3, 2, 1) # shape: (T_in, T_out, D_out, 2)
-            # delay_map = delay_ceil_prob[None, None,...] * delay_ceil_map + delay_floor_prob[None, None,...] * delay_floor_map # shape: (T_in, T_out, D_out, 2)
-            # delay_map = delay_ceil_map - delay_floor_map # shape: (T_in, T_out, D_out, 2)
-            # grad_delay = (delay_map[:,:,None,None,:,:] * input[:,None,:,:,:,:]).sum(dim=0) # shape: (T_out, N, C, D_out, 2)
-            # grad_delay = (grad_output * grad_delay).sum(dim=(0,1,2)) / input.shape[0]  # shape: (N, C, D_out, 2)
-            
-            # for indices in product(*[range(dim) for dim in (N, C, D_out, 2)]):
-            #     delay_map[..., *indices]
-            # diff = torch.argmax(output, dim=0)  # shape: (N, C, D_out, 2)
-            # diff = (diff[...,1] - diff[...,0]) # shape: (N, C, D_out)
-            # score = torch.exp(-torch.square(diff) / 2).unsqueeze(-1)  # shape: (N, C, D_out, 1)
-            # diff = torch.stack([diff, -diff], dim=-1)  # shape: (N, C, D_out, 2)
-            # grad_delay = (grad_output.sum(dim=0) * (score * diff)) # shape: (N, C, D_out, 2)
-            
-            # grad_delay = (torch.argmax(output, dim=0) - torch.argmax(input, dim=0)).float()  # shape: (N, C, D_out, 2)
-            
             grad_delay = (grad_output).sum(dim=(0,1,2))
         
         # vec의 그래디언트(None), d의 그래디언트 순서로 반환
@@ -278,36 +238,9 @@ class SingleStepDelay(MemoryModule):
         self.spike_queue = self.spike_queue.roll(shifts=-1, dims=0)  # Shift the queue to make space for new spike
         x_delayed = torch.zeros_like(self.spike_queue)
         x_delayed[0,:x.shape[0]] = x 
-        x_delayed = StochasticDelay.apply(x_delayed, delay)  # Apply stochastic delay
+        x_delayed = SpikeDelay.apply(x_delayed, delay)  # Apply stochastic delay
         self.spike_queue += x_delayed
         return self.spike_queue[0,:x.shape[0]]  # Return the output spike at current time
-
-class TrainableDelay(torch.nn.Module):
-    def __init__(self, in_features:int, out_features:int|None=None, init_delay:float=0) -> None:
-        """
-        Trainable Synaptic Delay Module.
-        
-        :param self: Self
-        :param init_delay: Initial delay in seconds
-        """
-        super().__init__()
-        self.init_delay = init_delay
-        self.synapsewise = out_features is not None
-        
-        if self.synapsewise:
-            assert out_features is not None
-            self.delay = torch.nn.Parameter(torch.full((in_features, out_features), init_delay), requires_grad=True)
-        else:
-            self.delay = torch.nn.Parameter(torch.full((in_features, 1), init_delay), requires_grad=True)
-    
-    def extra_repr(self) -> str:
-        return super().extra_repr() + f'init_delay={self.init_delay}'
-    
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output = StochasticDelay.apply(torch.sigmoid(input), self.delay)
-        if not self.synapsewise:
-            output = torch.squeeze(output, -1)
-        return output
 
 class JeffressLinear(torch.nn.Module):
     def __init__(self, radius: int, compression: int = 1) -> None:
@@ -325,8 +258,8 @@ class JeffressLinear(torch.nn.Module):
         self.in_features = 2
         self.radius = radius
         self.out_features = 2 * ((radius - 1) // compression + 1)
-        _delay = torch.cat([torch.arange(-radius, 0, compression, dtype=torch.float32),
-                            torch.arange(radius, 0, -compression, dtype=torch.float32).flip(0)],
+        _delay = torch.cat([torch.arange(-radius, 0, compression, dtype=torch.long),
+                            torch.arange(radius, 0, -compression, dtype=torch.long).flip(0)],
                            dim=0).view(-1, 1)
         self._delay = torch.nn.Parameter(_delay, requires_grad=False) # For symmetry
         self._weight = torch.nn.Parameter(torch.tensor(get_weight(1., 10., compression)), requires_grad=False)
@@ -364,7 +297,7 @@ class JeffressLinear(torch.nn.Module):
         output = input[...,None,:].expand([-1] * (len(input.shape) - 1) + [self.out_features, -1]) # ..., 2 -> ..., d_out, 2
         
         # Apply synapse-wise delay
-        output = StochasticDelay.apply(output, self.delay) # output shape: (T, N, C, D_out, 2)
+        output = SpikeDelay.apply(output, self.delay) # output shape: (T, N, C, D_out, 2)
         assert isinstance(output, torch.Tensor)
         
         output = self.filter(output)  # Apply LIF_Filter, shape: (T, N, C, D_out, 2)
@@ -382,7 +315,7 @@ class SpikeAmplifierNetwork(torch.nn.Module):
                  num_features:int,
                  backend:str="torch") -> None:
         """
-        Jeffress Model for Temporal Correlation Detection.
+        Amplify the first spike to all subsequent time steps.
         
         :param self: Self
         :param num_features: Number of input and output features (J)
@@ -405,7 +338,7 @@ class SpikeAmplifierNetwork(torch.nn.Module):
         :param self: Self
         :param input: Input tensor, shape: (T, N, C, J)
         :type input: torch.Tensor
-        :return: Output tensor after Jeffress processing
+        :return: Output tensor after amplification
         :rtype: Tensor
         """
         
@@ -436,7 +369,7 @@ class SpikeAmplifier(torch.nn.Module):
                  accelerated:bool=True,
                  backend:str="torch") -> None:
         """
-        Jeffress Model for Temporal Correlation Detection.
+        Amplify the first spike to all subsequent time steps.
         
         :param self: Self
         :param num_features: Number of input and output features (J)
@@ -447,10 +380,7 @@ class SpikeAmplifier(torch.nn.Module):
         self.num_features = num_features
         self.accelerated = accelerated
         
-        if not accelerated:
-            self.model = SpikeAmplifierNetwork(num_features=num_features, backend=backend)
-        else:
-            self.model = self.forward_accelerated
+        self.model = SpikeAmplifierNetwork(num_features=num_features, backend=backend)
     
     def forward_accelerated(self, input: torch.Tensor) -> torch.Tensor:
         """
@@ -459,14 +389,15 @@ class SpikeAmplifier(torch.nn.Module):
         :param self: Self
         :param input: Input tensor, shape: (T, ...)
         :type input: torch.Tensor
-        :return: Output tensor after Jeffress processing
+        :return: Output tensor after amplification
         :rtype: Tensor
         """
         assert self.accelerated, "Model is not in accelerated mode."
         
         output = torch.cumsum(input, dim=0)
-        output = torch.threshold(output, 1.0, 0.0)
-        output = torch.sign(output)
+        output = torch.ge(output, 1.0)
+        output = torch.cummax(output, dim=0)[0].float()
+        
         return output
     
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -476,9 +407,12 @@ class SpikeAmplifier(torch.nn.Module):
         :param self: Self
         :param input: Input tensor, shape: (T, ...)
         :type input: torch.Tensor
-        :return: Output tensor after Jeffress processing
+        :return: Output tensor after amplification
         :rtype: Tensor
         """
         
-        return self.model(input)
+        if self.accelerated:
+            return self.forward_accelerated(input)
+        else:
+            return self.model(input)
         

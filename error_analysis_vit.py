@@ -21,7 +21,7 @@ def evaluate_vit_model():
     # model_id = "nateraw/vit-base-patch16-224-cifar10"
     model_id = "MF21377197/vit-small-patch16-224-finetuned-Cifar10"
     dataset_id = "cifar10"
-    batch_size = torch.cuda.device_count() * 48
+    batch_size = torch.cuda.device_count() * 24
     
     # GPU 사용 가능 여부 확인
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -22,7 +22,8 @@ class L2Net(torch.nn.Module):
                  backend:str = "torch",
                  out_neuron:BaseNode|None = None,
                  gamma_m:float = 20.,
-                 gamma_s:float = 2.):
+                 gamma_s:float = 2.,
+                 accelerated:bool = True):
         """
         Cross-correlation network initialization.
         
@@ -61,7 +62,7 @@ class L2Net(torch.nn.Module):
         self.jeffress_model = torch.nn.Sequential(
             TimePadding(time_padding),  # T,N,C,2 -> T+Tp,N,C,2
             JeffressLinear(jeffress_radius, compression=jeffress_compression), # T+Tp,N,C,2 -> T+Tp,N,C,J,2
-            SpikeAmplifier(j_out_shape, backend=backend),  # T+Tp,N,C,J,2 -> T+Tp,N,C,J
+            SpikeAmplifier(j_out_shape, backend=backend, accelerated=accelerated),  # T+Tp,N,C,J,2 -> T+Tp,N,C,J
             TimeCrop(time_padding),  # T+Tp,N,C,J -> T,N,C,J
             
             SynapseFilter(tau=gamma_s, step_mode=step_mode, learnable=True),

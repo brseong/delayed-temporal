@@ -1,3 +1,4 @@
+from email.policy import strict
 import torch, math, wandb
 from time import perf_counter
 # from torch.utils.tensorboard import SummaryWriter
@@ -6,6 +7,7 @@ from transformers.utils import is_torch_npu_available, is_torch_xpu_available, l
 from transformers.utils.import_utils import is_torch_greater_or_equal
 from utils.datasets import encode_temporal_th, unnormalize_net_output
 from utils.model import L2Net
+from utils.load import load_l2net_model
 
 logger = logging.get_logger(__name__)
 # writer = SummaryWriter(log_dir="runs/spiking_sdpa_attention")
@@ -15,18 +17,9 @@ _is_torch_greater_or_equal_than_2_8 = is_torch_greater_or_equal("2.8", accept_de
 _is_torch_xpu_available = is_torch_xpu_available()
 _is_torch_npu_available = is_torch_npu_available()
 
-l2net_cfg = torch.load("models/l2net.cfg")
-l2nets = {}
-for device in range(torch.cuda.device_count()):
-    l2net = L2Net(l2net_cfg["TIME_STEPS"],
-                  l2net_cfg["VECTOR_DIM"],
-                  l2net_cfg["TIME_STEPS"]-1,
-                  l2net_cfg["JEFFRESS_COMPRESSION"]).eval()
-    l2net.load_state_dict(torch.load("models/l2net.pt", map_location=torch.device(f"cuda:{device}")))
-    l2nets[torch.device(f"cuda:{device}")] = l2net.to(torch.device(f"cuda:{device}"))
-print("L2Net loaded with following configuration:")
-print(l2net_cfg)
-min_val, max_val = l2net_cfg["MIN_VAL"], l2net_cfg["MAX_VAL"]
+l2nets, l2net_cfg = load_l2net_model("6b964822e41711f092720242ac11000f", parallel=True)
+min_val, max_val = float(l2net_cfg["MIN_VAL"]), float(l2net_cfg["MAX_VAL"]) # type: ignore
+time_steps, vector_dim = int(l2net_cfg["TIME_STEPS"]), int(l2net_cfg["VECTOR_DIM"]) # type: ignore
 
 def get_sum_square_error(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
@@ -36,11 +29,11 @@ def get_sum_square_error(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     :param b: Shape: (N, S, D)
     :return: Shape: (N, S)
     """
-    a = encode_temporal_th(a.clamp(min=min_val, max=max_val), l2net_cfg["TIME_STEPS"], time_pad=0, min_val=min_val, max_val=max_val)
-    b = encode_temporal_th(b.clamp(min=min_val, max=max_val), l2net_cfg["TIME_STEPS"], time_pad=0, min_val=min_val, max_val=max_val)
+    a = encode_temporal_th(a.clamp(min=min_val, max=max_val), time_steps, time_pad=0, min_val=min_val, max_val=max_val)
+    b = encode_temporal_th(b.clamp(min=min_val, max=max_val), time_steps, time_pad=0, min_val=min_val, max_val=max_val)
     input_ab = torch.stack([a,b], dim=-2)  # To make shape in form (T, N, S, 2, D)
     out = l2nets[a.device](input_ab).squeeze(-1)  # (T, N, S, 2, D) -> (N, S)
-    out = unnormalize_net_output(out, l2net_cfg["VECTOR_DIM"], min_val, max_val)
+    out = unnormalize_net_output(out, vector_dim, min_val, max_val)
     return out
 
 def get_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -79,7 +72,7 @@ def get_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
             
             # inner_product = (sse_Q + sse_K - sse_QK) / 2  # Shape: (N, S)
             
-            m, M = -7, 7
+            # m, M = -7, 7
             output[:, h, s] = (
                 torch.sum(Q_hs * Q_hs, dim=-1)
                 + torch.sum(K_h * K_h, dim=-1)
