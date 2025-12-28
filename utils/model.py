@@ -6,8 +6,7 @@ from spikingjelly.activation_based.functional import set_step_mode
 from spikingjelly.activation_based.surrogate import ATan
 from spikingjelly.activation_based.monitor import OutputMonitor
 
-from .module import SpikeAmplifier, SpikeAmplifierNetwork, JeffressLinear, TimePadding, TimeCrop
-from .datasets import encode_temporal_th
+from .module import SpikeAmplifier, JeffressLinear, TimePadding, TimeCrop
 from jaxtyping import Float
 
 class L2Net(torch.nn.Module):

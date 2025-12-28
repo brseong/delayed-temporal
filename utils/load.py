@@ -4,7 +4,7 @@ from json import load
 
 def load_l2net_model(hex:str, parallel:bool=True) -> tuple[dict[torch.device, L2Net], dict[str, object]]:
     path = f"models/{hex}"
-    l2net_cfg = torch.load(f"{path}/l2net.cfg")
+    l2net_cfg = torch.load(f"{path}/model.cfg")
     l2nets = {}
     
     dev_counts = torch.cuda.device_count() if parallel else 1
@@ -14,7 +14,7 @@ def load_l2net_model(hex:str, parallel:bool=True) -> tuple[dict[torch.device, L2
                     l2net_cfg["TIME_STEPS"]-1,
                     l2net_cfg["JEFFRESS_COMPRESSION"],
                     accelerated=True).eval()
-        l2net.load_state_dict(torch.load(f"{path}/l2net.pt", map_location=torch.device(f"cuda:{device}")), strict=True)
+        l2net.load_state_dict(torch.load(f"{path}/model.pt", map_location=torch.device(f"cuda:{device}")), strict=True)
         l2nets[torch.device(f"cuda:{device}")] = l2net.to(torch.device(f"cuda:{device}"))
     print("L2Net loaded with following configuration:")
     print(l2net_cfg)
