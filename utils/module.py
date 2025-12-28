@@ -1,5 +1,5 @@
 from itertools import product
-from typing import Sequence, overload
+from collections.abc import Sequence
 import torch
 from jaxtyping import Int64, Float
 from spikingjelly.activation_based.layer import SynapseFilter
@@ -9,6 +9,7 @@ from spikingjelly.activation_based.base import MemoryModule
 from spikingjelly.activation_based.functional import reset_net
 from torch import Tensor
 from .layer import LIF_Filter
+from .theory import get_weight
 
 class StochasticRound(torch.autograd.Function):
     """
@@ -140,18 +141,18 @@ def _shift_vec(input: torch.Tensor, delay: torch.Tensor) -> torch.Tensor:
     """
     Apply synaptic delay to the one-hot coded input tensor.
     
-    :param vec: The input tensor to apply delay to. shape: (T, N, C, D_out, D_in)
+    :param vec: The input tensor to apply delay to. shape: (T, ...)
     :type vec: torch.Tensor
-    :param delay: The delay tensor to apply. shape: (N, C, D_out, D_in)
+    :param delay: The delay tensor to apply. shape: (...)
     :type delay: torch.Tensor
-    :return: The output tensor after applying synaptic delay. shape: (T, N, C, D_out, D_in)
+    :return: The output tensor after applying synaptic delay. shape: (T, ...)
     :rtype: Tensor
     """
     assert delay.dtype == torch.long, f"Delay tensor must be of type torch.long but got {delay.dtype}"
-    T, N, C, D_out, D_in = input.shape
+    T = input.shape[0]
     
     # Apply delay by shifting the time dimension, using torch.gather
-    mat = torch.arange(T, device=input.device).view(T,1,1,1,1)#.repeat(1,N,C,D_out,D_in)
+    mat = torch.arange(T, device=input.device)[:,*([None] * (input.ndim -1))]  # Shape: (T, 1, 1, 1, 1)
     output = torch.gather(input, 0, (mat - delay[None,...]) % T)
     # Equivalently, we can use roll (very slow):
     # for d_out in range(D_out):
@@ -160,142 +161,38 @@ def _shift_vec(input: torch.Tensor, delay: torch.Tensor) -> torch.Tensor:
     
     return output
 
-class WrapperFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, params, forward, backward):
-        ctx.backward = backward
-        pack, output = forward(input.permute(*range(1, len(input.shape)),0))  # T, N, C, D_in -> N, C, D_in, T
-        ctx.save_for_backward(*pack)
-        return output.permute(-1,*range(len(input.shape)-1))  # N, C, D_out, T -> T, N, C, D_out
-
-    @staticmethod
-    def backward(ctx, grad_output): # type: ignore
-        backward = ctx.backward
-        pack = ctx.saved_tensors
-        grad_input, grad_weight = backward(grad_output.permute(*range(1, len(grad_output.shape)),0), *pack)
-        return grad_input.permute(-1,*range(len(grad_output.shape)-1)), grad_weight, None, None
-
-class EventPropLinear(torch.nn.Module):
-    def __init__(self, input_dim:int,
-                 output_dim:int,
-                 T:int,
-                 dt:int = 1,
-                 tau_m:float = 10.,
-                 tau_s:float = 1.,
-                 mu:float = 0.1) -> None:
-        """
-        EventProp Linear Layer Implementation with Spiking Neuron Dynamics.
-        https://github.com/lolemacs/pytorch-eventprop
-        
-        :param self: 설명
-        :param input_dim: 설명
-        :param output_dim: 설명
-        :param T: 설명
-        :param dt: 설명
-        :param tau_m: 설명
-        :param tau_s: 설명
-        :param mu: 설명
-        """
-        super(EventPropLinear, self).__init__()
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.T = T
-        self.dt = dt
-        self.tau_m = tau_m
-        self.tau_s = tau_s
-        
-        self.weight = torch.nn.Parameter(torch.Tensor(output_dim, input_dim))
-        torch.nn.init.normal_(self.weight, mu, mu)
-    
-    def extra_repr(self) -> str:
-        return f'input_dim={self.input_dim}, output_dim={self.output_dim}, T={self.T}, dt={self.dt}, tau_m={self.tau_m}, tau_s={self.tau_s}'
-    
-    def forward(self, input): # type: ignore
-        out = WrapperFunction.apply(input, self.weight, self.manual_forward, self.manual_backward)
-        return out
-        
-    def manual_forward(self, input):
-        steps = int(self.T / self.dt)
-
-        other_dims = input.shape[:-2]
-        V = torch.zeros(*other_dims, self.output_dim, steps).cuda()
-        I = torch.zeros(*other_dims, self.output_dim, steps).cuda()
-        output = torch.zeros(*other_dims, self.output_dim, steps).cuda()
-
-        while True:
-            for i in range(1, steps):
-                t = i * self.dt
-                V[...,i] = (1 - self.dt / self.tau_m) * V[...,i-1] + (self.dt / self.tau_m) * I[...,i-1]
-                I[...,i] = (1 - self.dt / self.tau_s) * I[...,i-1] + torch.nn.functional.linear(input[...,i-1].float(), self.weight)
-                spikes = (V[...,i] > 1.0).float()
-                output[...,i] = spikes
-                V[...,i] = (1-spikes) * V[...,i]
-            if self.training:
-                is_silent = output.sum(dim=-1).flatten(end_dim=-2).min(dim=0)[0] == 0
-                self.weight.data[is_silent] = self.weight.data[is_silent] + 1e-1
-                # if is_silent.sum() == 0:
-                #     break
-                break
-            else:
-                break
-
-        return (input, I, output), output
-    
-    def manual_backward(self, grad_output, input, I, post_spikes):
-        steps = int(self.T / self.dt)
-
-        other_dims = input.shape[:-2]
-        lV = torch.zeros(*other_dims, self.output_dim, steps).cuda()
-        lI = torch.zeros(*other_dims, self.output_dim, steps).cuda()
-        
-        grad_input = torch.zeros(*other_dims, input.shape[-2], steps).cuda()
-        grad_weight = torch.zeros(*other_dims, *self.weight.shape).cuda()
-        
-        for i in range(steps-2, -1, -1):
-            t = i * self.dt
-            delta = lV[...,i+1] - lI[...,i+1]
-            grad_input[...,i] = torch.nn.functional.linear(delta, self.weight.t())
-            lV[...,i] = (1 - self.dt / self.tau_m) * lV[...,i+1] + post_spikes[...,i+1] * (lV[...,i+1] + grad_output[...,i+1]) / (I[...,i] - 1 + 1e-10)
-            lI[...,i] = lI[...,i+1] + (self.dt / self.tau_s) * (lV[...,i+1] - lI[...,i+1])
-            spike_bool = input[...,i].float()
-            grad_weight -= (spike_bool.unsqueeze(-2) * lI[...,i].unsqueeze(-1))
-        return grad_input, grad_weight
-
 class StochasticDelay(torch.autograd.Function):    
     @staticmethod
     def forward(ctx, input: torch.Tensor, delay: torch.Tensor) -> torch.Tensor:
         """Apply synaptic delay to the one-hot coded input tensor.
         
         :param ctx: Context to save information for backward pass
-        :param input: The input tensor to apply delay to. shape: (T, N, C, D_out, 2)
+        :param input: The input tensor to apply delay to. shape: (T, N, C, D_out, D_in)
         :type input: torch.Tensor
         :param delay: The `float` delay tensor to apply. Delay must be in range [0, T-1].
-            It will be rounded stochastically. shape: (D_out, 2)
+            It will be rounded stochastically. shape: (D_out, D_in)
         :type delay: torch.nn.Parameter
-        :return: The output tensor after synaptic delay. shape: (T, N, C, D_out, 2)
+        :return: The output tensor after synaptic delay. shape: (T, N, C, D_out, D_in)
         :rtype: torch.Tensor
         """
-        output = input#.clone()
-        T, N, C, D_out, D_in = output.shape
+        T = input.shape[0]
         # Sample synaptic delays
         
-        batch_delay_latent = delay[None,None,...].repeat(N, C, 1, 1) # Shape: (N, C, D_out, 2)
+        batch_delay_latent = delay[*([None]*(input.ndim-3)),...].expand(*input.shape[1:-2],-1,-1) # Shape: (N, C, D_out, D_in)
         
         batch_delay_floored = torch.floor(batch_delay_latent)
         p = batch_delay_latent - batch_delay_floored  # The probability that delay is ceiled
         
         batch_delay_rounded = torch.where(torch.bernoulli(p).bool(), batch_delay_floored + 1.0, batch_delay_floored)
-        batch_delay_rounded = batch_delay_rounded.to(output.device) # Shape: (N, C, D_out, D_in)
-        batch_delay_rounded = batch_delay_rounded.clamp(max= (T - 1) - output.argmax(dim=0)) # Prevent delay overflow
+        batch_delay_rounded = batch_delay_rounded.to(input.device) # Shape: (N, C, D_out, D_in)
+        batch_delay_rounded = batch_delay_rounded.clamp(max= (T - 1) - input.argmax(dim=0)) # Prevent delay overflow
         batch_delay_rounded = batch_delay_rounded.long()
         
-        # Apply delay by shifting the time dimension, using torch.gather
-        output = _shift_vec(output, batch_delay_rounded)
-        
-        # For backward pass, use real-valued delay (not rounded)
+        # For backward pass
         ctx.save_for_backward(batch_delay_rounded.clone())
         
-        return output
+        # Apply delay by shifting the time dimension, using torch.gather
+        return _shift_vec(input, batch_delay_rounded)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor): # type: ignore
@@ -413,34 +310,31 @@ class TrainableDelay(torch.nn.Module):
         return output
 
 class JeffressLinear(torch.nn.Module):
-    def __init__(self, radius: int, bias = False) -> None:
+    def __init__(self, radius: int, compression: int = 1) -> None:
         """
         Synaptic Delay Convolutional Linear Layer.
         Applies synaptic delay convolution followed by a learnable synapse filter.
         Linear transformation is performed with synapse-wise delays.
         
         :param self: Self
-        :param out_features: Number of output features
-        :type out_features: int
-        :param tau: Time constant for the synapse filter
-        :type tau: float
-        :param bias: Whether to include a bias term
+        :param radius: Radius of cross correlation window
+        :type radius: int
+        :param compression: compression multiplier in correlation window.
         """
         super().__init__()
         self.in_features = 2
         self.radius = radius
-        self.out_features = 2 * radius + 1
-        self.has_bias = bias
-        _delay = torch.arange(-radius, radius+1, dtype=torch.float32, requires_grad=True).view(-1,1)
+        self.out_features = 2 * ((radius - 1) // compression + 1)
+        _delay = torch.cat([torch.arange(-radius, 0, compression, dtype=torch.float32),
+                            torch.arange(radius, 0, -compression, dtype=torch.float32).flip(0)],
+                           dim=0).view(-1, 1)
         self._delay = torch.nn.Parameter(_delay, requires_grad=False) # For symmetry
-        self._weight = torch.nn.Parameter(torch.tensor(6.53543197272069), requires_grad=False)
-        if bias:
-            self.log_bias = torch.nn.Parameter(torch.tensor(0.))
+        self._weight = torch.nn.Parameter(torch.tensor(get_weight(1., 10., compression)), requires_grad=False)
 
         self.filter = LIF_Filter(step_mode="m")
         
     def extra_repr(self):
-        return f'in_features={self.in_features}, out_features={self.radius}'
+        return f'in_features={self.in_features}, out_features={self.out_features}'
     
     @property
     def delay(self):
@@ -467,7 +361,7 @@ class JeffressLinear(torch.nn.Module):
         
         # Duplicate last dimension for D_out and D_in, to apply synapse-wise delay.
         # a out spikes from each input neuron map to d_out output neurons: total d_out output delays.
-        output = input.unsqueeze(-2).repeat([1] * (len(input.shape) - 1) + [self.out_features, 1]) # ..., 2 -> ..., d_out, 2
+        output = input[...,None,:].expand([-1] * (len(input.shape) - 1) + [self.out_features, -1]) # ..., 2 -> ..., d_out, 2
         
         # Apply synapse-wise delay
         output = StochasticDelay.apply(output, self.delay) # output shape: (T, N, C, D_out, 2)
@@ -480,13 +374,10 @@ class JeffressLinear(torch.nn.Module):
         
         # Sum over input dimension to get output current.
         output = torch.sum(output, dim=-1)
-        
-        if self.has_bias:
-            output += self.log_bias.exp()
 
         return output
 
-class SpikeAmplifier(torch.nn.Module):
+class SpikeAmplifierNetwork(torch.nn.Module):
     def __init__(self,
                  num_features:int,
                  backend:str="torch") -> None:
@@ -494,8 +385,7 @@ class SpikeAmplifier(torch.nn.Module):
         Jeffress Model for Temporal Correlation Detection.
         
         :param self: Self
-        :param in_features: Number of input features (J)
-        :param out_features: Number of output features (J)
+        :param num_features: Number of input and output features (J)
         :param step_mode: Step mode for spiking neurons
         :param backend: Backend for spiking neurons
         """
@@ -510,7 +400,7 @@ class SpikeAmplifier(torch.nn.Module):
     
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """
-        forward의 Docstring
+        A SNN to change all spikes after the first spike to 1.
         
         :param self: Self
         :param input: Input tensor, shape: (T, N, C, J)
@@ -520,7 +410,7 @@ class SpikeAmplifier(torch.nn.Module):
         """
         
         if self.single_step_delay is None:
-            self.single_step_delay = SingleStepDelay(queue_shape=input.shape[:3]+(1,self.num_features), backend=self.neuron.backend)
+            self.single_step_delay = SingleStepDelay(queue_shape=input.shape[:-1]+(1,self.num_features), backend=self.neuron.backend)
         self.single_step_delay.reset()
         self.i_seq = input.unbind(dim=0)  # Time series of (N, C, J)
         self.v_seq = []
@@ -539,3 +429,56 @@ class SpikeAmplifier(torch.nn.Module):
             y_seq[t+1] = y # List of (N, C, J)
             self.v_seq.append(self.neuron.v.clone())
         return y_seq[1:] # T, N, C, J
+    
+class SpikeAmplifier(torch.nn.Module):
+    def __init__(self,
+                 num_features:int,
+                 accelerated:bool=True,
+                 backend:str="torch") -> None:
+        """
+        Jeffress Model for Temporal Correlation Detection.
+        
+        :param self: Self
+        :param num_features: Number of input and output features (J)
+        :param step_mode: Step mode for spiking neurons
+        :param backend: Backend for spiking neurons
+        """
+        super().__init__()
+        self.num_features = num_features
+        self.accelerated = accelerated
+        
+        if not accelerated:
+            self.model = SpikeAmplifierNetwork(num_features=num_features, backend=backend)
+        else:
+            self.model = self.forward_accelerated
+    
+    def forward_accelerated(self, input: torch.Tensor) -> torch.Tensor:
+        """
+        Change all spikes after the first spike to 1.
+        
+        :param self: Self
+        :param input: Input tensor, shape: (T, ...)
+        :type input: torch.Tensor
+        :return: Output tensor after Jeffress processing
+        :rtype: Tensor
+        """
+        assert self.accelerated, "Model is not in accelerated mode."
+        
+        output = torch.cumsum(input, dim=0)
+        output = torch.threshold(output, 1.0, 0.0)
+        output = torch.sign(output)
+        return output
+    
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """
+        Change all spikes after the first spike to 1.
+        
+        :param self: Self
+        :param input: Input tensor, shape: (T, ...)
+        :type input: torch.Tensor
+        :return: Output tensor after Jeffress processing
+        :rtype: Tensor
+        """
+        
+        return self.model(input)
+        

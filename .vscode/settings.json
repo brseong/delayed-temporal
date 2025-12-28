@@ -1,1 +1,6 @@
-{}
+{
+    "python.analysis.extraPaths": [
+        "venv/src/spikingjelly",
+        "venv/src/transformers/src"
+    ]
+}

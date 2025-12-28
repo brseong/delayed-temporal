@@ -1,5 +1,6 @@
-import torch
+import torch, wandb
 from torch.utils.data import DataLoader
+from torch.nn.parallel import DataParallel
 from datasets import load_dataset
 from transformers import AttentionInterface
 from transformers.models.vit import ViTImageProcessor
@@ -20,7 +21,7 @@ def evaluate_vit_model():
     # model_id = "nateraw/vit-base-patch16-224-cifar10"
     model_id = "MF21377197/vit-small-patch16-224-finetuned-Cifar10"
     dataset_id = "cifar10"
-    batch_size = 1
+    batch_size = torch.cuda.device_count() * 48
     
     # GPU 사용 가능 여부 확인
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -59,13 +60,14 @@ def evaluate_vit_model():
     processed_dataset = dataset.with_transform(transform)
 
     # DataLoader 생성
-    dataloader = DataLoader(processed_dataset, batch_size=batch_size)
+    dataloader = DataLoader(processed_dataset, batch_size=batch_size, shuffle=True)
 
     # ---------------------------------------------------------
     # 4. 모델 로드
     # ---------------------------------------------------------
     print(f"Loading model: {model_id}...")
     model = ViTForImageClassification.from_pretrained(model_id, attn_implementation="spiking_sdpa")
+    model = DataParallel(model, device_ids=list(range(torch.cuda.device_count())))  # 모델 병렬화
     model.to(device)
     model.eval() # 평가 모드로 전환
 
@@ -88,6 +90,7 @@ def evaluate_vit_model():
 
         # 배치 단위로 메트릭에 추가
         metric.add_batch(predictions=predictions, references=labels)
+        wandb.log({"Intermediate accuracy": metric.compute()["accuracy"]})
 
     # ---------------------------------------------------------
     # 6. 최종 결과 계산 및 출력
@@ -99,4 +102,6 @@ def evaluate_vit_model():
     print("-" * 30)
 
 if __name__ == "__main__":
+    wandb.init(project="vit-evaluation")
     evaluate_vit_model()
+    wandb.finish()

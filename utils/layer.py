@@ -26,6 +26,7 @@ class LIF_Filter(MemoryModule):
         self.gamma_s = gamma_s
         self.lif_tau = 1/log(gamma_m / (gamma_m - 1))
         self.filter_tau = 1/log(gamma_s / (gamma_s - 1))
+        self.inv_tau_diff = 1 / (self.lif_tau - self.filter_tau)
         self.synapse_filter = SynapseFilter(tau=gamma_s, step_mode=step_mode, learnable=False)
         self.lif_filter = SynapseFilter(tau=gamma_m, step_mode=step_mode, learnable=False)
         
@@ -37,9 +38,9 @@ class LIF_Filter(MemoryModule):
             raise NotImplementedError("Only 'm' (multi time-step) step_mode is implemented.")
         
         x = torch.cat([x, torch.zeros_like(x[0:1, ...])], dim=0)  # Pad zero at the end along the last dimension
-        V_neg = self.synapse_filter(x)
-        V_pos = self.lif_filter(x)
-        V = self.filter_tau * (V_pos - V_neg) / (self.lif_tau - self.filter_tau)
+        V_neg = self.synapse_filter.to(x.device)(x)
+        V_pos = self.lif_filter.to(x.device)(x)
+        V = self.filter_tau * (V_pos - V_neg) * self.inv_tau_diff # Use inverse of time constant difference for computation efficiency
         assert torch.any(V >= 0), "LIF_Filter output has negative values."
         dV = V[1:, ...] - V[:-1, ...]
         

@@ -1,12 +1,13 @@
 import torch
-from spikingjelly.activation_based.neuron import ParametricLIFNode, LIFNode, BaseNode, IFNode, AdaptBaseNode, NonSpikingIFNode, NonSpikingLIFNode
-from spikingjelly.activation_based.layer import Linear, SynapseFilter, PrintShapeModule, LinearRecurrentContainer
+from spikingjelly.activation_based.neuron import ParametricLIFNode, LIFNode, IFNode, BaseNode, NonSpikingIFNode, NonSpikingLIFNode
+from spikingjelly.activation_based.layer import Linear, SynapseFilter
 from spikingjelly.activation_based.base import MemoryModule
 from spikingjelly.activation_based.functional import set_step_mode
-from spikingjelly.activation_based.surrogate import LeakyKReLU, MultiArgsSurrogateFunctionBase, SurrogateFunctionBase, ATan, Sigmoid, Rect
+from spikingjelly.activation_based.surrogate import ATan
 from spikingjelly.activation_based.monitor import OutputMonitor
 
-from .module import SpikeAmplifier, TransposeLayer, JeffressLinear, EventPropLinear, TimePadding, TimeCrop, Squeeze, Unsqueeze
+from .module import SpikeAmplifier, SpikeAmplifierNetwork, JeffressLinear, TimePadding, TimeCrop
+from .datasets import encode_temporal_th
 from jaxtyping import Float
 
 class L2Net(torch.nn.Module):
@@ -14,11 +15,12 @@ class L2Net(torch.nn.Module):
                  time_padding:int,
                  vector_dim:int,
                  jeffress_radius:int,
+                 jeffress_compression:int,
                  temporal_min:float = 0.0,
                  temporal_max:float = 1.0,
                  step_mode:str = "m",
                  backend:str = "torch",
-                 neuron = LIFNode,
+                 out_neuron:BaseNode|None = None,
                  gamma_m:float = 20.,
                  gamma_s:float = 2.):
         """
@@ -36,40 +38,46 @@ class L2Net(torch.nn.Module):
         self.time_padding = time_padding
         self.vector_dim = vector_dim
         self.jeffress_radius = jeffress_radius
+        self.jeffress_compression = jeffress_compression
+        self.temporal_min = temporal_min
+        self.temporal_max = temporal_max
         self.step_mode = step_mode
         self.backend = backend
-        self.neuron = neuron
         self.gamma_m = gamma_m
         self.gamma_s = gamma_s
         
         def _get_surrogate():
             return ATan(alpha=2.0)
         
-        _linear = Linear(jeffress_radius*2+1, 1, bias=False, step_mode=step_mode)
+        j_out_shape = 2 * ((jeffress_radius - 1) // jeffress_compression + 1)
+        
+        _linear = Linear(j_out_shape, 1, bias=False, step_mode=step_mode)
         with torch.no_grad():
             _linear.weight[:] = torch.linspace(
                 temporal_min-temporal_max,
                 temporal_max-temporal_min,
-                jeffress_radius*2+1).view(1, -1).square()
+                j_out_shape).view(1, -1).square()
         
         self.jeffress_model = torch.nn.Sequential(
             TimePadding(time_padding),  # T,N,C,2 -> T+Tp,N,C,2
-            JeffressLinear(jeffress_radius, bias=False), # T+Tp,N,C,2 -> T+Tp,N,C,J
-            SpikeAmplifier(2*jeffress_radius+1, backend=backend),  # T+Tp,N,C,J -> T+Tp,N,C,J
+            JeffressLinear(jeffress_radius, compression=jeffress_compression), # T+Tp,N,C,2 -> T+Tp,N,C,J,2
+            SpikeAmplifier(j_out_shape, backend=backend),  # T+Tp,N,C,J,2 -> T+Tp,N,C,J
             TimeCrop(time_padding),  # T+Tp,N,C,J -> T,N,C,J
             
             SynapseFilter(tau=gamma_s, step_mode=step_mode, learnable=True),
             _linear,  # T,N,C,J -> T,N,C,1
         )
         
-        # self.out_neuron = NonSpikingLIFNode(tau=gamma_m, decode="mean-mem")
-        self.out_neuron = LIFNode(tau=gamma_m, surrogate_function=_get_surrogate(), backend=backend, step_mode=step_mode)
+        if out_neuron is None:
+            self.out_neuron = LIFNode(tau=gamma_m, surrogate_function=_get_surrogate(), backend=backend, step_mode=step_mode)
+        else:
+            self.out_neuron = out_neuron
         
         # self.stats = OutputMonitor(self, (IFNode, LIFNode, ParametricLIFNode, SynapseFilter))
     
     def forward(self, x:Float[torch.Tensor, "T N 2 C"],
                 reset:bool=True,
-                return_v_seq:list[torch.Tensor]|None=None) -> Float[torch.Tensor, "T N 1"]:
+                return_mean:bool=True) -> Float[torch.Tensor, "T N 1"]:
         """
         Compute the correlation between two input tensors.
         
@@ -90,17 +98,17 @@ class L2Net(torch.nn.Module):
                     layer.reset()
             # self.stats.clear_recorded_data()
         
-        x = torch.transpose(x, 2, 3)  # T,N,C,2
+        x = torch.transpose(x, -1, -2)  # T,N,C,2
         x = self.jeffress_model(x)  # T,N,C,1
         
-        x = x.squeeze(-1).sum(dim=2, keepdim=True) # T,N,C -> T,N,1
+        x = x.squeeze(-1).sum(dim=-1, keepdim=True) # T,N,C -> T,N,1
         x = self.out_neuron(x)  # T,N,1 -> N,1
         # If not non-spiking neuron, average over time dimension
-        if x.ndim == 3:
+        if return_mean:
             x = x.mean(dim=0)  # T,N,1 -> N,1
         
         # if return_v_seq is not None:
         #     return_v_seq.append(self.jeffress_model[1].v_seq.clone().detach())
 
-        return x.view(1, -1)
+        return x
 

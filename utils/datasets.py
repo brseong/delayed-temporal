@@ -56,8 +56,12 @@ def unnormalize_net_output(y_pred:torch.Tensor, vector_dim:int, min_val:float, m
     """
     return torch.mul(y_pred, vector_dim * (max_val - min_val)**2)
 
-def encode_temporal(X_data:np.ndarray|torch.Tensor, time_steps:int, time_pad:int, min_val:float=0.0, max_val:float=1.0, backend="numpy")\
-        -> np.ndarray | torch.Tensor:
+def encode_temporal_np(X_data:np.ndarray,
+                       time_steps:int,
+                       time_pad:int,
+                       min_val:float=0.0,
+                       max_val:float=1.0)\
+        -> np.ndarray:
     """
     입력 데이터를 Latency Coding(TTFS)으로 변환합니다.
     강한 입력(절댓값) -> 빠른 스파이크, 약한 입력 -> 늦은 스파이크.
@@ -75,26 +79,42 @@ def encode_temporal(X_data:np.ndarray|torch.Tensor, time_steps:int, time_pad:int
     X_data = X_data - min_val
     X_data = X_data / (max_val - min_val)
     
-    if backend == "numpy":
-        assert isinstance(X_data, np.ndarray)
-        X_norm = ((max_val - X_data) * (time_steps-1)) / max_val
-        X_pos = np.floor(X_norm).astype(np.int32)
-        spikes_out = np.zeros((time_steps + time_pad, *X_data.shape), dtype=np.float32)
+    X_norm = ((max_val - X_data) * (time_steps-1)) / max_val
+    X_pos = np.floor(X_norm).astype(np.int32)
+    spikes_out = np.zeros((time_steps + time_pad, *X_data.shape), dtype=np.float32)
 
-        for indices in product(*[range(dim) for dim in X_data.shape]):
-            spikes_out[X_pos[*indices], *indices] = 1.0
-    elif backend == "torch":
-        assert isinstance(X_data, torch.Tensor)
-        X_norm = ((max_val - X_data) * (time_steps-1)) / max_val
-        X_pos = torch.floor(X_norm).long()
-        
-        spikes_out = torch.scatter(
-            torch.zeros((time_steps + time_pad, *X_data.shape), dtype=X_data.dtype, device=X_data.device),
-            dim=0,
-            index=X_pos.unsqueeze(0),
-            value=1.)
-    else:
-        raise ValueError("Unsupported backend. Choose 'numpy' or 'torch'.")
+    for indices in product(*[range(dim) for dim in X_data.shape]):
+        spikes_out[X_pos[*indices], *indices] = 1.0
+    
+    return spikes_out
+
+def encode_temporal_th(X_data:torch.Tensor, time_steps:int, time_pad:int, min_val:float=0.0, max_val:float=1.0)\
+        -> torch.Tensor:
+    """
+    입력 데이터를 Latency Coding(TTFS)으로 변환합니다.
+    강한 입력(절댓값) -> 빠른 스파이크, 약한 입력 -> 늦은 스파이크.
+    음수와 양수를 별도 채널로 분리합니다.
+
+    Args:
+        X_data (np.ndarray): 입력 데이터 (*,)
+        time_steps (int): 총 시뮬레이션 시간 단계.
+        time_pad (int): 시간 패딩 크기.
+
+    Returns:
+        torch.Tensor: 인코딩된 스파이크 데이터 (time_steps, *X_data.shape)
+    """
+    
+    X_data = X_data - min_val
+    X_data = X_data / (max_val - min_val)
+    
+    X_norm = ((max_val - X_data) * (time_steps-1)) / max_val
+    X_pos = torch.floor(X_norm).long()
+    
+    spikes_out = torch.scatter(
+        torch.zeros((time_steps + time_pad, *X_data.shape), dtype=X_data.dtype, device=X_data.device),
+        dim=0,
+        index=X_pos.unsqueeze(0),
+        value=1.)
     
     return spikes_out
 
@@ -113,7 +133,7 @@ if __name__ == "__main__":
     print(f"첫 번째 샘플 (일부): {X_data[0, :5]}")
 
     # 2. Latency Coding 실행
-    SX_data = encode_temporal(X_data, TIME_STEPS)
+    SX_data = encode_temporal_np(X_data, TIME_STEPS)
 
     print(f"\n--- Latency Coding 결과 ---")
     print(f"Spiked Data shape: {SX_data.shape}") # (1000, 20, 20)
