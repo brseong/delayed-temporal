@@ -6,7 +6,6 @@ from time import perf_counter
 from transformers.utils import is_torch_npu_available, is_torch_xpu_available, logging
 from transformers.utils.import_utils import is_torch_greater_or_equal
 from utils.datasets import encode_temporal_th, unnormalize_net_output
-from utils.model import L2Net
 from utils.load import load_l2net_model
 
 logger = logging.get_logger(__name__)
@@ -17,7 +16,9 @@ _is_torch_greater_or_equal_than_2_8 = is_torch_greater_or_equal("2.8", accept_de
 _is_torch_xpu_available = is_torch_xpu_available()
 _is_torch_npu_available = is_torch_npu_available()
 
-l2nets, l2net_cfg = load_l2net_model("6b964822e41711f092720242ac11000f", parallel=True)
+l2net_hash = "fa73b386e47111f0a1fe0242ac11000f"
+
+l2nets, l2net_cfg = load_l2net_model(l2net_hash, parallel=True)
 min_val, max_val = float(l2net_cfg["MIN_VAL"]), float(l2net_cfg["MAX_VAL"]) # type: ignore
 time_steps, vector_dim = int(l2net_cfg["TIME_STEPS"]), int(l2net_cfg["VECTOR_DIM"]) # type: ignore
 
@@ -72,11 +73,10 @@ def get_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
             
             # inner_product = (sse_Q + sse_K - sse_QK) / 2  # Shape: (N, S)
             
-            # m, M = -7, 7
             output[:, h, s] = (
                 torch.sum(Q_hs * Q_hs, dim=-1)
                 + torch.sum(K_h * K_h, dim=-1)
-                # - torch.sum(torch.pow(Q_hs.clamp(min=m, max=M)-K_h.clamp(min=m, max=M), 2), dim=-1)
+                # - torch.sum(torch.pow(Q_hs.clamp(min=min_val, max=max_val)-K_h.clamp(min=min_val, max=max_val), 2), dim=-1)
                 - sse_QK
                 ) * .5 # Shape: (N, S)
             wandb.log({"spiking_sdpa_attention/get_inner_time_per_head": perf_counter() - t})

@@ -5,7 +5,7 @@ from datasets import load_dataset
 from transformers import AttentionInterface
 from transformers.models.vit import ViTImageProcessor
 from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTForImageClassification
-from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
+from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward, l2net_cfg
 import evaluate
 from tqdm import tqdm
 
@@ -39,7 +39,8 @@ def evaluate_vit_model():
     processor = ViTImageProcessor.from_pretrained(model_id)
 
     # 평가 지표(Metric) 로드 - 정확도(Accuracy)
-    metric = evaluate.load("accuracy")
+    metric_int = evaluate.load("accuracy")
+    metric_tot = evaluate.load("accuracy")
 
     # ---------------------------------------------------------
     # 3. 데이터 전처리 함수 정의
@@ -89,19 +90,20 @@ def evaluate_vit_model():
         predictions = torch.argmax(outputs.logits, dim=-1)
 
         # 배치 단위로 메트릭에 추가
-        metric.add_batch(predictions=predictions, references=labels)
-        wandb.log({"Intermediate accuracy": metric.compute()["accuracy"]})
+        metric_tot.add_batch(predictions=predictions, references=labels)
+        wandb.log({"Intermediate accuracy": metric_int.compute(predictions=predictions, references=labels)["accuracy"]})
 
     # ---------------------------------------------------------
     # 6. 최종 결과 계산 및 출력
     # ---------------------------------------------------------
-    final_score = metric.compute()
+    final_score = metric_tot.compute()
     print("-" * 30)
     print(f"Evaluation Results for {model_id}:")
     print(f"Accuracy: {final_score['accuracy']:.4f}")
+    wandb.log({"Final Accuracy": final_score["accuracy"]})
     print("-" * 30)
 
 if __name__ == "__main__":
-    wandb.init(project="vit-evaluation")
+    wandb.init(project="vit-evaluation", config=l2net_cfg)
     evaluate_vit_model()
     wandb.finish()

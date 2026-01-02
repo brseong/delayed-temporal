@@ -3,7 +3,7 @@ import numpy as np
 import sympy as sp
 from typing import SupportsFloat
 
-def get_gamma(tau:float) -> float:
+def get_beta(tau:float) -> float:
         return 1/(1 - np.exp(-1/tau))
 
 def get_weight(TAU_S:SupportsFloat, TAU_M:SupportsFloat, TOLERANCE:SupportsFloat) -> SupportsFloat:
@@ -11,7 +11,7 @@ def get_weight(TAU_S:SupportsFloat, TAU_M:SupportsFloat, TOLERANCE:SupportsFloat
 
         psp = w * tau_s /(tau_m - tau_s) * ((sp.exp(-t/tau_m)-sp.exp(-t/tau_s)) + (sp.exp(-(t-tolerance)/tau_m)-sp.exp(-(t-tolerance)/tau_s)))
         psp_dot = sp.diff(psp, t)
-        
+
         eq_argmax_t = sp.Eq(psp_dot.expand(), 0)
         argmax_t = sp.solve(eq_argmax_t, t)[0]
         psp_max = sp.simplify(psp.subs(t, argmax_t))

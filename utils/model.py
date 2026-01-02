@@ -6,7 +6,7 @@ from spikingjelly.activation_based.functional import set_step_mode
 from spikingjelly.activation_based.surrogate import ATan
 from spikingjelly.activation_based.monitor import OutputMonitor
 
-from .module import SpikeAmplifier, JeffressLinear, TimePadding, TimeCrop
+from .module import SpikeAmplifier, JeffressFilter, TimePadding, TimeCrop
 from jaxtyping import Float
 
 class L2Net(torch.nn.Module):
@@ -20,8 +20,8 @@ class L2Net(torch.nn.Module):
                  step_mode:str = "m",
                  backend:str = "torch",
                  out_neuron:BaseNode|None = None,
-                 gamma_m:float = 20.,
-                 gamma_s:float = 2.,
+                 beta_m:float = 20.,
+                 beta_s:float = 2.,
                  accelerated:bool = True):
         """
         Cross-correlation network initialization.
@@ -43,8 +43,8 @@ class L2Net(torch.nn.Module):
         self.temporal_max = temporal_max
         self.step_mode = step_mode
         self.backend = backend
-        self.gamma_m = gamma_m
-        self.gamma_s = gamma_s
+        self.beta_m = beta_m
+        self.beta_s = beta_s
         
         def _get_surrogate():
             return ATan(alpha=2.0)
@@ -60,22 +60,24 @@ class L2Net(torch.nn.Module):
         
         self.jeffress_model = torch.nn.Sequential(
             TimePadding(time_padding),  # T,N,C,2 -> T+Tp,N,C,2
-            JeffressLinear(jeffress_radius, compression=jeffress_compression), # T+Tp,N,C,2 -> T+Tp,N,C,J,2
+            JeffressFilter(jeffress_radius, compression=jeffress_compression), # T+Tp,N,C,2 -> T+Tp,N,C,J,2
             SpikeAmplifier(j_out_shape, backend=backend, accelerated=accelerated),  # T+Tp,N,C,J,2 -> T+Tp,N,C,J
             TimeCrop(time_padding),  # T+Tp,N,C,J -> T,N,C,J
             
-            SynapseFilter(tau=gamma_s, step_mode=step_mode, learnable=True),
+            SynapseFilter(tau=beta_s, step_mode=step_mode, learnable=True),
             _linear,  # T,N,C,J -> T,N,C,1
         )
         
         if out_neuron is None:
-            self.out_neuron = LIFNode(tau=gamma_m, surrogate_function=_get_surrogate(), backend=backend, step_mode=step_mode)
+            self.out_neuron = LIFNode(tau=beta_m, surrogate_function=_get_surrogate(), backend=backend, step_mode=step_mode)
         else:
             self.out_neuron = out_neuron
         
         # self.stats = OutputMonitor(self, (IFNode, LIFNode, ParametricLIFNode, SynapseFilter))
     
-    def forward(self, x:Float[torch.Tensor, "T N 2 C"],
+    def forward(self,
+                x:Float[torch.Tensor, "T N 2 C"] | Float[torch.Tensor, "N C 2"],
+                is_input_spike_time:bool=False,
                 reset:bool=True,
                 return_mean:bool=True) -> Float[torch.Tensor, "T N 1"]:
         """
@@ -98,17 +100,14 @@ class L2Net(torch.nn.Module):
                     layer.reset()
             # self.stats.clear_recorded_data()
         
-        x = torch.transpose(x, -1, -2)  # T,N,C,2
+        x = torch.transpose(x, -1, -2)  # (T,)N,C,2
         x = self.jeffress_model(x)  # T,N,C,1
         
         x = x.squeeze(-1).sum(dim=-1, keepdim=True) # T,N,C -> T,N,1
         x = self.out_neuron(x)  # T,N,1 -> N,1
+        
         # If not non-spiking neuron, average over time dimension
         if return_mean:
             x = x.mean(dim=0)  # T,N,1 -> N,1
         
-        # if return_v_seq is not None:
-        #     return_v_seq.append(self.jeffress_model[1].v_seq.clone().detach())
-
         return x
-
