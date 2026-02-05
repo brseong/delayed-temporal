@@ -8,5 +8,6 @@ datasets
 evaluate
 scikit-learn
 tqdm
+cupy-cuda12x
 -e git+https://github.com/huggingface/transformers.git#egg=transformers
 -e git+https://github.com/brseong/spikingjelly.git#egg=spikingjelly

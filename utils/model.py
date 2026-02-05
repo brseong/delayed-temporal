@@ -47,7 +47,7 @@ class L2Net(torch.nn.Module):
         self.beta_s = beta_s
         
         def _get_surrogate():
-            return ATan(alpha=2.0)
+            return ATan()
         
         j_out_shape = 2 * ((jeffress_radius - 1) // jeffress_compression + 1)
         
@@ -77,7 +77,6 @@ class L2Net(torch.nn.Module):
     
     def forward(self,
                 x:Float[torch.Tensor, "T N 2 C"] | Float[torch.Tensor, "N C 2"],
-                is_input_spike_time:bool=False,
                 reset:bool=True,
                 return_mean:bool=True) -> Float[torch.Tensor, "T N 1"]:
         """
