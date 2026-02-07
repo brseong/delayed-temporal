@@ -1,11 +1,13 @@
-import torch, wandb
+from dataclasses import dataclass
+
+import torch, wandb, argparse
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DataParallel
 from datasets import load_dataset
 from transformers import AttentionInterface
 from transformers.models.vit import ViTImageProcessor
 from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTForImageClassification
-from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward, l2net_cfg
+from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward, netcache
 import evaluate
 from tqdm import tqdm
 
@@ -13,19 +15,47 @@ AttentionInterface.register("spiking_sdpa", spiking_sdpa_attention_forward)
 # import os
 # os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
-def evaluate_vit_model():
+@dataclass
+class Arguments:
+    model_id: str = "MF21377197/vit-small-patch16-224-finetuned-Cifar10"
+    dataset_id: str = "cifar10"
+    batch_size: int = 32
+    device: str = "cuda"
+    model_hex: str = "5836d6be043f11f19a160242ac11000f"
+    
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Evaluate ViT model with Spiking SDPA attention.")
+    parser.add_argument("--model_id", type=str, default="MF21377197/vit-small-patch16-224-finetuned-Cifar10",
+                        help="Pretrained ViT model ID from Hugging Face.")
+    parser.add_argument("--dataset_id", type=str, default="cifar10",
+                        help="Dataset ID from Hugging Face datasets library.")
+    parser.add_argument("--batch_size", type=int, default=32,
+                        help="Batch size for evaluation.")
+    parser.add_argument("--device", type=str, choices=["cuda", "cpu"], default="cuda",
+                        help="Device to run the evaluation on (e.g., 'cuda' or 'cpu').")
+    parser.add_argument("--model_hex", type=str, default="5836d6be043f11f19a160242ac11000f",
+                        help="Hex identifier for the cached Abstract L2Net model.")
+    
+    return Arguments(**vars(parser.parse_args()))
+
+def evaluate_vit_model(args:Arguments):
     # ---------------------------------------------------------
     # 1. 설정 (Configuration)
     # ---------------------------------------------------------
     # 예시: CIFAR-10에 파인튜닝된 ViT 모델 사용 (가장 일반적인 예시)
     # model_id = "nateraw/vit-base-patch16-224-cifar10"
-    model_id = "MF21377197/vit-small-patch16-224-finetuned-Cifar10"
-    dataset_id = "cifar10"
-    batch_size = torch.cuda.device_count() * 24
+    model_id = args.model_id
+    dataset_id = args.dataset_id
+    batch_size = args.batch_size
+    device_str = args.device
+    model_hex = args.model_hex
     
     # GPU 사용 가능 여부 확인
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # device = torch.device("cpu")
+    device = torch.device(device_str)
+    
+    netcache.hex = model_hex
+    l2net, l2net_cfg = netcache[device]
+    wandb.init(project="vit-evaluation", config=l2net_cfg, id=model_hex)
     print(f"Using device: {device}")
 
     # ---------------------------------------------------------
@@ -68,7 +98,7 @@ def evaluate_vit_model():
     # ---------------------------------------------------------
     print(f"Loading model: {model_id}...")
     model = ViTForImageClassification.from_pretrained(model_id, attn_implementation="spiking_sdpa")
-    model = DataParallel(model, device_ids=list(range(torch.cuda.device_count())))  # 모델 병렬화
+    # model = DataParallel(model, device_ids=list(range(torch.cuda.device_count())))  # 모델 병렬화
     model.to(device)
     model.eval() # 평가 모드로 전환
 
@@ -102,8 +132,8 @@ def evaluate_vit_model():
     print(f"Accuracy: {final_score['accuracy']:.4f}")
     wandb.log({"Final Accuracy": final_score["accuracy"]})
     print("-" * 30)
+    wandb.finish()
 
 if __name__ == "__main__":
-    wandb.init(project="vit-evaluation", config=l2net_cfg)
-    evaluate_vit_model()
-    wandb.finish()
+    args = parse_arguments()
+    evaluate_vit_model(args)

@@ -1,15 +1,15 @@
 from collections.abc import Sequence
 import torch
-from spikingjelly.activation_based.layer import SynapseFilter
 from spikingjelly.activation_based.surrogate import ATan
 from spikingjelly.activation_based.neuron import IFNode, LIFNode
 from spikingjelly.activation_based.base import MemoryModule
 from spikingjelly.activation_based.functional import reset_net
 from torch import Tensor
 from torch.profiler import record_function
+from remote_plot import plt
 
-from utils.functional import discounted_cumsum
-from .layer import LIF_Filter
+from .functional import discounted_cumsum
+from .layer import LIF_Filter, SynapseFilter
 from .theory import get_weight, tau2gamma, tau2beta
 
 class StochasticRound(torch.autograd.Function):
@@ -286,8 +286,9 @@ class SingleStepDelay(MemoryModule):
         self.spike_queue += x_delayed
         return self.spike_queue[0,:x.shape[0]]  # Return the output spike at current time
 
+# plt.figure(figsize=(12,4))
 class JeffressFilter(torch.nn.Module):
-    def __init__(self, radius: int, compression: int = 1, tau: float = 1.0, accelerated: bool = True) -> None:
+    def __init__(self, time_steps:int, radius: int, compression: int = 1, tau_s: float = 1.0, tau_m: float = 10.0) -> None:
         """
         Synaptic Delay Convolutional Linear Layer.
         Applies synaptic delay convolution followed by a learnable synapse filter.
@@ -306,11 +307,13 @@ class JeffressFilter(torch.nn.Module):
                             torch.arange(radius, 0, -compression, dtype=torch.long).flip(0)],
                            dim=0).reshape(-1, 1)
         self.delay = torch.nn.Parameter(torch.cat([_delay, -_delay], dim=1).relu(), requires_grad=False) # (D_out, D_in(=2))
-        self.weight = torch.nn.Parameter(torch.tensor(get_weight(1., 10., compression)), requires_grad=False)
+        self.weight = torch.nn.Parameter(torch.tensor(get_weight(1., 10., compression, time_steps)), requires_grad=False)
         
-        self.tau = tau
-        self.filter = LIF_Filter(tau_m=10., tau_s=1., step_mode="m")
-        # self.filter = SynapseFilter(tau=tau2gamma(tau), step_mode="m")
+        self.tau_s = tau_s
+        self.tau_m = tau_m
+        # self.filter = LIF_Filter(tau_m=10., tau_s=1., step_mode="m")
+        self.filter = SynapseFilter(beta=tau2beta(tau_s), step_mode="m")
+        self.neuron = LIFNode(tau=tau2gamma(tau_m), decay_input=False, surrogate_function=ATan(), backend="torch", step_mode="m", store_v_seq=True)
         
     def extra_repr(self):
         return f'in_features={self.in_features}, out_features={self.out_features}'
@@ -328,7 +331,7 @@ class JeffressFilter(torch.nn.Module):
         :rtype: Tensor
         """
         if reset:
-            self.filter.reset()
+            reset_net(self)
         with record_function("JeffressLinear_forward"):
             output = self.filter(input) # Apply SynapseFilter, shape: (T, N, C, 2)
             
@@ -343,7 +346,19 @@ class JeffressFilter(torch.nn.Module):
             # Apply synapse filter (postsynaptic current kernel) and weight
             # Sum over input dimension to get output current.
             output = torch.sum(output, dim=-1) # Shape: (T, N, C, D_out)
+            # for idx in range(output.shape[-1]):
+            #     plt.subplot(4, 12, idx+1)
+            #     plt.plot(output[:,0,0,idx].cpu().numpy(), 'r')
             output = torch.mul(output, self.weight) # Shape: (T, N, C, D_out)
+            # for idx in range(output.shape[-1]):
+            #     plt.subplot(4, 12, idx+1)
+            #     plt.plot(output[:,0,0,idx].cpu().numpy(), 'g')
+            
+            # output = self.neuron(output)  # Apply LIF neuron non-linearity, shape: (T, N, C, D_out)
+            # for idx in range(output.shape[-1]):
+            #     plt.subplot(4, 12, idx+1)
+            #     plt.plot(self.neuron.v_seq[:,0,0,idx].cpu().numpy(), 'b')
+            # print(output.count_nonzero() / output.numel())
 
         return output
 
@@ -366,8 +381,8 @@ class SpikeAmplifierNetwork(torch.nn.Module):
         self.tau = tau
         
         self.lateral_weight = torch.nn.Parameter(torch.full((num_features,), 10.), requires_grad=False) # Shape: (J,)
-        self.single_step_delay = None
-        self.neuron = LIFNode(tau=tau2gamma(tau), v_reset=0., surrogate_function=ATan(), backend=backend, step_mode="s", store_v_seq=True)
+        # self.single_step_delay = None
+        self.neuron = LIFNode(tau=tau2gamma(tau), decay_input=False, v_reset=0., surrogate_function=ATan(), backend=backend, step_mode="s", store_v_seq=True)
     
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """
@@ -380,9 +395,9 @@ class SpikeAmplifierNetwork(torch.nn.Module):
         :rtype: Tensor
         """
         
-        if self.single_step_delay is None:
-            self.single_step_delay = SingleStepDelay(queue_shape=input.shape[:-1]+(1,self.num_features), backend=self.neuron.backend).to(input.device)
-        self.single_step_delay.reset()
+        # if self.single_step_delay is None:
+        #     self.single_step_delay = SingleStepDelay(queue_shape=input.shape[:-1]+(1,self.num_features), backend=self.neuron.backend).to(input.device)
+        # self.single_step_delay.reset()
         
         reset_net(self.neuron)
         
@@ -432,9 +447,10 @@ class SpikeAmplifier(torch.nn.Module):
         """
         assert self.accelerated, "Model is not in accelerated mode."
         
-        # output = discounted_cumsum(input, discount=get_gamma(self.tau))
-        output = torch.cumsum(input, dim=0)
-        output = torch.ge(output, 1.0)
+        output = input
+        # output = discounted_cumsum(output, discount=tau2gamma(self.tau))
+        # output = torch.cumsum(input, dim=0)
+        # output = torch.ge(output, 1.0)
         output = torch.cummax(output, dim=0)[0].float()
         # print(output.count_nonzero() / output.numel())
         

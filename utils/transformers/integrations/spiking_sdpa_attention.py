@@ -1,4 +1,6 @@
-from email.policy import strict
+from functools import lru_cache
+from typing import Literal
+
 import torch, math, wandb
 from time import perf_counter
 # from torch.utils.tensorboard import SummaryWriter
@@ -6,7 +8,7 @@ from time import perf_counter
 from transformers.utils import is_torch_npu_available, is_torch_xpu_available, logging
 from transformers.utils.import_utils import is_torch_greater_or_equal
 from utils.datasets import encode_temporal_th, unnormalize_net_output
-from utils.load import load_l2net_model
+from utils.load import AbstractL2Net, load_l2net_model, load_abst_l2net_model
 
 logger = logging.get_logger(__name__)
 # writer = SummaryWriter(log_dir="runs/spiking_sdpa_attention")
@@ -16,11 +18,34 @@ _is_torch_greater_or_equal_than_2_8 = is_torch_greater_or_equal("2.8", accept_de
 _is_torch_xpu_available = is_torch_xpu_available()
 _is_torch_npu_available = is_torch_npu_available()
 
-l2net_hash = "fa73b386e47111f0a1fe0242ac11000f"
+class NetCache:
+    def __init__(self):
+        self.cache = {}
+        self._hex = None
+        self._parallel = True
+    
+    @property
+    def hex(self):
+        assert self._hex is not None, "L2Net hash is not registered."
+        return self._hex
+    @hex.setter
+    def hex(self, hex:str):
+        assert self._hex is None, "L2Net hash is already registered."
+        self._hex = hex
+        
+    @property
+    def parallel(self):
+        return self._parallel
+    @parallel.setter
+    def parallel(self, parallel:bool):
+        self._parallel = parallel
+        
+    def __getitem__(self, device:torch.device) -> tuple[AbstractL2Net, dict[str, object]]:
+        if device not in self.cache:
+            self.cache[device] = load_abst_l2net_model(self.hex, device=device)
+        return self.cache[device]
 
-l2nets, l2net_cfg = load_l2net_model(l2net_hash, parallel=True)
-min_val, max_val = float(l2net_cfg["MIN_VAL"]), float(l2net_cfg["MAX_VAL"]) # type: ignore
-time_steps, vector_dim = int(l2net_cfg["TIME_STEPS"]), int(l2net_cfg["VECTOR_DIM"]) # type: ignore
+netcache = NetCache()
 
 def get_sum_square_error(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
@@ -30,12 +55,37 @@ def get_sum_square_error(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     :param b: Shape: (N, S, D)
     :return: Shape: (N, S)
     """
+    l2net, l2net_cfg = netcache[a.device]
+    min_val, max_val = float(l2net_cfg["MIN_VAL"]), float(l2net_cfg["MAX_VAL"]) # type: ignore
+    time_steps, vector_dim = int(l2net_cfg["TIME_STEPS"]), int(l2net_cfg["VECTOR_DIM"]) # type: ignore
+    
     a = encode_temporal_th(a.clamp(min=min_val, max=max_val), time_steps, time_pad=0, min_val=min_val, max_val=max_val)
     b = encode_temporal_th(b.clamp(min=min_val, max=max_val), time_steps, time_pad=0, min_val=min_val, max_val=max_val)
     input_ab = torch.stack([a,b], dim=-2)  # To make shape in form (T, N, S, 2, D)
-    out = l2nets[a.device](input_ab).squeeze(-1)  # (T, N, S, 2, D) -> (N, S)
+    out = l2net(input_ab).squeeze(-1)  # (T, N, S, 2, D) -> (N, S)
     out = unnormalize_net_output(out, vector_dim, min_val, max_val)
     return out
+
+def get_sum_square_error_abst(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """
+    get_l2_distance의 Docstring
+    
+    :param a: Shape: (N, S, D)
+    :param b: Shape: (N, S, D)
+    :return: Shape: (N, S)
+    """
+    l2net, l2net_cfg = netcache[a.device]
+    min_val, max_val = float(l2net_cfg["MIN_VAL"]), float(l2net_cfg["MAX_VAL"]) # type: ignore
+    time_steps, vector_dim = int(l2net_cfg["TIME_STEPS"]), int(l2net_cfg["VECTOR_DIM"]) # type: ignore
+    
+    input_ab = torch.zeros(*a.shape[:-1], 2, a.shape[-1], device=a.device, dtype=a.dtype)
+    input_ab[..., 0, :] = (a.clamp(min = min_val, max = max_val) - min_val) / (max_val - min_val)
+    input_ab[..., 1, :] = (b.clamp(min = min_val, max = max_val) - min_val) / (max_val - min_val)
+    
+    out = l2net(input_ab).squeeze(-1)  # (N, S, 2, D) -> (N, S)
+    out = unnormalize_net_output(out, vector_dim, min_val, max_val)
+    return out
+
 
 def get_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
@@ -59,23 +109,23 @@ def get_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
             #     ) / 2
     
     # More efficient version:
+    zeros = None
     for h in range(num_attention_heads):
         for s in range(seqlen):
             t = perf_counter()
             Q_hs = a[:, h, s:s+1].expand(-1, seqlen, -1) # Shape: (N, S, D)
             K_h = b[:, h]  # Shape: (N, S, D)
             
-            # if zeros is None:
-            #     zeros = torch.zeros_like(K_h)
-            # sse_Q = get_sum_square_error(Q_hs, zeros)  # Shape: (N, S, D) -> (N, S)
-            # sse_K = get_sum_square_error(K_h, zeros)  # Shape: (N, S, D) -> (N, S)
-            sse_QK = get_sum_square_error(Q_hs, K_h)     # Shape: (N, S, D) -> (N, S)
+            if zeros is None:
+                zeros = torch.zeros_like(K_h)
+            sse_Q = get_sum_square_error_abst(Q_hs, zeros)  # Shape: (N, S, D) -> (N, S)
+            sse_K = get_sum_square_error_abst(K_h, zeros)  # Shape: (N, S, D) -> (N, S)
+            sse_QK = get_sum_square_error_abst(Q_hs, K_h)     # Shape: (N, S, D) -> (N, S)
             
             # inner_product = (sse_Q + sse_K - sse_QK) / 2  # Shape: (N, S)
-            
             output[:, h, s] = (
-                torch.sum(Q_hs * Q_hs, dim=-1)
-                + torch.sum(K_h * K_h, dim=-1)
+                sse_Q
+                + sse_K
                 # - torch.sum(torch.pow(Q_hs.clamp(min=min_val, max=max_val)-K_h.clamp(min=min_val, max=max_val), 2), dim=-1)
                 - sse_QK
                 ) * .5 # Shape: (N, S)
