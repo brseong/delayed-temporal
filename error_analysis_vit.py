@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Literal
 
 import torch, wandb, argparse
 from torch.utils.data import DataLoader
@@ -17,14 +18,17 @@ AttentionInterface.register("spiking_sdpa", spiking_sdpa_attention_forward)
 
 @dataclass
 class Arguments:
-    model_id: str = "MF21377197/vit-small-patch16-224-finetuned-Cifar10"
-    dataset_id: str = "cifar10"
-    batch_size: int = 32
-    device: str = "cuda"
-    model_hex: str = "5836d6be043f11f19a160242ac11000f"
+    experiment_name: str
+    model_id: str
+    dataset_id: Literal["cifar10"]
+    batch_size: int
+    device: Literal["cuda", "cpu"]
+    model_hex: str
     
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Evaluate ViT model with Spiking SDPA attention.")
+    parser.add_argument("--experiment_name", type=str,
+                        help="Name of the experiment for logging purposes.")
     parser.add_argument("--model_id", type=str, default="MF21377197/vit-small-patch16-224-finetuned-Cifar10",
                         help="Pretrained ViT model ID from Hugging Face.")
     parser.add_argument("--dataset_id", type=str, default="cifar10",
@@ -55,7 +59,8 @@ def evaluate_vit_model(args:Arguments):
     
     netcache.hex = model_hex
     l2net, l2net_cfg = netcache[device]
-    wandb.init(project="vit-evaluation", config=l2net_cfg, id=model_hex)
+    l2net_cfg["MODEL_HEX"] = model_hex
+    wandb.init(project="vit-evaluation", config=l2net_cfg, name=args.experiment_name)
     print(f"Using device: {device}")
 
     # ---------------------------------------------------------

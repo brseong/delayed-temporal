@@ -80,12 +80,12 @@ class AbstractL2Net(torch.nn.Module):
         #     x = x.mean(dim=0)  # T,N,1 -> T,N,1
         
         # Simulate input encoding process
-        x = x * (self.time_steps - 1)
-        x = x.floor()
+        x = x * (self.time_steps - 1) # N,2,C
+        x = x.floor() #  N,2,C
         
         # Get the index of the neurons in Jeffress layer
-        diff = x[...,0,:] - x[...,1,:]  # N,C
-        diff = diff.floor()
+        diff = x[...,0,:] - x[...,1,:]  # N,C -> N,C
+        diff = diff.floor() 
         
         sse = (self.w * self.time_steps)[diff.long()].sum(dim=-1)  # N
         

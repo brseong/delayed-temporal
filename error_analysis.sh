@@ -1,12 +1,17 @@
 #!/bin/bash
+trap 'kill -- -$$' SIGINT SIGTERM
 
-cuda_devices=(0 1 2 3)
-l2_hex=(6d579cd8045611f1b9910242ac11000f 8da8c372045611f195670242ac11000f 2a9cd64c045611f18af80242ac11000f c1d8c106045611f18f2e0242ac11000f)
+indices=(0 1 2 3)
+expr_name="ASSDPA\\ [-7,7]"
+cuda_devices=(4 5 6 7)
+l2_hex=(adfce21604e211f18e1c0242ac11000f 7dedc37804e311f18e1b0242ac11000f e3ef1d5204e311f1b87b0242ac11000f f69a01ce04e311f1af950242ac11000f)
 source ./venv/bin/activate
 
-for device in "${cuda_devices[@]}"; do
-    echo "Running error analysis on GPU $device"
-    script="CUDA_VISIBLE_DEVICES=${device} python3 error_analysis_vit.py --device cuda --model_hex ${l2_hex[$device]} &"
+for index in "${indices[@]}"; do
+    echo "Running error analysis on GPU ${cuda_devices[$index]} with model ${l2_hex[$index]}"
+    script="CUDA_VISIBLE_DEVICES=${cuda_devices[$index]} python3 error_analysis_vit.py --experiment_name ${expr_name} --device cuda --model_hex ${l2_hex[$index]} &"
     echo $script
     eval $script
 done
+
+wait

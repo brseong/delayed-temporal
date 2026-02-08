@@ -11,7 +11,8 @@ def load_l2net_model(hex:str, device=torch.device("cuda")) -> tuple[L2Net, dict[
                 l2net_cfg["VECTOR_DIM"],
                 l2net_cfg["TIME_STEPS"]-1,
                 l2net_cfg["JEFFRESS_COMPRESSION"],
-                accelerated=True).to(device).eval()
+                accelerated=True)
+    l2net = l2net.to(device).eval()
     l2net.load_state_dict(torch.load(f"{path}/model.pt", map_location=device), strict=True)
 
     print("L2Net loaded with following configuration:")
@@ -25,7 +26,8 @@ def load_abst_l2net_model(hex:str, device=torch.device("cuda")) -> tuple[Abstrac
     
     l2net = AbstractL2Net(l2net_cfg["TIME_STEPS"],
                 l2net_cfg["TIME_STEPS"]-1,
-                l2net_cfg["JEFFRESS_COMPRESSION"]).to(device).eval()
+                l2net_cfg["JEFFRESS_COMPRESSION"])
+    l2net = l2net.to(device).eval()
     l2net.load_state_dict(torch.load(f"{path}/model.pt", map_location=device), strict=True)
     
     print("AbstractL2Net loaded with following configuration:")

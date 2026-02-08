@@ -122,6 +122,8 @@ def get_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
             sse_K = get_sum_square_error_abst(K_h, zeros)  # Shape: (N, S, D) -> (N, S)
             sse_QK = get_sum_square_error_abst(Q_hs, K_h)     # Shape: (N, S, D) -> (N, S)
             
+            # breakpoint()
+            
             # inner_product = (sse_Q + sse_K - sse_QK) / 2  # Shape: (N, S)
             output[:, h, s] = (
                 sse_Q
