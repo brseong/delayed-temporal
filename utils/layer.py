@@ -4,7 +4,7 @@ from jaxtyping import Float
 from torch.profiler import record_function
 import torch, math
 
-from .transform import tau2beta, tau2gamma
+from .transforms.parameter import tau2beta, tau2gamma
 
 class LIF_Filter(MemoryModule):
     def __init__(self,

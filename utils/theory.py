@@ -1,7 +1,7 @@
 import sympy as sp
 import torch
 from .layer import SynapseFilter
-from .transform import tau2beta, tau2gamma
+from .transforms.parameter import tau2beta, tau2gamma
 
 def get_extremum_time(TAU_S:float, TAU_M:float, TOLERANCE:float) -> float:
         w, t = sp.symbols('w t', real=True, positive=True)
