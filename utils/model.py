@@ -16,8 +16,8 @@ class AbstractL2Net(torch.nn.Module):
                  time_steps:int,
                  jeffress_radius:int,
                  jeffress_compression:int,
-                 temporal_min:float = 0.0,
-                 temporal_max:float = 1.0,):
+                 input_window:tuple[float, float] = (0.0, 1.0),
+                 output_window:tuple[float, float] = (1.0, 2.0)):
         """
         Abstract Cross-correlation network initialization.
         
@@ -33,63 +33,49 @@ class AbstractL2Net(torch.nn.Module):
         self.time_steps = time_steps
         self.jeffress_radius = jeffress_radius
         self.jeffress_compression = jeffress_compression
-        self.temporal_min = temporal_min
-        self.temporal_max = temporal_max
+        self.input_window = input_window
+        self.output_window = output_window
         
         self.j_out_shape = 2 * ((jeffress_radius - 1) // jeffress_compression + 1)
-        self.w = torch.nn.Parameter(torch.ones(self.j_out_shape), requires_grad=True)
+        self.log_w = torch.nn.Parameter(torch.ones(self.j_out_shape), requires_grad=True)
+        self.tau_s = torch.nn.Parameter(torch.tensor(10.), requires_grad=True)
         # if out_neuron is None:
         #     self.out_neuron = LIFNode(tau=20., surrogate_function=ATan(), backend=backend, step_mode=step_mode)
         # else:
         #     self.out_neuron = out_neuron
         
         # self.stats = OutputMonitor(self, (IFNode, LIFNode, ParametricLIFNode, SynapseFilter))
+        self.spike_count = 0
     
-    def forward(self,
-                x:Float[torch.Tensor, "N 2 C"] | Float[torch.Tensor, "N C 2"],
-                reset:bool=True,
-                return_mean:bool=True) -> Float[torch.Tensor, "N 1"]:
+    def forward(self, x:Float[torch.Tensor, "N 2 C"]) -> Float[torch.Tensor, "N 1"]:
         """
         Compute the correlation between two input tensors.
         
         :param self: Self
         :param x: Input tensor of shape (N, 2, C). Input values are expected to be in the range [0, 1], representing normalized spike times.
-        :param reset: Whether to reset the states of neurons before forward pass
-        :param v_seq_pt: List to store returned membrane potential sequences
-        :return: Output tensor of shape (N, 1)
         :type x: torch.Tensor
-        :type reset: bool
-        :type return_l2: list[torch.Tensor]|None
-        :type return_v_seq: list[torch.Tensor]|None
+        :return: Output tensor of shape (N, 1)
         :rtype: torch.Tensor
         """
-        # if reset:
-        #     for layer in self.modules():
-        #         if isinstance(layer, (MemoryModule)):
-        #             layer.reset()
-        #     # self.stats.clear_recorded_data()
-        
-        # x = torch.transpose(x, -1, -2)  # (T,)N,C,2
-        # x = self.jeffress_model(x)  # T,N,C,1
-        
-        # x = x.squeeze(-1).sum(dim=-1, keepdim=True) # T,N,C -> T,N,1
-        # x = self.out_neuron(x)  # T,N,1 -> N,1
-        
-        # # If not non-spiking neuron, average over time dimension
-        # if return_mean:
-        #     x = x.mean(dim=0)  # T,N,1 -> T,N,1
         
         # Simulate input encoding process
-        x = x * (self.time_steps - 1) # N,2,C
+        # Input time window is [0, 1], where 0 means the earliest spike and 1 means the latest spike.
+        # `time_steps` is the precision of Jeffress layer.
+        x = (self.input_window[1]-x) * (self.time_steps - 1) # *N,2,C
         x = x.floor() #  N,2,C
         
-        # Get the index of the neurons in Jeffress layer
+        # Get the index of activated neurons in Jeffress layer
         diff = x[...,0,:] - x[...,1,:]  # N,C -> N,C
         diff = diff.floor() 
         
-        sse = (self.w * self.time_steps)[diff.long()].sum(dim=-1)  # N
-        
-        return sse.squeeze()  # N
+        # Get the spike times of the Jeffress layer neurons
+        jeffress_spk_out_time = x.max(dim=-2).values # N,C
+        # Positive weight constraint: Sum squared difference is always non-negative
+        log_current = self.log_w[diff.long()]  # N,C -> N,C
+        # Assume that the size of the output spike time window is 1, and the spike time is determined by the membrane potential.
+        # We can use an exponential function to simulate the relationship between the spike time and the membrane potential.
+        current = torch.exp(log_current - (self.output_window[1] - jeffress_spk_out_time) * (1/self.tau_s))  # N,C -> N,C
+        return current.sum(dim=-1, keepdim=True)  # N,C -> N,1
 
 class L2Net(torch.nn.Module):
     def __init__(self,

@@ -47,7 +47,7 @@ class NetCache:
 
 netcache = NetCache()
 
-def get_sum_square_error(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+def get_sse(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
     get_l2_distance의 Docstring
     
@@ -63,10 +63,10 @@ def get_sum_square_error(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     b = encode_temporal_th(b.clamp(min=min_val, max=max_val), time_steps, time_pad=0, min_val=min_val, max_val=max_val)
     input_ab = torch.stack([a,b], dim=-2)  # To make shape in form (T, N, S, 2, D)
     out = l2net(input_ab).squeeze(-1)  # (T, N, S, 2, D) -> (N, S)
-    out = unnormalize_net_output(out, vector_dim, min_val, max_val)
+    # out = unnormalize_net_output(out, vector_dim, min_val, max_val)
     return out
 
-def get_sum_square_error_abst(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+def get_scaled_sse_abst(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
     get_l2_distance의 Docstring
     
@@ -83,11 +83,11 @@ def get_sum_square_error_abst(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     input_ab[..., 1, :] = (b.clamp(min = min_val, max = max_val) - min_val) / (max_val - min_val)
     
     out = l2net(input_ab).squeeze(-1)  # (N, S, 2, D) -> (N, S)
-    out = unnormalize_net_output(out, vector_dim, min_val, max_val)
+    # out = unnormalize_net_output(out, vector_dim, min_val, max_val)
     return out
 
 
-def get_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+def get_scaled_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
     get_inner의 Docstring
     
@@ -118,19 +118,13 @@ def get_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
             
             if zeros is None:
                 zeros = torch.zeros_like(K_h)
-            sse_Q = get_sum_square_error_abst(Q_hs, zeros)  # Shape: (N, S, D) -> (N, S)
-            sse_K = get_sum_square_error_abst(K_h, zeros)  # Shape: (N, S, D) -> (N, S)
-            sse_QK = get_sum_square_error_abst(Q_hs, K_h)     # Shape: (N, S, D) -> (N, S)
-            
-            # breakpoint()
+            sse_Q = get_scaled_sse_abst(Q_hs, zeros)  # Shape: (N, S, D) -> (N, S)
+            sse_K = get_scaled_sse_abst(K_h, zeros)  # Shape: (N, S, D) -> (N, S)
+            sse_QK = get_scaled_sse_abst(Q_hs, K_h)     # Shape: (N, S, D) -> (N, S)
             
             # inner_product = (sse_Q + sse_K - sse_QK) / 2  # Shape: (N, S)
-            output[:, h, s] = (
-                sse_Q
-                + sse_K
-                # - torch.sum(torch.pow(Q_hs.clamp(min=min_val, max=max_val)-K_h.clamp(min=min_val, max=max_val), 2), dim=-1)
-                - sse_QK
-                ) * .5 # Shape: (N, S)
+            output[:, h, s] = sse_Q + sse_K - sse_QK # Shape: (N, S)
+            
             wandb.log({"spiking_sdpa_attention/get_inner_time_per_head": perf_counter() - t})
     
     return output
@@ -164,7 +158,7 @@ def use_gqa_in_sdpa(attention_mask: torch.Tensor | None, key: torch.Tensor) -> b
 def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
         is_causal=False, scale=None, enable_gqa=False) -> torch.Tensor:
     L, S = query.size(-2), key.size(-2)
-    scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
+    # scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
     attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
     if is_causal:
         assert attn_mask is None
@@ -182,7 +176,7 @@ def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, drop
         value = value.repeat_interleave(query.size(-3)//value.size(-3), -3)
 
     # attn_weight = query @ key.transpose(-2, -1) * scale_factor
-    attn_weight = get_inner(query, key) * scale_factor
+    attn_weight = get_scaled_inner(query, key) # * scale_factor
     attn_weight += attn_bias
     attn_weight = torch.softmax(attn_weight, dim=-1)
     attn_weight = torch.dropout(attn_weight, dropout_p, train=True)

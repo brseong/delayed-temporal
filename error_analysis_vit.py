@@ -37,7 +37,7 @@ def parse_arguments():
                         help="Batch size for evaluation.")
     parser.add_argument("--device", type=str, choices=["cuda", "cpu"], default="cuda",
                         help="Device to run the evaluation on (e.g., 'cuda' or 'cpu').")
-    parser.add_argument("--model_hex", type=str, default="5836d6be043f11f19a160242ac11000f",
+    parser.add_argument("--model_hex", type=str, default="70c547fe125b11f1a3cc0242ac11000e",
                         help="Hex identifier for the cached Abstract L2Net model.")
     
     return Arguments(**vars(parser.parse_args()))
