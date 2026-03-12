@@ -9,5 +9,6 @@ evaluate
 scikit-learn
 tqdm
 cupy-cuda12x
+remote_plot
 -e git+https://github.com/huggingface/transformers.git#egg=transformers
 -e git+https://github.com/brseong/spikingjelly.git#egg=spikingjelly

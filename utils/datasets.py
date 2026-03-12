@@ -44,6 +44,34 @@ def generate_l2_square_dataset(num_samples: int,
         y = y**2
     return X, y
 
+def generate_expsub_dataset(num_samples: int, 
+                        vector_dim: int,
+                        high: float = 20.0) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Generate a dataset for distance prediction using Lp squared distance.
+
+    Args:
+        num_samples: The number of samples to generate.
+        vector_dim: The dimension of each vector.
+        low: The minimum value of vector elements.
+        high: The maximum value of vector elements.
+
+    Returns:
+        t: Input data (two vectors concatenated horizontally). Shape: (num_samples, 2, vector_dim)
+        y: Output labels (Square of Lp distance). Shape: (num_samples, 1)
+    """
+    
+    # 1. 두 개의 랜덤 벡터 세트 생성
+    # np.random.uniform을 사용하여 (num_samples, vector_dim) 크기의 행렬 두 개를 생성
+    T = np.random.uniform(0, high, size=(num_samples, 2, vector_dim))
+    
+
+    # 2. Lp 거리 계산 (레이블 y)
+    # axis=1을 기준으로 합산하여 각 샘플(행)의 Lp 거리를 계산
+    y = np.linalg.norm(X[:, 0, :] - X[:, 1, :], ord=p, axis=1, keepdims=True)
+    return X, y
+
+
 def unnormalize_net_output(y_pred:torch.Tensor, vector_dim:int, min_val:float, max_val:float) -> torch.Tensor:
     """
     Restore the original scale of the L2 squared distance from the normalized output of L2Net.

@@ -1,4 +1,3 @@
-from turtle import forward
 import torch
 from spikingjelly.activation_based.neuron import ParametricLIFNode, LIFNode, IFNode, BaseNode, NonSpikingIFNode, NonSpikingLIFNode
 from spikingjelly.activation_based.layer import Linear, SynapseFilter

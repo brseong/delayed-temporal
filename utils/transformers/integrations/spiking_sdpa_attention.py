@@ -1,17 +1,15 @@
-from functools import lru_cache
-from typing import Literal
-
 import torch, math, wandb
 from time import perf_counter
-# from torch.utils.tensorboard import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 
 from transformers.utils import is_torch_npu_available, is_torch_xpu_available, logging
 from transformers.utils.import_utils import is_torch_greater_or_equal
 from utils.datasets import encode_temporal_th, unnormalize_net_output
 from utils.load import AbstractL2Net, load_l2net_model, load_abst_l2net_model
+from utils.transforms.functions import PotentialBounds, softmin_p2p
 
 logger = logging.get_logger(__name__)
-# writer = SummaryWriter(log_dir="runs/spiking_sdpa_attention")
+writer = SummaryWriter(log_dir="runs/spiking_sdpa_attention")
 
 _is_torch_greater_or_equal_than_2_5 = is_torch_greater_or_equal("2.5", accept_dev=True)
 _is_torch_greater_or_equal_than_2_8 = is_torch_greater_or_equal("2.8", accept_dev=True)
@@ -97,6 +95,35 @@ def get_scaled_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     batch, num_attention_heads, seqlen, head_dim = a.shape
     output = torch.zeros((batch, num_attention_heads, seqlen, seqlen), device=a.device, dtype=a.dtype)
     
+    # More efficient version:
+    zeros = torch.zeros((batch, seqlen, head_dim), device=a.device, dtype=a.dtype)
+    for h in range(num_attention_heads):
+        for s in range(seqlen):
+            t = perf_counter()
+            Q_hs = a[:, h, s:s+1].expand(-1, seqlen, -1) # Shape: (N, S, D)
+            K_h = b[:, h]  # Shape: (N, S, D)
+            
+            sse_Q = get_scaled_sse_abst(Q_hs, zeros)  # Shape: (N, S, D) -> (N, S)
+            sse_K = get_scaled_sse_abst(K_h, zeros)  # Shape: (N, S, D) -> (N, S)
+            sse_QK = get_scaled_sse_abst(Q_hs, K_h)     # Shape: (N, S, D) -> (N, S)
+            
+            # inner_product = (sse_Q + sse_K - sse_QK) / 2  # Shape: (N, S)
+            output[:, h, s] = sse_Q + sse_K - sse_QK # Shape: (N, S)
+            
+            wandb.log({"spiking_sdpa_attention/get_inner_time_per_head": perf_counter() - t})
+    
+    return output
+
+def get_neg_scaled_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """
+    get_inner의 Docstring
+    
+    :param a: Shape: (B, H, S, D)
+    :param b: Shape: (B, H, S, D)
+    """
+    batch, num_attention_heads, seqlen, head_dim = a.shape
+    output = torch.zeros((batch, num_attention_heads, seqlen, seqlen), device=a.device, dtype=a.dtype)
+    
     # Inefficient version:
     # zeros = torch.zeros((seqlen, head_dim), device=a.device, dtype=a.dtype)
     # for n in range(batch):
@@ -109,26 +136,23 @@ def get_scaled_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
             #     ) / 2
     
     # More efficient version:
-    zeros = None
+    zeros = torch.zeros((batch, seqlen, head_dim), device=a.device, dtype=a.dtype)
     for h in range(num_attention_heads):
         for s in range(seqlen):
             t = perf_counter()
             Q_hs = a[:, h, s:s+1].expand(-1, seqlen, -1) # Shape: (N, S, D)
             K_h = b[:, h]  # Shape: (N, S, D)
             
-            if zeros is None:
-                zeros = torch.zeros_like(K_h)
             sse_Q = get_scaled_sse_abst(Q_hs, zeros)  # Shape: (N, S, D) -> (N, S)
             sse_K = get_scaled_sse_abst(K_h, zeros)  # Shape: (N, S, D) -> (N, S)
             sse_QK = get_scaled_sse_abst(Q_hs, K_h)     # Shape: (N, S, D) -> (N, S)
             
             # inner_product = (sse_Q + sse_K - sse_QK) / 2  # Shape: (N, S)
-            output[:, h, s] = sse_Q + sse_K - sse_QK # Shape: (N, S)
+            output[:, h, s] = sse_QK - sse_Q - sse_K # Shape: (N, S)
             
             wandb.log({"spiking_sdpa_attention/get_inner_time_per_head": perf_counter() - t})
     
     return output
-    
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
@@ -172,13 +196,19 @@ def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, drop
             attn_bias = attn_mask + attn_bias
 
     if enable_gqa:
+        raise NotImplementedError("GQA is not implemented yet.")
         key = key.repeat_interleave(query.size(-3)//key.size(-3), -3)
         value = value.repeat_interleave(query.size(-3)//value.size(-3), -3)
 
-    # attn_weight = query @ key.transpose(-2, -1) * scale_factor
-    attn_weight = get_scaled_inner(query, key) # * scale_factor
-    attn_weight += attn_bias
-    attn_weight = torch.softmax(attn_weight, dim=-1)
+    # attn_weight = get_scaled_inner(query, key) # * scale_factor
+    # attn_weight += attn_bias
+    # attn_weight = torch.softmax(attn_weight, dim=-1)
+    neg_score = get_neg_scaled_inner(query, key) # * scale_factor
+    neg_score -= attn_bias
+    writer.add_histogram("spiking_sdpa_attention/neg_score_before_softmin", neg_score)
+    bound = PotentialBounds(-15, 15)
+    attn_weight = softmin_p2p(bound.clamp(neg_score), bound, tau=1.0)[0]
+    # attn_weight = softmin(attn_weight, PotentialBounds(lb, ub), tau=1.0)[0]
     attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
     return attn_weight @ value
 
@@ -238,9 +268,9 @@ def spiking_sdpa_attention_forward(
             attention_mask = torch.logical_not(attention_mask.bool()).to(query.device)
 
     # To record the distribution of query, key, value tensors to train Jeffress network
-    # writer.add_histogram("spiking_sdpa_attention/query", query)
-    # writer.add_histogram("spiking_sdpa_attention/key", key)
-    # writer.add_histogram("spiking_sdpa_attention/value", value)
+    writer.add_histogram("spiking_sdpa_attention/query", query)
+    writer.add_histogram("spiking_sdpa_attention/key", key)
+    writer.add_histogram("spiking_sdpa_attention/value", value)
     # writer.flush()
     # print("Spiking SDPA Attention - query.shape:", query.shape, "key.shape:", key.shape, "value.shape:", value.shape)
     
