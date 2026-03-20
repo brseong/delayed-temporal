@@ -1,4 +1,5 @@
 import torch
+from torch.nn.functional import softplus
 from spikingjelly.activation_based.neuron import ParametricLIFNode, LIFNode, IFNode, BaseNode, NonSpikingIFNode, NonSpikingLIFNode
 from spikingjelly.activation_based.layer import Linear, SynapseFilter
 from spikingjelly.activation_based.base import MemoryModule
@@ -6,9 +7,70 @@ from spikingjelly.activation_based.functional import set_step_mode
 from spikingjelly.activation_based.surrogate import ATan
 from spikingjelly.activation_based.monitor import OutputMonitor
 from utils.theory import tau2gamma
-
 from .module import SpikeAmplifier, JeffressFilter, TimePadding, TimeCrop
 from jaxtyping import Float
+
+class AbstractExpSubNet(torch.nn.Module):
+    def __init__(self,
+                 time_steps:int,
+                 max_diff:float,
+                 jeffress_compression:int,
+                 input_window:tuple[float, float] = (0.0, 1.0),
+                 output_window:tuple[float, float] = (1.0, 2.0)):
+        """
+        Abstract Cross-correlation network initialization.
+        
+        :param self: Self
+        :param vector_dim: Vector dimension to be processed
+        :param max_diff: Maximum difference between spike times
+        :param step_mode: Step mode for spiking neurons. Options: "s" (single time-step), "m" (multi time-step)
+        :param backend: Backend for spiking neurons. Options: "torch", "cupy"
+        :param neuron: Neuron model to be used (default: LIFNode)
+        :param surrogate: Surrogate gradient function to be used (default: ATan)
+        """
+        super(AbstractExpSubNet, self).__init__()
+        self.time_steps = time_steps
+        self.max_diff = max_diff
+        self.jeffress_compression = jeffress_compression
+        self.input_window = input_window
+        self.output_window = output_window
+        
+        self.j_out_shape = time_steps - 1
+        self.log_w = torch.nn.Parameter(torch.ones(self.j_out_shape), requires_grad=True)
+        self.tau_s = torch.nn.Parameter(torch.tensor(1.), requires_grad=True)
+        self.spike_count = 0
+    
+    def forward(self, x:Float[torch.Tensor, "*N 2 1"]) -> Float[torch.Tensor, "*N 1"]:
+        """
+        Compute the correlation between two input tensors.
+        
+        :param self: Self
+        :param x: Input tensor of shape (N, 2, 1). Input values are expected to be in the range [0, 1], representing normalized spike times.
+        :type x: torch.Tensor
+        :return: Output tensor of shape (N, 1)
+        :rtype: torch.Tensor
+        """
+        
+        # Simulate input encoding process
+        # Input time window is [0, 1], where 0 means the earliest spike and 1 means the latest spike.
+        # `time_steps` is the precision of Jeffress layer.
+        
+        # Get the index of activated neurons in Jeffress layer
+        diff = (x[...,0,:] - x[...,1,:]) * (self.time_steps - 1) / self.max_diff  # N, -> N,
+        diff = diff.floor() 
+        
+        # Get the spike times of the Jeffress layer neurons:
+        # Jeffress layer neurons are activated by the difference between the two input spike times,
+        # and the spike time of each Jeffress neuron is determined by the maximum of the two input spike times.
+        jeffress_spk_out_time = x.max(dim=-2).values / self.max_diff # N,
+        
+        # Positive weight constraint: Sum squared difference is always non-negative
+        log_current = self.log_w[diff.long()]  # N, -> N,
+        
+        # Assume that the size of the output spike time window is 1, and the spike time is determined by the membrane potential.
+        # We can use an exponential function to simulate the relationship between the spike time and the membrane potential.
+        current = log_current.exp() * (1 - torch.exp(-(self.output_window[1] - jeffress_spk_out_time) * (1/softplus(self.tau_s))))  # N, -> N,
+        return current
 
 class AbstractL2Net(torch.nn.Module):
     def __init__(self,
@@ -37,13 +99,7 @@ class AbstractL2Net(torch.nn.Module):
         
         self.j_out_shape = 2 * ((jeffress_radius - 1) // jeffress_compression + 1)
         self.log_w = torch.nn.Parameter(torch.ones(self.j_out_shape), requires_grad=True)
-        self.tau_s = torch.nn.Parameter(torch.tensor(10.), requires_grad=True)
-        # if out_neuron is None:
-        #     self.out_neuron = LIFNode(tau=20., surrogate_function=ATan(), backend=backend, step_mode=step_mode)
-        # else:
-        #     self.out_neuron = out_neuron
-        
-        # self.stats = OutputMonitor(self, (IFNode, LIFNode, ParametricLIFNode, SynapseFilter))
+        self.tau_s = torch.nn.Parameter(torch.tensor(1.), requires_grad=True)
         self.spike_count = 0
     
     def forward(self, x:Float[torch.Tensor, "N 2 C"]) -> Float[torch.Tensor, "N 1"]:
@@ -60,11 +116,11 @@ class AbstractL2Net(torch.nn.Module):
         # Simulate input encoding process
         # Input time window is [0, 1], where 0 means the earliest spike and 1 means the latest spike.
         # `time_steps` is the precision of Jeffress layer.
-        x = (self.input_window[1]-x) * (self.time_steps - 1) # *N,2,C
-        x = x.floor() #  N,2,C
+        x_scaled = (self.input_window[1]-x) * (self.time_steps - 1) # *N,2,C
+        x_scaled = x_scaled.floor() #  N,2,C
         
         # Get the index of activated neurons in Jeffress layer
-        diff = x[...,0,:] - x[...,1,:]  # N,C -> N,C
+        diff = x_scaled[...,0,:] - x_scaled[...,1,:]  # N,C -> N,C
         diff = diff.floor() 
         
         # Get the spike times of the Jeffress layer neurons
@@ -73,7 +129,7 @@ class AbstractL2Net(torch.nn.Module):
         log_current = self.log_w[diff.long()]  # N,C -> N,C
         # Assume that the size of the output spike time window is 1, and the spike time is determined by the membrane potential.
         # We can use an exponential function to simulate the relationship between the spike time and the membrane potential.
-        current = torch.exp(log_current - (self.output_window[1] - jeffress_spk_out_time) * (1/self.tau_s))  # N,C -> N,C
+        current = log_current.exp() * (1 - torch.exp(-(self.output_window[1] - jeffress_spk_out_time) * (1/softplus(self.tau_s))))  # N,C -> N,C
         return current.sum(dim=-1, keepdim=True)  # N,C -> N,1
 
 class L2Net(torch.nn.Module):

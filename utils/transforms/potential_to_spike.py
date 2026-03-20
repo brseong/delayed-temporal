@@ -102,4 +102,4 @@ def neg_log_transform(
     assert domain.min > 0.0, "The minimum of the potential domain must be greater than 0 for the logarithmic transform to be valid."
     # As the potential decreases towards the minimum, the spike time increases towards maximum.
     # This is the maximum spike time corresponding to the minimum potential in the domain.
-    return (-tau_s * torch.log(input_value) + tau_s * log(domain.max), TimeBounds(0, -tau_s * log(domain.min) + tau_s * log(domain.max)))            
+    return -tau_s * torch.log(input_value) + tau_s * log(domain.max), TimeBounds(0, -tau_s * log(domain.min) + tau_s * log(domain.max))            

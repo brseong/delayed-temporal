@@ -4,7 +4,8 @@ trap 'kill -- -$$' SIGINT SIGTERM
 indices=(0)
 expr_name="ANSA\\ [-8,8]"
 cuda_devices=(1)
-l2_hex=(520d27e2126911f1a4530242ac11000e)
+# l2_hex=(520d27e2126911f1a4530242ac11000e)
+l2_hex=(4eb15efe234b11f1acaa0242ac11000e)
 source ./venv/bin/activate
 device="cuda"
 

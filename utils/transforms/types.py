@@ -32,10 +32,7 @@ class NeuralTransform[InT: OpenBounds, OutT: OpenBounds](Protocol):
 def check_domain[InT: OpenBounds, OutT: OpenBounds](func: NeuralTransform[InT, OutT]) -> NeuralTransform[InT, OutT]:
     @wraps(func)
     def wrapper(input_value: Tensor, domain: InT, **kwargs) -> tuple[Tensor, OutT]:
-        try:
-            assert domain.min <= input_value.min() and input_value.max() <= domain.max,\
-               "Initial potentials must be within the specified domain."
-        except AssertionError as e:
-            breakpoint()
+        assert domain.min <= input_value.min() and input_value.max() <= domain.max,\
+            "Initial potentials must be within the specified domain."
         return func(input_value, domain, **kwargs)
     return wrapper

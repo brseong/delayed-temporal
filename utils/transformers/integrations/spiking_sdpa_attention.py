@@ -5,7 +5,7 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers.utils import is_torch_npu_available, is_torch_xpu_available, logging
 from transformers.utils.import_utils import is_torch_greater_or_equal
 from utils.datasets import encode_temporal_th, unnormalize_net_output
-from utils.load import AbstractL2Net, load_l2net_model, load_abst_l2net_model
+from utils.load import AbstractL2Net, load_l2net_model, load_abst_l2net_model, NetCache
 from utils.transforms.functions import PotentialBounds, softmin_p2p
 
 logger = logging.get_logger(__name__)
@@ -16,34 +16,7 @@ _is_torch_greater_or_equal_than_2_8 = is_torch_greater_or_equal("2.8", accept_de
 _is_torch_xpu_available = is_torch_xpu_available()
 _is_torch_npu_available = is_torch_npu_available()
 
-class NetCache:
-    def __init__(self):
-        self.cache = {}
-        self._hex = None
-        self._parallel = True
-    
-    @property
-    def hex(self):
-        assert self._hex is not None, "L2Net hash is not registered."
-        return self._hex
-    @hex.setter
-    def hex(self, hex:str):
-        assert self._hex is None, "L2Net hash is already registered."
-        self._hex = hex
-        
-    @property
-    def parallel(self):
-        return self._parallel
-    @parallel.setter
-    def parallel(self, parallel:bool):
-        self._parallel = parallel
-        
-    def __getitem__(self, device:torch.device) -> tuple[AbstractL2Net, dict[str, object]]:
-        if device not in self.cache:
-            self.cache[device] = load_abst_l2net_model(self.hex, device=device)
-        return self.cache[device]
-
-netcache = NetCache()
+netcache = NetCache(load_abst_l2net_model)
 
 def get_sse(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
@@ -54,8 +27,8 @@ def get_sse(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     :return: Shape: (N, S)
     """
     l2net, l2net_cfg = netcache[a.device]
-    min_val, max_val = float(l2net_cfg["MIN_VAL"]), float(l2net_cfg["MAX_VAL"]) # type: ignore
-    time_steps, vector_dim = int(l2net_cfg["TIME_STEPS"]), int(l2net_cfg["VECTOR_DIM"]) # type: ignore
+    min_val, max_val = float(l2net_cfg["min_val"]), float(l2net_cfg["max_val"]) # type: ignore
+    time_steps, vector_dim = int(l2net_cfg["time_steps"]), int(l2net_cfg["vector_dim"]) # type: ignore
     
     a = encode_temporal_th(a.clamp(min=min_val, max=max_val), time_steps, time_pad=0, min_val=min_val, max_val=max_val)
     b = encode_temporal_th(b.clamp(min=min_val, max=max_val), time_steps, time_pad=0, min_val=min_val, max_val=max_val)
@@ -73,8 +46,8 @@ def get_scaled_sse_abst(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     :return: Shape: (N, S)
     """
     l2net, l2net_cfg = netcache[a.device]
-    min_val, max_val = float(l2net_cfg["MIN_VAL"]), float(l2net_cfg["MAX_VAL"]) # type: ignore
-    time_steps, vector_dim = int(l2net_cfg["TIME_STEPS"]), int(l2net_cfg["VECTOR_DIM"]) # type: ignore
+    min_val, max_val = float(l2net_cfg["min_val"]), float(l2net_cfg["max_val"]) # type: ignore
+    time_steps, vector_dim = int(l2net_cfg["time_steps"]), int(l2net_cfg["vector_dim"]) # type: ignore
     
     input_ab = torch.zeros(*a.shape[:-1], 2, a.shape[-1], device=a.device, dtype=a.dtype)
     input_ab[..., 0, :] = (a.clamp(min = min_val, max = max_val) - min_val) / (max_val - min_val)

@@ -1,10 +1,15 @@
 import torch
 from jaxtyping import Float, Int
 from math import log, exp
+from torch.utils.tensorboard import SummaryWriter
 
-from .types import OpenBounds, PotentialBounds, TimeBounds, check_domain
+from ..load import NetCache, load_abst_expsub_model
+from .types import PotentialBounds, TimeBounds, check_domain
 from .potential_to_spike import neg_identity_transform, neg_log_transform
 from .spike_to_potential import reciprocal_exp_transform
+
+netcache = NetCache(load_abst_expsub_model)
+netcache.hex = "6e214270236611f1b8a10242ac11000e"
 
 @check_domain
 def softmin_p2p(
@@ -40,10 +45,13 @@ def softmin_p2p(
     sumexp_v = exp_v.sum(dim=-1, keepdim=True)       # Potentials addition
     # Potential_domain (0<N*exp((V_min - V_max)/tau), N),     where N is the number of elements in the last dimension.
     N = input_value.size(-1)
+    assert N == 197, "The number of elements in the last dimension must be 197, which is the sequence length of ViT input."
     potential_domain = PotentialBounds(potential_domain.min, potential_domain.max * N) # To use the same current intensity
     neg_t = neg_log_transform(exp_v, potential_domain, tau=tau)[0] # This is equivalent to -log(numerator) 
     neg_logsumexp = neg_log_transform(sumexp_v, potential_domain, tau=tau)[0] # This is equivalent to -log(denominator)
-    # Time_domain (0, (V_max - V_min)/tau + log(N))
-    logsoftmin = -neg_t + neg_logsumexp # This is equivalent to log(denominator) - log(numerator) but using the spiking transformation instead of the logarithm function.
-    attn_weight = logsoftmin.exp() # This is equivalent to softmax(attn_weight, dim=-1) but using the spiking transformation instead of the exponential function.
-    return attn_weight, PotentialBounds(0.0, 1.0)
+    # Time_domain (0, (V_max - V_min) + log(N))
+    # logsoftmin = -neg_t + neg_logsumexp # This is equivalent to log(denominator) - log(numerator) but using the spiking transformation instead of the logarithm function.
+    # attn_weight = logsoftmin.exp() # This is equivalent to softmax(attn_weight, dim=-1) but using the spiking transformation instead of the exponential function.
+    model, cfg = netcache[input_value.device] # Load the model to the same device as the input value.
+    attn_weight = model(torch.stack([neg_t, neg_logsumexp.expand([-1,-1,-1,neg_t.size(-1)])], dim=-1).unsqueeze(-1)) # This is equivalent to softmax(attn_weight, dim=-1) but using the spiking transformation instead of the exponential function, and using the learned model to further transform the attention weights.
+    return attn_weight.squeeze(-1), PotentialBounds(0.0, 1.0)
