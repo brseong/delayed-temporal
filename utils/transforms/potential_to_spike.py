@@ -24,7 +24,6 @@ def neg_linear_transform(
     domain: PotentialBounds,
     *,
     window_length: float = 1.0,
-    wave_approx: bool = False,
     **_
     ) -> tuple[
         Float[torch.Tensor, "*batch dims"],
@@ -44,21 +43,13 @@ def neg_linear_transform(
     Returns:
         tuple[Float[torch.Tensor, "*batch dims"], TimeBounds]: A tuple containing the transformed spike times and the time bounds of the output.
     """
-    if not wave_approx:
-        range = domain.max - domain.min
-        return window_length * (1 - (input_value - domain.min) / range), TimeBounds(0.0, window_length)
-    else:
-        image:TimeBounds
-        t_return, image = neg_linear_approximation(input_value, domain)
-        raise NotImplementedError("Wave approximation is not implemented yet.")
-        return t_return, image
+    range = domain.max - domain.min
+    return window_length * (1 - (input_value - domain.min) / range), TimeBounds(0.0, window_length)
 
 @check_domain
 def neg_identity_transform(
     input_value: Float[torch.Tensor, "*batch dims"],
     domain: PotentialBounds,
-    *,
-    wave_approx: bool = False,
     **_
     ) -> tuple[
         Float[torch.Tensor, "*batch dims"],
@@ -76,8 +67,7 @@ def neg_identity_transform(
     """
     return neg_linear_transform(input_value,
                                 domain,
-                                window_length=domain.max - domain.min,
-                                wave_approx=wave_approx)
+                                window_length=domain.max - domain.min)
 
 @check_domain
 def neg_log_transform(
@@ -102,4 +92,4 @@ def neg_log_transform(
     assert domain.min > 0.0, "The minimum of the potential domain must be greater than 0 for the logarithmic transform to be valid."
     # As the potential decreases towards the minimum, the spike time increases towards maximum.
     # This is the maximum spike time corresponding to the minimum potential in the domain.
-    return -tau_s * torch.log(input_value) + tau_s * log(domain.max), TimeBounds(0, -tau_s * log(domain.min) + tau_s * log(domain.max))            
+    return -tau_s * torch.log(input_value) + tau_s * log(domain.max), TimeBounds(0, -tau_s * log(domain.min) + tau_s * log(domain.max))

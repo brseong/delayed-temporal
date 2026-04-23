@@ -1,131 +1,22 @@
-import torch, math, wandb
-from time import perf_counter
-from torch.utils.tensorboard import SummaryWriter
+import torch
+import math
+import wandb
 
 from transformers.utils import is_torch_npu_available, is_torch_xpu_available, logging
 from transformers.utils.import_utils import is_torch_greater_or_equal
-from utils.datasets import encode_temporal_th, unnormalize_net_output
-from utils.load import AbstractL2Net, load_l2net_model, load_abst_l2net_model, NetCache
-from utils.transforms.functions import PotentialBounds, softmin_p2p
+from utils.transforms.functions import scaled_dot_product_function, softmin_function
+from utils.transforms.primitive import pulse_width_modulation_operator
+from utils.transforms.types import PotentialBounds, TimeBounds
 
 logger = logging.get_logger(__name__)
-writer = SummaryWriter(log_dir="runs/spiking_sdpa_attention")
+
+# Softmin masking: large positive suppresses masked positions (exp(-87) ≈ float32 min)
+_MASK_VAL = 87.0
 
 _is_torch_greater_or_equal_than_2_5 = is_torch_greater_or_equal("2.5", accept_dev=True)
 _is_torch_greater_or_equal_than_2_8 = is_torch_greater_or_equal("2.8", accept_dev=True)
 _is_torch_xpu_available = is_torch_xpu_available()
 _is_torch_npu_available = is_torch_npu_available()
-
-netcache = NetCache(load_abst_l2net_model)
-
-def get_sse(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """
-    get_l2_distance의 Docstring
-    
-    :param a: Shape: (N, S, D)
-    :param b: Shape: (N, S, D)
-    :return: Shape: (N, S)
-    """
-    l2net, l2net_cfg = netcache[a.device]
-    min_val, max_val = float(l2net_cfg["min_val"]), float(l2net_cfg["max_val"]) # type: ignore
-    time_steps, vector_dim = int(l2net_cfg["time_steps"]), int(l2net_cfg["vector_dim"]) # type: ignore
-    
-    a = encode_temporal_th(a.clamp(min=min_val, max=max_val), time_steps, time_pad=0, min_val=min_val, max_val=max_val)
-    b = encode_temporal_th(b.clamp(min=min_val, max=max_val), time_steps, time_pad=0, min_val=min_val, max_val=max_val)
-    input_ab = torch.stack([a,b], dim=-2)  # To make shape in form (T, N, S, 2, D)
-    out = l2net(input_ab).squeeze(-1)  # (T, N, S, 2, D) -> (N, S)
-    # out = unnormalize_net_output(out, vector_dim, min_val, max_val)
-    return out
-
-def get_scaled_sse_abst(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """
-    get_l2_distance의 Docstring
-    
-    :param a: Shape: (N, S, D)
-    :param b: Shape: (N, S, D)
-    :return: Shape: (N, S)
-    """
-    l2net, l2net_cfg = netcache[a.device]
-    min_val, max_val = float(l2net_cfg["min_val"]), float(l2net_cfg["max_val"]) # type: ignore
-    time_steps, vector_dim = int(l2net_cfg["time_steps"]), int(l2net_cfg["vector_dim"]) # type: ignore
-    
-    input_ab = torch.zeros(*a.shape[:-1], 2, a.shape[-1], device=a.device, dtype=a.dtype)
-    input_ab[..., 0, :] = (a.clamp(min = min_val, max = max_val) - min_val) / (max_val - min_val)
-    input_ab[..., 1, :] = (b.clamp(min = min_val, max = max_val) - min_val) / (max_val - min_val)
-    
-    out = l2net(input_ab).squeeze(-1)  # (N, S, 2, D) -> (N, S)
-    # out = unnormalize_net_output(out, vector_dim, min_val, max_val)
-    return out
-
-
-def get_scaled_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """
-    get_inner의 Docstring
-    
-    :param a: Shape: (B, H, S, D)
-    :param b: Shape: (B, H, S, D)
-    """
-    batch, num_attention_heads, seqlen, head_dim = a.shape
-    output = torch.zeros((batch, num_attention_heads, seqlen, seqlen), device=a.device, dtype=a.dtype)
-    
-    # More efficient version:
-    zeros = torch.zeros((batch, seqlen, head_dim), device=a.device, dtype=a.dtype)
-    for h in range(num_attention_heads):
-        for s in range(seqlen):
-            t = perf_counter()
-            Q_hs = a[:, h, s:s+1].expand(-1, seqlen, -1) # Shape: (N, S, D)
-            K_h = b[:, h]  # Shape: (N, S, D)
-            
-            sse_Q = get_scaled_sse_abst(Q_hs, zeros)  # Shape: (N, S, D) -> (N, S)
-            sse_K = get_scaled_sse_abst(K_h, zeros)  # Shape: (N, S, D) -> (N, S)
-            sse_QK = get_scaled_sse_abst(Q_hs, K_h)     # Shape: (N, S, D) -> (N, S)
-            
-            # inner_product = (sse_Q + sse_K - sse_QK) / 2  # Shape: (N, S)
-            output[:, h, s] = sse_Q + sse_K - sse_QK # Shape: (N, S)
-            
-            wandb.log({"spiking_sdpa_attention/get_inner_time_per_head": perf_counter() - t})
-    
-    return output
-
-def get_neg_scaled_inner(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """
-    get_inner의 Docstring
-    
-    :param a: Shape: (B, H, S, D)
-    :param b: Shape: (B, H, S, D)
-    """
-    batch, num_attention_heads, seqlen, head_dim = a.shape
-    output = torch.zeros((batch, num_attention_heads, seqlen, seqlen), device=a.device, dtype=a.dtype)
-    
-    # Inefficient version:
-    # zeros = torch.zeros((seqlen, head_dim), device=a.device, dtype=a.dtype)
-    # for n in range(batch):
-    #     for h in range(num_attention_heads):
-            # for s in range(seqlen):
-            #     Q, k = a[n,h], b[n,h,s] # Shape: (S, D), (,D)
-            #     K = k.unsqueeze(0).expand(seqlen, head_dim) # Shape: (S, D)
-            #     output[n,h,s,:] = (
-            #         get_sum_square_error(Q, zeros) + get_sum_square_error(K, zeros) - get_sum_square_error(Q, K)
-            #     ) / 2
-    
-    # More efficient version:
-    zeros = torch.zeros((batch, seqlen, head_dim), device=a.device, dtype=a.dtype)
-    for h in range(num_attention_heads):
-        for s in range(seqlen):
-            t = perf_counter()
-            Q_hs = a[:, h, s:s+1].expand(-1, seqlen, -1) # Shape: (N, S, D)
-            K_h = b[:, h]  # Shape: (N, S, D)
-            
-            sse_Q = get_scaled_sse_abst(Q_hs, zeros)  # Shape: (N, S, D) -> (N, S)
-            sse_K = get_scaled_sse_abst(K_h, zeros)  # Shape: (N, S, D) -> (N, S)
-            sse_QK = get_scaled_sse_abst(Q_hs, K_h)     # Shape: (N, S, D) -> (N, S)
-            
-            # inner_product = (sse_Q + sse_K - sse_QK) / 2  # Shape: (N, S)
-            output[:, h, s] = sse_QK - sse_Q - sse_K # Shape: (N, S)
-            
-            wandb.log({"spiking_sdpa_attention/get_inner_time_per_head": perf_counter() - t})
-    
-    return output
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
@@ -138,55 +29,73 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
-
 def use_gqa_in_sdpa(attention_mask: torch.Tensor | None, key: torch.Tensor) -> bool:
-    # GQA can only be used under the following conditions
-    # 1.cuda or Ascend NPU
-    #   - torch version >= 2.5
-    #   - attention_mask is None (otherwise it will fall back to the math kernel)
-    # 2.xpu
-    #   - torch version >= 2.8
     if _is_torch_xpu_available:
         return _is_torch_greater_or_equal_than_2_8
     return _is_torch_greater_or_equal_than_2_5 and attention_mask is None
 
-# https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html
-# Efficient implementation equivalent to the following:
 def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
-        is_causal=False, scale=None, enable_gqa=False) -> torch.Tensor:
-    L, S = query.size(-2), key.size(-2)
-    # scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
-    attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
-    if is_causal:
-        assert attn_mask is None
-        temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
-        attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+        is_causal=False, scale=None, enable_gqa=False, tau_m=1.0, theta=10.0) -> torch.Tensor:
 
-    if attn_mask is not None:
-        if attn_mask.dtype == torch.bool:
-            attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
-        else:
-            attn_bias = attn_mask + attn_bias
+    L, S = query.size(-2), key.size(-2)
 
     if enable_gqa:
         raise NotImplementedError("GQA is not implemented yet.")
-        key = key.repeat_interleave(query.size(-3)//key.size(-3), -3)
-        value = value.repeat_interleave(query.size(-3)//value.size(-3), -3)
 
-    # attn_weight = get_scaled_inner(query, key) # * scale_factor
-    # attn_weight += attn_bias
-    # attn_weight = torch.softmax(attn_weight, dim=-1)
-    neg_score = get_neg_scaled_inner(query, key) # * scale_factor
-    neg_score -= attn_bias
-    writer.add_histogram("spiking_sdpa_attention/neg_score_before_softmin", neg_score)
-    bound = PotentialBounds(-15, 15)
-    attn_weight = softmin_p2p(bound.clamp(neg_score), bound, tau=1.0)[0]
-    # attn_weight = softmin(attn_weight, PotentialBounds(lb, ub), tau=1.0)[0]
-    attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
-    return attn_weight @ value
+    # Softmin masking: large positive bias pushes masked positions to domain max → exp(-2θ/τ) ≈ 0
+    attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
+    if is_causal:
+        assert attn_mask is None
+        temp_mask = torch.ones(L, S, dtype=torch.bool, device=query.device).tril(diagonal=0)
+        attn_bias.masked_fill_(temp_mask.logical_not(), _MASK_VAL * tau_m)
+    if attn_mask is not None:
+        if attn_mask.dtype == torch.bool:
+            attn_bias.masked_fill_(attn_mask.logical_not(), _MASK_VAL * tau_m)
+        else:
+            # HF additive mask: negative for masked → negate for softmin convention
+            attn_bias = attn_bias - attn_mask.clamp(min=-_MASK_VAL * tau_m, max=0.0)
 
-# att_min = float("inf")
-# att_max = float("-inf")
+    # Fixed domain for q, k: clamp inputs to [-θ, θ] so ψ_M spike times t_B = θ - k ≥ 0
+    domain_qk = PotentialBounds(-theta, theta)
+    q_exp = domain_qk.clamp(query).unsqueeze(-2)   # (B,H,L,1,D)
+    k_exp = domain_qk.clamp(key).unsqueeze(-3)     # (B,H,1,S,D)
+
+    # f_SDP(q,k) = ψ_M sum ≈ -(1/√d_k)·dot(q,k), broadcasted to (B,H,L,S)
+    attn_score, _ = scaled_dot_product_function(q_exp, domain_qk, k_exp, domain_qk, theta)
+
+    # Clamp score to [-θ, θ]; declare domain with +0.1 guard so t_out = domain.max - score ≥ 0.1,
+    # preventing the float32/float64 precision gap at the exp(-2θ) boundary.
+    _guard = 0.1
+    attn_score = PotentialBounds(-theta, theta).clamp(attn_score + attn_bias)
+    score_bound = PotentialBounds(-theta - _guard, theta + _guard)
+
+    # softmin(f_SDP, τ_m) = softmax(−f_SDP/τ_m) = softmax(dot(q,k)/(τ_m·√d_k))
+    attn_weight, _ = softmin_function(attn_score, score_bound, tau_s=tau_m)
+
+    if dropout_p > 0.0:
+        attn_weight = torch.nn.functional.dropout(attn_weight, p=dropout_p)
+
+    # Value 인코딩: φ_NP — 막 전위 → 스파이크 시각
+    value_clamped = PotentialBounds(-theta, theta).clamp(value)
+    t_v = theta - value_clamped                               # (B, H, S, D)
+    domain_tv = TimeBounds(0.0, 2.0 * theta)
+
+    # Attention weight 도메인: softmin 출력 ∈ [0, 1]
+    domain_w = PotentialBounds(0.0, 1.0)
+
+    # ψ_PWM(t_v[j], θ; w[i,j]) = w[i,j] * (θ − t_v[j]) = w[i,j] * v[j]
+    # 브로드캐스트: (B,H,1,S,D) × (B,H,L,S,1) → (B,H,L,S,D)
+    t_v_exp = t_v.unsqueeze(-4)          # (B, H, 1, S, D)
+    w_exp   = attn_weight.unsqueeze(-1)  # (B, H, L, S, 1)
+
+    out_per_sv, _ = pulse_width_modulation_operator(
+        t_v_exp, domain_tv,
+        theta,   theta,
+        w_exp,   domain_w,
+    )  # → (B, H, L, S, D)
+
+    # S 차원 적분: Σ_j w[i,j] * v[j]  → (B, H, L, D)
+    return out_per_sv.sum(dim=-2)
 
 def spiking_sdpa_attention_forward(
     module: torch.nn.Module,
@@ -212,49 +121,29 @@ def spiking_sdpa_attention_forward(
         else:
             sdpa_kwargs = {"enable_gqa": True}
 
-    # Instead of relying on the value set in the module directly, we use the is_causal passed in kwargs if it is presented
     is_causal = is_causal if is_causal is not None else getattr(module, "is_causal", True)
-
-    # SDPA's Flash Attention (and cuDNN) kernels rely on the `is_causal` flag. However, there are certain conditions:
-    # - Not in decoding phase (otherwise we want full attention on the single query token)
-    # - Attention mask is not to be provided (even if it is a causal pattern)
-    # - Internally, we marked this as compatible with causal, i.e. it is a decoder attention type
-    #
-    # Quirks on the conditionals:
-    # - We avoid inline passing this to the SDPA function directly to support both torch.compile's dynamic shapes and
-    #   full graph options. Otherwise, dynamic shapes are prevented from compiling.
-    # - It is important to check first for the shape, otherwise compile will fail with
-    #   `argument 'is_causal' must be bool, not SymBool`.
     is_causal = query.shape[2] > 1 and attention_mask is None and is_causal
 
-    # Shapes (e.g. query.shape[2]) are tensors during jit tracing, resulting in `is_causal` being a tensor.
-    # We convert it to a bool for the SDPA kernel that only accepts bools.
     if torch.jit.is_tracing() and isinstance(is_causal, torch.Tensor):
         is_causal = is_causal.item()
 
-    # When `is_causal = False` and the `attention_mask` is not of boolean type, the Ascend NPU's SDPA interface cannot utilize the FlashAttentionScore operator，
-    # and falls back to small-operator concatenation. To invoke the FlashAttentionScore, the attention_mask must be converted to boolean type.
-    # This adaptation ensures the `attention_mask` meets the requirement for using FlashAttentionScore.
     if _is_torch_npu_available:
         if attention_mask is not None and attention_mask.dtype != torch.bool:
-            # Convert to boolean type, making sdpa to force call FlashAttentionScore to improve performance.
             attention_mask = torch.logical_not(attention_mask.bool()).to(query.device)
 
-    # To record the distribution of query, key, value tensors to train Jeffress network
-    writer.add_histogram("spiking_sdpa_attention/query", query)
-    writer.add_histogram("spiking_sdpa_attention/key", key)
-    writer.add_histogram("spiking_sdpa_attention/value", value)
-    # writer.flush()
-    # print("Spiking SDPA Attention - query.shape:", query.shape, "key.shape:", key.shape, "value.shape:", value.shape)
+    # Note: L2Net을 훈련하기 위해 사용하던 불필요한 로깅 제거 및 dropout 처리 정규화
+    dropout_prob = dropout if module.training else 0.0
     
     attn_output = spiking_scaled_dot_product_attention(
         query,
         key,
         value,
         attn_mask=attention_mask,
-        dropout_p=dropout,
+        dropout_p=dropout_prob,
         scale=scaling,
         is_causal=is_causal,
+        tau_m=kwargs.get("tau_m", 1.0),
+        theta=kwargs.get("theta", 10.0),
         **sdpa_kwargs,
     )
     

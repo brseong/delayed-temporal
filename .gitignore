@@ -215,3 +215,5 @@ logs/
 runs/
 src/
 venv/
+error_histogram.png
+tex/

@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, Callable, NamedTuple
 from functools import wraps
+import inspect
 
 import torch
 from torch import Tensor
@@ -29,10 +30,41 @@ class NeuralTransform[InT: OpenBounds, OutT: OpenBounds](Protocol):
     def __call__(self, input_value: Tensor, domain: InT, **kwargs) -> tuple[Tensor, OutT]: ...
 
 
-def check_domain[InT: OpenBounds, OutT: OpenBounds](func: NeuralTransform[InT, OutT]) -> NeuralTransform[InT, OutT]:
+class Potential(NamedTuple):
+    """막 전위 텐서와 그 선언 도메인의 묶음.
+
+    ViT 내부 SNN 레이어 간에 도메인을 전파하기 위해 사용된다.
+    각 레이어가 독립적으로 텐서를 측정하는 대신, 이전 레이어의
+    출력 도메인을 그대로 받아 구간 산술로 출력 도메인을 계산한다.
+    """
+    value: Tensor
+    domain: 'PotentialBounds'
+
+
+def check_domain[**P, R](func: Callable[P, R]) -> Callable[P, R]:
+    """Decorator to check if input tensors are within their specified domains."""
+    sig = inspect.signature(func)
     @wraps(func)
-    def wrapper(input_value: Tensor, domain: InT, **kwargs) -> tuple[Tensor, OutT]:
-        assert domain.min <= input_value.min() and input_value.max() <= domain.max,\
-            "Initial potentials must be within the specified domain."
-        return func(input_value, domain, **kwargs)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        bound_args = sig.bind(*args, **kwargs)
+        bound_args.apply_defaults()
+        
+        # Identify tensor-domain pairs
+        tensors = {k: v for k, v in bound_args.arguments.items() if isinstance(v, torch.Tensor)}
+        domains = {k: v for k, v in bound_args.arguments.items() if isinstance(v, OpenBounds)}
+        
+        for name, tensor in tensors.items():
+            domain = None
+            if f"domain_{name}" in domains:
+                domain = domains[f"domain_{name}"]
+            elif name == "input_value" and "domain" in domains:
+                domain = domains["domain"]
+            elif len(tensors) == 1 and len(domains) == 1:
+                domain = list(domains.values())[0]
+            
+            if domain is not None:
+                assert domain.min <= tensor.min() and tensor.max() <= domain.max,\
+                    f"Argument '{name}' must be within the specified domain [{domain.min}, {domain.max}]. Got min {tensor.min()} and max {tensor.max()}."
+        
+        return func(*args, **kwargs)
     return wrapper
