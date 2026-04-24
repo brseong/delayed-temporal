@@ -29,13 +29,13 @@ class Arguments:
     dataset_id: Literal["cifar10"]
     batch_size: int
     device: Literal["cuda", "cpu"]
-    model_hex: str
     spiking_layernorm: bool
     spiking_attention: bool
     spiking_ln_mul: bool
     spiking_ln_log: bool
     spiking_ln_expdiff: bool
     spiking_mlp: bool
+    activation: Literal["relu", "gelu"]
     theta: float
 
 def parse_arguments():
@@ -50,8 +50,6 @@ def parse_arguments():
                         help="Batch size for evaluation.")
     parser.add_argument("--device", type=str, choices=["cuda", "cpu"], default="cuda",
                         help="Device to run the evaluation on (e.g., 'cuda' or 'cpu').")
-    parser.add_argument("--model_hex", type=str, default="70c547fe125b11f1a3cc0242ac11000e",
-                        help="Hex identifier for the cached Abstract L2Net model.")
     parser.add_argument("--spiking-layernorm", action=argparse.BooleanOptionalAction, default=True,
                         help="Use SpikingLayerNorm instead of standard nn.LayerNorm.")
     parser.add_argument("--spiking-attention", action=argparse.BooleanOptionalAction, default=True,
@@ -64,8 +62,10 @@ def parse_arguments():
                         help="[SpikingLayerNorm] Stage 3: use ψ_ED for normalisation (vs direct exp).")
     parser.add_argument("--spiking-mlp", action=argparse.BooleanOptionalAction, default=True,
                         help="Use φ_NL clip activation in MLP (vs GELU). Implements ψ_L via PWM.")
-    parser.add_argument("--theta", type=float, default=10.0,
-                        help="Domain bound θ for SpikingLayerNorm clamping (default: 10.0).")
+    parser.add_argument("--activation", type=str, choices=["relu", "gelu"], default="gelu",
+                        help="Activation function to use when --no-spiking-mlp is set (default: gelu).")
+    parser.add_argument("--theta", type=float, default=100.0,
+                        help="Domain bound θ for SpikingLayerNorm clamping (default: 100.0).")
 
     args = parser.parse_args()
     return Arguments(
@@ -74,13 +74,13 @@ def parse_arguments():
         dataset_id=args.dataset_id,
         batch_size=args.batch_size,
         device=args.device,
-        model_hex=args.model_hex,
         spiking_layernorm=args.spiking_layernorm,
         spiking_attention=args.spiking_attention,
         spiking_ln_mul=args.spiking_ln_mul,
         spiking_ln_log=args.spiking_ln_log,
         spiking_ln_expdiff=args.spiking_ln_expdiff,
         spiking_mlp=args.spiking_mlp,
+        activation=args.activation,
         theta=args.theta,
     )
 
@@ -94,14 +94,13 @@ def evaluate_vit_model(args:Arguments):
     dataset_id = args.dataset_id
     batch_size = args.batch_size
     device_str = args.device
-    model_hex = args.model_hex
     
     # GPU 사용 가능 여부 확인
     device = torch.device(device_str)
     
     cfg = vars(args)
     cfg["attn_impl"] = "spiking_sdpa" if args.spiking_attention else "eager"
-    wandb.init(project="vit-evaluation", config=cfg, name=args.experiment_name)
+    wandb.init(entity="CIDA", project="vit-evaluation", config=cfg, name=args.experiment_name)
     print(f"Using device: {device}")
     print(f"Spiking LayerNorm: {args.spiking_layernorm}, Spiking Attention: {args.spiking_attention}")
     if args.spiking_layernorm:
@@ -154,6 +153,7 @@ def evaluate_vit_model(args:Arguments):
     config.spiking_ln_log = args.spiking_ln_log
     config.spiking_ln_expdiff = args.spiking_ln_expdiff
     config.use_spiking_mlp = args.spiking_mlp
+    config.hidden_act = args.activation
     config.theta = args.theta
     model = ViTForImageClassification.from_pretrained(model_id, config=config, attn_implementation=attn_impl)
     # model = DataParallel(model, device_ids=list(range(torch.cuda.device_count())))  # 모델 병렬화

@@ -11,14 +11,6 @@ image_min: The minimum value in the output range of the transformation.
 """
 
 @check_domain
-def neg_linear_approximation(
-    input_value: Float[torch.Tensor, "*batch times"],
-    domain: PotentialBounds,
-    **_) -> tuple[Float[torch.Tensor, "*batch dims"], TimeBounds]:
-    raise NotImplementedError("Identity approximation is not implemented yet.")
-    return input_value, TimeBounds(0.0, 1.0) # Not implemented yet, just return the input as is.
-
-@check_domain
 def neg_linear_transform(
     input_value: Float[torch.Tensor, "*batch dims"],
     domain: PotentialBounds,
@@ -44,7 +36,7 @@ def neg_linear_transform(
         tuple[Float[torch.Tensor, "*batch dims"], TimeBounds]: A tuple containing the transformed spike times and the time bounds of the output.
     """
     range = domain.max - domain.min
-    return window_length * (1 - (input_value - domain.min) / range), TimeBounds(0.0, window_length)
+    return window_length * (1 - (input_value - domain.min) / range).clamp(min=0.0, max=window_length), TimeBounds(0.0, window_length)
 
 @check_domain
 def neg_identity_transform(

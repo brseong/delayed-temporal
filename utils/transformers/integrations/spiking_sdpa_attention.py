@@ -12,6 +12,8 @@ logger = logging.get_logger(__name__)
 
 # Softmin masking: large positive suppresses masked positions (exp(-87) ≈ float32 min)
 _MASK_VAL = 87.0
+# reciprocal_exp_operator의 실효 지수 범위는 2*cap; exp(-2*40) ≈ 5e-35 > float32_tiny
+_SOFTMIN_CAP = 40.0
 
 _is_torch_greater_or_equal_than_2_5 = is_torch_greater_or_equal("2.5", accept_dev=True)
 _is_torch_greater_or_equal_than_2_8 = is_torch_greater_or_equal("2.8", accept_dev=True)
@@ -63,11 +65,12 @@ def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, drop
     # f_SDP(q,k) = ψ_M sum ≈ -(1/√d_k)·dot(q,k), broadcasted to (B,H,L,S)
     attn_score, _ = scaled_dot_product_function(q_exp, domain_qk, k_exp, domain_qk, theta)
 
-    # Clamp score to [-θ, θ]; declare domain with +0.1 guard so t_out = domain.max - score ≥ 0.1,
-    # preventing the float32/float64 precision gap at the exp(-2θ) boundary.
+    # softmin chain의 실효 지수 범위는 2*cap이므로 float32 underflow 방지를 위해 cap.
+    # exp(-2*_SOFTMIN_CAP) ≈ 5e-35 > float32_tiny; ±40 밖의 점수는 어차피 weight ≈ 0.
     _guard = 0.1
-    attn_score = PotentialBounds(-theta, theta).clamp(attn_score + attn_bias)
-    score_bound = PotentialBounds(-theta - _guard, theta + _guard)
+    softmin_cap = min(float(theta), _SOFTMIN_CAP)
+    attn_score = PotentialBounds(-softmin_cap, softmin_cap).clamp(attn_score + attn_bias)
+    score_bound = PotentialBounds(-softmin_cap - _guard, softmin_cap + _guard)
 
     # softmin(f_SDP, τ_m) = softmax(−f_SDP/τ_m) = softmax(dot(q,k)/(τ_m·√d_k))
     attn_weight, _ = softmin_function(attn_score, score_bound, tau_s=tau_m)
@@ -80,12 +83,13 @@ def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, drop
     t_v = theta - value_clamped                               # (B, H, S, D)
     domain_tv = TimeBounds(0.0, 2.0 * theta)
 
-    # Attention weight 도메인: softmin 출력 ∈ [0, 1]
+    # softmin 출력은 이론상 [0,1]이지만 float 오차로 미소 초과 가능 → clamp
+    attn_weight = attn_weight.clamp(0.0, 1.0)
     domain_w = PotentialBounds(0.0, 1.0)
 
     # ψ_PWM(t_v[j], θ; w[i,j]) = w[i,j] * (θ − t_v[j]) = w[i,j] * v[j]
     # 브로드캐스트: (B,H,1,S,D) × (B,H,L,S,1) → (B,H,L,S,D)
-    t_v_exp = t_v.unsqueeze(-4)          # (B, H, 1, S, D)
+    t_v_exp = t_v.unsqueeze(-3)          # (B, H, 1, S, D)
     w_exp   = attn_weight.unsqueeze(-1)  # (B, H, L, S, 1)
 
     out_per_sv, _ = pulse_width_modulation_operator(

@@ -1,10 +1,10 @@
 #!/bin/bash
 trap 'kill -- -$$' SIGINT SIGTERM
 
-indices=(0 1 2)
+indices=(0)
 sln="spiking-layernorm"
-sa="no-spiking-attention"
-cuda_devices=(0 1 2)
+sa="spiking-attention"
+cuda_devices=(1)
 source ./venv/bin/activate
 device="cuda"
 
@@ -13,23 +13,22 @@ device="cuda"
 # GPU 1: log only
 # GPU 2: log + expdiff (full SNN LN without mul)
 ln_flags=(
-    "--no-spiking-ln-mul --no-spiking-ln-log --no-spiking-ln-expdiff"
-    "--no-spiking-ln-mul --spiking-ln-log --no-spiking-ln-expdiff"
-    "--no-spiking-ln-mul --spiking-ln-log --spiking-ln-expdiff"
+    # "--no-spiking-ln-mul --no-spiking-ln-log --no-spiking-ln-expdiff"
+    # "--no-spiking-ln-mul --spiking-ln-log --no-spiking-ln-expdiff"
+    # "--no-spiking-ln-mul --spiking-ln-log --spiking-ln-expdiff"
+    ""
 )
 expr_names=(
-    "sln_baseline"
-    "sln_log"
-    "sln_log+expdiff"
+    "PWM"
 )
 
 for index in "${indices[@]}"; do
     echo "Running error analysis on GPU ${cuda_devices[$index]}: ${expr_names[$index]}"
     script="CUDA_VISIBLE_DEVICES=${cuda_devices[$index]} python3 error_analysis_vit.py \
         --experiment_name ${expr_names[$index]} --device ${device} \
-        --${sln} --${sa} ${ln_flags[$index]} --theta 400"
+        --${sln} --${sa} ${ln_flags[$index]} --theta 400 --spiking-mlp --activation relu"
     echo $script
-    eval $script &
+    eval $script
 done
 
 wait
