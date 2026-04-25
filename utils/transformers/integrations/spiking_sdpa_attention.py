@@ -5,15 +5,17 @@ import wandb
 from transformers.utils import is_torch_npu_available, is_torch_xpu_available, logging
 from transformers.utils.import_utils import is_torch_greater_or_equal
 from utils.transforms.functions import scaled_dot_product_function, softmin_function
+from utils.transforms.potential_to_spike import neg_identity_transform
 from utils.transforms.primitive import pulse_width_modulation_operator
 from utils.transforms.types import PotentialBounds, TimeBounds
 
 logger = logging.get_logger(__name__)
 
-# Softmin masking: large positive suppresses masked positions (exp(-87) ≈ float32 min)
-_MASK_VAL = 87.0
-# reciprocal_exp_operator의 실효 지수 범위는 2*cap; exp(-2*40) ≈ 5e-35 > float32_tiny
-_SOFTMIN_CAP = 40.0
+# Softmin masking: large positive suppresses masked positions (exp(-20) ≈ 2e-9)
+# Use a value that stays within stable range for float32 exp but provides enough suppression.
+_MASK_VAL = 20.0
+# reciprocal_exp_operator의 실효 지수 범위는 2*cap; exp(-2*20) ≈ 2e-18
+_SOFTMIN_CAP = 20.0
 
 _is_torch_greater_or_equal_than_2_5 = is_torch_greater_or_equal("2.5", accept_dev=True)
 _is_torch_greater_or_equal_than_2_8 = is_torch_greater_or_equal("2.8", accept_dev=True)
@@ -37,7 +39,7 @@ def use_gqa_in_sdpa(attention_mask: torch.Tensor | None, key: torch.Tensor) -> b
     return _is_torch_greater_or_equal_than_2_5 and attention_mask is None
 
 def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
-        is_causal=False, scale=None, enable_gqa=False, tau_m=1.0, theta=10.0) -> torch.Tensor:
+        is_causal=False, enable_gqa=False, tau_m=1.0, theta=10.0) -> torch.Tensor:
 
     L, S = query.size(-2), key.size(-2)
 
@@ -52,7 +54,8 @@ def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, drop
         attn_bias.masked_fill_(temp_mask.logical_not(), _MASK_VAL * tau_m)
     if attn_mask is not None:
         if attn_mask.dtype == torch.bool:
-            attn_bias.masked_fill_(attn_mask.logical_not(), _MASK_VAL * tau_m)
+            # Fix: support broadcasting for attn_mask
+            attn_bias = torch.where(attn_mask, attn_bias, _MASK_VAL * tau_m)
         else:
             # HF additive mask: negative for masked → negate for softmin convention
             attn_bias = attn_bias - attn_mask.clamp(min=-_MASK_VAL * tau_m, max=0.0)
@@ -65,23 +68,38 @@ def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, drop
     # f_SDP(q,k) = ψ_M sum ≈ -(1/√d_k)·dot(q,k), broadcasted to (B,H,L,S)
     attn_score, _ = scaled_dot_product_function(q_exp, domain_qk, k_exp, domain_qk, theta)
 
+    # Debug: Compare scores with torch.matmul
+    head_dim = query.size(-1)
+    torch_logits = torch.matmul(domain_qk.clamp(query), domain_qk.clamp(key).transpose(-2, -1)) * (1.0 / (head_dim ** 0.5))
+    score_error = (attn_score + torch_logits).abs().max().item()
+    print(f"[DEBUG] Attn score vs -torch_logits max diff: {score_error:.6f}")
+
     # softmin chain의 실효 지수 범위는 2*cap이므로 float32 underflow 방지를 위해 cap.
     # exp(-2*_SOFTMIN_CAP) ≈ 5e-35 > float32_tiny; ±40 밖의 점수는 어차피 weight ≈ 0.
-    _guard = 0.1
     softmin_cap = min(float(theta), _SOFTMIN_CAP)
-    attn_score = PotentialBounds(-softmin_cap, softmin_cap).clamp(attn_score + attn_bias)
-    score_bound = PotentialBounds(-softmin_cap - _guard, softmin_cap + _guard)
+    
+    # We MUST clamp BEFORE adding attn_bias if we want to support large masking values.
+    score_bound = PotentialBounds(-softmin_cap, softmin_cap)
+    score_bound_with_bias = PotentialBounds(score_bound.min, score_bound.max + _MASK_VAL * tau_m)
+    attn_score = score_bound.clamp(attn_score) + attn_bias
+    # score_bound = PotentialBounds(-softmin_cap, softmin_cap + _MASK_VAL * tau_m + _guard)
 
-    # softmin(f_SDP, τ_m) = softmax(−f_SDP/τ_m) = softmax(dot(q,k)/(τ_m·√d_k))
-    attn_weight, _ = softmin_function(attn_score, score_bound, tau_s=tau_m)
+    # softmin(f_SDP, τ_m) = softmax(dot(q,k)/(τ_m·√d_k))
+    attn_weight, _ = softmin_function(attn_score, score_bound_with_bias, tau_s=tau_m)
+
+    # Debug: Compare weights with torch.softmax
+    torch_logits_clamped = torch_logits.clamp(-softmin_cap, softmin_cap)
+    # attn_bias is positive for masked tokens in softmin convention
+    torch_weights = torch.nn.functional.softmax((torch_logits_clamped - attn_bias) / tau_m, dim=-1)
+    weight_error = (attn_weight - torch_weights).abs().max().item()
+    print(f"[DEBUG] Attn weight vs torch.softmax max diff: {weight_error:.6f}")
 
     if dropout_p > 0.0:
         attn_weight = torch.nn.functional.dropout(attn_weight, p=dropout_p)
 
     # Value 인코딩: φ_NP — 막 전위 → 스파이크 시각
     value_clamped = PotentialBounds(-theta, theta).clamp(value)
-    t_v = theta - value_clamped                               # (B, H, S, D)
-    domain_tv = TimeBounds(0.0, 2.0 * theta)
+    t_v, domain_tv = neg_identity_transform(value_clamped, PotentialBounds(-theta, theta))
 
     # softmin 출력은 이론상 [0,1]이지만 float 오차로 미소 초과 가능 → clamp
     attn_weight = attn_weight.clamp(0.0, 1.0)
@@ -89,17 +107,24 @@ def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, drop
 
     # ψ_PWM(t_v[j], θ; w[i,j]) = w[i,j] * (θ − t_v[j]) = w[i,j] * v[j]
     # 브로드캐스트: (B,H,1,S,D) × (B,H,L,S,1) → (B,H,L,S,D)
-    t_v_exp = t_v.unsqueeze(-3)          # (B, H, 1, S, D)
-    w_exp   = attn_weight.unsqueeze(-1)  # (B, H, L, S, 1)
+    t_v = t_v.unsqueeze(-3)          # (B, H, 1, S, D)
+    w   = attn_weight.unsqueeze(-1)  # (B, H, L, S, 1)
 
     out_per_sv, _ = pulse_width_modulation_operator(
-        t_v_exp, domain_tv,
+        t_v, domain_tv,
         theta,   theta,
-        w_exp,   domain_w,
+        w,   domain_w,
     )  # → (B, H, L, S, D)
 
     # S 차원 적분: Σ_j w[i,j] * v[j]  → (B, H, L, D)
-    return out_per_sv.sum(dim=-2)
+    attn_output = out_per_sv.sum(dim=-2)
+
+    # Debug: Compare output with torch @
+    torch_output = torch.matmul(torch_weights, value_clamped)
+    output_error = (attn_output - torch_output).abs().max().item()
+    print(f"[DEBUG] Final output vs torch.matmul max diff: {output_error:.6f}")
+
+    return attn_output
 
 def spiking_sdpa_attention_forward(
     module: torch.nn.Module,
@@ -108,7 +133,6 @@ def spiking_sdpa_attention_forward(
     value: torch.Tensor,
     attention_mask: torch.Tensor | None,
     dropout: float = 0.0,
-    scaling: float | None = None,
     is_causal: bool | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, None]:
@@ -144,7 +168,6 @@ def spiking_sdpa_attention_forward(
         value,
         attn_mask=attention_mask,
         dropout_p=dropout_prob,
-        scale=scaling,
         is_causal=is_causal,
         tau_m=kwargs.get("tau_m", 1.0),
         theta=kwargs.get("theta", 10.0),
