@@ -38,7 +38,7 @@ def scaled_dot_product_function(
     domain_q: PotentialBounds,
     k: torch.Tensor, 
     domain_k: PotentialBounds,
-    theta: float | torch.Tensor
+    theta: float
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Scaled dot-product operator (f_SDP)"""
     d_k = q.shape[-1]
