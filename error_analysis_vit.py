@@ -37,6 +37,7 @@ class Arguments:
     spiking_mlp: bool
     activation: Literal["relu", "gelu"]
     theta: float
+    noise_std: float
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Evaluate ViT model with Spiking SDPA attention.")
@@ -66,6 +67,8 @@ def parse_arguments():
                         help="Activation function to use when --no-spiking-mlp is set (default: gelu).")
     parser.add_argument("--theta", type=float, default=100.0,
                         help="Domain bound θ for SpikingLayerNorm clamping (default: 100.0).")
+    parser.add_argument("--noise-std", type=float, default=0.0,
+                        help="Spike-time noise standard deviation as a fraction of domain range (default: 0.0).")
 
     args = parser.parse_args()
     return Arguments(
@@ -82,6 +85,7 @@ def parse_arguments():
         spiking_mlp=args.spiking_mlp,
         activation=args.activation,
         theta=args.theta,
+        noise_std=args.noise_std,
     )
 
 def evaluate_vit_model(args:Arguments):
@@ -147,14 +151,17 @@ def evaluate_vit_model(args:Arguments):
     # ---------------------------------------------------------
     print(f"Loading model: {model_id}...")
     attn_impl = "spiking_sdpa" if args.spiking_attention else "eager"
-    config = ViTConfig.from_pretrained(model_id)
-    config.use_spiking_layernorm = args.spiking_layernorm
-    config.spiking_ln_mul = args.spiking_ln_mul
-    config.spiking_ln_log = args.spiking_ln_log
-    config.spiking_ln_expdiff = args.spiking_ln_expdiff
-    config.use_spiking_mlp = args.spiking_mlp
-    config.hidden_act = args.activation
-    config.theta = args.theta
+    config = ViTConfig.from_pretrained(
+        model_id,
+        use_spiking_layernorm=args.spiking_layernorm,
+        spiking_ln_mul=args.spiking_ln_mul,
+        spiking_ln_log=args.spiking_ln_log,
+        spiking_ln_expdiff=args.spiking_ln_expdiff,
+        use_spiking_mlp=args.spiking_mlp,
+        hidden_act=args.activation,
+        theta=args.theta,
+        noise_std=args.noise_std,
+    )
     model = ViTForImageClassification.from_pretrained(model_id, config=config, attn_implementation=attn_impl)
     # model = DataParallel(model, device_ids=list(range(torch.cuda.device_count())))  # 모델 병렬화
     model.to(device)

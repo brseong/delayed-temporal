@@ -1,9 +1,11 @@
 import torch
 import math
 import wandb
+from typing import cast
 
-from transformers.utils import is_torch_npu_available, is_torch_xpu_available, logging
 from transformers.utils.import_utils import is_torch_greater_or_equal
+from transformers.utils import logging
+from transformers.utils.import_utils import is_torch_npu_available, is_torch_xpu_available
 from utils.transforms.functions import scaled_dot_product_function, softmin_function
 from utils.transforms.potential_to_spike import neg_identity_transform
 from utils.transforms.primitive import pulse_width_modulation_operator
@@ -39,7 +41,9 @@ def use_gqa_in_sdpa(attention_mask: torch.Tensor | None, key: torch.Tensor) -> b
     return _is_torch_greater_or_equal_than_2_5 and attention_mask is None
 
 def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
-        is_causal=False, enable_gqa=False, tau_m=1.0, theta=10.0) -> torch.Tensor:
+    is_causal: bool = False, enable_gqa=False, tau_m=1.0, theta=10.0,
+    spike_time_noise_std=0.0, spike_time_noise_kind="gaussian", spike_time_noise_eval=False,
+    training=False) -> torch.Tensor:
 
     L, S = query.size(-2), key.size(-2)
 
@@ -106,7 +110,14 @@ def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, drop
 
     # Value 인코딩: φ_NP — 막 전위 → 스파이크 시각
     value_clamped = PotentialBounds(-theta, theta).clamp(value)
-    t_v, domain_tv = neg_identity_transform(value_clamped, PotentialBounds(-theta, theta))
+    t_v, domain_tv = neg_identity_transform(
+        value_clamped,
+        PotentialBounds(-theta, theta),
+        noise_std=float(spike_time_noise_std),
+        noise_kind=str(spike_time_noise_kind),
+        training=bool(training),
+        noise_eval=bool(spike_time_noise_eval),
+    )
 
     # softmin 출력은 이론상 [0,1]이지만 float 오차로 미소 초과 가능 → clamp
     attn_weight = attn_weight.clamp(0.0, 1.0)
@@ -151,16 +162,18 @@ def spiking_sdpa_attention_forward(
     sdpa_kwargs = {}
     if hasattr(module, "num_key_value_groups"):
         if not use_gqa_in_sdpa(attention_mask, key):
-            key = repeat_kv(key, module.num_key_value_groups)
-            value = repeat_kv(value, module.num_key_value_groups)
+            n_rep = int(cast(int, module.num_key_value_groups))
+            key = repeat_kv(key, n_rep)
+            value = repeat_kv(value, n_rep)
         else:
             sdpa_kwargs = {"enable_gqa": True}
 
-    is_causal = is_causal if is_causal is not None else getattr(module, "is_causal", True)
-    is_causal = query.shape[2] > 1 and attention_mask is None and is_causal
+    is_causal_flag = bool(is_causal) if is_causal is not None else bool(getattr(module, "is_causal", True))
+    is_causal_flag = query.shape[2] > 1 and attention_mask is None and is_causal_flag
 
-    if torch.jit.is_tracing() and isinstance(is_causal, torch.Tensor):
-        is_causal = is_causal.item()
+    is_tracing = getattr(torch.jit, "is_tracing", lambda: False)()
+    if is_tracing and isinstance(is_causal_flag, torch.Tensor):
+        is_causal_flag = is_causal_flag.item()
 
     if _is_torch_npu_available:
         if attention_mask is not None and attention_mask.dtype != torch.bool:
@@ -175,9 +188,13 @@ def spiking_sdpa_attention_forward(
         value,
         attn_mask=attention_mask,
         dropout_p=dropout_prob,
-        is_causal=is_causal,
+        is_causal=is_causal_flag,
         tau_m=kwargs.get("tau_m", 1.0),
         theta=kwargs.get("theta", 10.0),
+        spike_time_noise_std=kwargs.get("spike_time_noise_std", 0.0),
+        spike_time_noise_kind=kwargs.get("spike_time_noise_kind", "gaussian"),
+        spike_time_noise_eval=kwargs.get("spike_time_noise_eval", False),
+        training=module.training,
         **sdpa_kwargs,
     )
     

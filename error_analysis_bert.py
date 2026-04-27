@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal, cast
 
 import argparse
 import torch
@@ -19,13 +19,38 @@ from tqdm import tqdm
 _TB_LOG_BATCHES = 10  # 처음 N 배치에서만 히스토그램 로그
 AttentionInterface.register("spiking_sdpa", spiking_sdpa_attention_forward)
 
+DATASET_PRESETS = {
+    "sst2": {
+        "dataset_name": "glue",
+        "dataset_config_name": "sst2",
+        "dataset_split": "validation",
+        "text_column": "sentence",
+        "model_id": "textattack/bert-base-uncased-SST-2",
+    },
+    "agnews": {
+        "dataset_name": "ag_news",
+        "dataset_config_name": None,
+        "dataset_split": "test",
+        "text_column": "text",
+        "model_id": "textattack/bert-base-uncased-ag-news",
+    },
+    "imdb": {
+        "dataset_name": "imdb",
+        "dataset_config_name": None,
+        "dataset_split": "test",
+        "text_column": "text",
+        "model_id": "textattack/bert-base-uncased-imdb",
+    },
+}
+
 @dataclass
 class Arguments:
     experiment_name: str
     model_backend: Literal["hf", "spiking"]
+    task: Literal["sst2", "agnews", "imdb"]
     model_id: str
-    dataset_name: str
-    dataset_config_name: str
+    dataset_name: str | None
+    dataset_config_name: str | None
     dataset_split: str
     max_length: int
     batch_size: int
@@ -39,21 +64,26 @@ class Arguments:
     spiking_mlp: bool
     activation: Literal["relu", "gelu"]
     theta: float
+    spike_time_noise_std: float
+    spike_time_noise_kind: Literal["gaussian", "uniform"]
+    spike_time_noise_eval: bool
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Evaluate Hugging Face BERT on SST-2.")
+    parser = argparse.ArgumentParser(description="Evaluate Hugging Face BERT on SST-2, AG News, or IMDB.")
     parser.add_argument("--experiment_name", type=str, default="bert_eval",
                         help="Name of the experiment for logging purposes.")
     parser.add_argument("--model_backend", type=str, choices=["hf", "spiking"], default="hf",
                         help="Model backend to use (hf: vanilla HF BERT, spiking: spiking_bert class).")
-    parser.add_argument("--model_id", type=str, default="textattack/bert-base-uncased-SST-2",
-                        help="Pretrained BERT model ID from Hugging Face.")
-    parser.add_argument("--dataset_name", type=str, default="glue",
-                        help="Dataset name from Hugging Face datasets library.")
-    parser.add_argument("--dataset_config_name", type=str, default="sst2",
-                        help="Dataset config name for GLUE SST-2.")
-    parser.add_argument("--dataset_split", type=str, default="validation",
-                        help="Dataset split to evaluate.")
+    parser.add_argument("--task", type=str, choices=["sst2", "agnews", "imdb"], default="sst2",
+                        help="Preset task to evaluate. Sets dataset, split, and default model.")
+    parser.add_argument("--model_id", type=str, default=None,
+                        help="Optional Hugging Face model ID. If omitted, task preset default is used.")
+    parser.add_argument("--dataset_name", type=str, default=None,
+                        help="Optional dataset name override. If omitted, task preset is used.")
+    parser.add_argument("--dataset_config_name", type=str, default=None,
+                        help="Optional dataset config override. If omitted, task preset is used.")
+    parser.add_argument("--dataset_split", type=str, default=None,
+                        help="Optional dataset split override. If omitted, task preset is used.")
     parser.add_argument("--max_length", type=int, default=128,
                         help="Maximum token length for tokenizer padding/truncation.")
     parser.add_argument("--batch_size", type=int, default=32,
@@ -78,15 +108,28 @@ def parse_arguments():
                         help="Activation function used by the spiking backend config.")
     parser.add_argument("--theta", type=float, default=100.0,
                         help="Domain bound theta used by spiking backend modules.")
+    parser.add_argument("--spike_time_noise_std", type=float, default=0.0,
+                        help="Relative std for spike-time jitter against time-domain range.")
+    parser.add_argument("--spike_time_noise_kind", type=str, choices=["gaussian", "uniform"], default="gaussian",
+                        help="Noise distribution for spike-time jitter.")
+    parser.add_argument("--spike_time_noise_eval", action=argparse.BooleanOptionalAction, default=False,
+                        help="Apply spike-time jitter in eval mode as well.")
 
     args = parser.parse_args()
+    preset = DATASET_PRESETS[args.task]
+    model_id = cast(str, args.model_id or preset["model_id"])
+    dataset_name = cast(str | None, args.dataset_name or preset["dataset_name"])
+    dataset_config_name = cast(str | None, args.dataset_config_name if args.dataset_config_name is not None else preset["dataset_config_name"])
+    dataset_split = cast(str, args.dataset_split or preset["dataset_split"])
+
     return Arguments(
         experiment_name=args.experiment_name,
         model_backend=args.model_backend,
-        model_id=args.model_id,
-        dataset_name=args.dataset_name,
-        dataset_config_name=args.dataset_config_name,
-        dataset_split=args.dataset_split,
+        task=args.task,
+        model_id=model_id,
+        dataset_name=dataset_name,
+        dataset_config_name=dataset_config_name,
+        dataset_split=dataset_split,
         max_length=args.max_length,
         batch_size=args.batch_size,
         device=args.device,
@@ -99,28 +142,42 @@ def parse_arguments():
         spiking_mlp=args.spiking_mlp,
         activation=args.activation,
         theta=args.theta,
+        spike_time_noise_std=args.spike_time_noise_std,
+        spike_time_noise_kind=args.spike_time_noise_kind,
+        spike_time_noise_eval=args.spike_time_noise_eval,
     )
+
+
+def infer_text_column(column_names: list[str], preferred: str | None = None) -> str:
+    if preferred is not None and preferred in column_names:
+        return preferred
+
+    for candidate in ("sentence", "text", "content", "review"):
+        if candidate in column_names:
+            return candidate
+
+    raise ValueError(f"No supported text column found in dataset columns: {column_names}")
 
 def evaluate_bert_model(args:Arguments):
     model_backend = args.model_backend
-    model_id = args.model_id
-    dataset_name = args.dataset_name
-    dataset_config_name = args.dataset_config_name
-    dataset_split = args.dataset_split
+    model_id = cast(str, args.model_id)
+    dataset_name = cast(str | None, args.dataset_name)
+    dataset_config_name = cast(str | None, args.dataset_config_name)
+    dataset_split = cast(str, args.dataset_split)
     max_length = args.max_length
     batch_size = args.batch_size
     max_eval_batches = args.max_eval_batches
     device_str = args.device
     
-    device = torch.device(device_str)
+    torch_device = torch.device(device_str)
     
     cfg = vars(args)
     effective_attn_impl = "eager"
-    if model_backend == "spiking" and device.type != "cpu" and args.spiking_attention:
+    if model_backend == "spiking" and torch_device.type != "cpu" and args.spiking_attention:
         effective_attn_impl = "spiking_sdpa"
     cfg["attn_impl"] = effective_attn_impl
     wandb.init(entity="CIDA", project="bert-evaluation", config=cfg, name=args.experiment_name)
-    print(f"Using device: {device}")
+    print(f"Using device: {torch_device}")
     print(f"Model backend: {model_backend}")
     if model_backend == "spiking":
         print(
@@ -128,10 +185,19 @@ def evaluate_bert_model(args:Arguments):
             f"ln:{args.spiking_layernorm}, attn:{args.spiking_attention}, "
             f"mul:{args.spiking_ln_mul}, log:{args.spiking_ln_log}, "
             f"expdiff:{args.spiking_ln_expdiff}, mlp:{args.spiking_mlp}, "
-            f"act:{args.activation}, theta:{args.theta}"
+            f"act:{args.activation}, theta:{args.theta}, "
+            f"time_noise_std:{args.spike_time_noise_std}, "
+            f"time_noise_kind:{args.spike_time_noise_kind}, "
+            f"time_noise_eval:{args.spike_time_noise_eval}"
         )
     print(f"Loading dataset: {dataset_name}/{dataset_config_name} ({dataset_split})...")
-    dataset = load_dataset(dataset_name, dataset_config_name, split=dataset_split)
+    assert dataset_name is not None
+    if dataset_config_name is None:
+        dataset = load_dataset(dataset_name, split=dataset_split)
+    else:
+        dataset = load_dataset(dataset_name, dataset_config_name, split=dataset_split)
+    preferred_text_column = DATASET_PRESETS.get(args.task, {}).get("text_column")
+    text_column = infer_text_column(dataset.column_names, preferred=preferred_text_column)
     
     tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -139,7 +205,7 @@ def evaluate_bert_model(args:Arguments):
 
     def tokenize_batch(examples):
         tokenized = tokenizer(
-            examples["sentence"],
+            examples[text_column],
             padding="max_length",
             truncation=True,
             max_length=max_length,
@@ -150,9 +216,10 @@ def evaluate_bert_model(args:Arguments):
     processed_dataset = dataset.map(tokenize_batch, batched=True, remove_columns=dataset.column_names)
     processed_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
 
-    dataloader = DataLoader(processed_dataset, batch_size=batch_size, shuffle=False)
+    dataloader = DataLoader(cast(Any, processed_dataset), batch_size=batch_size, shuffle=False)
 
     print(f"Loading model: {model_id}...")
+    model: nn.Module
     if model_backend == "hf":
         model = AutoModelForSequenceClassification.from_pretrained(model_id)
     else:
@@ -164,8 +231,14 @@ def evaluate_bert_model(args:Arguments):
         config.use_spiking_mlp = args.spiking_mlp
         config.hidden_act = args.activation
         config.theta = args.theta
+        config.spike_time_noise_std = args.spike_time_noise_std
+        config.spike_time_noise_kind = args.spike_time_noise_kind
+        config.spike_time_noise_eval = args.spike_time_noise_eval
         model = BertForSequenceClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl)
-    model.to(device)
+    if torch_device.type == "cuda":
+        model = nn.Module.cuda(model)
+    else:
+        model = nn.Module.cpu(model)
     model.eval()
 
     tb_writer = SummaryWriter(log_dir=f"runs/{args.experiment_name}")
@@ -188,9 +261,9 @@ def evaluate_bert_model(args:Arguments):
     print("Starting evaluation...")
 
     for batch in tqdm(dataloader):
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        labels = batch["labels"].to(device)
+        input_ids = batch["input_ids"].to(torch_device)
+        attention_mask = batch["attention_mask"].to(torch_device)
+        labels = batch["labels"].to(torch_device)
 
         with torch.no_grad():
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
@@ -209,7 +282,7 @@ def evaluate_bert_model(args:Arguments):
         h.remove()
     tb_writer.close()
 
-    final_score = metric_tot.compute()
+    final_score = cast(dict[str, float], metric_tot.compute())
     print("-" * 30)
     print(f"Evaluation Results for {model_id}:")
     print(f"Accuracy: {final_score['accuracy']:.4f}")
