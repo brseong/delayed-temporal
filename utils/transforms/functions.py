@@ -18,7 +18,7 @@ def multiplication_operator(
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Multiplication operator (f_M) - Special case of f_PWM"""
     domain_B = PotentialBounds(-theta, theta)
-    t_B, domain_t_B = neg_identity_transform(B, domain_B)
+    t_B, domain_t_B = neg_identity_transform(domain_B.clamp(B), domain_B)
     
     # t_B bounds are [0, 2 * theta] since B is clamped to [-theta, theta]
     th_val = float(theta) if isinstance(theta, (int, float)) else float(theta.max())
@@ -187,9 +187,88 @@ def gelu_approximation(
     )
     
     # Step 4: f_M(v, div_out)
-    gelu_approx, gelu_domain = multiplication_operator(input_value, domain, div_out, div_domain, theta=theta)
+    
+    gelu_approx, gelu_domain = multiplication_operator(domain.clamp(input_value), domain, div_out, div_domain, theta=theta)
     
     return gelu_approx, gelu_domain
+
+@check_domain
+def swiglu_function(
+    u: torch.Tensor,
+    domain_u: PotentialBounds,
+    v: torch.Tensor,
+    domain_v: PotentialBounds,
+    *,
+    beta: float = 1.0,
+    tau_s: float = 1.0,
+    theta: float = 400.0,
+    **_
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """SwiGLU activation function using spiking operators.
+    
+    According to Lemma 4.5 (SwiGLU Operator) in the paper:
+    f_SwiGLU(u, v) := ψ_M(v, ψ_M(u, f_DIV(1, 1 + ψ_NE(φ_NP(β u)))))
+    
+    where:
+    - ψ_M is multiplication_operator
+    - φ_NP is neg_identity_transform (Negative Potential operator)
+    - ψ_NE is normalized_exp_operator (Negative Exp-Temporal operator)
+    - f_DIV is division_function
+    
+    Args:
+        u: First input potential
+        domain_u: Potential bounds for u
+        v: Second input potential
+        domain_v: Potential bounds for v
+        beta: Scaling constant for sigmoid computation (default: 1.0)
+        tau_s: Time constant for operators (default: 1.0)
+        theta: Parameter for multiplication operator (default: 400.0)
+    
+    Returns:
+        Tuple of (output, output_domain)
+    """
+    # Step 1: Scale u by beta
+    scaled_u = beta * u
+    scaled_domain_u = PotentialBounds(beta * domain_u.min, beta * domain_u.max)
+    
+    # Stability cap for exp
+    _STABILITY_CAP = 20.0
+    scaled_u_clamped = scaled_u.clamp(min=-_STABILITY_CAP, max=_STABILITY_CAP)
+    scaled_domain_u_clamped = PotentialBounds(
+        max(scaled_domain_u.min, -_STABILITY_CAP),
+        min(scaled_domain_u.max, _STABILITY_CAP)
+    )
+    
+    # Step 2: Apply φ_NP (neg_identity_transform) then ψ_NE (normalized_exp_operator)
+    t_betau, domain_t_betau = neg_identity_transform(scaled_u_clamped, scaled_domain_u_clamped)
+    exp_out, exp_domain = normalized_exp_operator(t_betau, domain_t_betau, tau_m=tau_s)
+    
+    # Step 3: Compute sigmoid σ(β u) = f_DIV(1, 1 + ψ_NE(φ_NP(β u)))
+    one_plus_exp = 1.0 + exp_out
+    one_plus_exp_domain = PotentialBounds(1.0 + exp_domain.min, 1.0 + exp_domain.max)
+    
+    sigmoid_out, sigmoid_domain = division_function(
+        X=torch.ones_like(one_plus_exp),
+        Y=one_plus_exp,
+        joint_domain=one_plus_exp_domain,
+        tau_s=tau_s
+    )
+    
+    # Step 4: Compute Swish: ψ_M(u, σ(β u)) = u * σ(β u)
+    swish_out, swish_domain = multiplication_operator(
+        u, domain_u,
+        sigmoid_out, sigmoid_domain,
+        theta=theta
+    )
+    
+    # Step 5: Final multiplication: ψ_M(v, swish_out) = v * u * σ(β u)
+    final_out, final_domain = multiplication_operator(
+        v, domain_v,
+        swish_out, swish_domain,
+        theta=theta
+    )
+    
+    return final_out, final_domain
 
 if __name__ == "__main__":
     # Test for exponential_function and division_function

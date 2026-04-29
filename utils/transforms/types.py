@@ -77,8 +77,7 @@ def _emit_spike_time_core(
     domain: OpenBounds,
     *,
     noise_std: float = 0.0,
-    noise_kind: str = "gaussian",
-    training: bool = True,
+    noise_kind: str = "gaussian"
 ) -> Tensor:
     """Inject optional spike-time noise and project back into the declared domain.
 
@@ -92,7 +91,7 @@ def _emit_spike_time_core(
     Returns:
         Domain-clamped spike-time tensor.
     """
-    if not training or noise_std <= 0.0:
+    if noise_std <= 0.0:
         return domain.clamp(input_value)
 
     span = float(domain.range)
@@ -114,7 +113,6 @@ def emit_spike_time(
     *,
     noise_std: float = 0.0,
     noise_kind: str = "gaussian",
-    training: bool = True,
 ) -> Tensor:
     """Checked wrapper for spike-time noise emission.
 
@@ -125,28 +123,53 @@ def emit_spike_time(
         domain,
         noise_std=noise_std,
         noise_kind=noise_kind,
-        training=training,
     )
 
+
+@dataclass
+class NoiseConfig:
+    """Global configuration for spike-time noise injection."""
+    std: float = 0.0
+    kind: str = "gaussian"
+    eval_mode: bool = False
+
+_GLOBAL_NOISE_CONFIG = NoiseConfig()
+
+def set_spike_time_noise(std: float, kind: str = "gaussian", eval_mode: bool = False):
+    """Register global spike-time noise parameters."""
+    global _GLOBAL_NOISE_CONFIG
+    _GLOBAL_NOISE_CONFIG.std = std
+    _GLOBAL_NOISE_CONFIG.kind = kind
+    _GLOBAL_NOISE_CONFIG.eval_mode = eval_mode
+
+def get_spike_time_noise() -> NoiseConfig:
+    """Retrieve global spike-time noise parameters."""
+    return _GLOBAL_NOISE_CONFIG
 
 def inject_spike_time_noise[**P, OutT: OpenBounds](func: Callable[P, tuple[Tensor, OutT]]) -> Callable[P, tuple[Tensor, OutT]]:
     """Decorator that injects optional noise into spike-time outputs.
 
-    The wrapped operator must return `(tensor, domain)`. Noise controls are
-    expected in kwargs and default to disabled:
-      - noise_std: float = 0.0
-      - noise_kind: str = "gaussian"
-      - training: bool = True
-      - noise_eval: bool = False
+    Noise is controlled either by explicit kwargs or by the global noise configuration.
+    If noise_std is not provided in kwargs, the global registration is used.
+
+    Expected kwargs:
+      - noise_std: float (optional)
+      - noise_kind: str (optional)
+      - training: bool (default=True)
+      - noise_eval: bool (optional)
     """
 
     @wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> tuple[Tensor, OutT]:
         output, out_domain = func(*args, **kwargs)
-        noise_std_raw = kwargs.get("noise_std", 0.0)
-        noise_kind_raw = kwargs.get("noise_kind", "gaussian")
+        
+        global_cfg = get_spike_time_noise()
+        
+        # Priority: explicit kwarg > global config
+        noise_std_raw = kwargs.get("noise_std", global_cfg.std)
+        noise_kind_raw = kwargs.get("noise_kind", global_cfg.kind)
         training_raw = kwargs.get("training", True)
-        noise_eval_raw = kwargs.get("noise_eval", False)
+        noise_eval_raw = kwargs.get("noise_eval", global_cfg.eval_mode)
 
         noise_std = float(noise_std_raw) if isinstance(noise_std_raw, (int, float)) else 0.0
         noise_kind = cast(str, noise_kind_raw)
@@ -158,8 +181,7 @@ def inject_spike_time_noise[**P, OutT: OpenBounds](func: Callable[P, tuple[Tenso
             output,
             out_domain,
             noise_std=noise_std,
-            noise_kind=noise_kind,
-            training=training or noise_eval,
+            noise_kind=noise_kind
         )
         return output, out_domain
 

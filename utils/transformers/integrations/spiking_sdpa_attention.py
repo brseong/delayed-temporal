@@ -42,7 +42,6 @@ def use_gqa_in_sdpa(attention_mask: torch.Tensor | None, key: torch.Tensor) -> b
 
 def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
     is_causal: bool = False, enable_gqa=False, tau_m=1.0, theta=10.0,
-    spike_time_noise_std=0.0, spike_time_noise_kind="gaussian", spike_time_noise_eval=False,
     training=False) -> torch.Tensor:
 
     L, S = query.size(-2), key.size(-2)
@@ -113,10 +112,7 @@ def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, drop
     t_v, domain_tv = neg_identity_transform(
         value_clamped,
         PotentialBounds(-theta, theta),
-        noise_std=float(spike_time_noise_std),
-        noise_kind=str(spike_time_noise_kind),
         training=bool(training),
-        noise_eval=bool(spike_time_noise_eval),
     )
 
     # softmin 출력은 이론상 [0,1]이지만 float 오차로 미소 초과 가능 → clamp
@@ -191,9 +187,6 @@ def spiking_sdpa_attention_forward(
         is_causal=is_causal_flag,
         tau_m=kwargs.get("tau_m", 1.0),
         theta=kwargs.get("theta", 10.0),
-        spike_time_noise_std=kwargs.get("spike_time_noise_std", 0.0),
-        spike_time_noise_kind=kwargs.get("spike_time_noise_kind", "gaussian"),
-        spike_time_noise_eval=kwargs.get("spike_time_noise_eval", False),
         training=module.training,
         **sdpa_kwargs,
     )
@@ -201,3 +194,4 @@ def spiking_sdpa_attention_forward(
     attn_output = attn_output.transpose(1, 2).contiguous()
 
     return attn_output, None
+

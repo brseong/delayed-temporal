@@ -39,8 +39,6 @@ def neg_linear_transform(
     range = domain.max - domain.min
     return window_length * (1 - (input_value - domain.min) / range).clamp(min=0.0, max=window_length), TimeBounds(0.0, window_length)
 
-@inject_spike_time_noise
-@check_domain
 def neg_identity_transform(
     input_value: Float[torch.Tensor, "*batch dims"],
     domain: PotentialBounds,

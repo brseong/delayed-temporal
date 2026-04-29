@@ -1,8 +1,8 @@
 #!/bin/bash
 trap 'kill -- -$$' SIGINT SIGTERM
 
-indices=(0 1 2 3)
-cuda_devices=(4 5 6 7)
+indices=(0 1 2)
+cuda_devices=(0 1 2 3 4 5 6 7)
 source ./venv/bin/activate
 device="cuda"
 
@@ -17,16 +17,28 @@ ln_flags=(
     ""
 )
 flags=(
-    "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 1e-3"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 5e-3"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 1e-2"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 5e-2"
+    # "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 1e-5"
+    # "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 5e-5"
+    "--no-spiking-layernorm --no-spiking-mlp --spiking-attention --noise-std 1e-4"
+    "--no-spiking-layernorm --spiking-mlp --no-spiking-attention --noise-std 1e-4"
+    "--spiking-layernorm --no-spiking-mlp --no-spiking-attention --noise-std 1e-4"
+    # "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 5e-4"
+    # "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 1e-3"
+    # "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 5e-3"
+    # "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 1e-2"
+    # "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 5e-2"
 )
 expr_names=(
-    "std_1e-3"
-    "std_5e-3"
-    "std_1e-2"
-    "std_5e-2"
+    # "std_1e-5"
+    # "std_5e-5"
+    "std_1e-4"
+    "std_1e-4"
+    "std_1e-4"
+    # "std_5e-4"
+    # "std_1e-3"
+    # "std_5e-3"
+    # "std_1e-2"
+    # "std_5e-2"
 )
 
 for index in "${indices[@]}"; do

@@ -1,8 +1,8 @@
 #!/bin/bash
 trap 'kill -- -$$' SIGINT SIGTERM
 
-indices=(0 1 2 3)
-cuda_devices=(0 1 2 3)
+indices=(0)
+cuda_devices=(1 3 4 5)
 source ./venv/bin/activate
 device="cuda"
 
@@ -17,16 +17,16 @@ ln_flags=(
     ""
 )
 flags=(
+    "--spiking-layernorm --spiking-mlp --spiking-attention"
     "--no-spiking-layernorm --no-spiking-mlp --spiking-attention"
     "--no-spiking-layernorm --spiking-mlp --no-spiking-attention"
     "--spiking-layernorm --no-spiking-mlp --no-spiking-attention"
-    "--spiking-layernorm --spiking-mlp --spiking-attention"
 )
 expr_names=(
+    "full-snn"
     "attn-only"
     "mlp-only"
     "ln-only"
-    "full-snn"
 )
 
 for index in "${indices[@]}"; do

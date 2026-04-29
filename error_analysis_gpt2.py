@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Any, Literal, cast
-
+import math
 import argparse
 import torch
 import wandb
@@ -8,38 +8,25 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from datasets import load_dataset
-from transformers import AttentionInterface, AutoModelForSequenceClassification, AutoTokenizer
-from utils.transformers.models.spiking_bert.configuration_bert import BertConfig
-from utils.transformers.models.spiking_bert.modeling_spiking_bert import BertForSequenceClassification, SpikingLayerNorm
+from transformers import AttentionInterface, AutoModelForCausalLM, AutoTokenizer
+from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import GPT2LMHeadModel
+from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
+from utils.transformers.models.spiking_ops import SpikingLayerNorm
 from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
 from utils.transforms.types import Potential, set_spike_time_noise
-import evaluate
 from tqdm import tqdm
 
-_TB_LOG_BATCHES = 10  # 처음 N 배치에서만 히스토그램 로그
+_TB_LOG_BATCHES = 10
+
 AttentionInterface.register("spiking_sdpa", spiking_sdpa_attention_forward)
 
 DATASET_PRESETS = {
-    "sst2": {
-        "dataset_name": "glue",
-        "dataset_config_name": "sst2",
-        "dataset_split": "validation",
-        "text_column": "sentence",
-        "model_id": "textattack/bert-base-uncased-SST-2",
-    },
-    "agnews": {
-        "dataset_name": "ag_news",
-        "dataset_config_name": None,
+    "wikitext2": {
+        "dataset_name": "wikitext",
+        "dataset_config_name": "wikitext-2-raw-v1",
         "dataset_split": "test",
         "text_column": "text",
-        "model_id": "textattack/bert-base-uncased-ag-news",
-    },
-    "imdb": {
-        "dataset_name": "imdb",
-        "dataset_config_name": None,
-        "dataset_split": "test",
-        "text_column": "text",
-        "model_id": "textattack/bert-base-uncased-imdb",
+        "model_id": "neulab/gpt2-finetuned-wikitext103",
     },
 }
 
@@ -47,7 +34,7 @@ DATASET_PRESETS = {
 class Arguments:
     experiment_name: str
     model_backend: Literal["hf", "spiking"]
-    task: Literal["sst2", "agnews", "imdb"]
+    task: Literal["wikitext2"]
     model_id: str
     dataset_name: str | None
     dataset_config_name: str | None
@@ -62,19 +49,20 @@ class Arguments:
     spiking_ln_log: bool
     spiking_ln_expdiff: bool
     spiking_mlp: bool
-    activation: Literal["relu", "gelu"]
+    activation: str
     theta: float
+    tau_s: float
     spike_time_noise_std: float
     spike_time_noise_kind: Literal["gaussian", "uniform"]
     spike_time_noise_eval: bool
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Evaluate Hugging Face BERT on SST-2, AG News, or IMDB.")
-    parser.add_argument("--experiment_name", type=str, default="bert_eval",
+    parser = argparse.ArgumentParser(description="Evaluate GPT-2 on WikiText-2.")
+    parser.add_argument("--experiment_name", type=str, default="gpt2_eval",
                         help="Name of the experiment for logging purposes.")
     parser.add_argument("--model_backend", type=str, choices=["hf", "spiking"], default="hf",
-                        help="Model backend to use (hf: vanilla HF BERT, spiking: spiking_bert class).")
-    parser.add_argument("--task", type=str, choices=["sst2", "agnews", "imdb"], default="sst2",
+                        help="Model backend to use (hf: vanilla HF GPT-2, spiking: spiking_gpt2 class).")
+    parser.add_argument("--task", type=str, choices=["wikitext2"], default="wikitext2",
                         help="Preset task to evaluate. Sets dataset, split, and default model.")
     parser.add_argument("--model_id", type=str, default=None,
                         help="Optional Hugging Face model ID. If omitted, task preset default is used.")
@@ -103,11 +91,13 @@ def parse_arguments():
     parser.add_argument("--spiking-ln-expdiff", action=argparse.BooleanOptionalAction, default=True,
                         help="[SpikingLayerNorm] Stage 3: use ψ_ED for normalisation.")
     parser.add_argument("--spiking-mlp", action=argparse.BooleanOptionalAction, default=True,
-                        help="Use spiking MLP when --model_backend spiking is selected.")
-    parser.add_argument("--activation", type=str, choices=["relu", "gelu"], default="gelu",
-                        help="Activation function used by the spiking backend config.")
+                        help="Use SpikingConv1D in MLP layers when --model_backend spiking is selected.")
+    parser.add_argument("--activation", type=str, default="gelu_new",
+                        help="Activation function for the spiking backend (default: gelu_new).")
     parser.add_argument("--theta", type=float, default=100.0,
                         help="Domain bound theta used by spiking backend modules.")
+    parser.add_argument("--tau-s", type=float, default=1.0,
+                        help="Spike-time constant tau_s used by SpikingLayerNorm.")
     parser.add_argument("--spike_time_noise_std", type=float, default=0.0,
                         help="Relative std for spike-time jitter against time-domain range.")
     parser.add_argument("--spike_time_noise_kind", type=str, choices=["gaussian", "uniform"], default="gaussian",
@@ -142,23 +132,23 @@ def parse_arguments():
         spiking_mlp=args.spiking_mlp,
         activation=args.activation,
         theta=args.theta,
+        tau_s=args.tau_s,
         spike_time_noise_std=args.spike_time_noise_std,
         spike_time_noise_kind=args.spike_time_noise_kind,
         spike_time_noise_eval=args.spike_time_noise_eval,
     )
 
-
 def infer_text_column(column_names: list[str], preferred: str | None = None) -> str:
     if preferred is not None and preferred in column_names:
         return preferred
 
-    for candidate in ("sentence", "text", "content", "review"):
+    for candidate in ("text", "content", "sentence"):
         if candidate in column_names:
             return candidate
 
     raise ValueError(f"No supported text column found in dataset columns: {column_names}")
 
-def evaluate_bert_model(args:Arguments):
+def evaluate_gpt2_model(args: Arguments):
     model_backend = args.model_backend
     model_id = cast(str, args.model_id)
     dataset_name = cast(str | None, args.dataset_name)
@@ -168,15 +158,15 @@ def evaluate_bert_model(args:Arguments):
     batch_size = args.batch_size
     max_eval_batches = args.max_eval_batches
     device_str = args.device
-    
+
     torch_device = torch.device(device_str)
-    
+
     cfg = vars(args)
     effective_attn_impl = "eager"
     if model_backend == "spiking" and torch_device.type != "cpu" and args.spiking_attention:
         effective_attn_impl = "spiking_sdpa"
     cfg["attn_impl"] = effective_attn_impl
-    wandb.init(entity="CIDA", project="bert-evaluation", config=cfg, name=args.experiment_name)
+    wandb.init(entity="CIDA", project="gpt2-evaluation", config=cfg, name=args.experiment_name)
     print(f"Using device: {torch_device}")
     print(f"Model backend: {model_backend}")
     if model_backend == "spiking":
@@ -185,7 +175,7 @@ def evaluate_bert_model(args:Arguments):
             f"ln:{args.spiking_layernorm}, attn:{args.spiking_attention}, "
             f"mul:{args.spiking_ln_mul}, log:{args.spiking_ln_log}, "
             f"expdiff:{args.spiking_ln_expdiff}, mlp:{args.spiking_mlp}, "
-            f"act:{args.activation}, theta:{args.theta}, "
+            f"act:{args.activation}, theta:{args.theta}, tau_s:{args.tau_s}, "
             f"time_noise_std:{args.spike_time_noise_std}, "
             f"time_noise_kind:{args.spike_time_noise_kind}, "
             f"time_noise_eval:{args.spike_time_noise_eval}"
@@ -203,12 +193,15 @@ def evaluate_bert_model(args:Arguments):
         dataset = load_dataset(dataset_name, split=dataset_split)
     else:
         dataset = load_dataset(dataset_name, dataset_config_name, split=dataset_split)
+
+    dataset = dataset.filter(lambda x: len(x["text"].strip()) > 0)
+
     preferred_text_column = DATASET_PRESETS.get(args.task, {}).get("text_column")
     text_column = infer_text_column(dataset.column_names, preferred=preferred_text_column)
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-    metric_tot = evaluate.load("accuracy")
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     def tokenize_batch(examples):
         tokenized = tokenizer(
@@ -217,7 +210,14 @@ def evaluate_bert_model(args:Arguments):
             truncation=True,
             max_length=max_length,
         )
-        tokenized["labels"] = examples["label"]
+        labels = []
+        for i in range(len(tokenized["input_ids"])):
+            label = [
+                -100 if mask == 0 else token
+                for mask, token in zip(tokenized["attention_mask"][i], tokenized["input_ids"][i])
+            ]
+            labels.append(label)
+        tokenized["labels"] = labels
         return tokenized
 
     processed_dataset = dataset.map(tokenize_batch, batched=True, remove_columns=dataset.column_names)
@@ -228,17 +228,19 @@ def evaluate_bert_model(args:Arguments):
     print(f"Loading model: {model_id}...")
     model: nn.Module
     if model_backend == "hf":
-        model = AutoModelForSequenceClassification.from_pretrained(model_id)
+        model = AutoModelForCausalLM.from_pretrained(model_id)
     else:
-        config = BertConfig.from_pretrained(model_id)
+        config = GPT2Config.from_pretrained(model_id)
         config.use_spiking_layernorm = args.spiking_layernorm
         config.spiking_ln_mul = args.spiking_ln_mul
         config.spiking_ln_log = args.spiking_ln_log
         config.spiking_ln_expdiff = args.spiking_ln_expdiff
         config.use_spiking_mlp = args.spiking_mlp
-        config.hidden_act = args.activation
+        config.activation_function = args.activation
         config.theta = args.theta
-        model = BertForSequenceClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl)
+        config.tau_s = args.tau_s
+        model = GPT2LMHeadModel.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl)
+
     if torch_device.type == "cuda":
         model = nn.Module.cuda(model)
     else:
@@ -250,7 +252,7 @@ def evaluate_bert_model(args:Arguments):
     hooks = []
 
     def make_ln_hook(tag):
-        def hook_fn(module, inp, out):
+        def hook_fn(_module, inp, out):
             if log_step[0] < _TB_LOG_BATCHES:
                 inp_val = inp[0].value if isinstance(inp[0], Potential) else inp[0]
                 out_val = out.value if isinstance(out, Potential) else out
@@ -264,21 +266,25 @@ def evaluate_bert_model(args:Arguments):
 
     print("Starting evaluation...")
 
+    total_loss = 0.0
+    total_steps = 0
+
     for batch in tqdm(dataloader):
         input_ids = batch["input_ids"].to(torch_device)
         attention_mask = batch["attention_mask"].to(torch_device)
         labels = batch["labels"].to(torch_device)
 
         with torch.no_grad():
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+
+        loss = outputs.loss
+
+        if not torch.isnan(loss):
+            total_loss += loss.item()
+            total_steps += 1
+            wandb.log({"Batch Loss": loss.item(), "Batch Perplexity": math.exp(min(loss.item(), 20.0))})
 
         log_step[0] += 1
-
-        predictions = torch.argmax(outputs.logits, dim=-1)
-
-        metric_tot.add_batch(predictions=predictions, references=labels)
-        wandb.log({"Batch Accuracy": (predictions == labels).float().mean().item()})
-
         if max_eval_batches > 0 and log_step[0] >= max_eval_batches:
             break
 
@@ -286,14 +292,17 @@ def evaluate_bert_model(args:Arguments):
         h.remove()
     tb_writer.close()
 
-    final_score = cast(dict[str, float], metric_tot.compute())
+    avg_loss = total_loss / total_steps if total_steps > 0 else float("inf")
+    perplexity = math.exp(avg_loss) if avg_loss < float("inf") else float("inf")
+
     print("-" * 30)
     print(f"Evaluation Results for {model_id}:")
-    print(f"Accuracy: {final_score['accuracy']:.4f}")
-    wandb.log({"Final Accuracy": final_score["accuracy"]})
+    print(f"Average Loss: {avg_loss:.4f}")
+    print(f"Perplexity: {perplexity:.4f}")
+    wandb.log({"Final Average Loss": avg_loss, "Final Perplexity": perplexity})
     print("-" * 30)
     wandb.finish()
 
 if __name__ == "__main__":
     args = parse_arguments()
-    evaluate_bert_model(args)
+    evaluate_gpt2_model(args)

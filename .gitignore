@@ -207,14 +207,14 @@ marimo/_lsp/
 __marimo__/
 
 
-wandb/
-temp.ipynb
-models/
-data/
-logs/
-runs/
-src/
-venv/
-error_histogram.png
-tex/
-TTFSFormer/
+/wandb/
+/temp.ipynb
+/models/
+/data/
+/logs/
+/runs/
+/src/
+/venv/
+/error_histogram.png
+/tex/
+/TTFSFormer/

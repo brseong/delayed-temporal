@@ -33,23 +33,23 @@ case "${task}" in
 esac
 
 expr_names=(
-    "spiking_attn"
-    "sln"
-    "smlp"
+    # "spiking_attn"
+    # "sln"
+    # "smlp"
     "all"
-    "control"
+    # "control"
 )
 
 # Ablation flags
 flags=(
-    "--spiking-attention --no-spiking-layernorm --no-spiking-mlp" # spiking_attn
-    "--no-spiking-attention --spiking-layernorm --no-spiking-mlp" # sln
-    "--no-spiking-attention --no-spiking-layernorm --spiking-mlp" # smlp
+    # "--spiking-attention --no-spiking-layernorm --no-spiking-mlp" # spiking_attn
+    # "--no-spiking-attention --spiking-layernorm --no-spiking-mlp" # sln
+    # "--no-spiking-attention --no-spiking-layernorm --spiking-mlp" # smlp
     "--spiking-attention --spiking-layernorm --spiking-mlp"       # all
-    "--no-spiking-attention --no-spiking-layernorm --no-spiking-mlp --activation gelu" # control (ANN only)
+    # "--no-spiking-attention --no-spiking-layernorm --no-spiking-mlp --activation gelu" # control (ANN only)
 )
 
-cuda_devices=(3 4 5 6 7) # Adjust if you want to run on different GPUs
+cuda_devices=(0) # Adjust if you want to run on different GPUs
 
 for index in "${!expr_names[@]}"; do
     echo "Running error analysis: ${expr_names[$index]}"

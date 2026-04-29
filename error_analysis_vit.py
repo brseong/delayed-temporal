@@ -10,7 +10,7 @@ from datasets import load_dataset
 from transformers import AttentionInterface
 from transformers.models.vit import ViTImageProcessor
 from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTForImageClassification, SpikingLayerNorm
-from utils.transforms.types import Potential
+from utils.transforms.types import Potential, set_spike_time_noise
 from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
 from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
 import evaluate
@@ -98,10 +98,10 @@ def evaluate_vit_model(args:Arguments):
     dataset_id = args.dataset_id
     batch_size = args.batch_size
     device_str = args.device
-    
+
     # GPU 사용 가능 여부 확인
     device = torch.device(device_str)
-    
+
     cfg = vars(args)
     cfg["attn_impl"] = "spiking_sdpa" if args.spiking_attention else "eager"
     wandb.init(entity="CIDA", project="vit-evaluation", config=cfg, name=args.experiment_name)
@@ -111,13 +111,17 @@ def evaluate_vit_model(args:Arguments):
         print(f"  LN stages — mul: {args.spiking_ln_mul}, log: {args.spiking_ln_log}, expdiff: {args.spiking_ln_expdiff}")
     print(f"Spiking MLP: {args.spiking_mlp}")
 
+    if args.noise_std > 0:
+        print(f"Applying global spike-time noise: {args.noise_std}")
+        set_spike_time_noise(std=args.noise_std, eval_mode=True)
+
     # ---------------------------------------------------------
     # 2. 데이터셋 및 전처리 도구 로드
     # ---------------------------------------------------------
     # 데이터셋 로드 (평가용이므로 'test' split 사용)
     print(f"Loading dataset: {dataset_id}...")
     dataset = load_dataset(dataset_id, split="test")
-    
+
     # 모델에 맞는 Feature Extractor(Image Processor) 로드
     processor = ViTImageProcessor.from_pretrained(model_id)
 
@@ -131,10 +135,10 @@ def evaluate_vit_model(args:Arguments):
     def transform(examples):
         # 이미지 데이터를 RGB로 변환 (흑백 이미지가 섞여 있을 경우 대비)
         images = [x.convert("RGB") for x in examples["img"]]
-        
+
         # ViT 입력 형태에 맞게 리사이즈 및 정규화
         inputs = processor(images, return_tensors="pt")
-        
+
         # 'pixel_values'는 모델의 입력, 'labels'는 정답
         inputs["labels"] = examples["label"]
         return inputs
@@ -160,7 +164,6 @@ def evaluate_vit_model(args:Arguments):
         use_spiking_mlp=args.spiking_mlp,
         hidden_act=args.activation,
         theta=args.theta,
-        noise_std=args.noise_std,
     )
     model = ViTForImageClassification.from_pretrained(model_id, config=config, attn_implementation=attn_impl)
     # model = DataParallel(model, device_ids=list(range(torch.cuda.device_count())))  # 모델 병렬화
