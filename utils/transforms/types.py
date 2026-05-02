@@ -105,27 +105,6 @@ def _emit_spike_time_core(
     output = input_value + noise
     return domain.clamp(output)
 
-
-@check_domain
-def emit_spike_time(
-    input_value: Tensor,
-    domain: OpenBounds,
-    *,
-    noise_std: float = 0.0,
-    noise_kind: str = "gaussian",
-) -> Tensor:
-    """Checked wrapper for spike-time noise emission.
-
-    This path keeps input-domain validation for direct calls.
-    """
-    return _emit_spike_time_core(
-        input_value,
-        domain,
-        noise_std=noise_std,
-        noise_kind=noise_kind,
-    )
-
-
 @dataclass
 class NoiseConfig:
     """Global configuration for spike-time noise injection."""

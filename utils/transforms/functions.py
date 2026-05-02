@@ -73,11 +73,11 @@ def exponential_function(
     # 1. f_NP (Negative Potential operator): V -> t_out = theta - V
     t_out, tb_out = neg_identity_transform(input_value, domain)
     
-    # 2. f_NE (Negative Exp-Temporal operator): t_out -> exp(-(t-t_out)/tau_m)
+    # 2. f_NE (Negative Exp-Temporal operator): t_out -> exp(-(t_max-t_out)/tau_m)
     # This results in exp(-V/tau_m) * constant
     v_out, domain_v_out = normalized_exp_operator(t_out, tb_out, tau_m=tau_m)
-    # exp(-(t-t_out)/tau_m) = exp(-(t-theta)/tau_m) * exp(-V/tau_m)
-    # Thus recover exp(V/tau_m) by multiplying with exp((t-theta)/tau_m) = exp(-theta/tau_m) * exp(t/tau_m)
+    # exp(-(t_max-t_out)/tau_m) = exp(-(t_max-theta)/tau_m) * exp(-V/tau_m)
+    # Thus recover exp(-V/tau_m) by multiplying with exp((t_max-theta)/tau_m) = exp(-theta/tau_m) * exp(t_max/tau_m)
     scaling_factor = exp(-domain.max / tau_m)
     return scaling_factor * v_out, PotentialBounds(domain_v_out.min * scaling_factor, domain_v_out.max * scaling_factor)
 

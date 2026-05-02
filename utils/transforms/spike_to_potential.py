@@ -29,7 +29,7 @@ def exp_operator(
     Returns:
         tuple[Float[torch.Tensor, "*batch dims"], PotentialBounds]: A tuple containing the transformed spike times and the potential bounds of the output.
         """
-    return torch.exp(-(domain.max - input_value) / tau_m), PotentialBounds(exp(-domain.max / tau_m), exp(-domain.min / tau_m))
+    return torch.exp(-(domain.max - input_value) / tau_m), PotentialBounds(exp(-(domain.max - domain.min) / tau_m), 1.0)
 
 @check_domain
 def normalized_exp_operator(
@@ -51,9 +51,15 @@ def normalized_exp_operator(
     Raises:
         NotImplementedError: wave approximation is not implemented yet.
         """
+    # result = exp(-(domain.max - input_value) / tau_m)
+    # = exp(-domain.max / tau_m) * exp(input_value / tau_m)
+    # scaling_factor = exp(domain.max / tau_m)
     result, domain_result = exp_operator(input_value, domain, tau_m=tau_m)
     scaling_factor = exp(domain.max / tau_m)
-    return scaling_factor * result, PotentialBounds(domain_result.min * scaling_factor, domain_result.max * scaling_factor)  
+    # out = scaling_factor * result
+    # = exp(domain.max / tau_m) * exp(-domain.max / tau_m) * exp(input_value / tau_m)
+    # = exp(input_value / tau_m)
+    return scaling_factor * result, PotentialBounds(domain_result.min * scaling_factor, domain_result.max * scaling_factor)
 
 @check_domain
 def exponential_difference_operator(

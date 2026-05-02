@@ -37,7 +37,7 @@ def neg_linear_transform(
         tuple[Float[torch.Tensor, "*batch dims"], TimeBounds]: A tuple containing the transformed spike times and the time bounds of the output.
     """
     range = domain.max - domain.min
-    return window_length * (1 - (input_value - domain.min) / range).clamp(min=0.0, max=window_length), TimeBounds(0.0, window_length)
+    return window_length * (1 - (input_value - domain.min) / range).clamp(min=0.0, max=1.0), TimeBounds(0.0, window_length)
 
 def neg_identity_transform(
     input_value: Float[torch.Tensor, "*batch dims"],

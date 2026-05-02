@@ -123,8 +123,6 @@ class SpikingLinear(nn.Linear):
         domain_x = PotentialBounds(-self.theta, self.theta)
         t_A, domain_t_A = neg_identity_transform(domain_x.clamp(x), domain_x)
         w_min, w_max = self.weight.min().item(), self.weight.max().item()
-        if w_min == w_max:
-            w_min, w_max = w_min - 1e-8, w_max + 1e-8
         domain_W: PotentialBounds = PotentialBounds(w_min, w_max)
         y_syn, domain_y_syn = pulse_width_modulation_operator(
             t_A.unsqueeze(-2), domain_t_A,
