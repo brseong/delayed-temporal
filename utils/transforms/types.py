@@ -17,9 +17,12 @@ class OpenBounds:
     def range(self) -> Number:
         return self.max - self.min
 
-    def clamp(self, value: Tensor) -> Tensor:
+    def clamp(self, value: Tensor, name: str | None = None) -> Tensor:
         """Clamp the input tensor to be within the valid range defined by the bounds."""
-        return value.clamp(self.min, self.max)
+        clamped = value.clamp(self.min, self.max)
+        if _CLAMP_LOG_ENABLED and _CURRENT_MODULE_NAME is not None:
+            _record_clamp_stats(_CURRENT_MODULE_NAME, name, value, clamped, self.min, self.max)
+        return clamped
     
 
 class PotentialBounds(OpenBounds): pass
@@ -27,6 +30,38 @@ class PotentialBounds(OpenBounds): pass
 class TimeBounds(OpenBounds): pass
 
 OutBoundsT = TypeVar("OutBoundsT", bound=OpenBounds)
+
+_CLAMP_LOG_ENABLED = False
+_CURRENT_MODULE_NAME = None
+_CLAMP_STATS = {} # (module_name, clamp_name) -> {'underflow': count, 'overflow': count, 'total': count}
+
+def set_clamp_log_enabled(enabled: bool):
+    global _CLAMP_LOG_ENABLED
+    _CLAMP_LOG_ENABLED = enabled
+
+def set_current_module_name(name: str | None):
+    global _CURRENT_MODULE_NAME
+    _CURRENT_MODULE_NAME = name
+
+def get_clamp_stats():
+    return _CLAMP_STATS
+
+def clear_clamp_stats():
+    global _CLAMP_STATS
+    _CLAMP_STATS = {}
+
+def _record_clamp_stats(module_name: str, clamp_name: str | None, original: Tensor, clamped: Tensor, min_val: Number, max_val: Number):
+    tag = (module_name, clamp_name or "unnamed")
+    if tag not in _CLAMP_STATS:
+        _CLAMP_STATS[tag] = {"underflow": 0, "overflow": 0, "total": 0}
+    
+    underflow = (original < min_val).sum().item()
+    overflow = (original > max_val).sum().item()
+    total = original.numel()
+    
+    _CLAMP_STATS[tag]["underflow"] += underflow
+    _CLAMP_STATS[tag]["overflow"] += overflow
+    _CLAMP_STATS[tag]["total"] += total
 
 class NeuralTransform[InT: OpenBounds, OutT: OpenBounds](Protocol):
     def __call__(self, input_value: Tensor, domain: InT, **kwargs) -> tuple[Tensor, OutT]: ...

@@ -9,11 +9,12 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from datasets import load_dataset
 from transformers import AttentionInterface, AutoModelForCausalLM, AutoTokenizer
-from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import GPT2LMHeadModel
+from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import GPT2LMHeadModel, SpikingConv1D
 from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
-from utils.transformers.models.spiking_ops import SpikingLayerNorm
+from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear
 from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
 from utils.transforms.types import Potential, set_spike_time_noise
+from utils.transforms import types
 from tqdm import tqdm
 
 _TB_LOG_BATCHES = 10
@@ -55,6 +56,7 @@ class Arguments:
     spike_time_noise_std: float
     spike_time_noise_kind: Literal["gaussian", "uniform"]
     spike_time_noise_eval: bool
+    collect_quantiles: bool
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Evaluate GPT-2 on WikiText-2.")
@@ -104,6 +106,8 @@ def parse_arguments():
                         help="Noise distribution for spike-time jitter.")
     parser.add_argument("--spike_time_noise_eval", action=argparse.BooleanOptionalAction, default=False,
                         help="Apply spike-time jitter in eval mode as well.")
+    parser.add_argument("--collect-quantiles", action="store_true",
+                        help="Collect and print 99.9%% quantiles of absolute activations.")
 
     args = parser.parse_args()
     preset = DATASET_PRESETS[args.task]
@@ -136,6 +140,7 @@ def parse_arguments():
         spike_time_noise_std=args.spike_time_noise_std,
         spike_time_noise_kind=args.spike_time_noise_kind,
         spike_time_noise_eval=args.spike_time_noise_eval,
+        collect_quantiles=args.collect_quantiles,
     )
 
 def infer_text_column(column_names: list[str], preferred: str | None = None) -> str:
@@ -260,9 +265,39 @@ def evaluate_gpt2_model(args: Arguments):
                 tb_writer.add_histogram(f"{tag}/output", out_val.detach().cpu().float(), log_step[0])
         return hook_fn
 
+    def make_clamp_hook(name):
+        def pre_hook(_module, _inp):
+            types.set_current_module_name(name)
+        def post_hook(_module, _inp, _out):
+            types.set_current_module_name(None)
+        return pre_hook, post_hook
+
     for name, module in model.named_modules():
         if isinstance(module, (nn.LayerNorm, SpikingLayerNorm)):
             hooks.append(module.register_forward_hook(make_ln_hook(name)))
+        
+        if isinstance(module, (SpikingLayerNorm, SpikingLinear, SpikingConv1D)):
+            pre_h, post_h = make_clamp_hook(name)
+            hooks.append(module.register_forward_pre_hook(pre_h))
+            hooks.append(module.register_forward_hook(post_h))
+
+    quantiles = []
+    def make_quantile_hook():
+        def hook_fn(module, inp, out):
+            val = out.value if isinstance(out, Potential) else out
+            if isinstance(val, torch.Tensor):
+                q = torch.quantile(val.detach().abs().float(), 0.999).item()
+                quantiles.append(q)
+        return hook_fn
+
+    if args.collect_quantiles:
+        from transformers.pytorch_utils import Conv1D
+        for name, module in model.named_modules():
+            if isinstance(module, (nn.Linear, nn.LayerNorm, nn.Embedding, SpikingLayerNorm, SpikingLinear, SpikingConv1D, Conv1D)):
+                hooks.append(module.register_forward_hook(make_quantile_hook()))
+
+    if model_backend == "spiking":
+        types.set_clamp_log_enabled(True)
 
     print("Starting evaluation...")
 
@@ -274,8 +309,20 @@ def evaluate_gpt2_model(args: Arguments):
         attention_mask = batch["attention_mask"].to(torch_device)
         labels = batch["labels"].to(torch_device)
 
+        types.clear_clamp_stats()
         with torch.no_grad():
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+
+        # Log clamp stats
+        clamp_stats = types.get_clamp_stats()
+        for (module_name, clamp_name), stats in clamp_stats.items():
+            total = stats["total"]
+            if total > 0:
+                underflow_ratio = stats["underflow"] / total
+                overflow_ratio = stats["overflow"] / total
+                tb_writer.add_scalar(f"clamp/{module_name}/{clamp_name}/underflow", underflow_ratio, log_step[0])
+                tb_writer.add_scalar(f"clamp/{module_name}/{clamp_name}/overflow", overflow_ratio, log_step[0])
+                tb_writer.add_scalar(f"clamp/{module_name}/{clamp_name}/total_clamped", underflow_ratio + overflow_ratio, log_step[0])
 
         loss = outputs.loss
 
@@ -291,6 +338,13 @@ def evaluate_gpt2_model(args: Arguments):
     for h in hooks:
         h.remove()
     tb_writer.close()
+    types.set_clamp_log_enabled(False)
+
+    if args.collect_quantiles and quantiles:
+        max_q = max(quantiles)
+        print(f"RESULT_QUANTILE: {max_q}")
+        with open(f"quantile_{args.task}.txt", "w") as f:
+            f.write(str(max_q))
 
     avg_loss = total_loss / total_steps if total_steps > 0 else float("inf")
     perplexity = math.exp(avg_loss) if avg_loss < float("inf") else float("inf")

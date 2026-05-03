@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.nn.parallel import DataParallel
 from datasets import load_dataset
-from transformers import AttentionInterface
+from transformers import AttentionInterface, AutoModelForImageClassification
 from transformers.models.vit import ViTImageProcessor
 from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTForImageClassification, SpikingLayerNorm
 from utils.transforms.types import Potential, set_spike_time_noise
@@ -25,10 +25,12 @@ AttentionInterface.register("spiking_sdpa", spiking_sdpa_attention_forward)
 @dataclass
 class Arguments:
     experiment_name: str
+    model_backend: Literal["hf", "spiking"]
     model_id: str
     dataset_id: str
     batch_size: int
     device: Literal["cuda", "cpu"]
+    max_eval_batches: int
     spiking_layernorm: bool
     spiking_attention: bool
     spiking_ln_mul: bool
@@ -40,17 +42,22 @@ class Arguments:
     noise_std: float
     weight_noise_std: float
     bias_noise_std: float
+    collect_quantiles: bool
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Evaluate ViT model with Spiking SDPA attention.")
     parser.add_argument("--experiment_name", type=str,
                         help="Name of the experiment for logging purposes.")
+    parser.add_argument("--model_backend", type=str, choices=["hf", "spiking"], default="hf",
+                        help="Model backend to use (hf: vanilla HF ViT, spiking: spiking_vit class).")
     parser.add_argument("--model_id", type=str, default="MF21377197/vit-small-patch16-224-finetuned-Cifar10",
                         help="Pretrained ViT model ID from Hugging Face.")
     parser.add_argument("--dataset_id", type=str, default="cifar10",
                         help="Dataset ID from Hugging Face datasets library.")
     parser.add_argument("--batch_size", type=int, default=32,
                         help="Batch size for evaluation.")
+    parser.add_argument("--max_eval_batches", type=int, default=0,
+                        help="If > 0, stop after this many evaluation batches for smoke testing.")
     parser.add_argument("--device", type=str, choices=["cuda", "cpu"], default="cuda",
                         help="Device to run the evaluation on (e.g., 'cuda' or 'cpu').")
     parser.add_argument("--spiking-layernorm", action=argparse.BooleanOptionalAction, default=True,
@@ -75,14 +82,18 @@ def parse_arguments():
                         help="Standard deviation of Gaussian noise to add to weights (default: 0.0).")
     parser.add_argument("--bias-noise-std", type=float, default=0.0,
                         help="Standard deviation of Gaussian noise to add to biases (default: 0.0).")
+    parser.add_argument("--collect-quantiles", action="store_true",
+                        help="Collect and print 99.9%% quantiles of absolute activations.")
 
     args = parser.parse_args()
     return Arguments(
         experiment_name=args.experiment_name,
+        model_backend=args.model_backend,
         model_id=args.model_id,
         dataset_id=args.dataset_id,
         batch_size=args.batch_size,
         device=args.device,
+        max_eval_batches=args.max_eval_batches,
         spiking_layernorm=args.spiking_layernorm,
         spiking_attention=args.spiking_attention,
         spiking_ln_mul=args.spiking_ln_mul,
@@ -94,6 +105,7 @@ def parse_arguments():
         noise_std=args.noise_std,
         weight_noise_std=args.weight_noise_std,
         bias_noise_std=args.bias_noise_std,
+        collect_quantiles=args.collect_quantiles,
     )
 
 DATASET_CONFIGS = {
@@ -119,6 +131,7 @@ def evaluate_vit_model(args:Arguments):
     # ---------------------------------------------------------
     # 1. 설정 (Configuration)
     # ---------------------------------------------------------
+    model_backend = args.model_backend
     model_id = args.model_id
     dataset_id = args.dataset_id
     batch_size = args.batch_size
@@ -133,18 +146,25 @@ def evaluate_vit_model(args:Arguments):
     device = torch.device(device_str)
 
     cfg = vars(args)
-    cfg["attn_impl"] = "spiking_sdpa" if args.spiking_attention else "eager"
+    effective_attn_impl = "eager"
+    if model_backend == "spiking" and device.type != "cpu" and args.spiking_attention:
+        effective_attn_impl = "spiking_sdpa"
+    cfg["attn_impl"] = effective_attn_impl
+
     wandb.init(entity="CIDA", project=f"vit-evaluation-{args.dataset_id}", config=cfg, name=args.experiment_name)
     print(f"Using device: {device}")
+    print(f"Model backend: {model_backend}")
     print(f"Model: {model_id}, Dataset: {dataset_id} ({split})")
-    print(f"Spiking LayerNorm: {args.spiking_layernorm}, Spiking Attention: {args.spiking_attention}")
-    if args.spiking_layernorm:
-        print(f"  LN stages — mul: {args.spiking_ln_mul}, log: {args.spiking_ln_log}, expdiff: {args.spiking_ln_expdiff}")
-    print(f"Spiking MLP: {args.spiking_mlp}")
+    
+    if model_backend == "spiking":
+        print(f"Spiking LayerNorm: {args.spiking_layernorm}, Spiking Attention: {args.spiking_attention}")
+        if args.spiking_layernorm:
+            print(f"  LN stages — mul: {args.spiking_ln_mul}, log: {args.spiking_ln_log}, expdiff: {args.spiking_ln_expdiff}")
+        print(f"Spiking MLP: {args.spiking_mlp}")
 
-    if args.noise_std > 0:
-        print(f"Applying global spike-time noise: {args.noise_std}")
-        set_spike_time_noise(std=args.noise_std, eval_mode=True)
+        if args.noise_std > 0:
+            print(f"Applying global spike-time noise: {args.noise_std}")
+            set_spike_time_noise(std=args.noise_std, eval_mode=True)
 
     # ---------------------------------------------------------
     # 2. 데이터셋 및 전처리 도구 로드
@@ -185,18 +205,20 @@ def evaluate_vit_model(args:Arguments):
     # 4. 모델 로드
     # ---------------------------------------------------------
     print(f"Loading model: {model_id}...")
-    attn_impl = "spiking_sdpa" if args.spiking_attention else "eager"
-    config = ViTConfig.from_pretrained(
-        model_id,
-        use_spiking_layernorm=args.spiking_layernorm,
-        spiking_ln_mul=args.spiking_ln_mul,
-        spiking_ln_log=args.spiking_ln_log,
-        spiking_ln_expdiff=args.spiking_ln_expdiff,
-        use_spiking_mlp=args.spiking_mlp,
-        hidden_act=args.activation,
-        theta=args.theta,
-    )
-    model = ViTForImageClassification.from_pretrained(model_id, config=config, attn_implementation=attn_impl)
+    if model_backend == "hf":
+        model = AutoModelForImageClassification.from_pretrained(model_id)
+    else:
+        config = ViTConfig.from_pretrained(
+            model_id,
+            use_spiking_layernorm=args.spiking_layernorm,
+            spiking_ln_mul=args.spiking_ln_mul,
+            spiking_ln_log=args.spiking_ln_log,
+            spiking_ln_expdiff=args.spiking_ln_expdiff,
+            use_spiking_mlp=args.spiking_mlp,
+            hidden_act=args.activation,
+            theta=args.theta,
+        )
+        model = ViTForImageClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl)
     # model = DataParallel(model, device_ids=list(range(torch.cuda.device_count())))  # 모델 병렬화
     
     apply_parameter_noise(model, args.weight_noise_std, args.bias_noise_std)
@@ -224,6 +246,24 @@ def evaluate_vit_model(args:Arguments):
         if isinstance(module, (nn.LayerNorm, SpikingLayerNorm)):
             hooks.append(module.register_forward_hook(make_ln_hook(name)))
 
+    quantiles = []
+    def make_quantile_hook():
+        def hook_fn(module, inp, out):
+            val = out.value if isinstance(out, Potential) else out
+            if isinstance(val, torch.Tensor):
+                val_flat = val.detach().abs().float().view(-1)
+                if val_flat.numel() > 16000000:
+                    step = val_flat.numel() // 16000000 + 1
+                    val_flat = val_flat[::step]
+                q = torch.quantile(val_flat, 0.999).item()
+                quantiles.append(q)
+        return hook_fn
+
+    if args.collect_quantiles:
+        for name, module in model.named_modules():
+            if isinstance(module, (nn.Linear, nn.LayerNorm, nn.Conv2d, SpikingLayerNorm)):
+                hooks.append(module.register_forward_hook(make_quantile_hook()))
+
     # ---------------------------------------------------------
     # 6. 평가 루프 (Evaluation Loop)
     # ---------------------------------------------------------
@@ -247,9 +287,18 @@ def evaluate_vit_model(args:Arguments):
         metric_tot.add_batch(predictions=predictions, references=labels)
         wandb.log({"Intermediate accuracy": metric_int.compute(predictions=predictions, references=labels)["accuracy"]})
 
+        if args.max_eval_batches > 0 and log_step[0] >= args.max_eval_batches:
+            break
+
     for h in hooks:
         h.remove()
     tb_writer.close()
+
+    if args.collect_quantiles and quantiles:
+        max_q = max(quantiles)
+        print(f"RESULT_QUANTILE: {max_q}")
+        with open(f"quantile_vit_{args.model_id.replace('/', '_')}.txt", "w") as f:
+            f.write(str(max_q))
 
     # ---------------------------------------------------------
     # 6. 최종 결과 계산 및 출력

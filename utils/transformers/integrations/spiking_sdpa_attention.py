@@ -66,8 +66,8 @@ def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, drop
 
     # Fixed domain for q, k: clamp inputs to [-θ, θ] so ψ_M spike times t_B = θ - k ≥ 0
     domain_qk = PotentialBounds(-theta, theta)
-    q_exp = domain_qk.clamp(query).unsqueeze(-2)   # (B,H,L,1,D)
-    k_exp = domain_qk.clamp(key).unsqueeze(-3)     # (B,H,1,S,D)
+    q_exp = domain_qk.clamp(query, name="query").unsqueeze(-2)   # (B,H,L,1,D)
+    k_exp = domain_qk.clamp(key, name="key").unsqueeze(-3)     # (B,H,1,S,D)
 
     # f_SDP(q,k) = ψ_M sum ≈ -(1/√d_k)·dot(q,k), broadcasted to (B,H,L,S)
     attn_score, _ = scaled_dot_product_function(q_exp, domain_qk, k_exp, domain_qk, theta)
@@ -84,7 +84,7 @@ def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, drop
     
     # Clamp the unmasked score range first.
     score_bound = PotentialBounds(-softmin_cap, softmin_cap)
-    attn_score = score_bound.clamp(attn_score)
+    attn_score = score_bound.clamp(attn_score, name="attn_score")
 
     # Hard overwrite: force masked scores to a fixed suppressing value.
     mask_fill = _MASK_VAL * tau_m
@@ -108,7 +108,7 @@ def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, drop
         attn_weight = torch.nn.functional.dropout(attn_weight, p=dropout_p)
 
     # Value 인코딩: φ_NP — 막 전위 → 스파이크 시각
-    value_clamped = PotentialBounds(-theta, theta).clamp(value)
+    value_clamped = PotentialBounds(-theta, theta).clamp(value, name="value")
     t_v, domain_tv = neg_identity_transform(
         value_clamped,
         PotentialBounds(-theta, theta),
@@ -194,4 +194,3 @@ def spiking_sdpa_attention_forward(
     attn_output = attn_output.transpose(1, 2).contiguous()
 
     return attn_output, None
-

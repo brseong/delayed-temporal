@@ -18,11 +18,13 @@ def multiplication_operator(
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Multiplication operator (f_M) - Special case of f_PWM"""
     domain_B = PotentialBounds(-theta, theta)
-    t_B, domain_t_B = neg_identity_transform(domain_B.clamp(B), domain_B)
+    # b -> t_b = \theta - b
+    t_B, domain_t_B = neg_identity_transform(domain_B.clamp(B, name="multiplication_B"), domain_B)
     
     # t_B bounds are [0, 2 * theta] since B is clamped to [-theta, theta]
     th_val = float(theta) if isinstance(theta, (int, float)) else float(theta.max())
     
+    # result = \int_{t_B}^{\theta} V dt = V * (\theta - t_B) = V * b
     return pulse_width_modulation_operator(
         t_A=t_B, 
         domain_t_A=domain_t_B, 
@@ -124,8 +126,8 @@ def division_function(
     Strictly formulated as composition of f_ED and f_NL according to paper.
     """
     # Clamp to avoid domain assertion errors from float precision
-    X = joint_domain.clamp(X)
-    Y = joint_domain.clamp(Y)
+    X = joint_domain.clamp(X, name="division_X")
+    Y = joint_domain.clamp(Y, name="division_Y")
     
     assert torch.all(X <= Y), "For division to be valid, each element of X must be less than or equal to the corresponding element of Y."
     
@@ -188,7 +190,7 @@ def gelu_approximation(
     
     # Step 4: f_M(v, div_out)
     
-    gelu_approx, gelu_domain = multiplication_operator(domain.clamp(input_value), domain, div_out, div_domain, theta=theta)
+    gelu_approx, gelu_domain = multiplication_operator(domain.clamp(input_value, name="gelu_x"), domain, div_out, div_domain, theta=theta)
     
     return gelu_approx, gelu_domain
 

@@ -57,8 +57,8 @@ class SpikingLayerNorm(nn.Module):
 
         x_err = x - x.mean(dim=-1, keepdim=True)
         domain_err: PotentialBounds = PotentialBounds(eps, theta - eps)
-        x_err_pos = domain_err.clamp(x_err)
-        x_err_neg = domain_err.clamp(-x_err)
+        x_err_pos = domain_err.clamp(x_err, name="x_err_pos")
+        x_err_neg = domain_err.clamp(-x_err, name="x_err_neg")
 
         if self.use_spiking_mul:
             M_pos, _ = multiplication_operator(x_err_pos, domain_err, x_err_pos, domain_err, theta)
@@ -69,7 +69,7 @@ class SpikingLayerNorm(nn.Module):
 
         var_x = var_x + eps
         domain_var: PotentialBounds = PotentialBounds(domain_err.min ** 2, domain_err.max ** 2)
-        var_x = domain_var.clamp(var_x)
+        var_x = domain_var.clamp(var_x, name="var_x")
 
         T0 = tau_s * math.log(domain_err.max / domain_err.min)
         if self.use_spiking_log:
@@ -121,7 +121,7 @@ class SpikingLinear(nn.Linear):
     def forward(self, input: Potential) -> Potential:
         x: torch.Tensor = input.value
         domain_x = PotentialBounds(-self.theta, self.theta)
-        t_A, domain_t_A = neg_identity_transform(domain_x.clamp(x), domain_x)
+        t_A, domain_t_A = neg_identity_transform(domain_x.clamp(x, name="linear_x"), domain_x)
         w_min, w_max = self.weight.min().item(), self.weight.max().item()
         domain_W: PotentialBounds = PotentialBounds(w_min, w_max)
         y_syn, domain_y_syn = pulse_width_modulation_operator(

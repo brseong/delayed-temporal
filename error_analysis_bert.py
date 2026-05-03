@@ -67,6 +67,7 @@ class Arguments:
     spike_time_noise_std: float
     spike_time_noise_kind: Literal["gaussian", "uniform"]
     spike_time_noise_eval: bool
+    collect_quantiles: bool
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Evaluate Hugging Face BERT on SST-2, AG News, or IMDB.")
@@ -114,6 +115,8 @@ def parse_arguments():
                         help="Noise distribution for spike-time jitter.")
     parser.add_argument("--spike_time_noise_eval", action=argparse.BooleanOptionalAction, default=False,
                         help="Apply spike-time jitter in eval mode as well.")
+    parser.add_argument("--collect-quantiles", action="store_true",
+                        help="Collect and print 99.9%% quantiles of absolute activations.")
 
     args = parser.parse_args()
     preset = DATASET_PRESETS[args.task]
@@ -145,6 +148,7 @@ def parse_arguments():
         spike_time_noise_std=args.spike_time_noise_std,
         spike_time_noise_kind=args.spike_time_noise_kind,
         spike_time_noise_eval=args.spike_time_noise_eval,
+        collect_quantiles=args.collect_quantiles,
     )
 
 
@@ -262,6 +266,20 @@ def evaluate_bert_model(args:Arguments):
         if isinstance(module, (nn.LayerNorm, SpikingLayerNorm)):
             hooks.append(module.register_forward_hook(make_ln_hook(name)))
 
+    quantiles = []
+    def make_quantile_hook():
+        def hook_fn(module, inp, out):
+            val = out.value if isinstance(out, Potential) else out
+            if isinstance(val, torch.Tensor):
+                q = torch.quantile(val.detach().abs().float(), 0.999).item()
+                quantiles.append(q)
+        return hook_fn
+
+    if args.collect_quantiles:
+        for name, module in model.named_modules():
+            if isinstance(module, (nn.Linear, nn.LayerNorm, nn.Embedding, SpikingLayerNorm)):
+                hooks.append(module.register_forward_hook(make_quantile_hook()))
+
     print("Starting evaluation...")
 
     for batch in tqdm(dataloader):
@@ -285,6 +303,12 @@ def evaluate_bert_model(args:Arguments):
     for h in hooks:
         h.remove()
     tb_writer.close()
+
+    if args.collect_quantiles and quantiles:
+        max_q = max(quantiles)
+        print(f"RESULT_QUANTILE: {max_q}")
+        with open(f"quantile_{args.task}.txt", "w") as f:
+            f.write(str(max_q))
 
     final_score = cast(dict[str, float], metric_tot.compute())
     print("-" * 30)

@@ -64,7 +64,7 @@ class SpikingConv1D(Conv1D):
     def forward(self, input: Potential) -> Potential:
         x: torch.Tensor = input.value
         domain_x = PotentialBounds(-self.theta, self.theta)
-        t_A, domain_t_A = neg_identity_transform(domain_x.clamp(x), domain_x)
+        t_A, domain_t_A = neg_identity_transform(domain_x.clamp(x, name="conv1d_x"), domain_x)
         w_min, w_max = self.weight.min().item(), self.weight.max().item()
         if w_min == w_max:
             w_min, w_max = w_min - 1e-8, w_max + 1e-8

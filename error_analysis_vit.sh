@@ -1,11 +1,12 @@
 #!/bin/bash
 trap 'kill -- -$$' SIGINT SIGTERM
 
-indices=(0 1 2)
-cuda_devices=(0 1 2 3 4 5 6 7)
+indices=(0)
+cuda_devices=(0)
 source ./venv/bin/activate
 device="cuda"
 batch_sizes=(16 32 8)
+model_backend="hf"
 
 # Task and Model selection
 dataset_id="imagenet-1k" # "cifar10" or "imagenet-1k"
@@ -31,12 +32,12 @@ ln_flags=(
     ""
 )
 flags=(
-    "--spiking-layernorm --spiking-mlp --spiking-attention"
-    "--spiking-layernorm --spiking-mlp --spiking-attention"
-    "--spiking-layernorm --spiking-mlp --spiking-attention"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend}"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend}"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend}"
     # "--no-spiking-layernorm --no-spiking-mlp --spiking-attention"
     # "--no-spiking-layernorm --spiking-mlp --no-spiking-attention"
-    # "--spiking-layernorm --no-spiking-mlp --no-spiking-attention"
+    # "--no-spiking-layernorm --no-spiking-mlp --no-spiking-attention --model_backend ${model_backend}"
 )
 expr_names=(
     "full-snn"
@@ -50,7 +51,7 @@ expr_names=(
 for index in "${indices[@]}"; do
     echo "Running error analysis on GPU ${cuda_devices[$index]}: ${expr_names[$index]}"
     script="CUDA_VISIBLE_DEVICES=${cuda_devices[$index]} python3 error_analysis_vit.py \
-        --experiment_name ${expr_names[$index]} --device ${device} \
+        --experiment_name ${model_backend}-${expr_names[$index]} --device ${device} \
         --batch_size ${batch_sizes[$index]} \
         --model_id ${model_ids[$index]} --dataset_id ${dataset_id} \
         ${flags[$index]} ${ln_flags[$index]} --theta 400.0"
