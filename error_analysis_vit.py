@@ -26,7 +26,7 @@ AttentionInterface.register("spiking_sdpa", spiking_sdpa_attention_forward)
 class Arguments:
     experiment_name: str
     model_id: str
-    dataset_id: Literal["cifar10"]
+    dataset_id: str
     batch_size: int
     device: Literal["cuda", "cpu"]
     spiking_layernorm: bool
@@ -38,6 +38,8 @@ class Arguments:
     activation: Literal["relu", "gelu"]
     theta: float
     noise_std: float
+    weight_noise_std: float
+    bias_noise_std: float
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Evaluate ViT model with Spiking SDPA attention.")
@@ -69,6 +71,10 @@ def parse_arguments():
                         help="Domain bound θ for SpikingLayerNorm clamping (default: 100.0).")
     parser.add_argument("--noise-std", type=float, default=0.0,
                         help="Spike-time noise standard deviation as a fraction of domain range (default: 0.0).")
+    parser.add_argument("--weight-noise-std", type=float, default=0.0,
+                        help="Standard deviation of Gaussian noise to add to weights (default: 0.0).")
+    parser.add_argument("--bias-noise-std", type=float, default=0.0,
+                        help="Standard deviation of Gaussian noise to add to biases (default: 0.0).")
 
     args = parser.parse_args()
     return Arguments(
@@ -86,26 +92,51 @@ def parse_arguments():
         activation=args.activation,
         theta=args.theta,
         noise_std=args.noise_std,
+        weight_noise_std=args.weight_noise_std,
+        bias_noise_std=args.bias_noise_std,
     )
+
+DATASET_CONFIGS = {
+    "cifar10": {"split": "test", "image_key": "img", "label_key": "label"},
+    "imagenet-1k": {"split": "validation", "image_key": "image", "label_key": "label"},
+}
+
+def apply_parameter_noise(model: nn.Module, weight_std: float, bias_std: float):
+    if weight_std <= 0 and bias_std <= 0:
+        return
+
+    print(f"Applying parameter noise: weight_std={weight_std}, bias_std={bias_std}")
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if 'weight' in name and weight_std > 0:
+                noise = torch.randn_like(param) * weight_std
+                param.add_(noise)
+            elif 'bias' in name and bias_std > 0:
+                noise = torch.randn_like(param) * bias_std
+                param.add_(noise)
 
 def evaluate_vit_model(args:Arguments):
     # ---------------------------------------------------------
     # 1. 설정 (Configuration)
     # ---------------------------------------------------------
-    # 예시: CIFAR-10에 파인튜닝된 ViT 모델 사용 (가장 일반적인 예시)
-    # model_id = "nateraw/vit-base-patch16-224-cifar10"
     model_id = args.model_id
     dataset_id = args.dataset_id
     batch_size = args.batch_size
     device_str = args.device
+
+    ds_config = DATASET_CONFIGS.get(dataset_id, {"split": "test", "image_key": "image", "label_key": "label"})
+    split = ds_config["split"]
+    image_key = ds_config["image_key"]
+    label_key = ds_config["label_key"]
 
     # GPU 사용 가능 여부 확인
     device = torch.device(device_str)
 
     cfg = vars(args)
     cfg["attn_impl"] = "spiking_sdpa" if args.spiking_attention else "eager"
-    wandb.init(entity="CIDA", project="vit-evaluation", config=cfg, name=args.experiment_name)
+    wandb.init(entity="CIDA", project=f"vit-evaluation-{args.dataset_id}", config=cfg, name=args.experiment_name)
     print(f"Using device: {device}")
+    print(f"Model: {model_id}, Dataset: {dataset_id} ({split})")
     print(f"Spiking LayerNorm: {args.spiking_layernorm}, Spiking Attention: {args.spiking_attention}")
     if args.spiking_layernorm:
         print(f"  LN stages — mul: {args.spiking_ln_mul}, log: {args.spiking_ln_log}, expdiff: {args.spiking_ln_expdiff}")
@@ -118,9 +149,9 @@ def evaluate_vit_model(args:Arguments):
     # ---------------------------------------------------------
     # 2. 데이터셋 및 전처리 도구 로드
     # ---------------------------------------------------------
-    # 데이터셋 로드 (평가용이므로 'test' split 사용)
+    # 데이터셋 로드
     print(f"Loading dataset: {dataset_id}...")
-    dataset = load_dataset(dataset_id, split="test")
+    dataset = load_dataset(dataset_id, split=split, cache_dir="/data/nas/datasets/")
 
     # 모델에 맞는 Feature Extractor(Image Processor) 로드
     processor = ViTImageProcessor.from_pretrained(model_id)
@@ -134,13 +165,13 @@ def evaluate_vit_model(args:Arguments):
     # ---------------------------------------------------------
     def transform(examples):
         # 이미지 데이터를 RGB로 변환 (흑백 이미지가 섞여 있을 경우 대비)
-        images = [x.convert("RGB") for x in examples["img"]]
+        images = [x.convert("RGB") for x in examples[image_key]]
 
         # ViT 입력 형태에 맞게 리사이즈 및 정규화
         inputs = processor(images, return_tensors="pt")
 
         # 'pixel_values'는 모델의 입력, 'labels'는 정답
-        inputs["labels"] = examples["label"]
+        inputs["labels"] = examples[label_key]
         return inputs
 
     # 데이터셋에 전처리 적용 (On-the-fly 방식)
@@ -167,6 +198,9 @@ def evaluate_vit_model(args:Arguments):
     )
     model = ViTForImageClassification.from_pretrained(model_id, config=config, attn_implementation=attn_impl)
     # model = DataParallel(model, device_ids=list(range(torch.cuda.device_count())))  # 모델 병렬화
+    
+    apply_parameter_noise(model, args.weight_noise_std, args.bias_noise_std)
+    
     model.to(device)
     model.eval() # 평가 모드로 전환
 
