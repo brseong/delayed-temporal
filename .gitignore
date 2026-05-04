@@ -218,3 +218,6 @@ __marimo__/
 /error_histogram.png
 /tex/
 /TTFSFormer/
+/quantiles/
+/wandb*.csv
+/*.pdf

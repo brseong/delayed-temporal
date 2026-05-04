@@ -1,12 +1,11 @@
 #!/bin/bash
 trap 'kill -- -$$' SIGINT SIGTERM
 
-indices=(0)
-cuda_devices=(0)
+cuda_devices=(0 1 3)
 source ./venv/bin/activate
 device="cuda"
 batch_sizes=(16 32 8)
-model_backend="hf"
+model_backend="spiking"
 
 # Task and Model selection
 dataset_id="imagenet-1k" # "cifar10" or "imagenet-1k"
@@ -14,9 +13,12 @@ dataset_id="imagenet-1k" # "cifar10" or "imagenet-1k"
 # model_id="WinKawaks/vit-small-patch16-224"
 # model_id="google/vit-large-patch16-224"
 model_ids=(
-    "google/vit-base-patch16-224"
-    "WinKawaks/vit-small-patch16-224"
-    "google/vit-large-patch16-224"
+    # "google/vit-base-patch16-224"
+    # "WinKawaks/vit-small-patch16-224"
+    # "google/vit-large-patch16-224"
+    "/data/nas/vit_base_patch16_224.augreg2_in21k_ft_in1k"
+    "/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k"
+    "/data/nas/vit_large_patch16_224.augreg_in21k_ft_in1k"
 )
 
 # Stage flags per experiment (mul=off; isolating log and expdiff):
@@ -40,21 +42,24 @@ flags=(
     # "--no-spiking-layernorm --no-spiking-mlp --no-spiking-attention --model_backend ${model_backend}"
 )
 expr_names=(
-    "full-snn"
-    "full-snn"
-    "full-snn"
+    "spiking"
+    "spiking"
+    "spiking"
+    # "full-snn"
+    # "full-snn"
+    # "full-snn"
     # "attn-only"
     # "mlp-only"
     # "ln-only"
 )
 
-for index in "${indices[@]}"; do
+for index in "${!cuda_devices[@]}"; do
     echo "Running error analysis on GPU ${cuda_devices[$index]}: ${expr_names[$index]}"
     script="CUDA_VISIBLE_DEVICES=${cuda_devices[$index]} python3 error_analysis_vit.py \
         --experiment_name ${model_backend}-${expr_names[$index]} --device ${device} \
         --batch_size ${batch_sizes[$index]} \
         --model_id ${model_ids[$index]} --dataset_id ${dataset_id} \
-        ${flags[$index]} ${ln_flags[$index]} --theta 400.0"
+        ${flags[$index]} ${ln_flags[$index]} --theta 1000"
     echo $script
     eval $script &
 done

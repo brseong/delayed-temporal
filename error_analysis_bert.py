@@ -271,7 +271,11 @@ def evaluate_bert_model(args:Arguments):
         def hook_fn(module, inp, out):
             val = out.value if isinstance(out, Potential) else out
             if isinstance(val, torch.Tensor):
-                q = torch.quantile(val.detach().abs().float(), 0.999).item()
+                val_flat = val.detach().abs().float().view(-1)
+                if val_flat.numel() > 16000000:
+                    step = val_flat.numel() // 16000000 + 1
+                    val_flat = val_flat[::step]
+                q = torch.quantile(val_flat, 0.999).item()
                 quantiles.append(q)
         return hook_fn
 
@@ -307,7 +311,10 @@ def evaluate_bert_model(args:Arguments):
     if args.collect_quantiles and quantiles:
         max_q = max(quantiles)
         print(f"RESULT_QUANTILE: {max_q}")
-        with open(f"quantile_{args.task}.txt", "w") as f:
+        import os
+        os.makedirs("quantiles", exist_ok=True)
+        model_name = args.model_id.replace("/", "_")
+        with open(f"quantiles/quantile_bert_{args.task}_{model_name}.txt", "w") as f:
             f.write(str(max_q))
 
     final_score = cast(dict[str, float], metric_tot.compute())

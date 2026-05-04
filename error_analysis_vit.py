@@ -129,6 +129,11 @@ def apply_parameter_noise(model: nn.Module, weight_std: float, bias_std: float):
 
 def evaluate_vit_model(args:Arguments):
     # ---------------------------------------------------------
+    # 0. 시드 설정
+    # ---------------------------------------------------------
+    torch.manual_seed(42)
+    
+    # ---------------------------------------------------------
     # 1. 설정 (Configuration)
     # ---------------------------------------------------------
     model_backend = args.model_backend
@@ -233,18 +238,29 @@ def evaluate_vit_model(args:Arguments):
     log_step = [0]
     hooks = []
 
-    def make_ln_hook(tag):
+    def make_ln_hook(tag, theta):
         def hook_fn(module, inp, out):
             if log_step[0] < _TB_LOG_BATCHES:
                 inp_val = inp[0].value if isinstance(inp[0], Potential) else inp[0]
                 out_val = out.value    if isinstance(out,    Potential) else out
+                
+                # Analysis of centered input (x_err)
+                x = inp_val.detach().float()
+                x_mean = x.mean(dim=-1, keepdim=True)
+                x_err = x - x_mean
+                max_abs_err = x_err.abs().max().item()
+                std_err = x_err.std().item()
+                
+                if max_abs_err > theta:
+                    print(f"[CLAMPING ALERT] {tag}: max_abs_err={max_abs_err:.2f} > theta={theta:.2f}, std={std_err:.2f}")
+                
                 tb_writer.add_histogram(f"{tag}/input",  inp_val.detach().cpu().float(), log_step[0])
                 tb_writer.add_histogram(f"{tag}/output", out_val.detach().cpu().float(),  log_step[0])
         return hook_fn
 
     for name, module in model.named_modules():
         if isinstance(module, (nn.LayerNorm, SpikingLayerNorm)):
-            hooks.append(module.register_forward_hook(make_ln_hook(name)))
+            hooks.append(module.register_forward_hook(make_ln_hook(name, args.theta)))
 
     quantiles = []
     def make_quantile_hook():
@@ -273,6 +289,9 @@ def evaluate_vit_model(args:Arguments):
         # 데이터를 디바이스(GPU/CPU)로 이동
         pixel_values = batch["pixel_values"].to(device)
         labels = batch["labels"].to(device)
+        
+        if log_step[0] == 0:
+            print(f"[DEBUG] Ground Truth Labels for Batch 0: {labels.tolist()}")
 
         # 예측 (Gradients 계산 불필요)
         with torch.no_grad():
@@ -297,7 +316,7 @@ def evaluate_vit_model(args:Arguments):
     if args.collect_quantiles and quantiles:
         max_q = max(quantiles)
         print(f"RESULT_QUANTILE: {max_q}")
-        with open(f"quantile_vit_{args.model_id.replace('/', '_')}.txt", "w") as f:
+        with open(f"quantiles/quantile_vit_{args.model_id.replace('/', '_')}.txt", "w") as f:
             f.write(str(max_q))
 
     # ---------------------------------------------------------

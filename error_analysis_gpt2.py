@@ -286,7 +286,11 @@ def evaluate_gpt2_model(args: Arguments):
         def hook_fn(module, inp, out):
             val = out.value if isinstance(out, Potential) else out
             if isinstance(val, torch.Tensor):
-                q = torch.quantile(val.detach().abs().float(), 0.999).item()
+                val_flat = val.detach().abs().float().view(-1)
+                if val_flat.numel() > 16000000:
+                    step = val_flat.numel() // 16000000 + 1
+                    val_flat = val_flat[::step]
+                q = torch.quantile(val_flat, 0.999).item()
                 quantiles.append(q)
         return hook_fn
 

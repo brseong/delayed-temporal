@@ -56,6 +56,12 @@ class SpikingLayerNorm(nn.Module):
         tau_s = self.tau_s
 
         x_err = x - x.mean(dim=-1, keepdim=True)
+        
+        # Debug: check if x_err exceeds theta
+        # max_val = x_err.abs().max().item()
+        # if max_val > theta:
+        #     print(f"[DEBUG] x_err max {max_val:.2f} exceeds theta {theta}")
+            
         domain_err: PotentialBounds = PotentialBounds(eps, theta - eps)
         x_err_pos = domain_err.clamp(x_err, name="x_err_pos")
         x_err_neg = domain_err.clamp(-x_err, name="x_err_neg")
@@ -141,6 +147,78 @@ class SpikingLinear(nn.Linear):
             y = y + self.bias
         return Potential(y, domain_y)
 
+class SpikingConv2d(nn.Conv2d):
+    """2D convolution via ψ_PWM operator. Numerically identical to nn.Conv2d."""
+
+    def __init__(self, in_channels: int, out_channels: int, kernel_size, stride=1,
+                 padding=0, dilation=1, groups=1, bias=True,
+                 theta: float = 400.0, device=None, dtype=None):
+        super().__init__(in_channels, out_channels, kernel_size, stride=stride,
+                         padding=padding, dilation=dilation, groups=groups,
+                         bias=bias, device=device, dtype=dtype)
+        self.theta = theta
+
+    def forward(self, input: Potential) -> Potential:
+        x: torch.Tensor = input.value
+        domain_x = PotentialBounds(-self.theta, self.theta)
+        t_A, domain_t_A = neg_identity_transform(domain_x.clamp(x, name="conv2d_x"), domain_x)
+        w_min, w_max = self.weight.min().item(), self.weight.max().item()
+        domain_W: PotentialBounds = PotentialBounds(w_min, w_max)
+        
+        # Manual padding for t_A to handle spiking domain correctly (x=0 corresponds to t=theta)
+        if self.padding[0] > 0 or self.padding[1] > 0:
+            t_A = torch.nn.functional.pad(t_A, (self.padding[1], self.padding[1], self.padding[0], self.padding[0]), value=self.theta)
+        
+        # Unfold input to (B, C_in * kH * kW, L)
+        t_A_unfolded = nn.functional.unfold(
+            t_A, self.kernel_size, self.dilation, padding=0, stride=self.stride
+        )
+        B, _, L = t_A_unfolded.shape
+        G = self.groups
+        C_out = self.out_channels
+        
+        # Reshape for grouped convolution broadcasting
+        # t_A_unfolded: (B, G, C_in//G * kH * kW, L)
+        t_A_unfolded = t_A_unfolded.view(B, G, -1, L)
+        
+        # weight: (G, C_out//G, C_in//G * kH * kW)
+        V = self.weight.view(G, C_out // G, -1)
+        
+        # Prepare for broadcasting:
+        # V:  (1, G, C_out//G, C_in//G * kH * kW, 1)
+        # dt: (B, G, 1,         C_in//G * kH * kW, L)
+        y_syn, domain_y_syn = pulse_width_modulation_operator(
+            t_A_unfolded.unsqueeze(2), domain_t_A,
+            self.theta, self.theta,
+            V.unsqueeze(0).unsqueeze(-1), domain_W,
+        )
+        
+        # y_syn: (B, G, C_out//G, C_in//G * kH * kW, L)
+        y = y_syn.sum(dim=3).view(B, C_out, L)
+        
+        # Determine output H and W
+        H_in, W_in = x.shape[2:]
+        kh, kw = self.kernel_size
+        ph, pw = self.padding
+        sh, sw = self.stride
+        dh, dw = self.dilation
+        H_out = (H_in + 2 * ph - dh * (kh - 1) - 1) // sh + 1
+        W_out = (W_in + 2 * pw - dw * (kw - 1) - 1) // sw + 1
+        
+        y = y.view(B, C_out, H_out, W_out)
+        
+        N = (self.in_channels // G) * kh * kw
+        domain_y: PotentialBounds = PotentialBounds(
+            domain_y_syn.min * N,
+            domain_y_syn.max * N,
+        )
+        
+        if self.bias is not None:
+            b_min, b_max = self.bias.min().item(), self.bias.max().item()
+            domain_y = PotentialBounds(domain_y.min + b_min, domain_y.max + b_max)
+            y = y + self.bias.view(1, -1, 1, 1)
+        return Potential(y, domain_y)
+
 
 def _apply_norm(norm: nn.Module, pot: Potential) -> Potential:
     if isinstance(norm, SpikingLayerNorm):
@@ -150,71 +228,50 @@ def _apply_norm(norm: nn.Module, pot: Potential) -> Potential:
 
 
 if __name__ == "__main__":
-    torch.manual_seed(7)
+    import torch
+    from torch import nn
 
-    x = torch.tensor(
-        [[0.25, -1.50, 2.00, 0.75],
-         [1.25, 0.50, -0.75, 2.50]],
-        dtype=torch.float32,
-    )
-    pot = Potential(x, PotentialBounds(x.min().item(), x.max().item()))
-
-    normalized_shape = x.shape[-1]
-    eps = 1e-5
-    theta = 200.0
-    tau_s = 1.0
-
-    layer_norm = nn.LayerNorm(normalized_shape, eps=eps)
-    spiking_layer_norm = SpikingLayerNorm(
-        normalized_shape,
-        eps=eps,
-        theta=theta,
-        tau_s=tau_s,
-        use_spiking_mul=False,
-        use_spiking_log=True,
-        use_spiking_expdiff=True,
-    )
-
+    torch.manual_seed(42)
+    
+    dim = 768
+    theta = 400.0
+    
+    # Initialize layers
+    ln = nn.LayerNorm(dim)
+    sln = SpikingLayerNorm(dim, theta=theta)
+    
+    # Sync weights
     with torch.no_grad():
-        spiking_layer_norm.weight.copy_(layer_norm.weight)
-        spiking_layer_norm.bias.copy_(layer_norm.bias)
-
-    ln_out = layer_norm(x)
-    spiking_out = spiking_layer_norm(pot)
-
-    x_hat = x - x.mean(dim=-1, keepdim=True)
-    variance = x_hat.pow(2).mean(dim=-1, keepdim=True)
-    std = torch.sqrt(variance + eps)
-    manual_ln = (x_hat / std) * layer_norm.weight + layer_norm.bias
-
-    print("=== LayerNorm vs SpikingLayerNorm ===")
-    print(f"input:\n{x}")
-    print(f"mean:\n{x.mean(dim=-1, keepdim=True)}")
-    print(f"centered x_hat:\n{x_hat}")
-    print(f"variance:\n{variance}")
-    print(f"std:\n{std}")
-    print(f"nn.LayerNorm output:\n{ln_out}")
-    print(f"manual LayerNorm output:\n{manual_ln}")
-    print(f"SpikingLayerNorm output:\n{spiking_out.value}")
-    print(f"SpikingLayerNorm domain: [{spiking_out.domain.min}, {spiking_out.domain.max}]")
-
-    print("=== Comparison ===")
-    print(f"max |nn - manual| = {(ln_out - manual_ln).abs().max().item():.6e}")
-    print(f"max |nn - spiking| = {(ln_out - spiking_out.value).abs().max().item():.6e}")
-    print(f"allclose(nn, manual) = {torch.allclose(ln_out, manual_ln, atol=1e-5, rtol=1e-5)}")
-    print(f"allclose(nn, spiking) = {torch.allclose(ln_out, spiking_out.value, atol=1e-3, rtol=1e-3)}")
-
-    # --- Explicit division_function test (sigmoid via joint-domain division) ---
-    print('\n=== division_function sigmoid test ===')
-    beta = 1.0
-    u = torch.tensor([-2.0, 0.0, 2.0], dtype=torch.float32)
-    exp_v = torch.exp(-beta * u)
-    joint_dom = PotentialBounds(1.0, 1.0 + float(exp_v.max().item()))
-    div_out, div_dom = division_function(
-        X=torch.ones_like(exp_v),
-        Y=1.0 + exp_v,
-        joint_domain=joint_dom,
-        tau_s=tau_s
-    )
-    print('division_function output:', div_out)
-    print('torch.sigmoid output:  ', torch.sigmoid(beta * u))
+        sln.weight.copy_(ln.weight)
+        sln.bias.copy_(ln.bias)
+    
+    max_diff = -1.0
+    worst_std = -1
+    max_x_err_at_worst = 0.0
+    
+    print(f"Testing standard deviations from 1 to 128 for dim={dim}, theta={theta}...")
+    
+    for std in range(1, 129):
+        # Create input tensor with mean 0 and current std
+        x = torch.randn(1, dim) * std
+        # Create Potential object for SpikingLayerNorm
+        pot = Potential(x, PotentialBounds(x.min().item(), x.max().item()))
+        
+        with torch.no_grad():
+            x_err = x - x.mean(dim=-1, keepdim=True)
+            max_x_err = x_err.abs().max().item()
+            
+            ln_out = ln(x)
+            sln_out = sln(pot).value
+            
+            diff = (ln_out - sln_out).abs().max().item()
+            
+            if diff > max_diff:
+                max_diff = diff
+                worst_std = std
+                max_x_err_at_worst = max_x_err
+                
+    print("\n=== Result ===")
+    print(f"Standard deviation with maximum difference: {worst_std}")
+    print(f"Maximum absolute difference: {max_diff:.6e}")
+    print(f"Max abs(x_err) at worst std: {max_x_err_at_worst:.2f} (theta={theta})")

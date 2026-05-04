@@ -42,7 +42,7 @@ from torch.profiler import profile, record_function, ProfilerActivity
 
 from utils.transforms.functions import gelu_approximation
 from utils.transforms.types import Potential, PotentialBounds
-from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear, _apply_norm
+from utils.transformers.models.spiking_ops import SpikingConv2d, SpikingLayerNorm, SpikingLinear, _apply_norm
 
 
 class ViTEmbeddings(nn.Module):
@@ -153,7 +153,12 @@ class ViTPatchEmbeddings(nn.Module):
         self.num_channels = num_channels
         self.num_patches = num_patches
 
-        self.projection = nn.Conv2d(num_channels, hidden_size, kernel_size=patch_size, stride=patch_size)
+        self._use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
+        
+        if self._use_spiking_mlp:
+            self.projection = SpikingConv2d(num_channels, hidden_size, kernel_size=patch_size, stride=patch_size, theta=getattr(config, "theta", 400.0))
+        else:
+            self.projection = nn.Conv2d(num_channels, hidden_size, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = False) -> torch.Tensor:
         batch_size, num_channels, height, width = pixel_values.shape
@@ -168,7 +173,12 @@ class ViTPatchEmbeddings(nn.Module):
                     f"Input image size ({height}*{width}) doesn't match model"
                     f" ({self.image_size[0]}*{self.image_size[1]})."
                 )
-        embeddings = self.projection(pixel_values).flatten(2).transpose(1, 2)
+        
+        if self._use_spiking_mlp:
+            # SpikingConv2d의 출력은 (B, hidden_size, H_patch, W_patch) → (B, hidden_size, num_patches) → (B, num_patches, hidden_size)
+            embeddings = self.projection(Potential(pixel_values, PotentialBounds(pixel_values.min().item(), pixel_values.max().item()))).value.flatten(2).transpose(1, 2)
+        else:
+            embeddings = self.projection(pixel_values).flatten(2).transpose(1, 2)
         return embeddings
 
 
