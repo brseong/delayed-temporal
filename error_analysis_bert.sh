@@ -3,8 +3,7 @@ trap 'kill -- -$$' SIGINT SIGTERM
 
 source ./venv/bin/activate
 device="cuda"
-theta=400
-model_backend="spiking"
+theta=1000
 task="${1:-sst2}"  # sst2 | agnews | imdb
 
 case "${task}" in
@@ -45,17 +44,16 @@ flags=(
     # "--spiking-attention --no-spiking-layernorm --no-spiking-mlp" # spiking_attn
     # "--no-spiking-attention --spiking-layernorm --no-spiking-mlp" # sln
     # "--no-spiking-attention --no-spiking-layernorm --spiking-mlp" # smlp
-    "--spiking-attention --spiking-layernorm --spiking-mlp"       # all
-    # "--no-spiking-attention --no-spiking-layernorm --no-spiking-mlp --activation gelu" # control (ANN only)
+    "--spiking-attention --spiking-layernorm --spiking-mlp --model_backend spiking"       # all
+    "--no-spiking-attention --no-spiking-layernorm --no-spiking-mlp --activation gelu --model_backend hf" # control (ANN only)
 )
 
-cuda_devices=(0) # Adjust if you want to run on different GPUs
+cuda_devices=(2 3) # Adjust if you want to run on different GPUs
 
 for index in "${!expr_names[@]}"; do
     echo "Running error analysis: ${expr_names[$index]}"
     script="CUDA_VISIBLE_DEVICES=${cuda_devices[$index]} python3 error_analysis_bert.py \
         --experiment_name ${expr_names[$index]}_${task} --device ${device} \
-        --model_backend ${model_backend} \
         --task ${task} \
         --model_id ${model_id} \
         --dataset_name ${dataset_name} --dataset_split ${dataset_split} \

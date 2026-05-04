@@ -204,9 +204,9 @@ def evaluate_bert_model(args:Arguments):
     print(f"Loading dataset: {dataset_name}/{dataset_config_name} ({dataset_split})...")
     assert dataset_name is not None
     if dataset_config_name is None:
-        dataset = load_dataset(dataset_name, split=dataset_split)
+        dataset = load_dataset(dataset_name, split=dataset_split, cache_dir="/data/nas/datasets/")
     else:
-        dataset = load_dataset(dataset_name, dataset_config_name, split=dataset_split)
+        dataset = load_dataset(dataset_name, dataset_config_name, split=dataset_split, cache_dir="/data/nas/datasets/")
     preferred_text_column = DATASET_PRESETS.get(args.task, {}).get("text_column")
     text_column = infer_text_column(dataset.column_names, preferred=preferred_text_column)
     

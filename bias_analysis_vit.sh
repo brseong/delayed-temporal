@@ -1,8 +1,8 @@
 #!/bin/bash
 trap 'kill -- -$$' SIGINT SIGTERM
 
-indices=(0)
-cuda_devices=(5 6 7)
+indices=(3)
+cuda_devices=(0 1 2 3)
 source ./venv/bin/activate
 device="cuda"
 model_id="WinKawaks/vit-small-patch16-224"
@@ -14,36 +14,23 @@ batch_size=32
 # GPU 0: standard only (baseline for LN stages)
 # GPU 1: log only
 # GPU 2: log + expdiff (full SNN LN without mul)
-ln_flags=(
-    # "--no-spiking-ln-mul --no-spiking-ln-log --no-spiking-ln-expdiff"
-    # "--no-spiking-ln-mul --spiking-ln-log --no-spiking-ln-expdiff"
-    # "--no-spiking-ln-mul --spiking-ln-log --spiking-ln-expdiff"
-    ""
-)
 flags=(
-    "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 5e-5 --model_backend ${backend}"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 1e-5 --model_backend ${backend}"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 3e-5 --model_backend ${backend}"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 1e-4 --model_backend ${backend}"
-    # "--no-spiking-layernorm --no-spiking-mlp --spiking-attention --noise-std 1e-4"
-    # "--no-spiking-layernorm --spiking-mlp --no-spiking-attention --noise-std 1e-4"
-    # "--spiking-layernorm --no-spiking-mlp --no-spiking-attention --noise-std 1e-4"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 3e-4 --model_backend ${backend}"
-    # "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 1e-3 --model_backend ${backend}"
-    # "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 3e-3"
-    # "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 1e-2"
-    # "--spiking-layernorm --spiking-mlp --spiking-attention --noise-std 3e-2"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --weight-noise-std 1e-2 --bias-noise-std 1e-2 --model_backend ${backend}"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --weight-noise-std 2e-2 --bias-noise-std 2e-2 --model_backend ${backend}"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --weight-noise-std 3e-2 --bias-noise-std 3e-2 --model_backend ${backend}"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --weight-noise-std 4e-2 --bias-noise-std 4e-2 --model_backend ${backend}"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --weight-noise-std 5e-2 --bias-noise-std 5e-2 --model_backend ${backend}"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --weight-noise-std 1e-1 --bias-noise-std 1e-1 --model_backend ${backend}"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --weight-noise-std 3e-1 --bias-noise-std 3e-1 --model_backend ${backend}"
 )
 expr_names=(
-    "std_5e-4"
-    "std_1e-5"
-    "std_3e-5"
-    "std_1e-4"
-    "std_3e-4"
-    # "std_1e-3"
-    # "std_5e-3"
-    # "std_1e-2"
-    # "std_5e-2"
+    "weight-bias-std_1e-2"
+    "weight-bias-std_2e-2"
+    "weight-bias-std_3e-2"
+    "weight-bias-std_4e-2"
+    "weight-bias-std_5e-2"
+    "weight-bias-std_1e-1"
+    "weight-bias-std_3e-1"
 )
 
 for index in "${indices[@]}"; do
@@ -51,7 +38,7 @@ for index in "${indices[@]}"; do
     script="CUDA_VISIBLE_DEVICES=${cuda_devices[$index]} python3 error_analysis_vit.py \
         --experiment_name ${expr_names[$index]} --device ${device}\
         --model_id ${model_id} --dataset_id ${dataset_id} \
-        --batch_size ${batch_size} ${flags[$index]} ${ln_flags[$index]} --theta 400.0"
+        --batch_size ${batch_size} ${flags[$index]} --theta 400.0"
     echo $script
     eval $script &
 done

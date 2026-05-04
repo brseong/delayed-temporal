@@ -162,9 +162,9 @@ def evaluate_llama3_model(args: Arguments):
     print(f"Loading dataset: {dataset_name}/{dataset_config_name} ({dataset_split})...")
     assert dataset_name is not None
     if dataset_config_name is None:
-        dataset = load_dataset(dataset_name, split=dataset_split)
+        dataset = load_dataset(dataset_name, split=dataset_split, cache_dir="/data/nas/datasets/")
     else:
-        dataset = load_dataset(dataset_name, dataset_config_name, split=dataset_split)
+        dataset = load_dataset(dataset_name, dataset_config_name, split=dataset_split, cache_dir="/data/nas/datasets/")
 
     dataset = dataset.filter(lambda x: len(x["text"].strip()) > 0)
 

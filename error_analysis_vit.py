@@ -122,9 +122,9 @@ def apply_parameter_noise(model: nn.Module, weight_std: float, bias_std: float):
         for name, param in model.named_parameters():
             if 'weight' in name and weight_std > 0:
                 noise = torch.randn_like(param) * weight_std
-                param.add_(noise)
+                param.mul_(1 + noise)
             elif 'bias' in name and bias_std > 0:
-                noise = torch.randn_like(param) * bias_std
+                noise = torch.randn_like(param) * bias_std * param.abs().max() 
                 param.add_(noise)
 
 def evaluate_vit_model(args:Arguments):
