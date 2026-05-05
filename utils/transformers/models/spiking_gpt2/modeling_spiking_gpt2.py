@@ -222,6 +222,10 @@ class GPT2Attention(nn.Module):
                 query_states, key_states, value_states, attention_mask
             )
         else:
+            if self.config._attn_implementation == "spiking_sdpa":
+                kwargs["theta"] = getattr(self.config, "theta", 10.0)
+                kwargs["tau_m"] = getattr(self.config, "tau_s", 1.0)
+
             attn_output, attn_weights = attention_interface(
                 self,
                 query_states,

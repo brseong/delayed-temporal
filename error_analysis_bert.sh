@@ -48,7 +48,7 @@ flags=(
     "--no-spiking-attention --no-spiking-layernorm --no-spiking-mlp --activation gelu --model_backend hf" # control (ANN only)
 )
 
-cuda_devices=(2 3) # Adjust if you want to run on different GPUs
+cuda_devices=(3) # Adjust if you want to run on different GPUs
 
 for index in "${!expr_names[@]}"; do
     echo "Running error analysis: ${expr_names[$index]}"

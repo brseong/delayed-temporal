@@ -29,13 +29,20 @@ DATASET_PRESETS = {
         "text_column": "text",
         "model_id": "neulab/gpt2-finetuned-wikitext103",
     },
+    "wikitext103": {
+        "dataset_name": "wikitext",
+        "dataset_config_name": "wikitext-103-raw-v1",
+        "dataset_split": "test",
+        "text_column": "text",
+        "model_id": "neulab/gpt2-finetuned-wikitext103",
+    },
 }
 
 @dataclass
 class Arguments:
     experiment_name: str
     model_backend: Literal["hf", "spiking"]
-    task: Literal["wikitext2"]
+    task: Literal["wikitext2", "wikitext103"]
     model_id: str
     dataset_name: str | None
     dataset_config_name: str | None
@@ -59,12 +66,12 @@ class Arguments:
     collect_quantiles: bool
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Evaluate GPT-2 on WikiText-2.")
+    parser = argparse.ArgumentParser(description="Evaluate GPT-2 on WikiText-2/103.")
     parser.add_argument("--experiment_name", type=str, default="gpt2_eval",
                         help="Name of the experiment for logging purposes.")
     parser.add_argument("--model_backend", type=str, choices=["hf", "spiking"], default="hf",
                         help="Model backend to use (hf: vanilla HF GPT-2, spiking: spiking_gpt2 class).")
-    parser.add_argument("--task", type=str, choices=["wikitext2"], default="wikitext2",
+    parser.add_argument("--task", type=str, choices=["wikitext2", "wikitext103"], default="wikitext2",
                         help="Preset task to evaluate. Sets dataset, split, and default model.")
     parser.add_argument("--model_id", type=str, default=None,
                         help="Optional Hugging Face model ID. If omitted, task preset default is used.")

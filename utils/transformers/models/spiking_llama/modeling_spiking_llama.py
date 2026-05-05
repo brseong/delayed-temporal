@@ -140,6 +140,10 @@ class LlamaAttention(nn.Module):
             self.config._attn_implementation, eager_attention_forward
         )
 
+        if self.config._attn_implementation == "spiking_sdpa":
+            kwargs["theta"] = getattr(self.config, "theta", 10.0)
+            kwargs["tau_m"] = getattr(self.config, "tau_s", 1.0)
+
         attn_output, attn_weights = attention_interface(
             self,
             query_states,

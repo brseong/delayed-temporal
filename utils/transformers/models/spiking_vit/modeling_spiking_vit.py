@@ -248,8 +248,8 @@ class ViTSelfAttention(nn.Module):
 
         kwargs = {}
         if self.config._attn_implementation == "spiking_sdpa":
-            kwargs["tau_m"] = getattr(self.config, "tau_m", 1.0)
             kwargs["theta"] = getattr(self.config, "theta", 10.0)
+            kwargs["tau_m"] = getattr(self.config, "tau_s", 1.0) # Use tau_s as default fallback for tau_m
 
         context_layer, attention_probs = attention_interface(
             self, query_layer, key_layer, value_layer, None,
