@@ -1,14 +1,14 @@
 #!/bin/bash
 trap 'kill -- -$$' SIGINT SIGTERM
 
-indices=(1 3)
-cuda_devices=(0 3 1 4 6 7)
+cuda_devices=(1 4 5 6 7)
 source ./venv/bin/activate
 device="cuda"
-model_id="WinKawaks/vit-small-patch16-224"
+# model_id="WinKawaks/vit-small-patch16-224"
+model_id="/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k"
 dataset_id="imagenet-1k"
 backend="spiking"
-batch_size=48
+batch_size=32
 
 # Stage flags per experiment (mul=off; isolating log and expdiff):
 # GPU 0: standard only (baseline for LN stages)
@@ -36,16 +36,12 @@ expr_names=(
     "std_3e-5"
     "std_4e-5"
     "std_5e-5"
-    "std_1e-4"
-    "std_3e-4"
-    "std_1e-3"
+    # "std_1e-4"
+    # "std_3e-4"
     # "std_1e-3"
-    # "std_5e-3"
-    # "std_1e-2"
-    # "std_5e-2"
 )
 
-for index in "${indices[@]}"; do
+for index in "${!expr_names[@]}"; do
     echo "Running error analysis on GPU ${cuda_devices[$index]}: ${expr_names[$index]}"
     script="CUDA_VISIBLE_DEVICES=${cuda_devices[$index]} python3 error_analysis_vit.py \
         --experiment_name ${expr_names[$index]} --device ${device}\

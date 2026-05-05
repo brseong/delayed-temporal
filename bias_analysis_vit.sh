@@ -1,11 +1,11 @@
 #!/bin/bash
 trap 'kill -- -$$' SIGINT SIGTERM
 
-indices=(3)
-cuda_devices=(0 1 2 3)
+cuda_devices=(0 1 5 6 7)
 source ./venv/bin/activate
 device="cuda"
-model_id="WinKawaks/vit-small-patch16-224"
+# model_id="WinKawaks/vit-small-patch16-224"
+model_id="/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k"
 dataset_id="imagenet-1k"
 backend="spiking"
 batch_size=32
@@ -29,11 +29,11 @@ expr_names=(
     "weight-bias-std_3e-2"
     "weight-bias-std_4e-2"
     "weight-bias-std_5e-2"
-    "weight-bias-std_1e-1"
-    "weight-bias-std_3e-1"
+    # "weight-bias-std_1e-1"
+    # "weight-bias-std_3e-1"
 )
 
-for index in "${indices[@]}"; do
+for index in "${!expr_names[@]}"; do
     echo "Running error analysis on GPU ${cuda_devices[$index]}: ${expr_names[$index]}"
     script="CUDA_VISIBLE_DEVICES=${cuda_devices[$index]} python3 error_analysis_vit.py \
         --experiment_name ${expr_names[$index]} --device ${device}\

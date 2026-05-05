@@ -1,10 +1,11 @@
 #!/bin/bash
 trap 'kill -- -$$' SIGINT SIGTERM
 
-cuda_devices=(0 1 3)
+cuda_devices="0,1,2,3,4,5,6,7"
+cuda_count=8
 source ./venv/bin/activate
 device="cuda"
-batch_sizes=(16 32 8)
+batch_sizes=($((16 * ${cuda_count})) $((32 * ${cuda_count})) $((8 * ${cuda_count})))
 model_backend="spiking"
 
 # Task and Model selection
@@ -37,8 +38,9 @@ flags=(
     "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend}"
     "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend}"
     "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend}"
-    # "--no-spiking-layernorm --no-spiking-mlp --spiking-attention"
-    # "--no-spiking-layernorm --spiking-mlp --no-spiking-attention"
+    # "--no-spiking-layernorm --no-spiking-mlp --spiking-attention --model_backend ${model_backend}"
+    # "--no-spiking-layernorm --spiking-mlp --no-spiking-attention --model_backend ${model_backend}"
+    # "--spiking-layernorm --no-spiking-mlp --no-spiking-attention --model_backend ${model_backend}"
     # "--no-spiking-layernorm --no-spiking-mlp --no-spiking-attention --model_backend ${model_backend}"
 )
 expr_names=(
@@ -53,15 +55,15 @@ expr_names=(
     # "ln-only"
 )
 
-for index in "${!cuda_devices[@]}"; do
+for index in "${!expr_names[@]}"; do
     echo "Running error analysis on GPU ${cuda_devices[$index]}: ${expr_names[$index]}"
-    script="CUDA_VISIBLE_DEVICES=${cuda_devices[$index]} python3 error_analysis_vit.py \
+    script="CUDA_VISIBLE_DEVICES=$cuda_devices python3 error_analysis_vit.py \
         --experiment_name ${model_backend}-${expr_names[$index]} --device ${device} \
         --batch_size ${batch_sizes[$index]} \
         --model_id ${model_ids[$index]} --dataset_id ${dataset_id} \
         ${flags[$index]} ${ln_flags[$index]} --theta 1000"
     echo $script
-    eval $script &
+    eval $script
 done
 
 wait

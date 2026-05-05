@@ -51,15 +51,17 @@ def normalized_exp_operator(
     Raises:
         NotImplementedError: wave approximation is not implemented yet.
         """
-    # result = exp(-(domain.max - input_value) / tau_m)
-    # = exp(-domain.max / tau_m) * exp(input_value / tau_m)
+    # # result = exp(-(domain.max - input_value) / tau_m)
+    # # = exp(-domain.max / tau_m) * exp(input_value / tau_m)
+    # # scaling_factor = exp(domain.max / tau_m)
+    # result, domain_result = exp_operator(input_value, domain, tau_m=tau_m)
     # scaling_factor = exp(domain.max / tau_m)
-    result, domain_result = exp_operator(input_value, domain, tau_m=tau_m)
-    scaling_factor = exp(domain.max / tau_m)
-    # out = scaling_factor * result
-    # = exp(domain.max / tau_m) * exp(-domain.max / tau_m) * exp(input_value / tau_m)
-    # = exp(input_value / tau_m)
-    return scaling_factor * result, PotentialBounds(domain_result.min * scaling_factor, domain_result.max * scaling_factor)
+    # # out = scaling_factor * result
+    # # = exp(domain.max / tau_m) * exp(-domain.max / tau_m) * exp(input_value / tau_m)
+    # # = exp(input_value / tau_m)
+    # return scaling_factor * result, PotentialBounds(domain_result.min * scaling_factor, domain_result.max * scaling_factor)
+
+    return input_value.exp(), PotentialBounds(exp(domain.min), exp(domain.max)) # To avoid numerical instability
 
 @check_domain
 def exponential_difference_operator(
@@ -82,15 +84,17 @@ def exponential_difference_operator(
     )
     # s = theta - p, theta = domain_p.max
     s, domain_s = neg_identity_transform(p, domain_p)
-    scaling_factor = exp(-domain_p.max / tau_s)
-    # p = exp(-(T-s)/tau_s) = exp(-(T-theta+p)/tau_s) = exp(-T/tau_s) * exp(theta/tau_s) * exp(-p/tau_s), T = domain_s.max, theta = domain_p.max
-    # p_normalized = exp(domain_p.max / tau_s) * exp(-p / tau_s), removes exp(-T/tau_s), which is constant.
-    p, domain_p = normalized_exp_operator(s, domain_s, tau_m=tau_s)
+    # scaling_factor = exp(-domain_p.max / tau_s) # exp(-theta / tau_s), theta = domain_p.max
+    # p' = exp(-(T-s)/tau_s) = exp(-(T-theta+p)/tau_s) = exp(-T/tau_s) * exp(theta/tau_s) * exp(-p/tau_s), T = domain_s.max, theta = domain_p.max
+    # p'_normalized = exp(domain_p.max / tau_s) * exp(-p / tau_s), removes exp(-T/tau_s), which is constant.
+    domain_s_scaled = PotentialBounds(domain_s.min - domain_p.max, domain_s.max - domain_p.max) # PotentialBounds(domain_s.min - domain_s.max, 0.0)
+    p, domain_p = normalized_exp_operator(s - domain_p.max, domain_s_scaled, tau_m=tau_s)
     # result = scaling_factor * p_normalized
     # = exp(-domain_p.max / tau_s) * exp(domain_p.max / tau_s) * exp(-p / tau_s)
     # = exp(-p / tau_s)
     # = exp((T_B - T_A) / tau_s)
-    result = scaling_factor * p, PotentialBounds(domain_p.min * scaling_factor, domain_p.max * scaling_factor)
+    # result = scaling_factor * p, PotentialBounds(domain_p.min * scaling_factor, domain_p.max * scaling_factor)
+    result = p, domain_p
     return result
 
 if __name__ == "__main__":

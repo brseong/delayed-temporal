@@ -224,11 +224,16 @@ def evaluate_vit_model(args:Arguments):
             theta=args.theta,
         )
         model = ViTForImageClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl)
-    # model = DataParallel(model, device_ids=list(range(torch.cuda.device_count())))  # 모델 병렬화
     
     apply_parameter_noise(model, args.weight_noise_std, args.bias_noise_std)
     
     model.to(device)
+    
+    # GPU 병렬화 (DataParallel) 설정
+    if device.type == "cuda" and torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        model = nn.DataParallel(model)
+        
     model.eval() # 평가 모드로 전환
 
     # ---------------------------------------------------------

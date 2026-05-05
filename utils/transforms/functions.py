@@ -1,6 +1,8 @@
 import torch
 from jaxtyping import Float
-from math import log, exp
+from math import isnan, log, exp
+
+from utils.transforms import exp_operator
 
 from .types import PotentialBounds, TimeBounds, check_domain
 from .primitive import pulse_width_modulation_operator
@@ -67,6 +69,7 @@ def exponential_function(
     domain: PotentialBounds,
     *,
     tau_m: float = 1.0,
+    normalized: bool = True,
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Exponential Potential operator (f_EP)
@@ -77,11 +80,16 @@ def exponential_function(
     
     # 2. f_NE (Negative Exp-Temporal operator): t_out -> exp(-(t_max-t_out)/tau_m)
     # This results in exp(-V/tau_m) * constant
-    v_out, domain_v_out = normalized_exp_operator(t_out, tb_out, tau_m=tau_m)
-    # exp(-(t_max-t_out)/tau_m) = exp(-(t_max-theta)/tau_m) * exp(-V/tau_m)
-    # Thus recover exp(-V/tau_m) by multiplying with exp((t_max-theta)/tau_m) = exp(-theta/tau_m) * exp(t_max/tau_m)
-    scaling_factor = exp(-domain.max / tau_m)
-    return scaling_factor * v_out, PotentialBounds(domain_v_out.min * scaling_factor, domain_v_out.max * scaling_factor)
+    if normalized:
+        v_out, domain_v_out = normalized_exp_operator(t_out, tb_out, tau_m=tau_m)
+        # exp(-(t_max-t_out)/tau_m) = exp(-(t_max-theta)/tau_m) * exp(-V/tau_m)
+        # Thus recover exp(-V/tau_m) by multiplying with exp((t_max-theta)/tau_m) = exp(-theta/tau_m) * exp(t_max/tau_m)
+        scaling_factor = exp(-domain.max / tau_m)
+        return scaling_factor * v_out, PotentialBounds(domain_v_out.min * scaling_factor, domain_v_out.max * scaling_factor)
+    else:
+        # return exp_operator(t_out, tb_out, tau_m=tau_m) # Raise numerical stability error
+        shift_val = tb_out.range / 2
+        return torch.exp((t_out - shift_val) / tau_m), PotentialBounds(exp((tb_out.min - shift_val) / tau_m), exp((tb_out.max - shift_val) / tau_m))
 
 @check_domain
 def softmin_function(
@@ -97,14 +105,14 @@ def softmin_function(
     w_{softmax, ij} ≈ f_DIV(s_ij, sum_k s_ik)
     """
     # 1. Exponential potential transformation: exp_v = exp(-s_ij / tau_s)
-    exp_v, exp_domain = exponential_function(input_value, domain, tau_m=tau_s)
+    exp_v, exp_domain = exponential_function(input_value, domain, tau_m=tau_s, normalized=False)
     
     # 2. Sum of exponentiated scores: sum_k exp(s_ik / tau_s)
     sumexp_v = exp_v.sum(dim=-1, keepdim=True)
     N = input_value.size(-1)
     # sumexp_domain = PotentialBounds(exp_domain.min, exp_domain.max * N)
     # Too high max bound causes numerical instability in division, so we use mathematically equivalent but tighter bound based on the fact that max of exp_v is exp(-domain.min / tau_s)
-    sumexp_domain = PotentialBounds(exp_v.min().item(), sumexp_v.max().item())
+    sumexp_domain = PotentialBounds(exp_domain.min * N, exp_domain.max * N)  # This is the original bound based on worst-case assumption
     
     # 3. Apply the Division Operator: f_DIV(exp_v, sumexp_v)
     result = division_function(
@@ -190,7 +198,12 @@ def gelu_approximation(
     
     # Step 4: f_M(v, div_out)
     
-    gelu_approx, gelu_domain = multiplication_operator(domain.clamp(input_value, name="gelu_x"), domain, div_out, div_domain, theta=theta)
+    gelu_approx, gelu_domain = multiplication_operator(
+        domain.clamp(input_value, name="gelu_x"),
+        domain,
+        div_domain.clamp(div_out), # For stability, ensure the output of division is within its theoretical bounds before multiplication
+        div_domain,
+        theta=theta)
     
     return gelu_approx, gelu_domain
 

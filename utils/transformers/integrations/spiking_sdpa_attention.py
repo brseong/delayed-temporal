@@ -13,11 +13,8 @@ from utils.transforms.types import PotentialBounds, TimeBounds
 
 logger = logging.get_logger(__name__)
 
-# Softmin masking: large positive suppresses masked positions (exp(-20) ≈ 2e-9)
-# Use a value that stays within stable range for float32 exp but provides enough suppression.
-_MASK_VAL = 20.0
 # reciprocal_exp_operator의 실효 지수 범위는 2*cap; exp(-2*20) ≈ 2e-18
-_SOFTMIN_CAP = 20.0
+_SOFTMIN_CAP = 80.0
 
 _is_torch_greater_or_equal_than_2_5 = is_torch_greater_or_equal("2.5", accept_dev=True)
 _is_torch_greater_or_equal_than_2_8 = is_torch_greater_or_equal("2.8", accept_dev=True)
@@ -87,15 +84,11 @@ def spiking_scaled_dot_product_attention(query, key, value, attn_mask=None, drop
     attn_score = score_bound.clamp(attn_score, name="attn_score")
 
     # Hard overwrite: force masked scores to a fixed suppressing value.
-    mask_fill = _MASK_VAL * tau_m
     if masked_pos is not None:
-        attn_score = torch.where(masked_pos, torch.full_like(attn_score, mask_fill), attn_score)
-
-    # Ensure the declared domain contains both unclamped and overwritten values.
-    score_bound_with_bias = PotentialBounds(score_bound.min, max(score_bound.max, float(mask_fill)))
+        attn_score = torch.where(masked_pos, _SOFTMIN_CAP, attn_score)
 
     # softmin(f_SDP, τ_m) = softmax(dot(q,k)/(τ_m·√d_k))
-    attn_weight, _ = softmin_function(attn_score, score_bound_with_bias, tau_s=tau_m)
+    attn_weight, _ = softmin_function(attn_score, score_bound, tau_s=tau_m, domain_shift=softmin_cap)
 
     # # Debug: Compare weights with torch.softmax
     # torch_logits_clamped = torch_logits.clamp(-softmin_cap, softmin_cap)
