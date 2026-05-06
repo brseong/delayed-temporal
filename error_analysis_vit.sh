@@ -17,9 +17,11 @@ model_ids=(
     # "google/vit-base-patch16-224"
     # "WinKawaks/vit-small-patch16-224"
     # "google/vit-large-patch16-224"
-    "/data/nas/vit_base_patch16_224.augreg2_in21k_ft_in1k"
+    # "/data/nas/vit_base_patch16_224.augreg2_in21k_ft_in1k"
     "/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k"
-    "/data/nas/vit_large_patch16_224.augreg_in21k_ft_in1k"
+    "/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k"
+    "/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k"
+    # "/data/nas/vit_large_patch16_224.augreg_in21k_ft_in1k"
 )
 
 # Stage flags per experiment (mul=off; isolating log and expdiff):
@@ -35,9 +37,9 @@ ln_flags=(
     ""
 )
 flags=(
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend}"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend}"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend}"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend} --precision float64"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend} --precision float16"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend} --precision bfloat16"
     # "--no-spiking-layernorm --no-spiking-mlp --spiking-attention --model_backend ${model_backend}"
     # "--no-spiking-layernorm --spiking-mlp --no-spiking-attention --model_backend ${model_backend}"
     # "--spiking-layernorm --no-spiking-mlp --no-spiking-attention --model_backend ${model_backend}"
@@ -61,7 +63,7 @@ for index in "${!expr_names[@]}"; do
         --experiment_name ${model_backend}-${expr_names[$index]} --device ${device} \
         --batch_size ${batch_sizes[$index]} \
         --model_id ${model_ids[$index]} --dataset_id ${dataset_id} \
-        ${flags[$index]} ${ln_flags[$index]} --theta 1000"
+        ${flags[$index]} ${ln_flags[$index]} --theta 2000"
     echo $script
     eval $script
 done

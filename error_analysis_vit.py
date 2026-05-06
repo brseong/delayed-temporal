@@ -30,6 +30,7 @@ class Arguments:
     dataset_id: str
     batch_size: int
     device: Literal["cuda", "cpu"]
+    precision: Literal["float32", "float64", "bfloat16", "float16"]
     max_eval_batches: int
     spiking_layernorm: bool
     spiking_attention: bool
@@ -50,7 +51,7 @@ def parse_arguments():
                         help="Name of the experiment for logging purposes.")
     parser.add_argument("--model_backend", type=str, choices=["hf", "spiking"], default="hf",
                         help="Model backend to use (hf: vanilla HF ViT, spiking: spiking_vit class).")
-    parser.add_argument("--model_id", type=str, default="MF21377197/vit-small-patch16-224-finetuned-Cifar10",
+    parser.add_argument("--model_id", type=str, default="/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k",
                         help="Pretrained ViT model ID from Hugging Face.")
     parser.add_argument("--dataset_id", type=str, default="cifar10",
                         help="Dataset ID from Hugging Face datasets library.")
@@ -60,6 +61,8 @@ def parse_arguments():
                         help="If > 0, stop after this many evaluation batches for smoke testing.")
     parser.add_argument("--device", type=str, choices=["cuda", "cpu"], default="cuda",
                         help="Device to run the evaluation on (e.g., 'cuda' or 'cpu').")
+    parser.add_argument("--precision", type=str, choices=["float32", "float64", "bfloat16", "float16"], default="float32",
+                        help="PyTorch precision (dtype) to use (default: float32).")
     parser.add_argument("--spiking-layernorm", action=argparse.BooleanOptionalAction, default=True,
                         help="Use SpikingLayerNorm instead of standard nn.LayerNorm.")
     parser.add_argument("--spiking-attention", action=argparse.BooleanOptionalAction, default=True,
@@ -93,6 +96,7 @@ def parse_arguments():
         dataset_id=args.dataset_id,
         batch_size=args.batch_size,
         device=args.device,
+        precision=args.precision,
         max_eval_batches=args.max_eval_batches,
         spiking_layernorm=args.spiking_layernorm,
         spiking_attention=args.spiking_attention,
@@ -133,6 +137,15 @@ def evaluate_vit_model(args:Arguments):
     # ---------------------------------------------------------
     torch.manual_seed(42)
     
+    # Precision mapping
+    dtype_map = {
+        "float32": torch.float32,
+        "float64": torch.float64,
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+    }
+    dtype = dtype_map[args.precision]
+    
     # ---------------------------------------------------------
     # 1. 설정 (Configuration)
     # ---------------------------------------------------------
@@ -160,6 +173,7 @@ def evaluate_vit_model(args:Arguments):
     print(f"Using device: {device}")
     print(f"Model backend: {model_backend}")
     print(f"Model: {model_id}, Dataset: {dataset_id} ({split})")
+    print(f"Precision: {args.precision}")
     
     if model_backend == "spiking":
         print(f"Spiking LayerNorm: {args.spiking_layernorm}, Spiking Attention: {args.spiking_attention}")
@@ -211,7 +225,7 @@ def evaluate_vit_model(args:Arguments):
     # ---------------------------------------------------------
     print(f"Loading model: {model_id}...")
     if model_backend == "hf":
-        model = AutoModelForImageClassification.from_pretrained(model_id)
+        model = AutoModelForImageClassification.from_pretrained(model_id, torch_dtype=dtype)
     else:
         config = ViTConfig.from_pretrained(
             model_id,
@@ -223,7 +237,7 @@ def evaluate_vit_model(args:Arguments):
             hidden_act=args.activation,
             theta=args.theta,
         )
-        model = ViTForImageClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl)
+        model = ViTForImageClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl, torch_dtype=dtype)
     
     apply_parameter_noise(model, args.weight_noise_std, args.bias_noise_std)
     
@@ -292,7 +306,7 @@ def evaluate_vit_model(args:Arguments):
 
     for batch in tqdm(dataloader):
         # 데이터를 디바이스(GPU/CPU)로 이동
-        pixel_values = batch["pixel_values"].to(device)
+        pixel_values = batch["pixel_values"].to(device, dtype=dtype)
         labels = batch["labels"].to(device)
         
         if log_step[0] == 0:
