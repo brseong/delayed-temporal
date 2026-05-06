@@ -207,6 +207,51 @@ def gelu_approximation(
     
     return gelu_approx, gelu_domain
 
+
+@check_domain
+def tanh(
+    input_value: Float[torch.Tensor, "*batch dims"],
+    domain: PotentialBounds,
+    *,
+    tau_s: float = 1.0,
+    theta: float = 400.0,
+    **_
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Approximate tanh activation using spiking operators.
+    
+    According to Lemma 4.4 (Derivation of tanh Approximation) in the paper:
+    f_tanh(v) := 2 * f_Div(1,1+f_Exp (-2v)) - 1
+    """
+    # Step 1: f_NP(-2v)
+    scale_const = 2.0
+    scale_bound = PotentialBounds(scale_const, scale_const)
+    scaled_input, _ = multiplication_operator(
+        input_value, domain,
+        input_value.new_tensor(scale_const).expand_as(input_value), scale_bound,
+        theta)
+    scaled_domain = PotentialBounds(scale_const * domain.min, scale_const * domain.max)
+    
+    # Stability cap for exp: exp(20) is safe, exp(400) overflows.
+    # Since exp(-1.702*v) is used for sigmoid, we only need to worry about v being very negative.
+    _STABILITY_CAP = 20.0
+    scaled_input_clamped = scaled_input.clamp(min=-_STABILITY_CAP, max=_STABILITY_CAP)
+    scaled_domain_clamped = PotentialBounds(max(scaled_domain.min, -_STABILITY_CAP), min(scaled_domain.max, _STABILITY_CAP))
+
+    # Step 2: f_NE(f_NP(1.702v))
+    # Note: exponential_function outputs C * exp(-1.702v)
+    neg_exp_out, neg_exp_domain = exponential_function(scaled_input_clamped, scaled_domain_clamped, tau_m=tau_s)
+    
+    # Step 3: f_DIV(C, C + f_NE(f_NP(1.702v)))
+    # This mathematically equals 1 / (1 + exp(-1.702v))
+    div_out, div_domain = division_function(
+        X=torch.full_like(neg_exp_out, 1.0), 
+        Y=1.0 + neg_exp_out, 
+        joint_domain=PotentialBounds(1.0, neg_exp_domain.max + 1.0), 
+        tau_s=tau_s
+    )
+    
+    return 2.0 * div_out - 1.0, PotentialBounds(2.0 * div_domain.min - 1.0, 2.0 * div_domain.max - 1.0)
+
 @check_domain
 def swiglu_function(
     u: torch.Tensor,

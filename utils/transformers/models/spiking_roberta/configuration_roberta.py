@@ -14,53 +14,75 @@
 # limitations under the License.
 """RoBERTa configuration"""
 
-from huggingface_hub.dataclasses import strict
-
-from ...configuration_utils import PreTrainedConfig
-from ...utils import auto_docstring
+from transformers.configuration_utils import PreTrainedConfig
+from transformers.utils import auto_docstring
 
 
 @auto_docstring(checkpoint="FacebookAI/roberta-base")
-@strict
 class RobertaConfig(PreTrainedConfig):
-    r"""
-    Examples:
-
-    ```python
-    >>> from transformers import RobertaConfig, RobertaModel
-
-    >>> # Initializing a RoBERTa configuration
-    >>> configuration = RobertaConfig()
-
-    >>> # Initializing a model (with random weights) from the configuration
-    >>> model = RobertaModel(configuration)
-
-    >>> # Accessing the model configuration
-    >>> configuration = model.config
-    ```"""
-
     model_type = "roberta"
 
-    vocab_size: int = 50265
-    hidden_size: int = 768
-    num_hidden_layers: int = 12
-    num_attention_heads: int = 12
-    intermediate_size: int = 3072
-    hidden_act: str = "gelu"
-    hidden_dropout_prob: float | int = 0.1
-    attention_probs_dropout_prob: float | int = 0.1
-    max_position_embeddings: int = 512
-    type_vocab_size: int = 2
-    initializer_range: float = 0.02
-    layer_norm_eps: float = 1e-12
-    pad_token_id: int | None = 1
-    bos_token_id: int | None = 0
-    eos_token_id: int | list[int] | None = 2
-    use_cache: bool = True
-    classifier_dropout: float | int | None = None
-    is_decoder: bool = False
-    add_cross_attention: bool = False
-    tie_word_embeddings: bool = True
+    def __init__(
+        self,
+        vocab_size=50265,
+        hidden_size=768,
+        num_hidden_layers=12,
+        num_attention_heads=12,
+        intermediate_size=3072,
+        hidden_act="gelu",
+        hidden_dropout_prob=0.1,
+        attention_probs_dropout_prob=0.1,
+        max_position_embeddings=512,
+        type_vocab_size=2,
+        initializer_range=0.02,
+        layer_norm_eps=1e-12,
+        pad_token_id=1,
+        bos_token_id=0,
+        eos_token_id=2,
+        use_cache=True,
+        classifier_dropout=None,
+        is_decoder=False,
+        add_cross_attention=False,
+        tie_word_embeddings=True,
+        use_spiking_layernorm=True,
+        spiking_ln_mul=True,
+        spiking_ln_log=True,
+        spiking_ln_expdiff=True,
+        use_spiking_mlp=True,
+        theta=10.0,
+        tau_s=1.0,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+        self.hidden_act = hidden_act
+        self.intermediate_size = intermediate_size
+        self.hidden_dropout_prob = hidden_dropout_prob
+        self.attention_probs_dropout_prob = attention_probs_dropout_prob
+        self.max_position_embeddings = max_position_embeddings
+        self.type_vocab_size = type_vocab_size
+        self.initializer_range = initializer_range
+        self.layer_norm_eps = layer_norm_eps
+        self.pad_token_id = pad_token_id
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.use_cache = use_cache
+        self.classifier_dropout = classifier_dropout
+        self.is_decoder = is_decoder
+        self.add_cross_attention = add_cross_attention
+        self.tie_word_embeddings = tie_word_embeddings
+
+        # Spiking parameters
+        self.use_spiking_layernorm = use_spiking_layernorm
+        self.spiking_ln_mul = spiking_ln_mul
+        self.spiking_ln_log = spiking_ln_log
+        self.spiking_ln_expdiff = spiking_ln_expdiff
+        self.use_spiking_mlp = use_spiking_mlp
+        self.theta = theta
+        self.tau_s = tau_s
 
 
 __all__ = ["RobertaConfig"]

@@ -3,7 +3,7 @@ trap 'kill -- -$$' SIGINT SIGTERM
 
 source ./venv/bin/activate
 device="cuda"
-theta=1000
+theta=2000
 task="wikitext2" # wikitext2 | wikitext103
 
 expr_names=(
