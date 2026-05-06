@@ -28,6 +28,7 @@ from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import (
     BaseModelOutputWithPastAndCrossAttentions,
     BaseModelOutputWithPoolingAndCrossAttentions,
+    CausalLMOutputWithCrossAttentions,
     MaskedLMOutput,
     MultipleChoiceModelOutput,
     QuestionAnsweringModelOutput,
@@ -224,8 +225,11 @@ class RobertaSelfOutput(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.dense = SpikingLinear(config.hidden_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
         self.use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
+        if self.use_spiking_mlp:
+            self.dense = SpikingLinear(config.hidden_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
+        else:
+            self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         
         _theta = getattr(config, "theta", 10.0)
         _tau_s = getattr(config, "tau_s", 1.0)
@@ -273,15 +277,19 @@ class RobertaAttention(nn.Module):
 class RobertaIntermediate(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.dense = SpikingLinear(config.hidden_size, config.intermediate_size, theta=getattr(config, "theta", 400.0))
-        self._use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
+        self.use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
+        if self.use_spiking_mlp:
+            self.dense = SpikingLinear(config.hidden_size, config.intermediate_size, theta=getattr(config, "theta", 400.0))
+        else:
+            self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
+            
         if isinstance(config.hidden_act, str):
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
         else:
             self.intermediate_act_fn = config.hidden_act
 
     def forward(self, pot: Potential) -> Potential:
-        if self._use_spiking_mlp:
+        if self.use_spiking_mlp:
             pot_z = self.dense(pot)
             return Potential(*gelu_approximation(*pot_z))
         else:
@@ -293,8 +301,11 @@ class RobertaIntermediate(nn.Module):
 class RobertaOutput(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.dense = SpikingLinear(config.intermediate_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
         self.use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
+        if self.use_spiking_mlp:
+            self.dense = SpikingLinear(config.intermediate_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
+        else:
+            self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
         
         _theta = getattr(config, "theta", 10.0)
         _tau_s = getattr(config, "tau_s", 1.0)
@@ -360,10 +371,13 @@ class RobertaEncoder(nn.Module):
 class RobertaPooler(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.dense = SpikingLinear(config.hidden_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
-        self.activation = nn.Tanh()
         self.use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
-        self.tau_s = getattr(config, "tau_s", 1.0)
+        if self.use_spiking_mlp:
+            self.dense = SpikingLinear(config.hidden_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
+            self.tau_s = getattr(config, "tau_s", 1.0)
+        else:
+            self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+            self.activation = nn.Tanh()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # We "pool" the model by simply taking the hidden state corresponding
@@ -375,8 +389,9 @@ class RobertaPooler(nn.Module):
             pooled_output, _ = tanh(pot_dense.value, pot_dense.domain, tau_s=self.tau_s, theta=self.dense.theta)
             return pooled_output
         else:
-            out = nn.functional.linear(first_token_tensor, self.dense.weight, self.dense.bias)
-            return self.activation(out)
+            pooled_output = self.dense(first_token_tensor)
+            pooled_output = self.activation(pooled_output)
+            return pooled_output
 
 
 @auto_docstring
@@ -446,6 +461,185 @@ class RobertaModel(RobertaPreTrainedModel):
         )
 
 
+class RobertaLMHead(nn.Module):
+    """Roberta Head for masked language modeling."""
+
+    def __init__(self, config):
+        super().__init__()
+        self.use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
+        if self.use_spiking_mlp:
+            self.dense = SpikingLinear(config.hidden_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
+        else:
+            self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+
+        _theta = getattr(config, "theta", 10.0)
+        _tau_s = getattr(config, "tau_s", 1.0)
+        _use_spiking_ln = getattr(config, "use_spiking_layernorm", True)
+        if _use_spiking_ln:
+            _sln_kwargs = dict(
+                theta=_theta, tau_s=_tau_s,
+                use_spiking_mul=getattr(config, "spiking_ln_mul", True),
+                use_spiking_log=getattr(config, "spiking_ln_log", True),
+                use_spiking_expdiff=getattr(config, "spiking_ln_expdiff", True),
+            )
+            self.layer_norm = SpikingLayerNorm(config.hidden_size, **_sln_kwargs)
+        else:
+            self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+        self.decoder = nn.Linear(config.hidden_size, config.vocab_size)
+        self.bias = nn.Parameter(torch.zeros(config.vocab_size))
+
+    def forward(self, features, **kwargs):
+        if self.use_spiking_mlp:
+            pot = Potential(features, PotentialBounds(features.min().item(), features.max().item()))
+            pot_z = self.dense(pot)
+            pot_act = Potential(*gelu_approximation(*pot_z))
+        else:
+            x = self.dense(features)
+            x = nn.functional.gelu(x)
+            pot_act = Potential(x, PotentialBounds(x.min().item(), x.max().item()))
+        
+        x = _apply_norm(self.layer_norm, pot_act).value
+        # project back to size of vocabulary with bias
+        x = self.decoder(x) + self.bias
+        return x
+
+
+@auto_docstring
+class RobertaForCausalLM(RobertaPreTrainedModel):
+    _tied_weights_keys = {
+        "lm_head.decoder.weight": "roberta.embeddings.word_embeddings.weight",
+        "lm_head.decoder.bias": "lm_head.bias",
+    }
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.roberta = RobertaModel(config, add_pooling_layer=False)
+        self.lm_head = RobertaLMHead(config)
+        self.post_init()
+
+    def get_output_embeddings(self):
+        return self.lm_head.decoder
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head.decoder = new_embeddings
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        **kwargs
+    ):
+        outputs = self.roberta(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            inputs_embeds=inputs_embeds,
+            **kwargs
+        )
+        sequence_output = outputs[0]
+        logits = self.lm_head(sequence_output)
+
+        loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
+
+        return CausalLMOutputWithCrossAttentions(
+            loss=loss,
+            logits=logits,
+        )
+
+
+@auto_docstring
+class RobertaForMaskedLM(RobertaPreTrainedModel):
+    _tied_weights_keys = {
+        "lm_head.decoder.weight": "roberta.embeddings.word_embeddings.weight",
+        "lm_head.decoder.bias": "lm_head.bias",
+    }
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.roberta = RobertaModel(config, add_pooling_layer=False)
+        self.lm_head = RobertaLMHead(config)
+        self.post_init()
+
+    def get_output_embeddings(self):
+        return self.lm_head.decoder
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head.decoder = new_embeddings
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        **kwargs
+    ):
+        outputs = self.roberta(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            inputs_embeds=inputs_embeds,
+            **kwargs
+        )
+        sequence_output = outputs[0]
+        prediction_scores = self.lm_head(sequence_output)
+
+        masked_lm_loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
+
+        return MaskedLMOutput(
+            loss=masked_lm_loss,
+            logits=prediction_scores,
+        )
+
+
+class RobertaClassificationHead(nn.Module):
+    """Head for sentence-level classification tasks."""
+
+    def __init__(self, config):
+        super().__init__()
+        self.use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
+        if self.use_spiking_mlp:
+            self.dense = SpikingLinear(config.hidden_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
+            self.tau_s = getattr(config, "tau_s", 1.0)
+        else:
+            self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+            
+        classifier_dropout = (
+            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
+        )
+        self.dropout = nn.Dropout(classifier_dropout)
+        self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
+
+    def forward(self, features, **kwargs):
+        x = features[:, 0, :]  # take <s> token (equiv. to [CLS])
+        x = self.dropout(x)
+        if self.use_spiking_mlp:
+            pot_in = Potential(x, PotentialBounds(x.min().item(), x.max().item()))
+            pot_z = self.dense(pot_in)
+            x, _ = tanh(pot_z.value, pot_z.domain, tau_s=self.tau_s, theta=self.dense.theta)
+        else:
+            x = self.dense(x)
+            x = torch.tanh(x)
+        x = self.dropout(x)
+        x = self.out_proj(x)
+        return x
+
+
 @auto_docstring
 class RobertaForSequenceClassification(RobertaPreTrainedModel):
     def __init__(self, config):
@@ -489,11 +683,69 @@ class RobertaForSequenceClassification(RobertaPreTrainedModel):
 
 
 @auto_docstring
-class RobertaForMaskedLM(RobertaPreTrainedModel):
+class RobertaForMultipleChoice(RobertaPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
+        self.roberta = RobertaModel(config)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, 1)
+        self.post_init()
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs
+    ):
+        num_choices = input_ids.shape[1] if input_ids is not None else inputs_embeds.shape[1]
+
+        flat_input_ids = input_ids.view(-1, input_ids.size(-1)) if input_ids is not None else None
+        flat_position_ids = position_ids.view(-1, position_ids.size(-1)) if position_ids is not None else None
+        flat_token_type_ids = token_type_ids.view(-1, token_type_ids.size(-1)) if token_type_ids is not None else None
+        flat_attention_mask = attention_mask.view(-1, attention_mask.size(-1)) if attention_mask is not None else None
+        flat_inputs_embeds = (
+            inputs_embeds.view(-1, inputs_embeds.size(-2), inputs_embeds.size(-1))
+            if inputs_embeds is not None
+            else None
+        )
+
+        outputs = self.roberta(
+            flat_input_ids,
+            position_ids=flat_position_ids,
+            token_type_ids=flat_token_type_ids,
+            attention_mask=flat_attention_mask,
+            inputs_embeds=flat_inputs_embeds,
+            **kwargs
+        )
+        pooled_output = outputs[1]
+
+        pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(pooled_output)
+        reshaped_logits = logits.view(-1, num_choices)
+
+        loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(reshaped_logits, labels)
+
+        return MultipleChoiceModelOutput(loss=loss, logits=reshaped_logits)
+
+
+@auto_docstring
+class RobertaForTokenClassification(RobertaPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.num_labels = config.num_labels
         self.roberta = RobertaModel(config, add_pooling_layer=False)
-        self.lm_head = RobertaLMHead(config)
+        classifier_dropout = (
+            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
+        )
+        self.dropout = nn.Dropout(classifier_dropout)
+        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
         self.post_init()
 
     def forward(
@@ -515,79 +767,80 @@ class RobertaForMaskedLM(RobertaPreTrainedModel):
             **kwargs
         )
         sequence_output = outputs[0]
-        prediction_scores = self.lm_head(sequence_output)
+        sequence_output = self.dropout(sequence_output)
+        logits = self.classifier(sequence_output)
 
-        masked_lm_loss = None
+        loss = None
         if labels is not None:
             loss_fct = CrossEntropyLoss()
-            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
+            loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
 
-        return MaskedLMOutput(
-            loss=masked_lm_loss,
-            logits=prediction_scores,
+        return TokenClassifierOutput(loss=loss, logits=logits)
+
+
+@auto_docstring
+class RobertaForQuestionAnswering(RobertaPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+        self.roberta = RobertaModel(config, add_pooling_layer=False)
+        self.qa_outputs = nn.Linear(config.hidden_size, config.num_labels)
+        self.post_init()
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        start_positions: Optional[torch.Tensor] = None,
+        end_positions: Optional[torch.Tensor] = None,
+        **kwargs
+    ):
+        outputs = self.roberta(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            inputs_embeds=inputs_embeds,
+            **kwargs
+        )
+        sequence_output = outputs[0]
+        logits = self.qa_outputs(sequence_output)
+        start_logits, end_logits = logits.split(1, dim=-1)
+        start_logits = start_logits.squeeze(-1).contiguous()
+        end_logits = end_logits.squeeze(-1).contiguous()
+
+        loss = None
+        if start_positions is not None and end_positions is not None:
+            if len(start_positions.size()) > 1:
+                start_positions = start_positions.squeeze(-1)
+            if len(end_positions.size()) > 1:
+                end_positions = end_positions.squeeze(-1)
+            ignored_index = start_logits.size(1)
+            start_positions = start_positions.clamp(0, ignored_index)
+            end_positions = end_positions.clamp(0, ignored_index)
+
+            loss_fct = CrossEntropyLoss(ignore_index=ignored_index)
+            start_loss = loss_fct(start_logits, start_positions)
+            end_loss = loss_fct(end_logits, end_positions)
+            loss = (start_loss + end_loss) / 2
+
+        return QuestionAnsweringModelOutput(
+            loss=loss,
+            start_logits=start_logits,
+            end_logits=end_logits,
         )
 
 
-class RobertaLMHead(nn.Module):
-    """Roberta Head for masked language modeling."""
-
-    def __init__(self, config):
-        super().__init__()
-        self.dense = SpikingLinear(config.hidden_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
-        
-        _theta = getattr(config, "theta", 10.0)
-        _tau_s = getattr(config, "tau_s", 1.0)
-        _use_spiking_ln = getattr(config, "use_spiking_layernorm", True)
-        if _use_spiking_ln:
-            _sln_kwargs = dict(
-                theta=_theta, tau_s=_tau_s,
-                use_spiking_mul=getattr(config, "spiking_ln_mul", True),
-                use_spiking_log=getattr(config, "spiking_ln_log", True),
-                use_spiking_expdiff=getattr(config, "spiking_ln_expdiff", True),
-            )
-            self.layer_norm = SpikingLayerNorm(config.hidden_size, **_sln_kwargs)
-        else:
-            self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-
-        self.decoder = nn.Linear(config.hidden_size, config.vocab_size)
-        self.bias = nn.Parameter(torch.zeros(config.vocab_size))
-        self._use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
-
-    def forward(self, features, **kwargs):
-        if self._use_spiking_mlp:
-            pot = Potential(features, PotentialBounds(features.min().item(), features.max().item()))
-            pot_z = self.dense(pot)
-            pot_act = Potential(*gelu_approximation(*pot_z))
-        else:
-            out = nn.functional.linear(features, self.dense.weight, self.dense.bias)
-            out = nn.functional.gelu(out)
-            pot_act = Potential(out, PotentialBounds(out.min().item(), out.max().item()))
-        
-        x = _apply_norm(self.layer_norm, pot_act).value
-        # project back to size of vocabulary with bias
-        x = self.decoder(x) + self.bias
-        return x
-
-
-class RobertaClassificationHead(nn.Module):
-    """Head for sentence-level classification tasks."""
-
-    def __init__(self, config):
-        super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        classifier_dropout = (
-            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
-        )
-        self.dropout = nn.Dropout(classifier_dropout)
-        self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
-
-    def forward(self, features, **kwargs):
-        x = features[:, 0, :]  # take <s> token (equiv. to [CLS])
-        x = self.dropout(x)
-        x = self.dense(x)
-        x = torch.tanh(x)
-        x = self.dropout(x)
-        x = self.out_proj(x)
-        return x
-
-__all__ = ["RobertaModel", "RobertaForSequenceClassification", "RobertaPreTrainedModel", "RobertaForMaskedLM"]
+__all__ = [
+    "RobertaModel",
+    "RobertaForCausalLM",
+    "RobertaForMaskedLM",
+    "RobertaForSequenceClassification",
+    "RobertaForMultipleChoice",
+    "RobertaForTokenClassification",
+    "RobertaForQuestionAnswering",
+    "RobertaPreTrainedModel",
+]
