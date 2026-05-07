@@ -213,7 +213,7 @@ __marimo__/
 /data/
 /logs/
 /runs/
-/src/
+/src/**
 /venv/
 /error_histogram.png
 /tex/

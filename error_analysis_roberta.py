@@ -247,6 +247,12 @@ def evaluate_roberta_model(args:Arguments):
         model = nn.Module.cuda(model)
     else:
         model = nn.Module.cpu(model)
+    
+    # GPU 병렬화 (DataParallel) 설정
+    if torch_device.type == "cuda" and torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        model = nn.DataParallel(model)    
+    
     model.eval()
 
     tb_writer = SummaryWriter(log_dir=f"runs/{args.experiment_name}")
