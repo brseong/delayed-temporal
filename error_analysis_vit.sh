@@ -1,8 +1,8 @@
 #!/bin/bash
 trap 'kill -- -$$' SIGINT SIGTERM
 
-cuda_devices="0,1,2,3,4,5,6,7"
-cuda_count=8
+cuda_devices="0,1,2,3"
+cuda_count=4
 source ./venv/bin/activate
 device="cuda"
 batch_sizes=($((16 * ${cuda_count})) $((32 * ${cuda_count})) $((8 * ${cuda_count})))
@@ -17,11 +17,9 @@ model_ids=(
     # "google/vit-base-patch16-224"
     # "WinKawaks/vit-small-patch16-224"
     # "google/vit-large-patch16-224"
-    # "/data/nas/vit_base_patch16_224.augreg2_in21k_ft_in1k"
     "/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k"
-    "/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k"
-    "/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k"
-    # "/data/nas/vit_large_patch16_224.augreg_in21k_ft_in1k"
+    "/data/nas/vit_base_patch16_224.augreg2_in21k_ft_in1k"
+    "/data/nas/vit_large_patch16_224.augreg_in21k_ft_in1k"
 )
 
 # Stage flags per experiment (mul=off; isolating log and expdiff):
@@ -37,18 +35,18 @@ ln_flags=(
     ""
 )
 flags=(
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend} --precision float64"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend} --precision float16"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend} --precision bfloat16"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend} --precision float32"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend} --precision float32"
+    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${model_backend} --precision float32"
     # "--no-spiking-layernorm --no-spiking-mlp --spiking-attention --model_backend ${model_backend}"
     # "--no-spiking-layernorm --spiking-mlp --no-spiking-attention --model_backend ${model_backend}"
     # "--spiking-layernorm --no-spiking-mlp --no-spiking-attention --model_backend ${model_backend}"
     # "--no-spiking-layernorm --no-spiking-mlp --no-spiking-attention --model_backend ${model_backend}"
 )
 expr_names=(
-    "spiking"
-    "spiking"
-    "spiking"
+    ""
+    ""
+    ""
     # "full-snn"
     # "full-snn"
     # "full-snn"
