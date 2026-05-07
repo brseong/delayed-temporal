@@ -171,15 +171,16 @@ def gelu_approximation(
     # Step 1: f_NP(1.702v)
     scale_const = 1.702
     scale_bound = PotentialBounds(scale_const, scale_const)
-    scaled_input, _ = multiplication_operator(
-        input_value, domain,
-        input_value.new_tensor(scale_const).expand_as(input_value), scale_bound,
-        theta)
+    # scaled_input, _ = multiplication_operator(
+    #     input_value, domain,
+    #     input_value.new_tensor(scale_const).expand_as(input_value), scale_bound,
+    #     theta)
+    scaled_input = input_value * scale_const
     scaled_domain = PotentialBounds(scale_const * domain.min, scale_const * domain.max)
     
     # Stability cap for exp: exp(20) is safe, exp(400) overflows.
     # Since exp(-1.702*v) is used for sigmoid, we only need to worry about v being very negative.
-    _STABILITY_CAP = 20.0
+    _STABILITY_CAP = 80.0
     scaled_input_clamped = scaled_input.clamp(min=-_STABILITY_CAP, max=_STABILITY_CAP)
     scaled_domain_clamped = PotentialBounds(max(scaled_domain.min, -_STABILITY_CAP), min(scaled_domain.max, _STABILITY_CAP))
 
