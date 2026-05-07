@@ -234,7 +234,7 @@ def tanh(
     
     # Stability cap for exp: exp(20) is safe, exp(400) overflows.
     # Since exp(-1.702*v) is used for sigmoid, we only need to worry about v being very negative.
-    _STABILITY_CAP = 20.0
+    _STABILITY_CAP = 80.0
     scaled_input_clamped = scaled_input.clamp(min=-_STABILITY_CAP, max=_STABILITY_CAP)
     scaled_domain_clamped = PotentialBounds(max(scaled_domain.min, -_STABILITY_CAP), min(scaled_domain.max, _STABILITY_CAP))
 

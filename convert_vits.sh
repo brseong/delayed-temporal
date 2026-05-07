@@ -1,3 +1,4 @@
 python -m transformers.models.vit.convert_vit_timm_to_pytorch --vit_name timm/vit_base_patch16_224.augreg2_in21k_ft_in1k --pytorch_dump_folder_path /data/nas/vit_base_patch16_224.augreg2_in21k_ft_in1k
 python -m transformers.models.vit.convert_vit_timm_to_pytorch --vit_name timm/vit_small_patch16_224.augreg_in21k_ft_in1k --pytorch_dump_folder_path /data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k
 python -m transformers.models.vit.convert_vit_timm_to_pytorch --vit_name timm/vit_large_patch16_224.augreg_in21k_ft_in1k --pytorch_dump_folder_path /data/nas/vit_large_patch16_224.augreg_in21k_ft_in1k
+python -m transformers.models.vit.convert_vit_timm_to_pytorch --vit_name timm/vit_tiny_patch16_224.augreg_in21k_ft_in1k --pytorch_dump_folder_path /data/nas/vit_tiny_patch16_224.augreg_in21k_ft_in1k

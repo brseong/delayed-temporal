@@ -44,6 +44,7 @@ class Arguments:
     weight_noise_std: float
     bias_noise_std: float
     collect_quantiles: bool
+    quick_test: bool
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Evaluate ViT model with Spiking SDPA attention.")
@@ -87,6 +88,8 @@ def parse_arguments():
                         help="Standard deviation of Gaussian noise to add to biases (default: 0.0).")
     parser.add_argument("--collect-quantiles", action="store_true",
                         help="Collect and print 99.9%% quantiles of absolute activations.")
+    parser.add_argument("--quick-test", action="store_true",
+                        help="Run a quick test with a small subset of the dataset and fewer batches.")
 
     args = parser.parse_args()
     return Arguments(
@@ -110,6 +113,7 @@ def parse_arguments():
         weight_noise_std=args.weight_noise_std,
         bias_noise_std=args.bias_noise_std,
         collect_quantiles=args.collect_quantiles,
+        quick_test=args.quick_test,
     )
 
 DATASET_CONFIGS = {
@@ -191,6 +195,8 @@ def evaluate_vit_model(args:Arguments):
     # 데이터셋 로드
     print(f"Loading dataset: {dataset_id}...")
     dataset = load_dataset(dataset_id, split=split, cache_dir="/data/nas/datasets/")
+    if args.quick_test:
+        dataset = dataset.select(range(5000))  # Quick test with only 5000 samples
 
     # 모델에 맞는 Feature Extractor(Image Processor) 로드
     processor = ViTImageProcessor.from_pretrained(model_id)
