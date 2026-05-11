@@ -4,7 +4,6 @@ trap 'kill -- -$$' SIGINT SIGTERM
 cuda_devices="0,1,2,3,4,5,6,7"
 source ./venv/bin/activate
 device="cuda"
-# model_id="WinKawaks/vit-small-patch16-224"
 model_id="/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k"
 dataset_id="imagenet-1k"
 backend="spiking"
