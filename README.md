@@ -1,5 +1,3 @@
->📋  A template README.md for code accompanying a Machine Learning paper
-
 # Biologically Plausible Dual Operators for TTFS-Coded Analog Spiking Transformers
 
 This repository is the official implementation of *Biologically Plausible Dual Operators for TTFS-Coded
