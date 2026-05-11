@@ -221,3 +221,5 @@ __marimo__/
 /quantiles/
 /wandb*.csv
 /*.pdf
+/.claude
+/.vscode
