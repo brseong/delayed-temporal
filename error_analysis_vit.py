@@ -199,7 +199,10 @@ def evaluate_vit_model(args:Arguments):
         dataset = dataset.select(range(5000))  # Quick test with only 5000 samples
 
     # 모델에 맞는 Feature Extractor(Image Processor) 로드
-    processor = ViTImageProcessor.from_pretrained(model_id)
+    if model_id == "mpiorczynski/relu-vit-base-patch16-224":
+        processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
+    else:
+        processor = ViTImageProcessor.from_pretrained(model_id)
 
     # 평가 지표(Metric) 로드 - 정확도(Accuracy)
     metric_int = evaluate.load("accuracy")
@@ -230,8 +233,10 @@ def evaluate_vit_model(args:Arguments):
     # 4. 모델 로드
     # ---------------------------------------------------------
     print(f"Loading model: {model_id}...")
+    
     if model_backend == "hf":
-        model = AutoModelForImageClassification.from_pretrained(model_id, torch_dtype=dtype)
+        config = ViTConfig.from_pretrained(model_id, hidden_act=args.activation)
+        model = AutoModelForImageClassification.from_pretrained(model_id, torch_dtype=dtype, config=config)
     else:
         config = ViTConfig.from_pretrained(
             model_id,

@@ -232,7 +232,9 @@ def evaluate_bert_model(args:Arguments):
     print(f"Loading model: {model_id}...")
     model: nn.Module
     if model_backend == "hf":
-        model = AutoModelForSequenceClassification.from_pretrained(model_id)
+        config = BertConfig.from_pretrained(model_id)
+        config.hidden_act = args.activation
+        model = AutoModelForSequenceClassification.from_pretrained(model_id, config=config)
     else:
         config = BertConfig.from_pretrained(model_id)
         config.use_spiking_layernorm = args.spiking_layernorm

@@ -23,7 +23,8 @@ from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 from transformers import initialization as init
-from transformers.activations import ACT2FN
+import transformers
+from transformers.activations import ACT2FN, GELUActivation
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import (
     BaseModelOutputWithPastAndCrossAttentions,
@@ -42,7 +43,7 @@ from transformers.utils.generic import can_return_tuple, merge_with_config_defau
 from transformers.utils.output_capturing import capture_outputs
 from .configuration_bert import BertConfig
 
-from utils.transforms.functions import gelu_approximation
+from utils.transforms.functions import gelu_approximation, tanh
 from utils.transforms.types import Potential, PotentialBounds
 from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear, _apply_norm
 
@@ -235,7 +236,12 @@ class BertIntermediate(nn.Module):
     def forward(self, pot: Potential) -> Potential:
         pot_z = self.dense(pot)
         if self._use_spiking_mlp:
-            return Potential(*gelu_approximation(*pot_z))
+            if isinstance(self.intermediate_act_fn, GELUActivation):
+                return Potential(*gelu_approximation(*pot_z))
+            if isinstance(self.intermediate_act_fn, nn.ReLU):
+                # ReLU approximation: output is max(0, x), so the domain is [max(0, min), max(0, max)]
+                out, domain = pot_z
+                return Potential(out.relu(), domain)
         out = self.intermediate_act_fn(pot_z.value)
         return Potential(out, PotentialBounds(out.min().item(), out.max().item()))
 
@@ -303,14 +309,25 @@ class BertEncoder(nn.Module):
 class BertPooler(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.activation = nn.Tanh()
+        self.use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
+        if self.use_spiking_mlp:
+            self.dense = SpikingLinear(config.hidden_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
+            self.tau_s = getattr(config, "tau_s", 1.0)
+        else:
+            self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+            self.activation = nn.Tanh()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         first_token_tensor = hidden_states[:, 0]
-        pooled_output = self.dense(first_token_tensor)
-        pooled_output = self.activation(pooled_output)
-        return pooled_output
+        if self.use_spiking_mlp:
+            pot_in = Potential(first_token_tensor, PotentialBounds(first_token_tensor.min().item(), first_token_tensor.max().item()))
+            pot_dense = self.dense(pot_in)
+            pooled_output, _ = tanh(pot_dense.value, pot_dense.domain, tau_s=self.tau_s, theta=self.dense.theta)
+            return pooled_output
+        else:
+            pooled_output = self.dense(first_token_tensor)
+            pooled_output = self.activation(pooled_output)
+            return pooled_output
 
 
 @auto_docstring
