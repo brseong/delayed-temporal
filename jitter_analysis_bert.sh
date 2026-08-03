@@ -11,7 +11,8 @@ dataset_name="glue"
 dataset_config_name="sst2"
 dataset_split="validation"
 
-cuda_devices=(0 1 2 3)
+cuda_devices=(${GPUS:-0 1 2 3})   # override with e.g. GPUS="4 5 6 7"
+source "$(dirname "${BASH_SOURCE[0]}")/gpu_pool.sh"
 backend="hf"
 batch_size=$((32 * 4)) # Adjust based on the number of GPUs and memory constraints
 
@@ -30,9 +31,11 @@ expr_names=(
     "std_${stds[3]}"
 )
 
+gpu_pool_init "${cuda_devices[@]}"
 for index in "${!expr_names[@]}"; do
-    echo "Running error analysis: ${expr_names[$index]}"
-    script="CUDA_VISIBLE_DEVICES=${cuda_devices[$index]} python3 error_analysis_bert.py \
+    gpu_pool_acquire; gpu=$GPU_POOL_ACQUIRED
+    echo "Running error analysis on GPU ${gpu}: ${expr_names[$index]}"
+    script="CUDA_VISIBLE_DEVICES=${gpu} python3 error_analysis_bert.py \
         --experiment_name ${expr_names[$index]}_${task} --device ${device} \
         --task ${task} \
         --model_id ${model_id} \
@@ -43,6 +46,7 @@ for index in "${!expr_names[@]}"; do
     fi
     echo $script
     eval $script &
+    gpu_pool_register $! "$gpu"
 done
 
 wait

@@ -110,6 +110,7 @@ class ViTConfig(PreTrainedConfig):
         spiking_ln_log=True,
         spiking_ln_expdiff=True,
         use_spiking_mlp=True,
+        spiking_mlp_exact_gelu=False,
         noise_std=0.0,
         **kwargs,
     ):
@@ -139,6 +140,7 @@ class ViTConfig(PreTrainedConfig):
         self.spiking_ln_log = spiking_ln_log
         self.spiking_ln_expdiff = spiking_ln_expdiff
         self.use_spiking_mlp = use_spiking_mlp
+        self.spiking_mlp_exact_gelu = spiking_mlp_exact_gelu
         self.noise_std = noise_std
 
 

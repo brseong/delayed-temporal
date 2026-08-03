@@ -50,11 +50,14 @@ flags=(
     "--no-spiking-attention --no-spiking-layernorm --no-spiking-mlp --activation gelu --model_backend hf" # control (ANN only)
 )
 
-cuda_devices=(0 1) # Adjust if you want to run on different GPUs
+cuda_devices=(${GPUS:-0 1}) # override with e.g. GPUS="4 5 6 7"
+source "$(dirname "${BASH_SOURCE[0]}")/gpu_pool.sh"
 
+gpu_pool_init "${cuda_devices[@]}"
 for index in "${!expr_names[@]}"; do
-    echo "Running error analysis: ${expr_names[$index]}"
-    script="CUDA_VISIBLE_DEVICES=${cuda_devices[$index]} python3 error_analysis_roberta.py \
+    gpu_pool_acquire; gpu=$GPU_POOL_ACQUIRED
+    echo "Running error analysis on GPU ${gpu}: ${expr_names[$index]}"
+    script="CUDA_VISIBLE_DEVICES=${gpu} python3 error_analysis_roberta.py \
         --experiment_name roberta_${expr_names[$index]}_${task} --device ${device} \
         --task ${task} --batch_size 16 \
         --model_id ${model_id} \
@@ -65,6 +68,7 @@ for index in "${!expr_names[@]}"; do
     fi
     echo $script
     eval $script &
+    gpu_pool_register $! "$gpu"
 done
 
 wait

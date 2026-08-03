@@ -154,7 +154,7 @@ class ViTPatchEmbeddings(nn.Module):
         self.num_patches = num_patches
 
         self._use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
-        
+
         if self._use_spiking_mlp:
             self.projection = SpikingConv2d(num_channels, hidden_size, kernel_size=patch_size, stride=patch_size, theta=getattr(config, "theta", 400.0))
         else:
@@ -298,6 +298,7 @@ class ViTIntermediate(nn.Module):
         super().__init__()
         self.dense = SpikingLinear(config.hidden_size, config.intermediate_size, theta=getattr(config, "theta", 400.0))
         self._use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
+        self._spiking_mlp_exact_gelu = getattr(config, "spiking_mlp_exact_gelu", False)
         self._theta = getattr(config, "theta", 400.0)
         self._eps = 1e-5
         # 항상 활성 함수 초기화 (spiking 경로도 GELU 먼저 적용)
@@ -309,7 +310,14 @@ class ViTIntermediate(nn.Module):
     def forward(self, pot: Potential) -> Potential:
         pot_z: Potential = self.dense(pot)              # PotentialBounds 전파
         if self._use_spiking_mlp:
-            return Potential(*gelu_approximation(*pot_z))  # 근사 GELU: x * sigmoid(1.702 * x) + 추가 절단 효과로 음수 꼬리 더 강하게 제거 — check_domain 필요
+            if self._spiking_mlp_exact_gelu:
+                x = pot_z.value
+                sqrt_2_over_pi = 0.7978845608028654
+                out = 0.5 * x * (1.0 + torch.tanh(sqrt_2_over_pi * (x + 0.044715 * x ** 3)))
+                return Potential(out, PotentialBounds(out.min().item(), out.max().item()))
+            else:
+                return Potential(*gelu_approximation(*pot_z, theta=self._theta))
+
         out = self.intermediate_act_fn(pot_z.value)
         return Potential(out, PotentialBounds(out.min().item(), out.max().item()))
 

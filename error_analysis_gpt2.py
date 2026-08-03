@@ -13,7 +13,8 @@ from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import GPT2LMH
 from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
 from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear
 from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
-from utils.transforms.types import Potential, set_spike_time_noise
+from utils.transforms.types import Potential
+from utils.transforms.noise import set_spike_time_noise
 from utils.transforms import types
 from tqdm import tqdm
 

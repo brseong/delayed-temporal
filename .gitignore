@@ -217,9 +217,23 @@ __marimo__/
 /venv/
 /error_histogram.png
 /tex/
+/paper/
 /TTFSFormer/
 /quantiles/
 /wandb*.csv
 /*.pdf
 /.claude
 /.vscode
+/.continue
+/TTFSFormer
+/analysis
+/reports
+
+# experiment run logs (analysis scripts / noise sweeps)
+/scan_logs/
+/gelu_confirm_logs/
+/*_logs/
+/beta_pool_logs.txt
+/analysis/figures/*.pdf
+CLAUDE.md
+AGENTS.md

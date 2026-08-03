@@ -1,8 +1,9 @@
 #!/bin/bash
 trap 'kill -- -$$' SIGINT SIGTERM
 
-cuda_devices=(0 1 5 6 7)
-source ./venv/bin/activate
+cuda_devices=(${GPUS:-0 1 5 6 7})   # override with e.g. GPUS="4 5 6 7"
+source ./venv/bin/activate 2>/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/gpu_pool.sh"
 device="cuda"
 # model_id="WinKawaks/vit-small-patch16-224"
 model_id="/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k"
@@ -33,14 +34,17 @@ expr_names=(
     # "weight-bias-std_3e-1"
 )
 
+gpu_pool_init "${cuda_devices[@]}"
 for index in "${!expr_names[@]}"; do
-    echo "Running error analysis on GPU ${cuda_devices[$index]}: ${expr_names[$index]}"
-    script="CUDA_VISIBLE_DEVICES=${cuda_devices[$index]} python3 error_analysis_vit.py \
+    gpu_pool_acquire; gpu=$GPU_POOL_ACQUIRED
+    echo "Running error analysis on GPU ${gpu}: ${expr_names[$index]}"
+    script="CUDA_VISIBLE_DEVICES=${gpu} python3 error_analysis_vit.py \
         --experiment_name ${expr_names[$index]} --device ${device}\
         --model_id ${model_id} --dataset_id ${dataset_id} \
         --batch_size ${batch_size} ${flags[$index]} --theta 400.0"
     echo $script
     eval $script &
+    gpu_pool_register $! "$gpu"
 done
 
 wait

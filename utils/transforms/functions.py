@@ -163,49 +163,101 @@ def gelu_approximation(
     theta: float = 400.0,
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Approximate GELU activation using spiking operators.
-    
-    According to Lemma 4.4 (Derivation of GELU Approximation) in the paper:
-    f_GELU(v) := f_M(v, f_DIV(1, 1 + f_NE(f_NP(1.702v))))
+    """Approximate GELU activation using spiking operators (tanh form).
+
+    Uses the approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).
     """
+    input_clamped = domain.clamp(input_value, name="gelu_x")
+
+    # x^2 and x^3 via f_M
+    x2, domain_x2 = multiplication_operator(input_clamped, domain, input_clamped, domain, theta)
+    x3, domain_x3 = multiplication_operator(x2, domain_x2, input_clamped, domain, theta)
+
+    # 0.044715 * x^3
+    coeff = 0.044715
+    coeff_tensor = input_value.new_tensor(coeff).expand_as(input_value)
+    coeff_domain = PotentialBounds(coeff, coeff)
+    x3_scaled, domain_x3_scaled = multiplication_operator(x3, domain_x3, coeff_tensor, coeff_domain, theta)
+
+    # x + 0.044715 * x^3
+    inner = input_clamped + x3_scaled
+    inner_domain = PotentialBounds(domain.min + domain_x3_scaled.min, domain.max + domain_x3_scaled.max)
+
+    # sqrt(2/pi) * inner
+    scale_const = 0.7978845608028654
+    scale_tensor = input_value.new_tensor(scale_const).expand_as(input_value)
+    scale_domain = PotentialBounds(scale_const, scale_const)
+    tanh_in, tanh_in_domain = multiplication_operator(inner, inner_domain, scale_tensor, scale_domain, theta)
+
+    # tanh(sqrt(2/pi) * (x + 0.044715 * x^3))
+    tanh_out, tanh_domain = tanh(tanh_in, tanh_in_domain, tau_s=tau_s, theta=theta)
+
+    # 0.5 * (1 + tanh(...))
+    one_plus = 1.0 + tanh_out
+    one_plus_domain = PotentialBounds(1.0 + tanh_domain.min, 1.0 + tanh_domain.max)
+    half = 0.5
+    half_tensor = input_value.new_tensor(half).expand_as(input_value)
+    half_domain = PotentialBounds(half, half)
+    gate, gate_domain = multiplication_operator(one_plus, one_plus_domain, half_tensor, half_domain, theta)
+
+    # x * gate
+    gelu_approx, gelu_domain = multiplication_operator(input_clamped, domain, gate, gate_domain, theta)
+    return gelu_approx, gelu_domain
+
+
+@check_domain
+def gelu_approximation_sigmoid(
+    input_value: Float[torch.Tensor, "*batch dims"],
+    domain: PotentialBounds,
+    *,
+    tau_s: float = 1.0,
+    theta: float = 400.0,
+    **_
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Approximate GELU activation using spiking operators (sigmoid form)."""
     # Step 1: f_NP(1.702v)
     scale_const = 1.702
     scale_bound = PotentialBounds(scale_const, scale_const)
-    # scaled_input, _ = multiplication_operator(
-    #     input_value, domain,
-    #     input_value.new_tensor(scale_const).expand_as(input_value), scale_bound,
-    #     theta)
-    scaled_input = input_value * scale_const
+    scaled_input, _ = multiplication_operator(
+        input_value,
+        domain,
+        input_value.new_tensor(scale_const).expand_as(input_value),
+        scale_bound,
+        theta,
+    )
     scaled_domain = PotentialBounds(scale_const * domain.min, scale_const * domain.max)
-    
+
     # Stability cap for exp: exp(20) is safe, exp(400) overflows.
     # Since exp(-1.702*v) is used for sigmoid, we only need to worry about v being very negative.
     _STABILITY_CAP = 80.0
     scaled_input_clamped = scaled_input.clamp(min=-_STABILITY_CAP, max=_STABILITY_CAP)
-    scaled_domain_clamped = PotentialBounds(max(scaled_domain.min, -_STABILITY_CAP), min(scaled_domain.max, _STABILITY_CAP))
+    scaled_domain_clamped = PotentialBounds(
+        max(scaled_domain.min, -_STABILITY_CAP),
+        min(scaled_domain.max, _STABILITY_CAP),
+    )
 
     # Step 2: f_NE(f_NP(1.702v))
     # Note: exponential_function outputs C * exp(-1.702v)
     neg_exp_out, neg_exp_domain = exponential_function(scaled_input_clamped, scaled_domain_clamped, tau_m=tau_s)
-    
+
     # Step 3: f_DIV(C, C + f_NE(f_NP(1.702v)))
     # This mathematically equals 1 / (1 + exp(-1.702v))
     div_out, div_domain = division_function(
-        X=torch.full_like(neg_exp_out, 1.0), 
-        Y=1.0 + neg_exp_out, 
-        joint_domain=PotentialBounds(1.0, neg_exp_domain.max + 1.0), 
-        tau_s=tau_s
+        X=torch.full_like(neg_exp_out, 1.0),
+        Y=1.0 + neg_exp_out,
+        joint_domain=PotentialBounds(1.0, neg_exp_domain.max + 1.0),
+        tau_s=tau_s,
     )
-    
+
     # Step 4: f_M(v, div_out)
-    
     gelu_approx, gelu_domain = multiplication_operator(
         domain.clamp(input_value, name="gelu_x"),
         domain,
-        div_domain.clamp(div_out), # For stability, ensure the output of division is within its theoretical bounds before multiplication
+        div_domain.clamp(div_out),
         div_domain,
-        theta=theta)
-    
+        theta=theta,
+    )
+
     return gelu_approx, gelu_domain
 
 
@@ -372,10 +424,15 @@ if __name__ == "__main__":
     gelu_domain = PotentialBounds(-5.0, 5.0)
     gelu_out, _ = gelu_approximation(gelu_x, gelu_domain, tau_s=tau_s)
     expected_gelu = F.gelu(gelu_x)
+    sqrt_2_over_pi = 0.7978845608028654
+    expected_gelu_tanh = 0.5 * gelu_x * (1.0 + torch.tanh(sqrt_2_over_pi * (gelu_x + 0.044715 * gelu_x ** 3)))
     
     print(f"GELU Approx Output:   {gelu_out.tolist()}")
     print(f"Expected PyTorch GELU: {expected_gelu.tolist()}")
+    print(f"Expected Tanh GELU:    {expected_gelu_tanh.tolist()}")
     
     # As it's an approximation using mathematical substitutions, allow slightly higher tolerance
+    is_gelu_formula_valid = torch.allclose(gelu_out, expected_gelu_tanh, atol=2e-2)
     is_gelu_valid = torch.allclose(gelu_out, expected_gelu, atol=2e-2)
+    print(f"GELU Formula Match: {is_gelu_formula_valid}")
     print(f"GELU Approximation Accurate: {is_gelu_valid}")

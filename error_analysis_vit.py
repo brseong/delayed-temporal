@@ -10,7 +10,8 @@ from datasets import load_dataset
 from transformers import AttentionInterface, AutoModelForImageClassification
 from transformers.models.vit import ViTImageProcessor
 from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTForImageClassification, SpikingLayerNorm
-from utils.transforms.types import Potential, set_spike_time_noise
+from utils.transforms.types import Potential
+from utils.transforms.noise import set_spike_time_noise, install_device_mismatch
 from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
 from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
 import evaluate
@@ -38,9 +39,19 @@ class Arguments:
     spiking_ln_log: bool
     spiking_ln_expdiff: bool
     spiking_mlp: bool
+    spiking_mlp_exact_gelu: bool
     activation: Literal["relu", "gelu"]
     theta: float
     noise_std: float
+    # --- neuromorphic noise model (see utils/transforms/noise.py) ---
+    jitter_enabled: bool
+    jitter_mode: Literal["potential", "time"]
+    hazard_enabled: bool
+    hazard_delta_u: float
+    hazard_insert_rate: float
+    mismatch_enabled: bool
+    mismatch_theta_std: float
+    # --- static synaptic parameter noise (applied to loaded weights) ---
     weight_noise_std: float
     bias_noise_std: float
     collect_quantiles: bool
@@ -76,12 +87,29 @@ def parse_arguments():
                         help="[SpikingLayerNorm] Stage 3: use ψ_ED for normalisation (vs direct exp).")
     parser.add_argument("--spiking-mlp", action=argparse.BooleanOptionalAction, default=True,
                         help="Use φ_NL clip activation in MLP (vs GELU). Implements ψ_L via PWM.")
+    parser.add_argument("--spiking-mlp-exact-gelu", action=argparse.BooleanOptionalAction, default=False,
+                        help="If --spiking-mlp is set, bypass approx GELU and use exact PyTorch GELU instead.")
     parser.add_argument("--activation", type=str, choices=["relu", "gelu"], default="gelu",
                         help="Activation function to use when --no-spiking-mlp is set (default: gelu).")
     parser.add_argument("--theta", type=float, default=100.0,
                         help="Domain bound θ for SpikingLayerNorm clamping (default: 100.0).")
     parser.add_argument("--noise-std", type=float, default=0.0,
-                        help="Spike-time noise standard deviation as a fraction of domain range (default: 0.0).")
+                        help="Jitter σ as a fraction of the (potential or time) domain range (default: 0.0).")
+    # --- neuromorphic noise model: three independently-toggleable components ---
+    parser.add_argument("--jitter-enabled", action=argparse.BooleanOptionalAction, default=False,
+                        help="[A] Operating-point-dependent temporal jitter of magnitude --noise-std.")
+    parser.add_argument("--jitter-mode", type=str, choices=["potential", "time"], default="potential",
+                        help="[A] 'potential' (V-referred, σ_t=σ_V/|dV/dt|) or 'time' (legacy, uniform on t).")
+    parser.add_argument("--hazard-enabled", action=argparse.BooleanOptionalAction, default=False,
+                        help="[B] Escape-noise drop/insertion hazard near threshold.")
+    parser.add_argument("--hazard-delta-u", type=float, default=0.0,
+                        help="[B] Δu (soft-threshold width) as a fraction of the potential-domain range.")
+    parser.add_argument("--hazard-insert-rate", type=float, default=0.0,
+                        help="[B] ρ₀, baseline spurious-spike (insertion) probability.")
+    parser.add_argument("--mismatch-enabled", action=argparse.BooleanOptionalAction, default=False,
+                        help="[C] Static per-neuron threshold mismatch (frozen).")
+    parser.add_argument("--mismatch-theta-std", type=float, default=0.0,
+                        help="[C] σ_θ: per-neuron θ offset std, relative to θ.")
     parser.add_argument("--weight-noise-std", type=float, default=0.0,
                         help="Standard deviation of Gaussian noise to add to weights (default: 0.0).")
     parser.add_argument("--bias-noise-std", type=float, default=0.0,
@@ -107,9 +135,17 @@ def parse_arguments():
         spiking_ln_log=args.spiking_ln_log,
         spiking_ln_expdiff=args.spiking_ln_expdiff,
         spiking_mlp=args.spiking_mlp,
+        spiking_mlp_exact_gelu=args.spiking_mlp_exact_gelu,
         activation=args.activation,
         theta=args.theta,
         noise_std=args.noise_std,
+        jitter_enabled=args.jitter_enabled,
+        jitter_mode=args.jitter_mode,
+        hazard_enabled=args.hazard_enabled,
+        hazard_delta_u=args.hazard_delta_u,
+        hazard_insert_rate=args.hazard_insert_rate,
+        mismatch_enabled=args.mismatch_enabled,
+        mismatch_theta_std=args.mismatch_theta_std,
         weight_noise_std=args.weight_noise_std,
         bias_noise_std=args.bias_noise_std,
         collect_quantiles=args.collect_quantiles,
@@ -185,9 +221,21 @@ def evaluate_vit_model(args:Arguments):
             print(f"  LN stages — mul: {args.spiking_ln_mul}, log: {args.spiking_ln_log}, expdiff: {args.spiking_ln_expdiff}")
         print(f"Spiking MLP: {args.spiking_mlp}")
 
-        if args.noise_std > 0:
-            print(f"Applying global spike-time noise: {args.noise_std}")
-            set_spike_time_noise(std=args.noise_std, eval_mode=True)
+        # Encoder-level noise (jitter + escape hazard). Device mismatch is installed on the
+        # model after it is built (see below). All components are off unless explicitly enabled.
+        if args.jitter_enabled or args.hazard_enabled:
+            print(f"Noise — jitter: {args.jitter_enabled} (σ={args.noise_std}, mode={args.jitter_mode}), "
+                  f"hazard: {args.hazard_enabled} (Δu={args.hazard_delta_u}, ρ₀={args.hazard_insert_rate})")
+        set_spike_time_noise(
+            std=args.noise_std,
+            eval_mode=True,
+            mode=args.jitter_mode,
+            potential_scale=args.theta,   # σ_V = std·θ for potential-mode jitter
+            jitter_enabled=args.jitter_enabled,
+            hazard_enabled=args.hazard_enabled,
+            hazard_delta_u=args.hazard_delta_u,
+            hazard_insert_rate=args.hazard_insert_rate,
+        )
 
     # ---------------------------------------------------------
     # 2. 데이터셋 및 전처리 도구 로드
@@ -245,15 +293,22 @@ def evaluate_vit_model(args:Arguments):
             spiking_ln_log=args.spiking_ln_log,
             spiking_ln_expdiff=args.spiking_ln_expdiff,
             use_spiking_mlp=args.spiking_mlp,
+            spiking_mlp_exact_gelu=args.spiking_mlp_exact_gelu,
             hidden_act=args.activation,
             theta=args.theta,
         )
         model = ViTForImageClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl, torch_dtype=dtype)
     
     apply_parameter_noise(model, args.weight_noise_std, args.bias_noise_std)
-    
+
     model.to(device)
-    
+
+    # Static device mismatch (frozen per-neuron threshold offsets) via forward pre-hooks.
+    # Installed after .to(device) so offsets are sampled on the model's device.
+    if model_backend == "spiking" and args.mismatch_enabled and args.mismatch_theta_std > 0:
+        handles = install_device_mismatch(model, theta_std=args.mismatch_theta_std, enabled=True)
+        print(f"Installed static device mismatch on {len(handles)} spiking modules (σ_θ={args.mismatch_theta_std}).")
+
     # GPU 병렬화 (DataParallel) 설정
     if device.type == "cuda" and torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")

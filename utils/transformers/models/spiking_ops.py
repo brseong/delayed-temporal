@@ -11,7 +11,7 @@ from utils.transforms.functions import multiplication_operator, division_functio
 from utils.transforms.potential_to_spike import neg_log_transform
 from utils.transforms.primitive import pulse_width_modulation_operator
 from utils.transforms.spike_to_potential import exponential_difference_operator
-from utils.transforms.types import Potential, PotentialBounds, TimeBounds, _emit_spike_time_core
+from utils.transforms.types import Potential, PotentialBounds, TimeBounds
 
 
 class SpikingLayerNorm(nn.Module):

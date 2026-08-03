@@ -12,7 +12,8 @@ from transformers import AttentionInterface, AutoModelForSequenceClassification,
 from utils.transformers.models.spiking_bert.configuration_bert import BertConfig
 from utils.transformers.models.spiking_bert.modeling_spiking_bert import BertForSequenceClassification, SpikingLayerNorm
 from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
-from utils.transforms.types import Potential, set_spike_time_noise
+from utils.transforms.types import Potential
+from utils.transforms.noise import set_spike_time_noise
 import evaluate
 from tqdm import tqdm
 

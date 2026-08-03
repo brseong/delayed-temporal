@@ -1,7 +1,8 @@
 import torch
 from jaxtyping import Float, Int
 from math import log, exp
-from .types import OpenBounds, PotentialBounds, TimeBounds, check_domain, inject_spike_time_noise
+from .types import OpenBounds, PotentialBounds, TimeBounds, check_domain
+from .noise import inject_spike_time_noise
 
 """
 domain: The range of possible values for the input potentials.
