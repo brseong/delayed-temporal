@@ -14,7 +14,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
 parts/
 sdist/
@@ -219,7 +219,6 @@ __marimo__/
 /tex/
 /paper/
 /TTFSFormer/
-/quantiles/
 /wandb*.csv
 /*.pdf
 /.claude
@@ -229,11 +228,15 @@ __marimo__/
 /analysis
 /reports
 
-# experiment run logs (analysis scripts / noise sweeps)
-/scan_logs/
-/gelu_confirm_logs/
+# generated experiment artifacts
+/artifacts/logs/
+/artifacts/quantiles/
+/artifacts/figures/
+/artifacts/wandb/
 /*_logs/
 /beta_pool_logs.txt
-/analysis/figures/*.pdf
-CLAUDE.md
-AGENTS.md
+.claude
+.mcp.json
+.codex
+lat.md/.cache/
+.agents/skills/lat-md/SKILL.md

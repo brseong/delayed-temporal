@@ -14,16 +14,16 @@ pip install -r requirements.txt
 
 Before running the error analysis script, download the pre-trained ViT models:
 ```bash
-bash convert_vits.sh
+bash scripts/setup/convert_vits.sh
 ```
-Make sure to place the downloaded models in the appropriate directory as specified in the `error_analysis_vit.sh` script.
+Make sure to place the downloaded models in the appropriate directory as specified in `scripts/experiments/error_analysis_vit.sh`.
 
 ## Evaluation (ViT)
 
 To evaluate the model on ImageNet, run:
 
 ```bash
-bash error_analysis_vit.sh
+bash scripts/experiments/error_analysis_vit.sh
 ```
 
 ## Threshold-Jitter Analysis (ViT)
@@ -31,5 +31,5 @@ bash error_analysis_vit.sh
 To perform threshold-jitter analysis on the ViT model, run:
 
 ```bash
-bash theta_jitter_analysis_vit.sh
+bash scripts/experiments/theta_jitter_analysis_vit.sh
 ```
