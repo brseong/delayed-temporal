@@ -42,6 +42,8 @@ Time-to-potential operators turn latency differences into exponential analog val
 
 [[utils/transforms/spike_to_potential.py#normalized_exp_operator]] is a numerically stabilized simulation shortcut. Its current implementation applies `exp` directly to the supplied tensor, so any claim involving its `tau_m` argument must be verified against the implementation rather than inferred from the signature.
 
+The event-aware exponential-difference path does not evaluate this shortcut at a missed event's stored deadline. It evolves and clamps the preceding integration state, re-encodes that potential, and returns the exp-temporal reset value zero if this internal event also misses.
+
 ## Dual Operator Algebra
 
 The project’s “dual operators” alternate potential-to-time encoders with temporal integration or exponential time-to-potential operators.
@@ -77,6 +79,10 @@ These quantities are configuration and calibration assumptions, not learned circ
 
 Clamping turns an unbounded mathematical mapping into a finite simulation domain and creates approximation cases at both endpoints.
 
-Values beyond a potential range are clipped before encoding. Time jitter is also clipped to its output time domain. The latest representable spike can therefore mean a valid late event, a clamped event, or a hazard-induced drop in the current simulator; no separate validity mask distinguishes those cases.
+Values beyond a potential range are clipped before encoding. Maintained Gaussian sampling distinguishes a delivered event from a deadline miss explicitly, even though both use finite stored times.
+
+A missed event does not erase the analog state. The receiving operator evolves whatever physical state exists until $T_{\mathrm{obs}}$, reads that potential, clamps it to the output rails, and continues the operator chain. The complete opening/closing truth table is [[noise#Observation-Time Potential Invariant]].
+
+The stored deadline time of a missed spike is only a tensor carrier. It must never be mistaken for a valid latest spike or substituted into a temporal formula without consulting `fired`.
 
 Accuracy claims should report clamp or miss behavior alongside task metrics when finite-window effects are active. The relevant instrumentation is described in [[evaluation#Diagnostics and Instrumentation]].

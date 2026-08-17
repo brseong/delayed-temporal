@@ -10,6 +10,14 @@ Pulse-width modulation is the central primitive: a potential is integrated over 
 
 The code evaluates this identity directly on tensors. It represents the behavior of the proposed primitive, not a circuit netlist, event router, or SPICE transient simulation.
 
+## Missing-Event Readout
+
+Every event-driven operator produces the clamped potential physically present at the observation deadline, even when an expected spike never arrives.
+
+An opening miss leaves the state at reset. A closing or reference miss leaves the active dynamics running until $T_{\mathrm{obs}}$. Both results are finite potentials and feed the next operator; neither is marked invalid. See [[noise#Observation-Time Potential Invariant]] for the authoritative equations.
+
+Operator implementations may differ in their membrane trajectory, current kernel, or rail bounds, but not in this readout policy. A missed spike's stored deadline timestamp is metadata storage and cannot replace the physical state calculation.
+
 ## Composed Functions
 
 Higher-level functions combine encoders, PWM integration, exponential decoding, reductions, and fixed affine scaling.
@@ -22,6 +30,8 @@ Multiplication encodes one operand as a latency and uses the other as the integr
 
 [[utils/transforms/functions.py#multiplication_operator]] clamps the encoded operand to `[-theta, theta]`, obtains `t = theta - B`, and integrates `V` from that event to `theta`. The resulting tensor is `V * B` under the ideal affine mapping.
 
+Under maintained timing noise, the same function requests a decorated event for the encoded operand and one scalar zero-reference event for the operator call. It applies the common observation-time trajectories and clamps the resulting product to the original ideal output rails; no Gaussian-specific multiplication API exists.
+
 ### Division
 
 Division converts numerator and denominator to synchronized log latencies, then exponentiates their difference.
@@ -29,6 +39,8 @@ Division converts numerator and denominator to synchronized log latencies, then 
 [[utils/transforms/functions.py#division_function]] requires `X <= Y` elementwise and uses the same positive joint domain for both log encoders. [[utils/transforms/spike_to_potential.py#exponential_difference_operator]] then maps the latency difference back to the ratio.
 
 The shared domain is essential because independent offsets would not cancel. Clamping, finite positive floors, and exponential implementation details determine where the simulated result is approximate.
+
+In maintained event-aware execution, division passes both decorated log events into exponential difference. That operator first computes and rail-clamps the physical integration state at $T_{\mathrm{obs}}$, re-encodes this finite state through the ordinary decorated `phi_NP`, and evaluates `psi_NE` only if the internal event arrives. An internal event miss leaves the exponential response at reset zero, so the noisy output envelope includes zero.
 
 ### Exponential and Softmin
 
@@ -56,6 +68,8 @@ These classes subclass PyTorch’s corresponding modules so parameter names and 
 
 GPT-2 uses its own equivalent adapter, [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#SpikingConv1D]], to match Hugging Face’s transposed `Conv1D` parameter convention.
 
+When maintained timing noise is enabled, all three affine adapters obtain both data and layer-shared zero-reference events through the decorated encoder. They contract the resulting physical integration durations with the pretrained weights, then clamp the potential read at $T_{\mathrm{obs}}$ to the declared output rails.
+
 ## Spiking LayerNorm
 
 LayerNorm is a multi-stage composition and the most delicate shared operator in the current model stack.
@@ -71,6 +85,8 @@ The current implementation has finite-floor and clipping behavior described in [
 Attention composes spiking projections, signed dot products, softmin normalization, and PWM-weighted value accumulation.
 
 [[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_scaled_dot_product_attention]] clamps query and key to a fixed symmetric domain, computes negated scaled dot products, applies hard mask suppression, normalizes with softmin, and integrates encoded values against the resulting weights.
+
+In maintained-noise execution, value and scalar zero-reference events come from the same decorated encoder used by affine PWM. Their physical durations are contracted with attention weights by matrix multiplication, avoiding an explicit `(L,S,D)` synapse tensor, and the observation-time output is clamped to its conservative summed rail envelope.
 
 [[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_sdpa_attention_forward]] adapts this implementation to the Hugging Face attention interface, including causal-mask selection and grouped-query compatibility checks. Grouped-query execution through the spiking kernel remains unsupported when native repetition cannot be used.
 

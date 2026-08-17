@@ -62,9 +62,9 @@ The full configuration is part of every result’s identity. A partial operator 
 
 Temporal noise is attached to the two potential-to-spike transforms so every composite function receives a consistent perturbation mechanism.
 
-This provides one implementation point for jitter and spike reliability experiments. Static threshold mismatch remains module-local because it represents frozen device variation rather than a per-encoding random event.
+This provides one implementation point for direct Gaussian timing and its deadline-miss mask. Event-aware operators must request and consume that mask; they must not introduce a second encoder-specific sampler. Static mismatch remains module-local because it represents frozen variation rather than a per-encoding event.
 
-The global decorator also makes noise apply to internal sub-operations, which is a deliberate stress-test interpretation rather than automatically a one-noise-event-per-physical-neuron model; see [[noise#Noise Model]].
+Tensor-only operators retain the historical interface until they implement the fixed observation-time readout rule. A miss never creates an invalid downstream value; [[noise#Observation-Time Potential Invariant]] defines the common semantics and [[noise#Current Coverage and Resume Order]] defines the migration order.
 
 ## Separate Deterministic Fidelity from Noise
 

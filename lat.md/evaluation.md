@@ -38,10 +38,13 @@ Available diagnostics include:
 - TensorBoard histograms for LayerNorm inputs and outputs.
 - Optional 99.9th-percentile activation magnitude collection for choosing `theta`.
 - Named underflow and overflow counts from [[utils/transforms/types.py#set_clamp_log_enabled]].
+- Per-site Gaussian event misses and noisy-readout saturation.
 - ViT alerts and histograms for centered LayerNorm activations and bounds.
 - W&B logging for configuration, intermediate metrics, and final metrics.
 
 Clamp logging uses global module-name state. Hooks must set and clear that state consistently, especially when model execution is parallelized.
+
+The ViT runner prints per-site Gaussian rates and logs them under `Gaussian/<site>/...` in W&B. Gaussian counters are also process-wide mutable state and are reset whenever a new seeded replica is configured.
 
 ## Noise and Ablation Sweeps
 
@@ -50,6 +53,16 @@ Shell scripts under `scripts/experiments` run isolated sweeps for jitter, hazard
 `scripts/experiments/noise_analysis_vit.sh` and `noise_scan_vit.sh` vary one ViT noise component at a time. The same directory contains legacy jitter and theta sweeps, static-bias experiments, quantile collection, and GELU comparisons.
 
 The scripts are orchestration, not definitions of the noise model. Parameter semantics come from [[noise#Noise Model]], and comparisons must distinguish current potential-referred jitter from legacy time-referred runs.
+
+## Gaussian Spike-Time Verification
+
+The maintained Gaussian model has a seeded decorator-level regression check independent of model datasets and checkpoints.
+
+The regression check covers the sampled distribution and deadline behavior plus affine, multiplication, exponential, exponential-difference, division, LayerNorm, softmin, attention value integration, and per-site counters. Operator checks retain noise-off parity paths and force opening, closing/reference, and internal exp-temporal cases where applicable.
+
+The verification intentionally enters through decorated encoders. It does not define or test a separate Gaussian multiplication API.
+
+As each operator is migrated, its regression must force opening and closing/reference misses independently and verify the readout equations in [[noise#Observation-Time Potential Invariant]]. A test expecting an invalid output conflicts with the maintained model.
 
 ## Targeted Analysis Programs
 
