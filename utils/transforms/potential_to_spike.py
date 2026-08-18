@@ -1,7 +1,7 @@
 import torch
 from jaxtyping import Float, Int
 from math import log, exp
-from .types import OpenBounds, PotentialBounds, TimeBounds, check_domain
+from .types import OpenBounds, PotentialBounds, SpikeSample, TimeBounds, check_domain
 from .noise import inject_spike_time_noise
 
 """
@@ -43,24 +43,37 @@ def neg_linear_transform(
 def neg_identity_transform(
     input_value: Float[torch.Tensor, "*batch dims"],
     domain: PotentialBounds,
-    **_
+    **kwargs,
     ) -> tuple[
         Float[torch.Tensor, "*batch dims"],
-        TimeBounds]:
-    """Apply negative-identity transform to the input potentials to produce spike times.
+        TimeBounds] | SpikeSample:
+    """Encode potentials with a negative-identity TTFS mapping.
+
+    This convenience transform delegates to the decorated negative-linear encoder
+    with a time window equal to the potential-domain width. All caller keywords are
+    forwarded so event-aware requests reach the shared Gaussian injection boundary
+    instead of being silently discarded by this wrapper.
 
     Args:
-        input_value (Float[torch.Tensor, "*batch dims"]): Initial potentials of the neurons.
-        domain (PotentialBounds): The range of possible values for the input potentials.
-        wave_approx (bool, optional): Whether to use a wave approximation for the transformation.
-            If True, the transformation will produce spike times that approximate a waveform. Defaults to False.
-    
+        input_value: Initial potentials to encode.
+        domain: Valid potential interval and source of the identity-code duration.
+        **kwargs: Encoder-control keywords such as ``return_spike_sample`` and
+            ``noise_site`` forwarded to :func:`neg_linear_transform`.
+
     Returns:
-        tuple[Float[torch.Tensor, "*batch dims"], TimeBounds]: A tuple containing the transformed spike times and the time bounds of the output.
+        A deterministic ``(time, bounds)`` pair, or a ``SpikeSample`` when the
+        event-aware Gaussian path is explicitly requested.
     """
-    return neg_linear_transform(input_value,
-                                domain,
-                                window_length=domain.max - domain.min)
+    # The identity code maps the entire potential interval onto an equally long
+    # time interval; callers cannot redefine this physical mapping through kwargs.
+    forwarded_kwargs = {
+        **kwargs,
+        "window_length": domain.max - domain.min,
+    }
+
+    # Forward event-awareness and site attribution unchanged to the one decorated
+    # encoder boundary that owns sampling, deadline classification, and statistics.
+    return neg_linear_transform(input_value, domain, **forwarded_kwargs)
 
 @inject_spike_time_noise
 @check_domain

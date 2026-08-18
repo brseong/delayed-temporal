@@ -4,10 +4,110 @@ from math import isnan, log, exp
 
 from utils.transforms import exp_operator
 
-from .types import PotentialBounds, TimeBounds, check_domain
+from .noise import clamp_gaussian_output, get_gaussian_time_noise
+from .types import PotentialBounds, SpikeSample, TimeBounds, check_domain
 from .primitive import pulse_width_modulation_operator
 from .potential_to_spike import neg_identity_transform, neg_log_transform
 from .spike_to_potential import normalized_exp_operator, exponential_difference_operator
+
+
+def _gaussian_multiplication_operator(
+    V: torch.Tensor,
+    domain_V: PotentialBounds,
+    encoded_B: torch.Tensor,
+    domain_B: PotentialBounds,
+    theta: float,
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Evaluate multiplication from sampled data and zero-reference events.
+
+    This private implementation owns only the maintained Gaussian path. ``encoded_B``
+    must already be clamped to the symmetric identity-encoder domain, and Gaussian
+    timing noise must be enabled before entry. The public operator remains responsible
+    for input validation, common preprocessing, and selecting this implementation.
+
+    Args:
+        V: Potential supplying the constant integration drive.
+        domain_V: Declared bounds of the integration drive.
+        encoded_B: Pre-clamped operand encoded into the opening event.
+        domain_B: Symmetric ``[-theta, theta]`` identity-encoder domain.
+        theta: Nominal zero-reference time and multiplication-factor rail.
+
+    Returns:
+        The observation-time physical readout clamped to its ideal product rails,
+        together with those rails.
+
+    Raises:
+        RuntimeError: If an event-aware encoder does not return ``SpikeSample``.
+    """
+    # Each encoded B element owns an opening event. The returned fired mask, rather
+    # than the finite deadline carrier stored in time, controls whether integration starts.
+    data_event = neg_identity_transform(
+        encoded_B,
+        domain_B,
+        return_spike_sample=True,
+        noise_site="multiplication.data",
+    )
+    if not isinstance(data_event, SpikeSample):
+        raise RuntimeError(
+            "Gaussian multiplication encoding must return SpikeSample"
+        )
+
+    # Sample one scalar zero-reference event for the entire operator invocation. Its
+    # scalar time and fired flag broadcast across every data event without resampling.
+    reference_event = neg_identity_transform(
+        encoded_B.new_zeros(()),
+        domain_B,
+        return_spike_sample=True,
+        noise_site="multiplication.reference",
+    )
+    if not isinstance(reference_event, SpikeSample):
+        raise RuntimeError(
+            "Gaussian multiplication reference must return SpikeSample"
+        )
+
+    # A delivered reference closes the active trajectory at its sampled time. A
+    # missing reference leaves it active until the inclusive observation deadline.
+    deadline = data_event.time.new_tensor(float(data_event.domain.max))
+    stop_time = torch.where(
+        reference_event.fired,
+        reference_event.time,
+        deadline,
+    )
+
+    # A missing opening event leaves the potential at reset zero. For a delivered
+    # opening, preserve the signed physical interval before applying the drive V.
+    duration = torch.where(
+        data_event.fired,
+        stop_time - data_event.time,
+        torch.zeros_like(data_event.time),
+    )
+    result = V * duration
+
+    # Gaussian excursions do not expand the representable product rails. Derive the
+    # original ideal envelope from all V-bound and factor-bound endpoint products.
+    th_val = float(theta) if isinstance(theta, (int, float)) else float(theta.max())
+    result_candidates = (
+        domain_V.min * -th_val,
+        domain_V.min * th_val,
+        domain_V.max * -th_val,
+        domain_V.max * th_val,
+    )
+    result_domain = PotentialBounds(
+        min(result_candidates),
+        max(result_candidates),
+    )
+
+    # Saturation statistics inspect the raw physical readout, then the normal bounded
+    # operator contract clamps it before any downstream composition receives it.
+    return (
+        clamp_gaussian_output(
+            result,
+            result_domain,
+            site="multiplication.output",
+            name="multiplication_result",
+        ),
+        result_domain,
+    )
 
 
 @check_domain
@@ -18,15 +118,52 @@ def multiplication_operator(
     domain_B: PotentialBounds,
     theta: float
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Multiplication operator (f_M) - Special case of f_PWM"""
-    domain_B = PotentialBounds(-theta, theta)
-    # b -> t_b = \theta - b
-    t_B, domain_t_B = neg_identity_transform(domain_B.clamp(B, name="multiplication_B"), domain_B)
-    
-    # t_B bounds are [0, 2 * theta] since B is clamped to [-theta, theta]
+    """Multiply two potentials through affine TTFS and PWM integration.
+
+    ``B`` is encoded as ``t_B = theta - B`` inside ``[0, 2 * theta]``
+    and ``V`` is integrated from that opening event to the zero-reference event at
+    nominal time ``theta``. This public entry point performs the common calibrated
+    encoding setup, then dispatches either to the private Gaussian event readout or
+    to the deterministic analytic PWM primitive.
+
+    In Gaussian mode, a missing data event contributes reset value zero, while a
+    missing reference event leaves integration active until the fixed observation
+    deadline. Those event-specific details remain isolated in the private helper so
+    both paths continue to share one public operator and one bounds contract.
+
+    Args:
+        V: Potential supplying the constant integration drive.
+        domain_V: Declared bounds of the integration drive.
+        B: Potential encoded into the opening spike time.
+        domain_B: Declared caller bounds used by input-domain validation.
+        theta: Symmetric encoder rail and nominal zero-reference time.
+
+    Returns:
+        The physically read multiplication result and its ideal output rails.
+    """
+    # Multiplication always uses the calibrated symmetric identity-code interval,
+    # while the caller-supplied domain has already served input validation.
+    encoder_domain_B = PotentialBounds(-theta, theta)
+
+    # Clamp the encoded operand once before dispatch so deterministic and Gaussian
+    # implementations receive the exact same nominal potential tensor.
+    encoded_B = encoder_domain_B.clamp(B, name="multiplication_B")
+
+    # Keep stochastic sampling and physical missing-event readout behind a private
+    # implementation; downstream callers never select a Gaussian-specific API.
+    if get_gaussian_time_noise().enabled:
+        return _gaussian_multiplication_operator(
+            V,
+            domain_V,
+            encoded_B,
+            encoder_domain_B,
+            theta,
+        )
+
+    # Noise-free execution retains the original analytic PWM path and scalar closing
+    # time. Convert theta only for the primitive's scalar temporal-bound contract.
     th_val = float(theta) if isinstance(theta, (int, float)) else float(theta.max())
-    
-    # result = \int_{t_B}^{\theta} V dt = V * (\theta - t_B) = V * b
+    t_B, domain_t_B = neg_identity_transform(encoded_B, encoder_domain_B)
     return pulse_width_modulation_operator(
         t_A=t_B, 
         domain_t_A=domain_t_B, 
@@ -63,6 +200,94 @@ def scaled_dot_product_function(
         
     return scale * summed_M, PotentialBounds(out_min, out_max)
 
+
+def _gaussian_exponential_function(
+    input_value: torch.Tensor,
+    domain: PotentialBounds,
+    *,
+    tau_m: float,
+    normalized: bool,
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Evaluate the exponential operator from one sampled input event.
+
+    This private implementation owns the maintained Gaussian path. The input
+    potential is encoded through the shared negative-identity boundary, and its
+    delivered timestamp drives the same normalized or shifted exponential mapping
+    as the deterministic operator. A missed input event never starts that response,
+    so the observation-time potential remains at reset value zero.
+
+    Args:
+        input_value: Potential tensor to encode into an exponential timing response.
+        domain: Declared potential bounds defining the identity-code time window.
+        tau_m: Exponential membrane time constant used by the selected mapping.
+        normalized: Select the normalized exponential composition when true.
+
+    Returns:
+        The finite observation-time response clamped to its Gaussian-path rails,
+        together with those rails.
+
+    Raises:
+        RuntimeError: If the event-aware encoder does not return ``SpikeSample``.
+    """
+    # Request one event per input element from the common encoder boundary so its
+    # sampled time and fired mask originate from the same Gaussian draw.
+    event = neg_identity_transform(
+        input_value,
+        domain,
+        return_spike_sample=True,
+        noise_site="exponential.input",
+    )
+    if not isinstance(event, SpikeSample):
+        raise RuntimeError(
+            "Gaussian exponential encoding must return SpikeSample"
+        )
+
+    # The sampler already stores early arrivals at the window start and misses at
+    # the finite deadline. Clamp defensively to the declared carrier interval before
+    # applying an exponentially sensitive readout.
+    delivered_time = torch.clamp(
+        event.time,
+        min=float(event.domain.min),
+        max=float(event.domain.max),
+    )
+
+    # Preserve the deterministic normalized composition, including its fixed scale
+    # removal, while extending the lower physical rail to the reset value zero.
+    if normalized:
+        scaling_factor = exp(-float(domain.max) / tau_m)
+        response = scaling_factor * torch.exp(delivered_time)
+        response_max = scaling_factor * exp(float(event.domain.max))
+    else:
+        # The unnormalized path centers the code window before applying its explicit
+        # membrane time constant, matching the existing noise-free tensor mapping.
+        shift_val = float(event.domain.range) / 2.0
+        response = torch.exp((delivered_time - shift_val) / tau_m)
+        response_max = exp(
+            (float(event.domain.max) - shift_val) / tau_m
+        )
+
+    # A missed opening event leaves the exponential membrane at reset; its stored
+    # deadline is only a finite carrier and must not be decoded as an arriving spike.
+    response = torch.where(
+        event.fired,
+        response,
+        torch.zeros_like(response),
+    )
+    response_domain = PotentialBounds(0.0, response_max)
+
+    # Count any raw rail excursions before clamping the finite physical readout for
+    # downstream operators. Exact endpoint values remain valid representations.
+    return (
+        clamp_gaussian_output(
+            response,
+            response_domain,
+            site="exponential.output",
+            name="exponential_result",
+        ),
+        response_domain,
+    )
+
+
 @check_domain
 def exponential_function(
     input_value: Float[torch.Tensor, "*batch dims"],
@@ -72,24 +297,132 @@ def exponential_function(
     normalized: bool = True,
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Exponential Potential operator (f_EP)
-    Calculates exp(V/tau_m) by composing f_NP and f_NE.
+    """Apply the composed exponential-potential operator.
+
+    The public entry point selects either the event-aware Gaussian implementation or
+    the original deterministic composition of negative-identity encoding and
+    exponential temporal decoding. Both modes retain the same input contract and
+    ``normalized`` selection; only the Gaussian helper interprets delivery masks and
+    exposes reset-valued missed events.
+
+    Args:
+        input_value: Bounded potential tensor to transform.
+        domain: Declared input-potential interval.
+        tau_m: Membrane time constant used by the exponential mapping.
+        normalized: Select the scaled normalized composition when true, or the
+            centered direct exponential when false.
+
+    Returns:
+        The transformed potential tensor and the bounds declared by the selected
+        physical or deterministic path.
     """
-    # 1. f_NP (Negative Potential operator): V -> t_out = theta - V
+    # Keep event sampling, reset behavior, and noisy-output statistics isolated in
+    # the private implementation while preserving one public operator API.
+    if get_gaussian_time_noise().enabled:
+        return _gaussian_exponential_function(
+            input_value,
+            domain,
+            tau_m=tau_m,
+            normalized=normalized,
+        )
+
+    # The deterministic path first applies the negative-identity encoder, mapping
+    # the potential interval onto its equally wide time-code interval.
     t_out, tb_out = neg_identity_transform(input_value, domain)
-    
-    # 2. f_NE (Negative Exp-Temporal operator): t_out -> exp(-(t_max-t_out)/tau_m)
-    # This results in exp(-V/tau_m) * constant
+
+    # Normalized decoding uses the existing temporal primitive and removes its fixed
+    # domain-dependent scale without altering the propagated endpoint bounds.
     if normalized:
         v_out, domain_v_out = normalized_exp_operator(t_out, tb_out, tau_m=tau_m)
-        # exp(-(t_max-t_out)/tau_m) = exp(-(t_max-theta)/tau_m) * exp(-V/tau_m)
-        # Thus recover exp(-V/tau_m) by multiplying with exp((t_max-theta)/tau_m) = exp(-theta/tau_m) * exp(t_max/tau_m)
         scaling_factor = exp(-domain.max / tau_m)
-        return scaling_factor * v_out, PotentialBounds(domain_v_out.min * scaling_factor, domain_v_out.max * scaling_factor)
-    else:
-        # return exp_operator(t_out, tb_out, tau_m=tau_m) # Raise numerical stability error
-        shift_val = tb_out.range / 2
-        return torch.exp((t_out - shift_val) / tau_m), PotentialBounds(exp((tb_out.min - shift_val) / tau_m), exp((tb_out.max - shift_val) / tau_m))
+        return scaling_factor * v_out, PotentialBounds(
+            domain_v_out.min * scaling_factor,
+            domain_v_out.max * scaling_factor,
+        )
+
+    # The unnormalized form centers the finite code window before exponentiation;
+    # derive its output interval from the same two temporal endpoints.
+    shift_val = tb_out.range / 2
+    return torch.exp((t_out - shift_val) / tau_m), PotentialBounds(
+        exp((tb_out.min - shift_val) / tau_m),
+        exp((tb_out.max - shift_val) / tau_m),
+    )
+
+
+def _gaussian_softmin_function(
+    input_value: torch.Tensor,
+    domain: PotentialBounds,
+    *,
+    tau_s: float,
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Evaluate softmin through event-aware exponential and division operators.
+
+    Gaussian exponential misses physically produce reset value zero, but the
+    following negative-log encoder requires a strictly positive finite domain. This
+    helper therefore uses the ideal unnormalized exponential minimum as the shared
+    positive floor for both numerator values and their reduction. The ordinary
+    bounds clamp then maps a reset zero onto that declared finite representational
+    floor before event-aware division.
+
+    Args:
+        input_value: Bounded score tensor normalized along its final dimension.
+        domain: Declared score interval used by the exponential encoder.
+        tau_s: Shared exponential and logarithmic temporal scale.
+
+    Returns:
+        The finite event-aware softmin weights and their propagated ratio rails.
+
+    Raises:
+        TypeError: If ``input_value`` is not a floating-point tensor.
+        ValueError: If the normalization dimension is empty or the computed positive
+            floor is not representable for the input dtype.
+    """
+    # Validate structural requirements before invoking a stochastic sub-operator so
+    # a rejected softmin call cannot consume or advance the configured generator.
+    if not torch.is_floating_point(input_value):
+        raise TypeError("softmin input must be a floating-point tensor")
+    element_count = input_value.size(-1)
+    if element_count == 0:
+        raise ValueError("softmin requires a non-empty final dimension")
+
+    # First produce one event-aware unnormalized exponential per score. A missed
+    # exponential input remains exactly zero at this physical stage.
+    exp_value, exp_domain = exponential_function(
+        input_value,
+        domain,
+        tau_m=tau_s,
+        normalized=False,
+    )
+
+    # Reduce over the same final dimension used by attention normalization. Keep the
+    # dimension so the independently sampled denominator event broadcasts on decode.
+    sum_exp_value = exp_value.sum(dim=-1, keepdim=True)
+
+    # The Gaussian exponential domain includes reset zero, which cannot enter a log
+    # encoder. Recover the ideal delivered minimum and keep it above dtype underflow.
+    ideal_exp_min = exp(-float(domain.range) / (2.0 * tau_s))
+    dtype_floor = float(torch.finfo(input_value.dtype).tiny)
+    positive_floor = max(ideal_exp_min, dtype_floor)
+    if not torch.isfinite(input_value.new_tensor(positive_floor)):
+        raise ValueError("softmin positive floor must be finite and representable")
+
+    # One shared domain must contain both each numerator and the reduced denominator.
+    # Its upper rail grows with the reduction, while its lower rail stays at the
+    # single-element floor so low or missed numerator values are representable.
+    joint_domain = PotentialBounds(
+        positive_floor,
+        exp_domain.max * element_count,
+    )
+
+    # Event-aware division performs the actual floor clamp, samples synchronized log
+    # events, applies miss-aware exponential difference, and returns finite weights.
+    return division_function(
+        X=exp_value,
+        Y=sum_exp_value,
+        joint_domain=joint_domain,
+        tau_s=tau_s,
+    )
+
 
 @check_domain
 def softmin_function(
@@ -99,29 +432,132 @@ def softmin_function(
     tau_s: float = 1.0,
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Apply Softmax transform to the input potentials to produce normalized weights.
-    
-    According to Lemma 4.3 (Derivation of Softmax Normalization) in the paper:
-    w_{softmax, ij} ≈ f_DIV(s_ij, sum_k s_ik)
+    """Normalize scores with the composed softmin operator.
+
+    The construction exponentiates negated-score timing responses, reduces them
+    along the final dimension, and divides each response by that sum. Gaussian mode
+    delegates to the private implementation that reconciles exponential reset zero
+    with the finite positive log domain; deterministic mode retains the original
+    three-stage tensor composition.
+
+    Args:
+        input_value: Bounded score tensor normalized along its final dimension.
+        domain: Declared score interval.
+        tau_s: Shared exponential and logarithmic temporal scale.
+
+    Returns:
+        The softmin weights and their propagated potential bounds.
+
+    According to Lemma 4.3, the normalization is composed as
+    ``w_softmin,ij ≈ f_DIV(s_ij, sum_k s_ik)`` after exponentiating scores.
     """
+    # Keep the reset-to-positive-floor policy and event-aware sub-operator sequence
+    # isolated from the deterministic composition behind one public API.
+    if get_gaussian_time_noise().enabled:
+        return _gaussian_softmin_function(
+            input_value,
+            domain,
+            tau_s=tau_s,
+        )
+
     # 1. Exponential potential transformation: exp_v = exp(-s_ij / tau_s)
-    exp_v, exp_domain = exponential_function(input_value, domain, tau_m=tau_s, normalized=False)
-    
+    exp_v, exp_domain = exponential_function(
+        input_value,
+        domain,
+        tau_m=tau_s,
+        normalized=False,
+    )
+
     # 2. Sum of exponentiated scores: sum_k exp(s_ik / tau_s)
     sumexp_v = exp_v.sum(dim=-1, keepdim=True)
     N = input_value.size(-1)
+
+    # Propagate the original worst-case reduction bounds. The deterministic lower
+    # rail is positive, so this path does not require the Gaussian helper's floor.
     # sumexp_domain = PotentialBounds(exp_domain.min, exp_domain.max * N)
-    # Too high max bound causes numerical instability in division, so we use mathematically equivalent but tighter bound based on the fact that max of exp_v is exp(-domain.min / tau_s)
-    sumexp_domain = PotentialBounds(exp_domain.min * N, exp_domain.max * N)  # This is the original bound based on worst-case assumption
-    
+    # Too high max bound causes numerical instability in division, so use the
+    # original mathematically equivalent worst-case reduction bound.
+    sumexp_domain = PotentialBounds(
+        exp_domain.min * N,
+        exp_domain.max * N,
+    )
+
     # 3. Apply the Division Operator: f_DIV(exp_v, sumexp_v)
-    result = division_function(
+    return division_function(
         X=exp_v,
         Y=sumexp_v,
         joint_domain=sumexp_domain,
-        tau_s=tau_s
+        tau_s=tau_s,
     )
-    return result
+
+
+def _gaussian_division_function(
+    X: torch.Tensor,
+    Y: torch.Tensor,
+    joint_domain: PotentialBounds,
+    tau_s: float,
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Evaluate division from independently sampled logarithmic events.
+
+    This private implementation assumes ``X`` and ``Y`` have already been clamped
+    to the same strictly positive domain and satisfy ``X <= Y``. Encoding both
+    operands against that shared domain makes their logarithmic offsets cancel. The
+    resulting delivery masks are preserved through event-aware exponential
+    difference, which owns the physical opening, closing, and internal-event miss
+    behavior.
+
+    Args:
+        X: Prevalidated numerator tensor.
+        Y: Prevalidated denominator tensor.
+        joint_domain: Shared positive bounds used by both logarithmic encoders.
+        tau_s: Common logarithmic time scale.
+
+    Returns:
+        The event-aware ratio readout and its propagated output rails.
+
+    Raises:
+        RuntimeError: If either decorated logarithmic encoder fails to return a
+            ``SpikeSample`` while Gaussian timing noise is enabled.
+    """
+    # Sample the numerator event through the shared log encoder. Its fired mask is
+    # the opening-event state consumed by exponential difference.
+    numerator_event = neg_log_transform(
+        X,
+        joint_domain,
+        tau_s=tau_s,
+        return_spike_sample=True,
+        noise_site="division.numerator",
+    )
+
+    # Draw the denominator independently from the same generator stream and domain;
+    # using one domain is what cancels the two fixed logarithmic timing offsets.
+    denominator_event = neg_log_transform(
+        Y,
+        joint_domain,
+        tau_s=tau_s,
+        return_spike_sample=True,
+        noise_site="division.denominator",
+    )
+
+    # Fail at this boundary if a decorated encoder violates the event-aware contract
+    # rather than allowing tuple unpacking to discard a delivery mask downstream.
+    if not isinstance(numerator_event, SpikeSample) or not isinstance(
+        denominator_event,
+        SpikeSample,
+    ):
+        raise RuntimeError("Gaussian division encoders must return SpikeSample")
+
+    # Forward both complete event records. The exponential-difference dispatcher
+    # applies opening/closing miss physics, re-encodes the finite intermediate state,
+    # and records its final output saturation without a division-specific fallback.
+    return exponential_difference_operator(
+        numerator_event,
+        numerator_event.domain,
+        denominator_event,
+        denominator_event.domain,
+        tau_s=tau_s,
+    )
+
 
 @check_domain
 def division_function(
@@ -130,28 +566,63 @@ def division_function(
     joint_domain: PotentialBounds,
     tau_s: float
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Division Operator (f_DIV) based on mathematical identity.
-    Strictly formulated as composition of f_ED and f_NL according to paper.
+    """Divide two positive potentials through log timing and exponential difference.
+
+    Both operands are projected into one shared domain so the fixed offset of their
+    negative-log encodings cancels. This public entry point performs common input
+    preparation and ordering validation, then selects either the private Gaussian
+    event implementation or the original deterministic tensor composition.
+
+    Args:
+        X: Numerator tensor.
+        Y: Denominator tensor.
+        joint_domain: Shared strictly positive domain for both operands.
+        tau_s: Common logarithmic encoding and temporal decoding scale.
+
+    Returns:
+        The ratio-like exponential-difference response and its propagated bounds.
+
+    Raises:
+        AssertionError: If any clamped numerator exceeds its denominator.
     """
-    # Clamp to avoid domain assertion errors from float precision
+    # Apply the identical shared rails before either execution path. Besides handling
+    # floating-point boundary drift, this preserves the synchronized log offset.
     X = joint_domain.clamp(X, name="division_X")
     Y = joint_domain.clamp(Y, name="division_Y")
-    
-    assert torch.all(X <= Y), "For division to be valid, each element of X must be less than or equal to the corresponding element of Y."
-    
-    # Note: must use same domain for both X and Y to synchronize the transformation, as the division operator relies on the relative values of X and Y after transformation.
+
+    # The current operator contract restricts the represented ratio to X/Y <= 1;
+    # reject invalid ordering before sampling so failed calls consume no RNG state.
+    assert torch.all(X <= Y), (
+        "For division to be valid, each element of X must be less than or equal "
+        "to the corresponding element of Y."
+    )
+
+    # Dispatch only after all common preprocessing and validation. The private path
+    # retains both delivery masks through its physical exponential-difference readout.
+    if get_gaussian_time_noise().enabled:
+        return _gaussian_division_function(X, Y, joint_domain, tau_s)
+
+    # Both transforms must use the same domain to synchronize their fixed offsets.
     # t_X = -\tau_s * log(X/T) = -\tau_s * (log(X) - log(T))
     # t_Y = -\tau_s * log(Y/T) = -\tau_s * (log(Y) - log(T))
     t_X, tb_X = neg_log_transform(X, joint_domain, tau_s=tau_s)
     t_Y, tb_Y = neg_log_transform(Y, joint_domain, tau_s=tau_s)
-    # For numerical stability, ensure transformed values are within their theoretical bounds
+
+    # Keep deterministic latencies inside their analytic interval before temporal
+    # subtraction, preventing endpoint roundoff from expanding the ratio envelope.
     t_X = t_X.clamp(min=tb_X.min, max=tb_X.max)
     t_Y = t_Y.clamp(min=tb_Y.min, max=tb_Y.max)
-    
+
     # f_DIV(X, Y) = exp((t_Y - t_X) / tau_s)
     # = exp(-t_X / tau_s) * exp(t_Y / tau_s)
     # = exp(log(X/T)) * exp(-log(Y/T)) = X/Y
-    result, domain_result = exponential_difference_operator(t_X, tb_X, t_Y, tb_Y, tau_s=tau_s)
+    result, domain_result = exponential_difference_operator(
+        t_X,
+        tb_X,
+        t_Y,
+        tb_Y,
+        tau_s=tau_s,
+    )
     return result, domain_result
 
 @check_domain
@@ -305,6 +776,127 @@ def tanh(
     
     return 2.0 * div_out - 1.0, PotentialBounds(2.0 * div_domain.min - 1.0, 2.0 * div_domain.max - 1.0)
 
+
+def _gaussian_swiglu_function(
+    u: torch.Tensor,
+    domain_u: PotentialBounds,
+    v: torch.Tensor,
+    domain_v: PotentialBounds,
+    *,
+    beta: float,
+    tau_s: float,
+    theta: float,
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Evaluate SwiGLU through event-aware exponential, division, and products.
+
+    This private implementation follows
+    ``v * (u * f_DIV(1, 1 + psi_NE(phi_NP(beta * u))))``. The direct exponential
+    input is sampled explicitly because its delivery mask must select between a
+    decoded response and reset zero. Division and both multiplication stages then
+    reuse their public operators, which dispatch to their own Gaussian physical
+    readouts under the same process-wide configuration.
+
+    Args:
+        u: Input controlling both the sigmoid-like gate and gated value.
+        domain_u: Declared bounds of ``u``.
+        v: Second input multiplied with the gated ``u`` value.
+        domain_v: Declared bounds of ``v``.
+        beta: Scale applied to ``u`` before gate construction.
+        tau_s: Temporal scale forwarded to division.
+        theta: Symmetric identity-code rail used by multiplication stages.
+
+    Returns:
+        The finite event-aware SwiGLU output and its propagated product rails.
+
+    Raises:
+        RuntimeError: If direct event-aware encoding does not return ``SpikeSample``.
+    """
+    # Step 1: Scale u by beta and propagate the same affine endpoint bounds used by
+    # the deterministic composition before applying its exponential stability cap.
+    scaled_u = beta * u
+    scaled_domain_u = PotentialBounds(
+        beta * domain_u.min,
+        beta * domain_u.max,
+    )
+    stability_cap = 20.0
+    scaled_u_clamped = scaled_u.clamp(
+        min=-stability_cap,
+        max=stability_cap,
+    )
+    scaled_domain_u_clamped = PotentialBounds(
+        max(scaled_domain_u.min, -stability_cap),
+        min(scaled_domain_u.max, stability_cap),
+    )
+
+    # Step 2: Apply phi_NP(beta*u) at the shared encoder boundary. One sampled event
+    # supplies both the finite carrier time and the delivery decision for psi_NE.
+    exponential_event = neg_identity_transform(
+        scaled_u_clamped,
+        scaled_domain_u_clamped,
+        return_spike_sample=True,
+        noise_site="swiglu.exponential_input",
+    )
+    if not isinstance(exponential_event, SpikeSample):
+        raise RuntimeError("Gaussian SwiGLU encoding must return SpikeSample")
+
+    # Decode only delivered events. Early samples are already stored at the start,
+    # and a missed event leaves this internal exponential response at reset zero.
+    delivered_time = torch.clamp(
+        exponential_event.time,
+        min=float(exponential_event.domain.min),
+        max=float(exponential_event.domain.max),
+    )
+    exp_out = torch.where(
+        exponential_event.fired,
+        torch.exp(delivered_time),
+        torch.zeros_like(delivered_time),
+    )
+    exp_domain = PotentialBounds(
+        0.0,
+        exp(float(exponential_event.domain.max)),
+    )
+    exp_out = clamp_gaussian_output(
+        exp_out,
+        exp_domain,
+        site="swiglu.exponential_output",
+        name="swiglu_exponential_result",
+    )
+
+    # Step 3: f_DIV(1, 1 + psi_NE(phi_NP(beta*u))) constructs the sigmoid-like gate.
+    # The reset-inclusive exponential rail makes one the valid positive lower bound.
+    one_plus_exp = 1.0 + exp_out
+    one_plus_exp_domain = PotentialBounds(
+        1.0 + exp_domain.min,
+        1.0 + exp_domain.max,
+    )
+    sigmoid_out, sigmoid_domain = division_function(
+        X=torch.ones_like(one_plus_exp),
+        Y=one_plus_exp,
+        joint_domain=one_plus_exp_domain,
+        tau_s=tau_s,
+    )
+
+    # Step 4: psi_M(u, sigmoid) forms the gated Swish value. Its event-aware
+    # multiplication applies opening/reference miss physics and output rail logging.
+    swish_out, swish_domain = multiplication_operator(
+        u,
+        domain_u,
+        sigmoid_out,
+        sigmoid_domain,
+        theta=theta,
+    )
+
+    # Step 5: psi_M(v, swish) completes v*u*sigmoid using a second independently
+    # sampled multiplication call while preserving the propagated potential bounds.
+    return multiplication_operator(
+        v,
+        domain_v,
+        swish_out,
+        swish_domain,
+        theta=theta,
+    )
+
+
 @check_domain
 def swiglu_function(
     u: torch.Tensor,
@@ -318,6 +910,10 @@ def swiglu_function(
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """SwiGLU activation function using spiking operators.
+
+    The public entry point selects the private event-aware Gaussian implementation
+    or the original deterministic five-stage composition while preserving one API,
+    one algebraic definition, and the same propagated output contract.
     
     According to Lemma 4.5 (SwiGLU Operator) in the paper:
     f_SwiGLU(u, v) := ψ_M(v, ψ_M(u, f_DIV(1, 1 + ψ_NE(φ_NP(β u)))))
@@ -340,6 +936,19 @@ def swiglu_function(
     Returns:
         Tuple of (output, output_domain)
     """
+    # Keep direct event decoding, miss handling, and nested noisy operators isolated
+    # in the private implementation while callers retain this single public surface.
+    if get_gaussian_time_noise().enabled:
+        return _gaussian_swiglu_function(
+            u,
+            domain_u,
+            v,
+            domain_v,
+            beta=beta,
+            tau_s=tau_s,
+            theta=theta,
+        )
+
     # Step 1: Scale u by beta
     scaled_u = beta * u
     scaled_domain_u = PotentialBounds(beta * domain_u.min, beta * domain_u.max)
@@ -358,7 +967,9 @@ def swiglu_function(
     
     # Step 3: Compute sigmoid σ(β u) = f_DIV(1, 1 + ψ_NE(φ_NP(β u)))
     one_plus_exp = 1.0 + exp_out
-    one_plus_exp_domain = PotentialBounds(1.0 + exp_domain.min, 1.0 + exp_domain.max)
+    # The shared division domain must contain both the constant numerator 1 and the
+    # denominator 1 + exp_out; using 1 + exp_domain.min would clamp the numerator.
+    one_plus_exp_domain = PotentialBounds(1.0, 1.0 + exp_domain.max)
     
     sigmoid_out, sigmoid_domain = division_function(
         X=torch.ones_like(one_plus_exp),
@@ -366,6 +977,10 @@ def swiglu_function(
         joint_domain=one_plus_exp_domain,
         tau_s=tau_s
     )
+
+    # Expand the internal gate rail to the physical reset value zero. This absorbs
+    # endpoint roundoff before multiplication and matches the Gaussian gate contract.
+    sigmoid_domain = PotentialBounds(0.0, sigmoid_domain.max)
     
     # Step 4: Compute Swish: ψ_M(u, σ(β u)) = u * σ(β u)
     swish_out, swish_domain = multiplication_operator(
