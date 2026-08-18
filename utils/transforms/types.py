@@ -29,6 +29,23 @@ class PotentialBounds(OpenBounds): pass
 
 class TimeBounds(OpenBounds): pass
 
+
+class SpikeSample(NamedTuple):
+    """Finite spike-time storage paired with an explicit delivery mask.
+
+    ``time`` always remains inside ``domain`` so downstream tensor operations never
+    receive infinities or sentinel values outside the declared temporal interval.
+    When an event misses the fixed observation deadline, ``time`` stores
+    ``domain.max`` only as a finite carrier and ``fired`` is false. Consumers must
+    therefore consult ``fired`` before interpreting the stored timestamp as an
+    event that physically arrived.
+    """
+
+    time: Tensor  # Delivered time, or the finite deadline carrier for a missed event.
+    domain: TimeBounds  # Code interval whose maximum is the observation deadline.
+    fired: Tensor  # Boolean tensor distinguishing delivered events from deadline misses.
+
+
 OutBoundsT = TypeVar("OutBoundsT", bound=OpenBounds)
 
 _CLAMP_LOG_ENABLED = False
