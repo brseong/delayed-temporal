@@ -10,6 +10,8 @@ The process-wide configuration stores the absolute time mean and standard deviat
 
 The generator advances across forward calls. Reconfiguring it restarts a replica; an individual forward must not reseed it. Because this state is process-wide, the maintained path rejects `DataParallel` execution.
 
+Evaluation entry points expose a dimensionless standard-deviation fraction $r_t$ and convert it once using the base identity-code window, $\sigma_t=r_t(2\theta)$. Every encoder in that run then receives the same absolute $\sigma_t$.
+
 ## Direct Gaussian Spike-Time Noise
 
 One Gaussian timing sample jointly determines the delivered spike time and whether the event misses the observation deadline.
@@ -78,7 +80,7 @@ The existing potential-to-spike decorator is the only production injection point
 
 [[utils/transforms/noise.py#inject_spike_time_noise]] first calls the deterministic encoder and then samples timing noise when the consumer requests `return_spike_sample=True`. Both [[utils/transforms/potential_to_spike.py#neg_linear_transform]] and [[utils/transforms/potential_to_spike.py#neg_log_transform]] carry this decorator.
 
-There is no separate Gaussian multiplication operator and no encoder-specific Gaussian helper. Event-aware consumers receive a time-and-delivery record, while tensor-only callers preserve the historical `(time, bounds)` interface.
+There is no separate Gaussian multiplication operator and no encoder-specific Gaussian helper. Event-aware consumers receive a time-and-delivery record, while noise-free callers preserve the deterministic `(time, bounds)` interface.
 
 ## Layer-Shared Reference Event
 
@@ -87,14 +89,6 @@ An affine layer treats its zero-reference timing signal as a physical spike shar
 [[utils/transformers/models/spiking_ops.py#SpikingLinear#forward]] requests both the data event and one scalar zero-reference event through the same decorator. Data events receive independent timing samples; the scalar reference sample is broadcast across the layer operation.
 
 If a data event is absent, its contribution remains at the reset value. If the reference event is absent, integration continues to the observation deadline. These are direct applications of [[noise#Observation-Time Potential Invariant]], not operator-specific fallback policies.
-
-## Legacy Dynamic Compatibility
-
-The pre-existing potential-referred jitter and independent drop/insertion implementation remains temporarily available only for reproducing older experiments.
-
-[[utils/transforms/noise.py#NoiseConfig]] and [[utils/transforms/noise.py#set_spike_time_noise]] configure that historical path. Direct Gaussian noise and legacy dynamic noise are mutually exclusive, because combining them would perturb one encoder twice and destroy the single-sample interpretation.
-
-[[utils/transforms/noise.py#_apply_escape_hazard]] is not evidence for the maintained Gaussian model. Its independently sampled drop/insertion events and the linked-beta helper should be treated as legacy stress tests.
 
 ## Static Threshold Mismatch
 
@@ -116,8 +110,6 @@ The maintained production integration covers the three affine adapters, multipli
 
 Missing-event semantics are already fixed by [[noise#Observation-Time Potential Invariant]]. Extending coverage means implementing each operator's ordinary physical state trajectory up to $T_{\mathrm{obs}}$ and reading the resulting clamped potential; it does not require another validity policy discussion.
 
-Legacy module-scoping hooks continue to mutate the old global configuration and do not scope the maintained Gaussian generator.
-
 ## Interpretation Limits
 
 The implementation is a controlled computational robustness model rather than calibrated circuit validation.
@@ -128,9 +120,9 @@ Experiments must report $\mu_t$, $\sigma_t$, seed or repeats, injection coverage
 
 ## Current Coverage and Resume Order
 
-The planned event-aware migration is complete; work now resumes from model-level smoke evaluation and timing-noise calibration rather than another operator rewrite.
+The event-aware migration proceeds from the shared sampler and encoder boundary through composed operators, model adapters, evaluation entry points, and seeded verification.
 
-Affine, multiplication, exponential, exponential-difference/division, activation, softmin, and attention value paths use decorated events and retain noise-off parity references. Verification exercises opening, closing/reference, and internal exp-temporal cases.
+Coverage is complete only when affine, multiplication, exponential, exponential-difference/division, activation, softmin, and attention value paths use decorated events and retain noise-off parity references. Verification must exercise opening, closing/reference, and internal exp-temporal cases.
 
 The next experimental order is:
 
@@ -139,7 +131,7 @@ The next experimental order is:
 3. inspect per-site output saturation before selecting the manuscript's operating range;
 4. repeat selected settings across seeds before any hardware comparison.
 
-Every stage keeps the noise-free tensor path as a parity reference. No stage may introduce `gaussian_multiplication_operator`, a direct encoder sampler, or invalid-result propagation.
+Every stage keeps the noise-free tensor path as a parity reference. No stage may introduce `gaussian_multiplication_operator`, an operator-specific sampler, or invalid-result propagation.
 
 ## Gaussian Noise Statistics
 

@@ -5,5 +5,5 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[operators]] — Primitive temporal integration and the composite Transformer operator vocabulary.
 - [[models]] — Hugging Face model-family adapters, checkpoint compatibility, and ablation controls.
 - [[decisions]] — Rationale and trade-offs behind the project’s major architectural choices.
-- [[noise]] — Gaussian event timing, fixed-deadline potential readout, legacy compatibility, and migration order.
+- [[noise]] — Gaussian event timing, fixed-deadline potential readout, static non-idealities, and verification.
 - [[evaluation]] — Experiment entry points, metrics, diagnostics, sweeps, and verification boundaries.

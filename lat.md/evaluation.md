@@ -44,19 +44,19 @@ Available diagnostics include:
 
 Clamp logging uses global module-name state. Hooks must set and clear that state consistently, especially when model execution is parallelized.
 
-The ViT runner prints per-site Gaussian rates and logs them under `Gaussian/<site>/...` in W&B. Gaussian counters are also process-wide mutable state and are reset whenever a new seeded replica is configured.
+Each spiking runner prints per-site Gaussian rates and logs them under `Gaussian/<site>/...` in W&B. Gaussian counters are process-wide mutable state and are reset whenever a new seeded replica is configured.
 
 ## Noise and Ablation Sweeps
 
-Shell scripts under `scripts/experiments` run isolated sweeps for jitter, hazard-style drop/insertion, static mismatch, activation variants, and module-level conversion ablations.
+Shell scripts under `scripts/experiments` run isolated sweeps for Gaussian spike-time noise, static mismatch, activation variants, and module-level conversion ablations.
 
-`scripts/experiments/noise_analysis_vit.sh` and `noise_scan_vit.sh` vary one ViT noise component at a time. The same directory contains legacy jitter and theta sweeps, static-bias experiments, quantile collection, and GELU comparisons.
+`scripts/experiments/noise_analysis_vit.sh` and `noise_scan_vit.sh` sweep Gaussian timing scale for ViT. The same directory contains model-family timing and theta sweeps, static-bias experiments, quantile collection, and GELU comparisons.
 
-The scripts are orchestration, not definitions of the noise model. Parameter semantics come from [[noise#Noise Model]], and comparisons must distinguish current potential-referred jitter from legacy time-referred runs.
+The scripts pass a dimensionless `time_noise_std_frac`. Each evaluator converts it to one absolute standard deviation using $\sigma_t=r_t(2\theta)$, applies that value at every encoder boundary, and records both values with the seed.
 
 ## Gaussian Spike-Time Verification
 
-The maintained Gaussian model has a seeded decorator-level regression check independent of model datasets and checkpoints.
+The maintained Gaussian model requires a seeded decorator-level regression check independent of model datasets and checkpoints.
 
 The regression check covers the sampled distribution and deadline behavior plus affine, multiplication, exponential, exponential-difference, division, LayerNorm, softmin, attention value integration, and per-site counters. Operator checks retain noise-off parity paths and force opening, closing/reference, and internal exp-temporal cases where applicable.
 
@@ -68,7 +68,7 @@ As each operator is migrated, its regression must force opening and closing/refe
 
 The `analysis/` directory contains focused attribution experiments and figure generators for mechanisms that are difficult to isolate in end-to-end task runs.
 
-The analyses cover LayerNorm noise gain, module-level noise contribution, MLP decomposition, GELU internal stages, and beta-linked pooling experiments. They can temporarily scope global encoder noise to selected modules; the restrictions in [[noise#Injection Scope and Compounding]] apply.
+Timing-noise analyses use the same run-wide Gaussian configuration as model evaluation. Focused attribution must be expressed as an explicit experimental program rather than by mutating the global generator around selected modules.
 
 Generated figures and run logs are experiment artifacts rather than architecture sources. Reproducing a figure requires the checkpoint, dataset cache, environment, and command described by the corresponding analysis script.
 
@@ -89,7 +89,7 @@ Before treating a change as validated, select checks proportional to its layer:
 - Domain or primitive changes need algebraic value and bound tests, including endpoints and signed event order.
 - Composite functions need comparisons against their dense mathematical references across calibrated domains.
 - Model changes need noise-free checkpoint fidelity plus task-level smoke evaluation.
-- Noise changes need deterministic seed checks, distribution checks, injection-scope checks, and repeated confidence intervals.
+- Noise changes need deterministic seed checks, distribution checks, injection-coverage checks, and repeated confidence intervals.
 - Cost-model changes need `python scripts/verification/verify_sop.py` and explicit review of modeling assumptions.
 
 `lat check` validates this documentation’s section identities and source references; it is not a substitute for numerical model tests.

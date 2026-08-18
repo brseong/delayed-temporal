@@ -44,9 +44,9 @@ ViT’s complete orchestration is implemented by [[scripts/evaluation/error_anal
 
 Numeric values travel through `Potential` objects, while global experiment configuration controls attention selection, noise injection, and diagnostic instrumentation.
 
-The data plane is explicit: a tensor is paired with bounds, transformed into spike events when an operator requires them, and read back as a bounded potential at $T_{\mathrm{obs}}$. The control plane is less local: Hugging Face configs select modules, while current and legacy noise paths use process-wide settings.
+The data plane is explicit: a tensor is paired with bounds, transformed into spike events when an operator requires them, and read back as a bounded potential at $T_{\mathrm{obs}}$. The control plane is less local: Hugging Face configs select modules, while Gaussian timing noise uses process-wide settings.
 
-This distinction matters for concurrency. Ordinary model computation is per-instance, but global noise configuration and clamp logging are process-global mutable state; scoped experiments must not assume thread-safe or `DataParallel`-safe configuration changes.
+This distinction matters for concurrency. Ordinary model computation is per-instance, but global noise configuration and clamp logging are process-global mutable state; experiments must not assume thread-safe or `DataParallel`-safe configuration changes.
 
 ## Legacy Discrete-Time Subsystem
 
