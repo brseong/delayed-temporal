@@ -1,0 +1,50 @@
+# TODO
+
+This file tracks concrete follow-up work that is intentionally deferred from the maintained architecture and operator implementation.
+
+## Static Bounds for All Operators
+
+Every maintained operator must use bounds fixed before inference; a forward pass must never define its own physical rails from values it has already produced.
+
+### Why Static Bounds Are Required
+
+Static bounds turn domains into predeclared physical and mathematical contracts instead of batch-specific observations.
+
+- Physical TTFS rails and observation windows must be configured before an input is encoded. Deriving them from the completed output is an unavailable runtime oracle.
+- The same activation must receive the same domain and encoding regardless of batch contents, ordering, batch size, device partitioning, or noise seed.
+- A tensor's observed minimum and maximum describe only that batch; they do not conservatively bound future inputs and therefore cannot satisfy the `Potential` contract.
+- Widening bounds around a noisy output hides physical underflow and overflow. Raw outputs must be compared with fixed rails before statistics are recorded and clamping is applied.
+- Immutable bounds keep deterministic clipping error, operator approximation, Gaussian timing error, deadline misses, and output saturation independently measurable.
+
+### Intended Runtime Contract
+
+Calibration and interval arithmetic establish an immutable bound table before evaluation, after which forward execution may only consume, propagate, compare, and clamp against those bounds.
+
+The required order is: load or calibrate static input envelopes, derive conservative operator outputs, evaluate the raw tensor, record excursions against the fixed output rail, clamp, and pass the unchanged declared envelope downstream. Neither clean nor noisy execution may widen a bound.
+
+Calibration runs with timing noise disabled and is identified by stable operator sites. A checkpoint change, static parameter perturbation, preprocessing change, model-family change, or ablation-path change invalidates the affected calibration and requires rebuilding it before evaluation.
+
+### Acceptance Criteria
+
+The migration is complete only when static-domain behavior is invariant under evaluation batching and all runtime extrema-derived domain construction has left maintained paths.
+
+- [ ] Reordering identical samples, changing batch size, or partitioning a batch produces identical declared bounds at every operator site.
+- [ ] Changing the Gaussian seed changes sampled events and outputs but never changes any declared potential or time bound.
+- [ ] Every out-of-envelope value increments pre-clamp underflow or overflow statistics without mutating the envelope.
+- [ ] Evaluation fails clearly when a required calibrated bound is absent or incompatible instead of silently measuring the current tensor.
+- [ ] A final source audit and direct tests reject `PotentialBounds` or `TimeBounds` constructed from live forward-tensor extrema.
+
+### Implementation Checklist
+
+The implementation work covers every maintained transform and model adapter, not only LayerNorm or operators that directly emit spikes.
+
+- [ ] Audit every maintained `PotentialBounds` and `TimeBounds` construction, including model inputs, embeddings, residuals, normalization, activations, attention, projections, and task readouts; no forward may infer a domain from the current tensor's extrema.
+- [ ] Prefer operator-derived interval arithmetic whenever the input bounds and transformation provide a conservative static result.
+- [ ] For paths without a practical analytic envelope, record per-site minima and maxima during a representative noise-free calibration run.
+- [ ] Persist stable site identifiers together with the checkpoint, dataset split, preprocessing, model family, and active ablation configuration used for calibration.
+- [ ] Freeze learned-parameter bounds once after checkpoint loading or static perturbation instead of recomputing parameter extrema on every forward.
+- [ ] Initialize model-entry potential bounds from calibration rather than measuring the first or current batch.
+- [ ] Clamp every out-of-envelope value against its fixed bound and report underflow and overflow counts without widening that bound at runtime.
+- [ ] Include LayerNorm's pre-affine normalized result in calibration, then derive its post-affine envelope by interval arithmetic from fixed scale and bias endpoints.
+- [ ] Keep spike-time windows configuration-derived: LayerNorm log windows remain fixed by `clip_margin`, `theta`, and `tau_s`, while affine identity encoding remains on its declared symmetric interval.
+- [ ] Verify bounds are identical across batch contents, ordering, and batch size, and add a final source audit that rejects runtime tensor-extrema domain construction in maintained paths.

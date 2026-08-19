@@ -49,8 +49,9 @@ from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
 
 from utils.transforms import neg_identity_transform
 from utils.transforms.functions import gelu_approximation
+from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_noise
 from utils.transforms.primitive import pulse_width_modulation_operator
-from utils.transforms.types import Potential, PotentialBounds
+from utils.transforms.types import Potential, PotentialBounds, SpikeSample
 from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear, _apply_norm
 
 logger = logging.get_logger(__name__)
@@ -61,26 +62,176 @@ class SpikingConv1D(Conv1D):
         super().__init__(nf, nx, **kwargs)
         self.theta = theta
 
+    def _gaussian_forward(
+        self,
+        x: torch.Tensor,
+        encoded_x: torch.Tensor,
+        domain_x: PotentialBounds,
+        domain_W: PotentialBounds,
+    ) -> Potential:
+        """Evaluate GPT-2's transposed affine projection from sampled events.
+
+        Hugging Face ``Conv1D`` stores weights as ``[in_features, out_features]``.
+        This method preserves that layout while replacing each encoded input with a
+        physical integration duration. One scalar zero-reference event is shared by
+        the complete projection call; opening and reference misses follow the same
+        observation-deadline rules as the other affine adapters.
+
+        Args:
+            x: Original input tensor used for metadata and scalar allocation.
+            encoded_x: Input clamped to the symmetric identity-code domain.
+            domain_x: Symmetric input rails ``[-theta, theta]``.
+            domain_W: Min/max bounds of the transposed Conv1D weight matrix.
+
+        Returns:
+            A bounded ``Potential`` with the original leading dimensions and ``nf``
+            output features.
+
+        Raises:
+            RuntimeError: If either event-aware encoder call fails to return a
+                ``SpikeSample``.
+        """
+        # Each final-dimension input element independently opens its projection
+        # trajectory; the fired mask preserves misses across arbitrary leading shapes.
+        data_event = neg_identity_transform(
+            encoded_x,
+            domain_x,
+            return_spike_sample=True,
+            noise_site="conv1d.data",
+        )
+        if not isinstance(data_event, SpikeSample):
+            raise RuntimeError(
+                "Gaussian SpikingConv1D encoding must return SpikeSample"
+            )
+
+        # One scalar zero codeword supplies the shared closing event for the entire
+        # GPT-2 projection call instead of being resampled per token or feature.
+        reference_event = neg_identity_transform(
+            x.new_zeros(()),
+            domain_x,
+            return_spike_sample=True,
+            noise_site="conv1d.reference",
+        )
+        if not isinstance(reference_event, SpikeSample):
+            raise RuntimeError(
+                "Gaussian SpikingConv1D reference must return SpikeSample"
+            )
+
+        # A delivered reference closes all active trajectories at its sample; a miss
+        # reads them at the fixed deadline shared with every data event.
+        deadline = data_event.time.new_tensor(float(data_event.domain.max))
+        stop_time = torch.where(
+            reference_event.fired,
+            reference_event.time,
+            deadline,
+        )
+
+        # Data misses contribute reset zero. Flatten only the leading dimensions for
+        # addmm, retaining Hugging Face's [in_features, out_features] weight layout.
+        duration = torch.where(
+            data_event.fired,
+            stop_time - data_event.time,
+            torch.zeros_like(data_event.time),
+        )
+        output_shape = duration.size()[:-1] + (self.nf,)
+        flat_duration = duration.reshape(-1, duration.size(-1))
+        if self.bias is None:
+            y = torch.matmul(flat_duration, self.weight)
+        else:
+            y = torch.addmm(self.bias, flat_duration, self.weight)
+        y = y.view(output_shape)
+
+        # Derive ideal output rails from every weight/input endpoint product and the
+        # input-feature fan-in represented by the first weight dimension.
+        product_candidates = (
+            domain_W.min * domain_x.min,
+            domain_W.min * domain_x.max,
+            domain_W.max * domain_x.min,
+            domain_W.max * domain_x.max,
+        )
+        fan_in = self.weight.size(0)
+        domain_y = PotentialBounds(
+            min(product_candidates) * fan_in,
+            max(product_candidates) * fan_in,
+        )
+
+        # Bias has already been applied by addmm, so only extend the propagated rails
+        # here. In the all-data-missed case it remains the complete affine output.
+        if self.bias is not None:
+            domain_y = PotentialBounds(
+                domain_y.min + self.bias.min().item(),
+                domain_y.max + self.bias.max().item(),
+            )
+
+        # Record raw projection saturation before returning the bounded potential to
+        # the next GPT-2 attention or MLP operation.
+        return Potential(
+            clamp_gaussian_output(
+                y,
+                domain_y,
+                site="conv1d.output",
+                name="conv1d_y",
+            ),
+            domain_y,
+        )
+
     def forward(self, input: Potential) -> Potential:
+        """Apply GPT-2's transposed affine projection through PWM integration.
+
+        Common input calibration and weight-bound extraction precede dispatch to the
+        private event-aware method or the original explicit per-synapse PWM path.
+        Both modes preserve Hugging Face's ``[in_features, out_features]`` weight
+        layout, arbitrary leading tensor dimensions, bias, and fan-in bounds.
+
+        Args:
+            input: GPT-2 activation tensor paired with upstream potential bounds.
+
+        Returns:
+            The projected activation paired with conservative ideal potential rails.
+        """
+        # Conv1D uses its configured symmetric identity encoder independently of the
+        # upstream Potential domain, matching the other pretrained affine adapters.
         x: torch.Tensor = input.value
         domain_x = PotentialBounds(-self.theta, self.theta)
-        t_A, domain_t_A = neg_identity_transform(domain_x.clamp(x, name="conv1d_x"), domain_x)
+        encoded_x = domain_x.clamp(x, name="conv1d_x")
+
+        # Compute one transposed-weight interval for both paths. Preserve the existing
+        # infinitesimal expansion when all learned weights are exactly identical.
         w_min, w_max = self.weight.min().item(), self.weight.max().item()
         if w_min == w_max:
             w_min, w_max = w_min - 1e-8, w_max + 1e-8
         domain_W: PotentialBounds = PotentialBounds(w_min, w_max)
+
+        # Isolate event sampling, shared-reference timing, addmm, and saturation
+        # logging inside the private Gaussian implementation.
+        if get_gaussian_time_noise().enabled:
+            return self._gaussian_forward(
+                x,
+                encoded_x,
+                domain_x,
+                domain_W,
+            )
+
+        # Noise-free execution retains explicit temporal encoding and per-synapse
+        # broadcasting over the output-feature dimension.
+        t_A, domain_t_A = neg_identity_transform(encoded_x, domain_x)
         y_syn: torch.Tensor
         y_syn, domain_y_syn = pulse_width_modulation_operator(
             t_A.unsqueeze(-1), domain_t_A,
             self.theta, self.theta,
             self.weight, domain_W,
         )
+
+        # Sum the input-feature synapses and scale the endpoint envelope by the same
+        # fan-in represented by the first transposed-weight dimension.
         N = self.weight.size(0)
         domain_y: PotentialBounds = PotentialBounds(
             domain_y_syn.min * N,
             domain_y_syn.max * N,
         )
         y: torch.Tensor = y_syn.sum(dim=-2)
+
+        # Apply learned bias to both the projected value and its conservative bounds.
         if self.bias is not None:
             b_min, b_max = self.bias.min().item(), self.bias.max().item()
             domain_y = PotentialBounds(

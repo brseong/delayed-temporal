@@ -17,7 +17,11 @@ from transformers import AttentionInterface, AutoModelForImageClassification
 from transformers.models.vit import ViTImageProcessor
 from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTForImageClassification, SpikingLayerNorm
 from utils.transforms.types import Potential
-from utils.transforms.noise import set_spike_time_noise, install_device_mismatch
+from utils.transforms.noise import (
+    get_gaussian_noise_stats,
+    install_device_mismatch,
+    set_gaussian_time_noise,
+)
 from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
 from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
 import evaluate
@@ -32,6 +36,17 @@ AttentionInterface.register("spiking_sdpa", spiking_sdpa_attention_forward)
 
 @dataclass
 class Arguments:
+    """Command-line configuration consumed by the ViT evaluator.
+
+    Dynamic event noise is represented only by direct Gaussian spike-time error.
+    ``time_noise_std_frac`` is dimensionless and is converted later by the
+    evaluation function to an absolute standard deviation using the identity-code
+    window ``2 * theta``. Static threshold mismatch and learned-parameter
+    perturbations remain independent experiment axes.
+    """
+
+    # Evaluation, backend, and model-conversion controls are independent of the
+    # selected non-ideality experiments.
     experiment_name: str
     model_backend: Literal["hf", "spiking"]
     model_id: str
@@ -49,22 +64,39 @@ class Arguments:
     spiking_mlp_exact_gelu: bool
     activation: Literal["relu", "gelu"]
     theta: float
-    noise_std: float
-    # --- neuromorphic noise model (see utils/transforms/noise.py) ---
-    jitter_enabled: bool
-    jitter_mode: Literal["potential", "time"]
-    hazard_enabled: bool
-    hazard_delta_u: float
-    hazard_insert_rate: float
+
+    # Direct Gaussian timing noise uses one relative input scale, one absolute mean,
+    # and one replica seed; no jitter mode or escape-hazard controls remain.
+    gaussian_time_noise: bool
+    time_noise_std_frac: float
+    time_noise_mean: float
+    time_noise_seed: int
+
+    # Static device and parameter non-idealities remain separate from event timing
+    # so their effects can be swept and attributed independently.
     mismatch_enabled: bool
     mismatch_theta_std: float
-    # --- static synaptic parameter noise (applied to loaded weights) ---
     weight_noise_std: float
     bias_noise_std: float
+
+    # Diagnostic and smoke-evaluation controls do not alter operator definitions.
     collect_quantiles: bool
     quick_test: bool
 
-def parse_arguments():
+def parse_arguments() -> Arguments:
+    """Parse the ViT evaluator command line into its typed configuration.
+
+    The maintained dynamic-noise interface exposes one direct Gaussian timing
+    model. Its standard deviation is entered as a fraction of the identity-code
+    window and converted to absolute time inside evaluation, while the mean and
+    seed are already absolute replica parameters. Static mismatch and parameter
+    perturbation options remain independent.
+
+    Returns:
+        A fully populated :class:`Arguments` instance.
+    """
+    # General evaluation and spiking-ablation options remain unchanged so this
+    # migration affects only the dynamic event-noise interface.
     parser = argparse.ArgumentParser(description="Evaluate ViT model with Spiking SDPA attention.")
     parser.add_argument("--experiment_name", type=str,
                         help="Name of the experiment for logging purposes.")
@@ -100,19 +132,36 @@ def parse_arguments():
                         help="Activation function to use when --no-spiking-mlp is set (default: gelu).")
     parser.add_argument("--theta", type=float, default=100.0,
                         help="Domain bound θ for SpikingLayerNorm clamping (default: 100.0).")
-    parser.add_argument("--noise-std", type=float, default=0.0,
-                        help="Jitter σ as a fraction of the (potential or time) domain range (default: 0.0).")
-    # --- neuromorphic noise model: three independently-toggleable components ---
-    parser.add_argument("--jitter-enabled", action=argparse.BooleanOptionalAction, default=False,
-                        help="[A] Operating-point-dependent temporal jitter of magnitude --noise-std.")
-    parser.add_argument("--jitter-mode", type=str, choices=["potential", "time"], default="potential",
-                        help="[A] 'potential' (V-referred, σ_t=σ_V/|dV/dt|) or 'time' (legacy, uniform on t).")
-    parser.add_argument("--hazard-enabled", action=argparse.BooleanOptionalAction, default=False,
-                        help="[B] Escape-noise drop/insertion hazard near threshold.")
-    parser.add_argument("--hazard-delta-u", type=float, default=0.0,
-                        help="[B] Δu (soft-threshold width) as a fraction of the potential-domain range.")
-    parser.add_argument("--hazard-insert-rate", type=float, default=0.0,
-                        help="[B] ρ₀, baseline spurious-spike (insertion) probability.")
+
+    # Direct Gaussian spike-time noise uses the common four-option CLI shared by
+    # every model family. No aliases for jitter, hazard, or the old noise std remain.
+    parser.add_argument(
+        "--gaussian-time-noise",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Apply direct Gaussian error to every event-aware spike time.",
+    )
+    parser.add_argument(
+        "--time-noise-std-frac",
+        type=float,
+        default=0.0,
+        help="Gaussian time std as a fraction of the identity window 2*theta.",
+    )
+    parser.add_argument(
+        "--time-noise-mean",
+        type=float,
+        default=0.0,
+        help="Gaussian timing mean in absolute time units (default: 0.0).",
+    )
+    parser.add_argument(
+        "--time-noise-seed",
+        type=int,
+        default=0,
+        help="Seed for the evaluator replica's dedicated timing-noise generator.",
+    )
+
+    # Static threshold mismatch and learned-parameter perturbations deliberately
+    # remain separate controls rather than being folded into event timing noise.
     parser.add_argument("--mismatch-enabled", action=argparse.BooleanOptionalAction, default=False,
                         help="[C] Static per-neuron threshold mismatch (frozen).")
     parser.add_argument("--mismatch-theta-std", type=float, default=0.0,
@@ -126,6 +175,8 @@ def parse_arguments():
     parser.add_argument("--quick-test", action="store_true",
                         help="Run a quick test with a small subset of the dataset and fewer batches.")
 
+    # Parse once, then copy every field explicitly into the dataclass so omissions
+    # or stale option names fail visibly during this staged interface migration.
     args = parser.parse_args()
     return Arguments(
         experiment_name=args.experiment_name,
@@ -145,12 +196,10 @@ def parse_arguments():
         spiking_mlp_exact_gelu=args.spiking_mlp_exact_gelu,
         activation=args.activation,
         theta=args.theta,
-        noise_std=args.noise_std,
-        jitter_enabled=args.jitter_enabled,
-        jitter_mode=args.jitter_mode,
-        hazard_enabled=args.hazard_enabled,
-        hazard_delta_u=args.hazard_delta_u,
-        hazard_insert_rate=args.hazard_insert_rate,
+        gaussian_time_noise=args.gaussian_time_noise,
+        time_noise_std_frac=args.time_noise_std_frac,
+        time_noise_mean=args.time_noise_mean,
+        time_noise_seed=args.time_noise_seed,
         mismatch_enabled=args.mismatch_enabled,
         mismatch_theta_std=args.mismatch_theta_std,
         weight_noise_std=args.weight_noise_std,
@@ -178,7 +227,23 @@ def apply_parameter_noise(model: nn.Module, weight_std: float, bias_std: float):
                 noise = torch.randn_like(param) * bias_std * param.abs().max() 
                 param.add_(noise)
 
-def evaluate_vit_model(args:Arguments):
+def evaluate_vit_model(args: Arguments) -> None:
+    """Evaluate one ViT backend under the requested non-idealities.
+
+    The evaluator converts the dimensionless timing-noise fraction to one absolute
+    Gaussian standard deviation using the base identity-code window ``2 * theta``.
+    That absolute value and one seeded generator are installed once for the whole
+    replica. Because the configuration and generator are process-wide mutable
+    state, Gaussian execution explicitly rejects multi-GPU ``DataParallel``.
+
+    Args:
+        args: Parsed ViT evaluation, conversion, and non-ideality settings.
+
+    Raises:
+        RuntimeError: If Gaussian timing noise would execute through
+            ``DataParallel`` across multiple CUDA devices.
+        ValueError: If Gaussian parameters fail shared noise validation.
+    """
     # ---------------------------------------------------------
     # 0. 시드 설정
     # ---------------------------------------------------------
@@ -210,7 +275,41 @@ def evaluate_vit_model(args:Arguments):
     # GPU 사용 가능 여부 확인
     device = torch.device(device_str)
 
-    cfg = vars(args)
+    # Convert the user-facing fraction exactly once from the default identity-code
+    # duration. Every decorated encoder then receives this same absolute sigma_t.
+    identity_time_window = 2.0 * float(args.theta)
+    time_noise_std = float(args.time_noise_std_frac) * identity_time_window
+    gaussian_enabled = bool(
+        model_backend == "spiking" and args.gaussian_time_noise
+    )
+
+    # A process-wide generator cannot represent independent per-device replica
+    # streams under DataParallel, so reject that topology before external setup.
+    use_data_parallel = device.type == "cuda" and torch.cuda.device_count() > 1
+    if gaussian_enabled and use_data_parallel:
+        raise RuntimeError(
+            "Gaussian spike-time noise does not support DataParallel; "
+            "run one evaluation process per GPU"
+        )
+
+    # Installing a configuration starts one seeded measurement replica and clears
+    # prior Gaussian counters. HF evaluation installs the disabled state explicitly.
+    set_gaussian_time_noise(
+        enabled=gaussian_enabled,
+        time_std=time_noise_std,
+        time_mean=args.time_noise_mean,
+        seed=args.time_noise_seed,
+        device=device,
+    )
+
+    # Log both the dimensionless input and the derived absolute quantity so runs at
+    # different theta values remain interpretable without reconstructing the CLI.
+    cfg = {
+        **vars(args),
+        "gaussian_time_noise_effective": gaussian_enabled,
+        "identity_time_window": identity_time_window,
+        "time_noise_std": time_noise_std,
+    }
     effective_attn_impl = "eager"
     if model_backend == "spiking" and device.type != "cpu" and args.spiking_attention:
         effective_attn_impl = "spiking_sdpa"
@@ -221,28 +320,21 @@ def evaluate_vit_model(args:Arguments):
     print(f"Model backend: {model_backend}")
     print(f"Model: {model_id}, Dataset: {dataset_id} ({split})")
     print(f"Precision: {args.precision}")
+    print(
+        "Gaussian time noise — "
+        f"enabled: {gaussian_enabled}, "
+        f"std_frac: {args.time_noise_std_frac}, "
+        f"identity_window: {identity_time_window}, "
+        f"std_abs: {time_noise_std}, "
+        f"mean_abs: {args.time_noise_mean}, "
+        f"seed: {args.time_noise_seed}"
+    )
     
     if model_backend == "spiking":
         print(f"Spiking LayerNorm: {args.spiking_layernorm}, Spiking Attention: {args.spiking_attention}")
         if args.spiking_layernorm:
             print(f"  LN stages — mul: {args.spiking_ln_mul}, log: {args.spiking_ln_log}, expdiff: {args.spiking_ln_expdiff}")
         print(f"Spiking MLP: {args.spiking_mlp}")
-
-        # Encoder-level noise (jitter + escape hazard). Device mismatch is installed on the
-        # model after it is built (see below). All components are off unless explicitly enabled.
-        if args.jitter_enabled or args.hazard_enabled:
-            print(f"Noise — jitter: {args.jitter_enabled} (σ={args.noise_std}, mode={args.jitter_mode}), "
-                  f"hazard: {args.hazard_enabled} (Δu={args.hazard_delta_u}, ρ₀={args.hazard_insert_rate})")
-        set_spike_time_noise(
-            std=args.noise_std,
-            eval_mode=True,
-            mode=args.jitter_mode,
-            potential_scale=args.theta,   # σ_V = std·θ for potential-mode jitter
-            jitter_enabled=args.jitter_enabled,
-            hazard_enabled=args.hazard_enabled,
-            hazard_delta_u=args.hazard_delta_u,
-            hazard_insert_rate=args.hazard_insert_rate,
-        )
 
     # ---------------------------------------------------------
     # 2. 데이터셋 및 전처리 도구 로드
@@ -317,9 +409,9 @@ def evaluate_vit_model(args:Arguments):
         print(f"Installed static device mismatch on {len(handles)} spiking modules (σ_θ={args.mismatch_theta_std}).")
 
     # GPU 병렬화 (DataParallel) 설정
-    if device.type == "cuda" and torch.cuda.device_count() > 1:
+    if use_data_parallel:
         print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
-        model = nn.DataParallel(model)
+        model = DataParallel(model)
         
     model.eval() # 평가 모드로 전환
 
@@ -420,6 +512,39 @@ def evaluate_vit_model(args:Arguments):
     print(f"Evaluation Results for {model_id}:")
     print(f"Accuracy: {final_score['accuracy']:.4f}")
     wandb.log({"Final Accuracy": final_score["accuracy"]})
+
+    # Report event delivery and physical rail saturation with their own denominators.
+    # The stored statistics remain limited to the five maintained raw count fields.
+    if gaussian_enabled:
+        for site, counts in sorted(get_gaussian_noise_stats().items()):
+            events = counts["events"]
+            outputs = counts["outputs"]
+            miss_rate = counts["misses"] / events if events else 0.0
+            underflow_rate = (
+                counts["output_underflows"] / outputs if outputs else 0.0
+            )
+            overflow_rate = (
+                counts["output_overflows"] / outputs if outputs else 0.0
+            )
+            print(
+                f"Gaussian[{site}] events={events}, misses={counts['misses']} "
+                f"(rate={miss_rate:.6g}), outputs={outputs}, "
+                f"underflows={counts['output_underflows']} "
+                f"(rate={underflow_rate:.6g}), "
+                f"overflows={counts['output_overflows']} "
+                f"(rate={overflow_rate:.6g})"
+            )
+            wandb.log({
+                f"Gaussian/{site}/events": events,
+                f"Gaussian/{site}/misses": counts["misses"],
+                f"Gaussian/{site}/miss_rate": miss_rate,
+                f"Gaussian/{site}/outputs": outputs,
+                f"Gaussian/{site}/output_underflows": counts["output_underflows"],
+                f"Gaussian/{site}/output_underflow_rate": underflow_rate,
+                f"Gaussian/{site}/output_overflows": counts["output_overflows"],
+                f"Gaussian/{site}/output_overflow_rate": overflow_rate,
+            })
+
     print("-" * 30)
     wandb.finish()
 

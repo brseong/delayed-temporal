@@ -24,6 +24,8 @@ For example, [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViT
 
 Some fallback and nonlinear paths still construct bounds from observed output minima and maxima. Those paths are useful for simulation but are data-dependent and should not be presented as fixed hardware calibration without an explicit calibration protocol.
 
+The planned removal of runtime-derived bounds across all maintained operators and model adapters is tracked in [[todo#Static Bounds for All Operators]].
+
 ## TTFS Encoding
 
 Potential-to-spike transforms encode larger analog values as earlier events inside a declared time window.
@@ -62,7 +64,7 @@ Operations with positive-only logarithmic encoding represent a signed centered v
 
 [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm]] centers the input, creates positive and negative rails, processes each through logarithmic and exponential-difference stages, and subtracts the results. This allows signed normalization while keeping each logarithmic encoder input positive.
 
-The encoding floor and the LayerNorm stabilizer currently share `eps`, and inactive rails are clamped to that floor. Consequently, finite-floor behavior is part of the numerical approximation and must be separated from the ideal dual-rail derivation.
+`clip_margin` independently insets both potential endpoints to form `[clip_margin, theta - clip_margin]`, while `eps` only stabilizes the LayerNorm variance. Inactive rails remain clamped to the margin, so their finite residual is distinct from denominator regularization.
 
 ## Scale Parameters
 
@@ -71,7 +73,7 @@ The encoding floor and the LayerNorm stabilizer currently share `eps`, and inact
 - `theta` is commonly both the symmetric potential clamp and the reference endpoint used by affine TTFS multiplication.
 - `tau_s` controls log-encoding and exponential-difference scale.
 - `tau_m` appears in exponential operator interfaces, but not every stabilized implementation currently uses it consistently.
-- `eps` prevents zero-valued logarithms and stabilizes LayerNorm, while also introducing a finite encoding floor in the current implementation.
+- `clip_margin` keeps LayerNorm logarithmic rails away from zero and below `theta`, while `eps` independently stabilizes its variance denominator.
 
 These quantities are configuration and calibration assumptions, not learned circuit characteristics. Their trade-offs are discussed in [[decisions#Explicit Finite Domains and Clamping]].
 
