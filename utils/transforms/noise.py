@@ -1,41 +1,25 @@
-"""Single source of truth for the neuromorphic noise model.
+"""Gaussian spike-time noise and static threshold mismatch for TTFS models.
 
-Everything noise-related lives here so the model can be understood by reading one file.
-Three physically-separable effects (pure-simulation robustness study):
+Dynamic non-ideality is represented by one additive Gaussian error in absolute
+time units at each event-aware potential-to-spike boundary. The sampled raw time
+jointly determines the delivered timestamp and whether the event arrived after
+the encoder's fixed observation deadline. All encoder sites share one seeded,
+advancing generator per evaluation replica.
 
-  A. Operating-point-dependent temporal jitter — injected in *potential* space so the
-     encoder's own Jacobian yields σ_t = |dt/dV|·σ_V = σ_V/|dV/dt| (uniform on the linear
-     data path, σ_V·τ/V on the log LayerNorm/attention path). A legacy time-space jitter is
-     kept selectable for reproducing older sweeps.
-  B. Drop/insertion escape-noise hazard — ρ(t) = ρ₀·exp((V−θ)/Δu) (Gerstner SRM), mapped to
-     a per-neuron per-forward firing reliability for single-spike TTFS.
-  C. Static device mismatch — frozen per-neuron threshold offset, installed as forward
-     pre-hooks so the spiking modules themselves need no noise code.
+Static threshold mismatch remains an independent experimental axis. It is sampled
+once per supported module, stored as a frozen non-persistent buffer, and applied by
+forward pre-hooks. Gaussian event timing and static mismatch therefore have distinct
+configuration, sampling, and reporting paths.
 
-A and B are applied at the encoder via the `inject_spike_time_noise` decorator (which every
-potential→spike transform already carries). C is applied by `install_device_mismatch`.
-
-Colored 1/f·RTN noise is intentionally excluded: single-spike TTFS has no intra-inference time
-axis, so low-frequency components collapse to the quasi-static offset that C already models.
-
-Scope & calibration caveats
----------------------------
-- The decorated encoders (neg_linear/neg_log) are reused as internal arithmetic primitives:
-  multiplication_operator, division_function and softmin all call an encoder, and the spiking
-  LayerNorm/attention chain calls several per layer. So A/B perturb *every spike-time
-  sub-computation*, not once per physical neuron. Noise therefore compounds across hundreds of
-  sites and the model shows a fairly sharp robustness cliff — magnitudes must be small
-  (jitter std and mismatch σ_θ ≈ 1e-6…1e-5 for ViT-S at θ=2000). This is a deliberate
-  worst-case ("noise at every operation") reading, not a bug.
-- The spiking LayerNorm is the sensitivity bottleneck; sweeps should bracket its cliff.
-- A/B reference their scale to θ (`potential_scale`), not each encoder's domain range, because
-  the LayerNorm variance encoder's range is θ² and would otherwise dominate. See reports/NOISE.md.
+This module also owns per-site Gaussian event and output-saturation counters. Its
+configuration and counters are mutable process-wide state, so one noisy replica must
+run in one process without DataParallel replication.
 """
 
 import math
 from dataclasses import dataclass
 from functools import wraps
-from typing import Callable, TypedDict, cast
+from typing import Callable, TypedDict
 
 import torch
 from torch import Tensor
@@ -244,8 +228,7 @@ def set_gaussian_time_noise(
 
     Raises:
         TypeError: If ``enabled`` is not boolean or ``seed`` is not an integer.
-        ValueError: If a timing parameter is non-finite, ``time_std`` is negative,
-            or the legacy dynamic-noise path is already active.
+        ValueError: If a timing parameter is non-finite or ``time_std`` is negative.
         RuntimeError: If PyTorch cannot create or seed a generator on ``device``.
     """
     global _GLOBAL_GAUSSIAN_TIME_CONFIG
@@ -265,16 +248,6 @@ def set_gaussian_time_noise(
         raise ValueError("Gaussian time-noise parameters must be finite")
     if normalized_std < 0.0:
         raise ValueError("time_std must be non-negative")
-
-    # During the staged migration, activating both models would perturb one event
-    # twice and make its timing distribution uninterpretable, so fail explicitly.
-    if enabled and (
-        _GLOBAL_NOISE_CONFIG.jitter_enabled
-        or _GLOBAL_NOISE_CONFIG.hazard_enabled
-    ):
-        raise ValueError(
-            "direct Gaussian noise and legacy dynamic noise are mutually exclusive"
-        )
 
     # A disabled configuration owns no generator. An enabled replica gets exactly
     # one device-matched stream seeded here and advanced later by encoder sampling.
@@ -524,204 +497,33 @@ def _sample_gaussian_spike_time(
     # must use fired—not the stored value—to distinguish misses from on-time arrivals.
     stored_time = torch.where(fired, delivered_time, deadline)
     return SpikeSample(time=stored_time, domain=domain, fired=fired)
-
-
-@dataclass
-class NoiseConfig:
-    """Global configuration for encoder-level spike-time noise (jitter + hazard).
-
-    Device mismatch (C) is per-module state and is not held here.
-    """
-    std: float = 0.0
-    kind: str = "gaussian"
-    eval_mode: bool = False
-    mode: str = "potential"            # "potential" (V-referred) | "time" (legacy, t-referred)
-    potential_scale: float = 0.0       # σ_V = std·potential_scale (θ); 0 ⇒ fall back to domain.range
-    jitter_enabled: bool = False
-    hazard_enabled: bool = False
-    hazard_delta_u: float = 0.0        # Δu, relative to the potential-domain range
-    hazard_insert_rate: float = 0.0    # ρ₀, baseline spurious-spike probability
-
-_GLOBAL_NOISE_CONFIG = NoiseConfig()
-
-
-def set_spike_time_noise(
-    std: float,
-    kind: str = "gaussian",
-    eval_mode: bool = False,
-    *,
-    mode: str = "potential",
-    potential_scale: float = 0.0,
-    jitter_enabled: bool | None = None,
-    hazard_enabled: bool = False,
-    hazard_delta_u: float = 0.0,
-    hazard_insert_rate: float = 0.0,
-):
-    """Register global encoder-noise parameters.
-
-    `jitter_enabled=None` (the default used by the older call sites) enables jitter iff
-    `std > 0`, preserving backward compatibility. `potential_scale` is the voltage reference θ
-    for potential-mode jitter (σ_V = std·θ); 0 falls back to each encoder's domain range.
-    """
-    global _GLOBAL_NOISE_CONFIG
-    _GLOBAL_NOISE_CONFIG.std = std
-    _GLOBAL_NOISE_CONFIG.kind = kind
-    _GLOBAL_NOISE_CONFIG.eval_mode = eval_mode
-    _GLOBAL_NOISE_CONFIG.mode = mode
-    _GLOBAL_NOISE_CONFIG.potential_scale = potential_scale
-    _GLOBAL_NOISE_CONFIG.jitter_enabled = (std > 0.0) if jitter_enabled is None else jitter_enabled
-    _GLOBAL_NOISE_CONFIG.hazard_enabled = hazard_enabled
-    _GLOBAL_NOISE_CONFIG.hazard_delta_u = hazard_delta_u
-    _GLOBAL_NOISE_CONFIG.hazard_insert_rate = hazard_insert_rate
-
-
-def get_spike_time_noise() -> NoiseConfig:
-    """Retrieve global encoder-noise parameters."""
-    return _GLOBAL_NOISE_CONFIG
-
-
-# Bridge constant: Gumbel(first-passage) std / scale = σ_V / Δu.
-_SIGMA_V_OVER_DELTA_U = math.pi / math.sqrt(6.0)
-
-
-def sigma_v_frac(beta: float) -> float:
-    """σ_V/θ implied by a dimensionless sharpness β (= β_phys·θ). σ_V/θ = (π/√6)/β."""
-    return _SIGMA_V_OVER_DELTA_U / beta
-
-
-def set_unified_noise(
-    beta: float,
-    theta: float,
-    *,
-    jitter_only: bool = False,
-    drop_only: bool = False,
-    insert_rate: float = 0.0,
-    eval_mode: bool = True,
-):
-    """Physically-coupled single-β escape-noise (the faithful primary model).
-
-    Jitter (A) and drop (B) are the *variance* and the *survival* of ONE escape-noise
-    first-passage, so both derive from a single dimensionless sharpness β (= β_phys·θ):
-
-        σ_V/θ = (π/√6)/β      # Gumbel std of the first-passage time (operating-point-free)
-        Δu/θ  = 1/β           # soft-threshold width, Δu = 1/β_phys
-
-    hence σ_V = (π/√6)·Δu. Larger β ⇒ sharper threshold ⇒ less noise. This replaces the two
-    independent knobs with one physical parameter (uncalibrated but structurally faithful — a
-    single value is *swept*, not fit to a device).
-
-    `jitter_only`/`drop_only` are ABLATION masks: an analysis maneuver to isolate one channel,
-    NOT a claim that the hardware exposes independent knobs. Leave both False for the faithful
-    coupled model.
-    """
-    set_spike_time_noise(
-        std=sigma_v_frac(beta),
-        eval_mode=eval_mode,
-        mode="potential",
-        potential_scale=theta,
-        jitter_enabled=not drop_only,
-        hazard_enabled=not jitter_only,
-        hazard_delta_u=1.0 / beta,
-        hazard_insert_rate=insert_rate,
-    )
-
-
 # ---------------------------------------------------------------------------
-# A — temporal jitter
-# ---------------------------------------------------------------------------
-
-def _emit_spike_time_core(
-    input_value: Tensor,
-    domain: OpenBounds,
-    *,
-    noise_std: float = 0.0,
-    noise_kind: str = "gaussian",
-) -> Tensor:
-    """Legacy time-space jitter: add Gaussian noise to the emitted spike time and re-clamp.
-
-    Kept for `mode="time"` so historical `jitter_analysis` / `theta_jitter_analysis` sweeps
-    remain reproducible. `noise_std` is relative to the (time) domain range.
-    """
-    if noise_std <= 0.0:
-        return domain.clamp(input_value)
-
-    span = float(domain.range)
-    if noise_kind == "gaussian":
-        noise = torch.randn_like(input_value) * (noise_std * span)
-    else:
-        raise ValueError(f"Unsupported noise_kind: {noise_kind}. Use 'gaussian'")
-
-    return domain.clamp(input_value + noise)
-
-
-# ---------------------------------------------------------------------------
-# B — escape-noise hazard (drop / insertion)
-# ---------------------------------------------------------------------------
-
-def _apply_escape_hazard(
-    t: Tensor,
-    V: Tensor,
-    in_domain: OpenBounds,
-    out_domain: OpenBounds,
-    cfg: NoiseConfig,
-) -> Tensor:
-    """Escape-noise hazard: probabilistic spike drop / insertion near threshold.
-
-    ρ(t) = ρ₀·exp((V−θ)/Δu) mapped to a per-neuron per-forward firing reliability. The drive
-    margin is measured from the encoding floor `in_domain.min`, so weak (near-floor /
-    late-spiking) neurons drop and strongly-driven neurons fire reliably (Mainen–Sejnowski).
-
-    Dropped neurons are pushed to `out_domain.max` (the silent / latest spike time); a fraction
-    `hazard_insert_rate` of spurious early spikes are set to `out_domain.min`.
-
-    Δu is referenced to the same voltage scale θ (`potential_scale`) as the jitter, falling back
-    to the encoder's domain range — otherwise the θ² range of the LayerNorm variance encoder
-    would make the soft-threshold width meaningless there.
-    """
-    scale = cfg.potential_scale if cfg.potential_scale > 0.0 else float(in_domain.range)
-    du = float(cfg.hazard_delta_u) * scale
-    if du <= 0.0:
-        return t
-
-    p_fire = (1.0 - torch.exp(-(V - in_domain.min) / du)).clamp(0.0, 1.0)
-    drop = torch.rand_like(t) > p_fire
-    t = torch.where(drop, torch.full_like(t, float(out_domain.max)), t)
-
-    insert_rate = float(cfg.hazard_insert_rate)
-    if insert_rate > 0.0:
-        insert = torch.rand_like(t) < insert_rate
-        t = torch.where(insert, torch.full_like(t, float(out_domain.min)), t)
-    return t
-
-
-# ---------------------------------------------------------------------------
-# Encoder decorator (applies A and B)
+# Gaussian encoder injection boundary
 # ---------------------------------------------------------------------------
 
 def inject_spike_time_noise[**P, OutT: OpenBounds](
     func: Callable[P, tuple[Tensor, OutT]],
 ) -> Callable[P, tuple[Tensor, OutT] | SpikeSample]:
-    """Decorate a potential-to-spike encoder with shared noise injection.
+    """Decorate a deterministic encoder with event-aware Gaussian time noise.
 
-    Tensor-only calls retain the deterministic or legacy ``(time, bounds)``
-    interface during migration. An event-aware caller explicitly requests
-    ``return_spike_sample=True``; when direct Gaussian noise is enabled, one sampled
-    timestamp then determines both its finite stored time and deadline-delivery mask.
+    Ordinary calls preserve the encoder's ``(time, bounds)`` contract and never
+    sample. A physical consumer opts into noise with
+    ``return_spike_sample=True``; that request uses the process-wide Gaussian
+    configuration to return one finite timestamp and its deadline-delivery mask.
 
-    The decorator remains the sole dynamic-noise boundary. This guarantees that
-    linear and logarithmic encoders use the same absolute Gaussian parameters,
-    generator stream, deadline rule, and statistics schema while legacy call sites
-    continue to work until their later removal.
+    Keeping sampling at this boundary makes linear and logarithmic encoders share
+    one absolute timing scale, one advancing generator, one inclusive deadline
+    rule, and one statistics schema. No alternate dynamic-noise branch is applied
+    at the encoder boundary.
 
     Args:
         func: Deterministic encoder returning a time tensor and its declared bounds.
 
     Returns:
-        A wrapped encoder supporting the existing tuple interface and the explicit
-        event-aware ``SpikeSample`` interface.
+        A wrapped encoder supporting deterministic tuples and explicit event-aware
+        ``SpikeSample`` results.
 
     Raises:
-        ValueError: If direct Gaussian and legacy dynamic noise are both active.
         RuntimeError: If an event-aware result is requested while Gaussian noise is
             disabled or its enabled configuration has no generator.
         TypeError: If an event-aware encoder does not declare ``TimeBounds``.
@@ -732,109 +534,57 @@ def inject_spike_time_noise[**P, OutT: OpenBounds](
         *args: P.args,
         **kwargs: P.kwargs,
     ) -> tuple[Tensor, OutT] | SpikeSample:
-        # Read both process-wide configurations once so this encoder call observes a
-        # consistent migration state even though the legacy path still exists.
-        cfg = get_spike_time_noise()
+        # Snapshot the process-wide Gaussian configuration once. The enabled flag,
+        # timing parameters, and generator therefore belong to the same replica for
+        # the entire encoder call even if external code later replaces the singleton.
         gaussian_cfg = get_gaussian_time_noise()
         return_spike_sample = bool(kwargs.get("return_spike_sample", False))
 
-        # Preserve legacy keyword precedence until its callers and implementation
-        # are deleted in the final cleanup phase.
-        std_raw = kwargs.get("noise_std", cfg.std)
-        std = float(std_raw) if isinstance(std_raw, (int, float)) else 0.0
-        kind = cast(str, kwargs.get("noise_kind", cfg.kind))
-        mode = cast(str, kwargs.get("noise_mode", cfg.mode))
-        jitter_on = bool(kwargs.get("jitter_enabled", cfg.jitter_enabled))
-        hazard_on = bool(kwargs.get("hazard_enabled", cfg.hazard_enabled))
-
-        # Applying both models would perturb and suppress the same physical event
-        # twice. Guard the boundary as well as the setter because legacy state can
-        # still be enabled independently while the staged migration is in progress.
-        if gaussian_cfg.enabled and (jitter_on or hazard_on):
-            raise ValueError(
-                "direct Gaussian noise and legacy dynamic noise are mutually exclusive"
-            )
-
-        # Locate the potential and domain for the temporary potential-referred
-        # legacy branch. Gaussian timing noise is applied only after encoding.
-        potential = args[0] if len(args) > 0 else kwargs.get("input_value")
-        in_domain = args[1] if len(args) > 1 else kwargs.get("domain")
-        have_potential = torch.is_tensor(potential) and in_domain is not None
-
-        # Legacy potential jitter must precede the deterministic transform. Its
-        # perturbed value is projected back into the encoder's valid input domain.
-        if jitter_on and std > 0.0 and mode == "potential" and have_potential:
-            sigma_v = std * (
-                cfg.potential_scale
-                if cfg.potential_scale > 0.0
-                else float(in_domain.range)
-            )
-            potential = in_domain.clamp(potential + torch.randn_like(potential) * sigma_v)
-            if len(args) > 0:
-                args = (potential,) + args[1:]
-            else:
-                kwargs = {**kwargs, "input_value": potential}
-
-        # Always run the deterministic encoder exactly once. Gaussian noise acts on
-        # its bounded nominal spike time rather than perturbing the input potential.
+        # Run the deterministic encoder exactly once before deciding whether a
+        # sample is needed. Gaussian error is defined in time space and therefore
+        # acts on the bounded nominal timestamp, never on the source potential.
         output, out_domain = func(*args, **kwargs)
 
-        if return_spike_sample:
-            # Event-aware semantics belong exclusively to the maintained Gaussian
-            # path; refusing an inactive request avoids silently returning all-fired
-            # events under a configuration the caller expected to be stochastic.
-            if not gaussian_cfg.enabled:
-                raise RuntimeError(
-                    "return_spike_sample requires enabled Gaussian time noise"
-                )
-            if not isinstance(out_domain, TimeBounds):
-                raise TypeError(
-                    "event-aware spike encoders must return TimeBounds"
-                )
-            if not isinstance(gaussian_cfg.generator, torch.Generator):
-                raise RuntimeError(
-                    "enabled Gaussian time noise requires a torch.Generator"
-                )
+        # Tensor-only consumers cannot represent a missed event, so they retain the
+        # deterministic tuple even while a Gaussian replica is active. Production
+        # physical readouts explicitly request the event-aware result instead.
+        if not return_spike_sample:
+            return out_domain.clamp(output), out_domain
 
-            # Enforce the deterministic encoder's existing bounds contract before
-            # sampling; TimeBounds.max is directly the inclusive observation deadline.
-            nominal_time = out_domain.clamp(output)
-            sample = _sample_gaussian_spike_time(
-                nominal_time,
-                time_std=gaussian_cfg.time_std,
-                domain=out_domain,
-                generator=gaussian_cfg.generator,
-                time_mean=gaussian_cfg.time_mean,
+        # Refuse event-aware requests without a configured replica. Returning an
+        # implicit all-fired mask would hide a configuration error and would make
+        # noise-off behavior depend on which return type the caller requested.
+        if not gaussian_cfg.enabled:
+            raise RuntimeError(
+                "return_spike_sample requires enabled Gaussian time noise"
+            )
+        if not isinstance(out_domain, TimeBounds):
+            raise TypeError("event-aware spike encoders must return TimeBounds")
+        if not isinstance(gaussian_cfg.generator, torch.Generator):
+            raise RuntimeError(
+                "enabled Gaussian time noise requires a torch.Generator"
             )
 
-            # Count the same sampled events used by downstream physical readout.
-            # Misses are strict deadline exceedances encoded by the fired mask.
-            site = kwargs.get("noise_site", func.__name__)
-            counts = _stats_for(site)
-            counts["events"] += sample.time.numel()
-            counts["misses"] += int((~sample.fired).sum().item())
-            return sample
+        # Clamp only the nominal deterministic codeword before sampling. The sampled
+        # timestamp itself remains unbounded until the sampler classifies strict
+        # deadline exceedance and stores a finite deadline carrier for every miss.
+        nominal_time = out_domain.clamp(output)
+        sample = _sample_gaussian_spike_time(
+            nominal_time,
+            time_std=gaussian_cfg.time_std,
+            domain=out_domain,
+            generator=gaussian_cfg.generator,
+            time_mean=gaussian_cfg.time_mean,
+        )
 
-        # The remaining branches are temporary compatibility behavior for tuple
-        # callers and will disappear once every production consumer is event-aware.
-        if jitter_on and std > 0.0 and mode == "time":
-            output = _emit_spike_time_core(
-                output,
-                out_domain,
-                noise_std=std,
-                noise_kind=kind,
-            )
-        if hazard_on and have_potential:
-            output = _apply_escape_hazard(
-                output,
-                potential,
-                in_domain,
-                out_domain,
-                cfg,
-            )
-
-        # Tuple callers retain the pre-migration rail projection and declared domain.
-        return out_domain.clamp(output), out_domain
+        # Attribute exactly the sampled events consumed by downstream readout. Event
+        # totals and strict deadline misses share the same mask, so reported rates
+        # cannot drift from the physical values used by the operator implementation.
+        site = kwargs.get("noise_site", func.__name__)
+        counts = _stats_for(site)
+        counts["events"] += sample.time.numel()
+        counts["misses"] += int((~sample.fired).sum().item())
+        return sample
 
     return wrapper
 
@@ -884,40 +634,4 @@ def install_device_mismatch(model, theta_std: float, enabled: bool = True):
         m.register_buffer("_mismatch_offset", offset, persistent=False)
         handles.append(m.register_forward_pre_hook(_mismatch_pre_hook))
 
-    return handles
-
-
-# ---------------------------------------------------------------------------
-# Per-module noise scoping (attribution experiments)
-# ---------------------------------------------------------------------------
-
-def _noise_off():
-    set_spike_time_noise(std=0.0, jitter_enabled=False, hazard_enabled=False)
-
-
-def install_noise_scope(model, is_noisy, **on_kwargs):
-    """Scope encoder noise (jitter/hazard) to a subset of modules.
-
-    Sets the global config OFF, then brackets each module where `is_noisy(module)` is True with a
-    forward pre-hook that turns noise ON (with `on_kwargs`, e.g. std/mode/potential_scale/
-    jitter_enabled) and a post-hook that turns it OFF again. Only the encoder calls executed
-    *inside* a matching module are perturbed, so "only attention" / "everything but the FFN" /
-    … can be measured. Returns hook handles; call `.remove()` on each to restore.
-
-    Single-threaded eval only — it mutates the global NoiseConfig, so do NOT use with
-    DataParallel. Assumes matching modules are not nested inside one another (group containers).
-    """
-    _noise_off()
-
-    def pre(module, args):
-        set_spike_time_noise(**on_kwargs)
-
-    def post(module, args, output):
-        _noise_off()
-
-    handles = []
-    for m in model.modules():
-        if is_noisy(m):
-            handles.append(m.register_forward_pre_hook(pre))
-            handles.append(m.register_forward_hook(post))
     return handles

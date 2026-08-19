@@ -83,8 +83,8 @@ class Arguments:
     activation: Literal["relu", "gelu"]
     theta: float
 
-    # Keep the same four Gaussian fields across every evaluator; no distribution
-    # selector or evaluation-mode jitter toggle remains in the typed interface.
+    # Keep the same four Gaussian fields across every evaluator so scripts can
+    # configure replicas without model-specific timing parameters.
     gaussian_time_noise: bool
     time_noise_std_frac: float
     time_noise_mean: float

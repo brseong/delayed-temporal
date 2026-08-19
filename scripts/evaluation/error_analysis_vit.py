@@ -66,7 +66,7 @@ class Arguments:
     theta: float
 
     # Direct Gaussian timing noise uses one relative input scale, one absolute mean,
-    # and one replica seed; no jitter mode or escape-hazard controls remain.
+    # and one replica seed shared by every event-aware encoder.
     gaussian_time_noise: bool
     time_noise_std_frac: float
     time_noise_mean: float
@@ -134,7 +134,7 @@ def parse_arguments() -> Arguments:
                         help="Domain bound θ for SpikingLayerNorm clamping (default: 100.0).")
 
     # Direct Gaussian spike-time noise uses the common four-option CLI shared by
-    # every model family. No aliases for jitter, hazard, or the old noise std remain.
+    # every model family.
     parser.add_argument(
         "--gaussian-time-noise",
         action=argparse.BooleanOptionalAction,

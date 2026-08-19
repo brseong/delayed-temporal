@@ -328,7 +328,7 @@ class SpikingLayerNorm(nn.Module):
             A normalized ``Potential`` with bounds synchronized to its output.
         """
         # Keep sampled timestamps and delivery masks confined to the dedicated
-        # implementation so they cannot enter the legacy tensor-only arithmetic.
+        # implementation so deterministic tensor arithmetic remains event-free.
         if get_gaussian_time_noise().enabled:
             return self._gaussian_forward(pot)
 

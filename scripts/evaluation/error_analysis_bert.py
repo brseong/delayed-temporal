@@ -83,8 +83,8 @@ class Arguments:
     activation: Literal["relu", "gelu"]
     theta: float
 
-    # The Gaussian interface is shared verbatim across all four model evaluators;
-    # distribution selection and train/eval jitter switches are not retained.
+    # The Gaussian interface is shared verbatim across all four model evaluators,
+    # keeping replica configuration identical across model families.
     gaussian_time_noise: bool
     time_noise_std_frac: float
     time_noise_mean: float

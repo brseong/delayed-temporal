@@ -100,8 +100,8 @@ def parse_arguments() -> Arguments:
     Returns:
         A dataset-resolved :class:`Arguments` instance.
     """
-    # Keep language-model, dataset, and spiking-ablation controls unchanged while
-    # replacing only the legacy dynamic-noise arguments.
+    # Keep language-model, dataset, and spiking-ablation controls independent from
+    # the shared Gaussian replica parameters.
     parser = argparse.ArgumentParser(description="Evaluate GPT-2 on WikiText-2/103.")
     parser.add_argument("--experiment_name", type=str, default="gpt2_eval",
                         help="Name of the experiment for logging purposes.")
@@ -144,8 +144,8 @@ def parse_arguments() -> Arguments:
     parser.add_argument("--tau-s", type=float, default=1.0,
                         help="Spike-time constant tau_s used by SpikingLayerNorm.")
 
-    # The Gaussian-only options are identical to the other model evaluators, making
-    # experiment scripts portable without legacy aliases or distribution switches.
+    # These options match the other model evaluators so one experiment convention
+    # can configure every supported architecture.
     parser.add_argument(
         "--gaussian-time-noise",
         action=argparse.BooleanOptionalAction,
