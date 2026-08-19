@@ -33,7 +33,10 @@ from utils.transforms.functions import (
     softmin_function,
     swiglu_function,
 )
-from utils.transforms.spike_to_potential import exponential_difference_operator
+from utils.transforms.spike_to_potential import (
+    exponential_difference_operator,
+    normalized_exp_operator,
+)
 from utils.transforms.types import Potential, PotentialBounds, SpikeSample, TimeBounds
 from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import SpikingConv1D
 from utils.transformers.models.spiking_ops import (
@@ -440,6 +443,261 @@ def verify_gaussian_deadline_probability() -> None:
         deterministic_probability,
         torch.tensor([0.0, 1.0, 0.0], dtype=torch.float64),
     )
+
+
+def verify_exponential_time_constant_scaling() -> None:
+    """Verify non-unit exponential scales and invalid-scale rejection.
+
+    Logarithmic encoders multiply temporal differences by ``tau_s``; exponential
+    decoders must divide by the same scale so division remains X/Y instead of
+    ``(X/Y)**tau_s``. This regression covers the primitive normalized decoder,
+    direct Gaussian exponential, exponential difference, division, softmin, SwiGLU,
+    and full-spiking LayerNorm at three scales. It also checks dtype-level endpoint
+    failures and RNG non-consumption.
+
+    Raises:
+        AssertionError: If a non-unit scale changes an algebraic result, Gaussian
+            zero-noise parity fails, invalid bounds pass, or rejection advances RNG.
+    """
+    time_value = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float64)
+    time_domain = TimeBounds(-1.0, 1.0)
+    potential_value = torch.tensor([-0.75, 0.0, 1.0, 2.0], dtype=torch.float64)
+    potential_domain = PotentialBounds(-1.0, 3.0)
+    layernorm_baseline: torch.Tensor | None = None
+
+    # The primitive must apply exactly the same 1/tau slope to payload and declared
+    # endpoints. Testing float64 equality here catches a silently ignored argument
+    # independently of every composed operator.
+    for tau_s in (0.5, 1.0, 2.0):
+        primitive, primitive_domain = normalized_exp_operator(
+            time_value,
+            time_domain,
+            tau_m=tau_s,
+        )
+        assert torch.equal(primitive, torch.exp(time_value / tau_s))
+        assert math.isclose(
+            float(primitive_domain.min),
+            math.exp(float(time_domain.min) / tau_s),
+            rel_tol=1e-15,
+        )
+        assert math.isclose(
+            float(primitive_domain.max),
+            math.exp(float(time_domain.max) / tau_s),
+            rel_tol=1e-15,
+        )
+
+        # Both public exponential modes must preserve deterministic/Gaussian
+        # zero-noise parity on an asymmetric domain, which exposes incorrect use of
+        # half-window offsets in the normalized current-gain path.
+        for normalized in (True, False):
+            set_gaussian_time_noise(enabled=False)
+            deterministic_exp, deterministic_domain = exponential_function(
+                potential_value,
+                potential_domain,
+                tau_m=tau_s,
+                normalized=normalized,
+            )
+            set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1701)
+            gaussian_exp, gaussian_domain = exponential_function(
+                potential_value,
+                potential_domain,
+                tau_m=tau_s,
+                normalized=normalized,
+            )
+            assert torch.allclose(
+                gaussian_exp,
+                deterministic_exp,
+                atol=1e-12,
+                rtol=1e-12,
+            )
+            assert gaussian_domain.min == 0.0
+            assert math.isclose(
+                float(gaussian_domain.max),
+                float(deterministic_domain.max),
+                rel_tol=1e-12,
+            )
+
+        # A direct time difference must decode as exp((t_B-t_A)/tau_s) in both
+        # execution modes. This is the exact stage that previously omitted division
+        # by tau_s after its internal negative-identity re-encoding.
+        t_A = torch.tensor([0.5, 1.5], dtype=torch.float64)
+        t_B = torch.tensor([1.0, 1.0], dtype=torch.float64)
+        shared_domain = TimeBounds(0.0, 2.0)
+        expected_difference = torch.exp((t_B - t_A) / tau_s)
+        set_gaussian_time_noise(enabled=False)
+        deterministic_difference, _ = exponential_difference_operator(
+            t_A,
+            shared_domain,
+            t_B,
+            shared_domain,
+            tau_s=tau_s,
+        )
+        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1702)
+        gaussian_difference, _ = exponential_difference_operator(
+            t_A,
+            shared_domain,
+            t_B,
+            shared_domain,
+            tau_s=tau_s,
+        )
+        assert torch.allclose(deterministic_difference, expected_difference)
+        assert torch.allclose(gaussian_difference, expected_difference)
+
+        # Log-encoder scale must cancel completely through exponential difference.
+        # Division therefore remains the same X/Y for every positive tau_s rather
+        # than acquiring a scale-dependent power.
+        numerator = torch.tensor([0.2, 1.0, 5.0], dtype=torch.float64)
+        denominator = torch.tensor([1.0, 2.0, 10.0], dtype=torch.float64)
+        ratio_domain = PotentialBounds(0.1, 10.0)
+        set_gaussian_time_noise(enabled=False)
+        deterministic_ratio, _ = division_function(
+            numerator,
+            denominator,
+            ratio_domain,
+            tau_s=tau_s,
+        )
+        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1703)
+        gaussian_ratio, _ = division_function(
+            numerator,
+            denominator,
+            ratio_domain,
+            tau_s=tau_s,
+        )
+        expected_ratio = numerator / denominator
+        assert torch.allclose(deterministic_ratio, expected_ratio)
+        assert torch.allclose(gaussian_ratio, expected_ratio)
+
+        # Softmin must retain its physical temperature: unnormalized exponentials
+        # depend on tau_s, while division cancels its own log/decode scale exactly.
+        scores = torch.tensor(
+            [[-2.0, -1.0, 0.0, 1.0, 2.0], [1.5, -0.5, 0.25, -1.25, 2.0]],
+            dtype=torch.float64,
+        )
+        score_domain = PotentialBounds(-2.0, 2.0)
+        expected_softmin = torch.softmax(-scores / tau_s, dim=-1)
+        set_gaussian_time_noise(enabled=False)
+        deterministic_softmin, _ = softmin_function(
+            scores,
+            score_domain,
+            tau_s=tau_s,
+        )
+        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1705)
+        gaussian_softmin, _ = softmin_function(
+            scores,
+            score_domain,
+            tau_s=tau_s,
+        )
+        assert torch.allclose(deterministic_softmin, expected_softmin)
+        assert torch.allclose(gaussian_softmin, expected_softmin)
+
+        # SwiGLU uses the same exponential temperature in sigmoid(beta*u/tau_s).
+        # An asymmetric u domain additionally verifies fixed bias cancellation at
+        # every tested scale rather than only at the default tau_s one.
+        u = torch.tensor([-0.75, 0.0, 1.0, 2.0], dtype=torch.float64)
+        v = torch.tensor([1.0, -0.5, 2.0, 0.25], dtype=torch.float64)
+        domain_u = PotentialBounds(-1.0, 3.0)
+        domain_v = PotentialBounds(-2.0, 2.0)
+        beta = 0.7
+        expected_swiglu = v * u * torch.sigmoid(beta * u / tau_s)
+        set_gaussian_time_noise(enabled=False)
+        deterministic_swiglu, _ = swiglu_function(
+            u,
+            domain_u,
+            v,
+            domain_v,
+            beta=beta,
+            tau_s=tau_s,
+            theta=8.0,
+        )
+        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1706)
+        gaussian_swiglu, _ = swiglu_function(
+            u,
+            domain_u,
+            v,
+            domain_v,
+            beta=beta,
+            tau_s=tau_s,
+            theta=8.0,
+        )
+        assert torch.allclose(deterministic_swiglu, expected_swiglu)
+        assert torch.allclose(gaussian_swiglu, expected_swiglu)
+
+        # LayerNorm log times scale with tau_s and exponential-difference decoding
+        # divides by it, so the complete normalized activation is scale-invariant.
+        layernorm_value = torch.tensor(
+            [[-1.5, -0.25, 0.75, 1.0], [0.5, -1.0, 1.5, -0.5]],
+            dtype=torch.float64,
+        )
+        layernorm = SpikingLayerNorm(
+            4,
+            eps=1.0e-5,
+            theta=4.0,
+            tau_s=tau_s,
+            clip_margin=0.1,
+            use_spiking_mul=True,
+            use_spiking_log=True,
+            use_spiking_expdiff=True,
+        ).to(dtype=torch.float64)
+        with torch.no_grad():
+            layernorm.weight.copy_(
+                torch.tensor([1.0, 0.8, 1.2, 0.5], dtype=torch.float64)
+            )
+            layernorm.bias.copy_(
+                torch.tensor([0.1, -0.2, 0.05, 0.3], dtype=torch.float64)
+            )
+        layernorm_input = Potential(
+            layernorm_value,
+            PotentialBounds(-2.0, 2.0),
+        )
+        set_gaussian_time_noise(enabled=False)
+        deterministic_layernorm = layernorm(layernorm_input)
+        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1707)
+        gaussian_layernorm = layernorm(layernorm_input)
+        assert torch.allclose(
+            gaussian_layernorm.value,
+            deterministic_layernorm.value,
+        )
+        if layernorm_baseline is None:
+            layernorm_baseline = deterministic_layernorm.value.detach().clone()
+        else:
+            assert torch.allclose(deterministic_layernorm.value, layernorm_baseline)
+
+    # Endpoint overflow and positive-domain underflow must fail in the carrier dtype,
+    # even though Python float could still represent one of those wider values.
+    for invalid_domain in (TimeBounds(0.0, 100.0), TimeBounds(-200.0, 0.0)):
+        try:
+            normalized_exp_operator(
+                torch.tensor([0.0], dtype=torch.float32),
+                invalid_domain,
+                tau_m=1.0,
+            )
+        except ValueError as error:
+            assert "finite and strictly positive" in str(error)
+        else:
+            raise AssertionError(f"accepted unrepresentable domain {invalid_domain}")
+
+    # Invalid Gaussian scales are rejected before the internal encoder. Snapshot the
+    # generator to prove validation does not consume a sample or shift later events.
+    set_gaussian_time_noise(enabled=True, time_std=1.0, seed=1704)
+    try:
+        generator = get_gaussian_time_noise().generator
+        assert generator is not None
+        state_before = generator.get_state().clone()
+        try:
+            exponential_difference_operator(
+                torch.tensor([0.5], dtype=torch.float64),
+                TimeBounds(0.0, 2.0),
+                torch.tensor([1.0], dtype=torch.float64),
+                TimeBounds(0.0, 2.0),
+                tau_s=0.0,
+            )
+        except ValueError as error:
+            assert "finite and positive" in str(error)
+        else:
+            raise AssertionError("accepted zero exponential-difference tau_s")
+        assert torch.equal(state_before, generator.get_state())
+    finally:
+        set_gaussian_time_noise(enabled=False)
 
 
 def verify_gaussian_encoder_boundary() -> None:
@@ -1835,6 +2093,7 @@ if __name__ == "__main__":
     verify_gaussian_sampler_rng_contract()
     verify_gaussian_sampler_deadline_contract()
     verify_gaussian_deadline_probability()
+    verify_exponential_time_constant_scaling()
     verify_gaussian_encoder_boundary()
     verify_gaussian_statistics_contract()
     verify_gaussian_multiplication_operator()

@@ -1,6 +1,7 @@
 import torch
 from jaxtyping import Float, Int
-from math import exp, isclose
+from math import exp, isclose, isfinite
+from numbers import Real
 
 from .noise import clamp_gaussian_output, get_gaussian_time_noise
 from .potential_to_spike import neg_identity_transform
@@ -42,27 +43,60 @@ def normalized_exp_operator(
     ) -> tuple[
         Float[torch.Tensor, "*batch dims"],
         PotentialBounds]:
-    """Apply exponential negative transform to the input potentials to produce spike times, and normalize the output to have a maximum of 1.
+    """Decode a time-domain value through a normalized exponential response.
+
+    The operator computes ``exp(input_value / tau_m)`` and propagates the same
+    monotonic transformation over the declared time interval. Endpoint decoding is
+    performed in the input tensor's dtype and device before the payload so invalid
+    time constants, overflow, or positive-domain underflow fail deterministically.
 
     Args:
-        input_value (Float[torch.Tensor, "*batch dims"]): Input spike times of the neurons.
-        domain (TimeBounds): The range of possible values for the input spike times.
-        tau_m (float, optional): The time constant for the exponential transform. Defaults to 1.0.
+        input_value: Finite time-domain tensor contained in ``domain``.
+        domain: Declared interval transformed into output-potential bounds.
+        tau_m: Positive finite membrane time constant that scales the exponent.
 
     Raises:
-        NotImplementedError: wave approximation is not implemented yet.
-        """
-    # # result = exp(-(domain.max - input_value) / tau_m)
-    # # = exp(-domain.max / tau_m) * exp(input_value / tau_m)
-    # # scaling_factor = exp(domain.max / tau_m)
-    # result, domain_result = exp_operator(input_value, domain, tau_m=tau_m)
-    # scaling_factor = exp(domain.max / tau_m)
-    # # out = scaling_factor * result
-    # # = exp(domain.max / tau_m) * exp(-domain.max / tau_m) * exp(input_value / tau_m)
-    # # = exp(input_value / tau_m)
-    # return scaling_factor * result, PotentialBounds(domain_result.min * scaling_factor, domain_result.max * scaling_factor)
+        TypeError: If ``tau_m`` is not a real scalar.
+        ValueError: If ``tau_m`` is non-finite or non-positive, or if either decoded
+            endpoint is not finite and strictly positive in ``input_value.dtype``.
+    """
+    # Reject booleans explicitly even though Python models them as integers. A time
+    # constant is a physical real-valued scale, not a feature toggle or tensor field.
+    if isinstance(tau_m, bool) or not isinstance(tau_m, Real):
+        raise TypeError("tau_m must be a real scalar")
+    tau_value = float(tau_m)
+    if not isfinite(tau_value) or tau_value <= 0.0:
+        raise ValueError("tau_m must be finite and positive")
 
-    return input_value.exp(), PotentialBounds(exp(domain.min), exp(domain.max)) # To avoid numerical instability
+    # Decode the declared endpoints in the payload's dtype and device first. This
+    # detects float16/float32 overflow or underflow that Python's wider float could
+    # otherwise hide while advertising unusable potential bounds.
+    scaled_endpoints = input_value.new_tensor(
+        [float(domain.min) / tau_value, float(domain.max) / tau_value]
+    )
+    decoded_endpoints = torch.exp(scaled_endpoints)
+
+    # Logarithmic consumers require strictly positive finite rails. Reject zero from
+    # exponential underflow as well as infinities from overflow before evaluating the
+    # full tensor, whose in-domain values lie monotonically between these endpoints.
+    if not bool(
+        (
+            torch.isfinite(decoded_endpoints)
+            & (decoded_endpoints > 0.0)
+        ).all()
+    ):
+        raise ValueError(
+            "normalized exponential bounds must be finite and strictly positive "
+            "in the input tensor dtype"
+        )
+
+    # Apply the same scaled exponential to every payload element and return concrete
+    # scalar rails so downstream interval arithmetic remains device-independent.
+    result = torch.exp(input_value / tau_value)
+    return result, PotentialBounds(
+        decoded_endpoints[0].item(),
+        decoded_endpoints[1].item(),
+    )
 
 
 def _gaussian_exponential_difference_operator(
@@ -86,15 +120,25 @@ def _gaussian_exponential_difference_operator(
         domain_t_A: Declared time bounds for the opening input.
         t_B: Closing time tensor or event-aware closing sample.
         domain_t_B: Declared time bounds for the closing input.
-        tau_s: Temporal scale retained for the public operator contract.
+        tau_s: Positive finite scale dividing the decoded temporal difference.
 
     Returns:
         The clamped exponential response and its event-aware output rails.
 
     Raises:
-        ValueError: If the two event inputs do not share an observation deadline.
+        TypeError: If ``tau_s`` is not a real scalar.
+        ValueError: If ``tau_s`` is invalid, the event deadlines differ, or decoded
+            exponential endpoints are unrepresentable in the carrier dtype.
         RuntimeError: If internal event encoding does not return ``SpikeSample``.
     """
+    # Validate before the internal encoder boundary so malformed calls cannot
+    # consume the next sample from the run-wide Gaussian generator.
+    if isinstance(tau_s, bool) or not isinstance(tau_s, Real):
+        raise TypeError("tau_s must be a real scalar")
+    tau_value = float(tau_s)
+    if not isfinite(tau_value) or tau_value <= 0.0:
+        raise ValueError("tau_s must be finite and positive")
+
     # Plain tensors are deterministic events that have already arrived. Wrap them
     # with all-true masks so the remaining physical readout uses one representation.
     if isinstance(t_A, SpikeSample):
@@ -174,7 +218,31 @@ def _gaussian_exponential_difference_operator(
         min=float(exponential_input_domain.min),
         max=float(exponential_input_domain.max),
     )
-    response = torch.exp(exponential_input)
+
+    # Apply the physical membrane scale to both declared endpoints before decoding
+    # the carrier. This makes log-encoded differences tau_s*log(X/Y) return X/Y
+    # instead of the incorrect power (X/Y)**tau_s.
+    scaled_endpoints = exponential_input.new_tensor(
+        [
+            float(exponential_input_domain.min) / tau_value,
+            float(exponential_input_domain.max) / tau_value,
+        ]
+    )
+    decoded_endpoints = torch.exp(scaled_endpoints)
+
+    # A delivered exponential must remain finite and strictly positive even though
+    # the complete event-aware output domain later adds reset zero for internal misses.
+    if not bool(
+        (
+            torch.isfinite(decoded_endpoints)
+            & (decoded_endpoints > 0.0)
+        ).all()
+    ):
+        raise ValueError(
+            "Gaussian exponential-difference bounds must be finite and strictly "
+            "positive in the carrier tensor dtype"
+        )
+    response = torch.exp(exponential_input / tau_value)
 
     # A missed internal event never initiates the exponential response. Extend the
     # physical lower rail to reset zero while retaining the ideal delivered maximum.
@@ -185,7 +253,7 @@ def _gaussian_exponential_difference_operator(
     )
     response_domain = PotentialBounds(
         0.0,
-        exp(float(exponential_input_domain.max)),
+        decoded_endpoints[1].item(),
     )
 
     # Record raw saturation before applying the final output rail clamp used by all

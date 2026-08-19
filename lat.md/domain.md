@@ -42,9 +42,11 @@ Time-to-potential operators turn latency differences into exponential analog val
 
 [[utils/transforms/spike_to_potential.py#exp_operator]] computes a bounded exponential relative to the end of a time domain. [[utils/transforms/spike_to_potential.py#exponential_difference_operator]] composes integration, affine encoding, and an exponential stage to represent an exponential of a time difference.
 
-[[utils/transforms/spike_to_potential.py#normalized_exp_operator]] is a numerically stabilized simulation shortcut. Its current implementation applies `exp` directly to the supplied tensor, so any claim involving its `tau_m` argument must be verified against the implementation rather than inferred from the signature.
+[[utils/transforms/spike_to_potential.py#normalized_exp_operator]] evaluates `exp(t/tau_m)` and transforms its declared endpoints in the input tensor’s dtype. It rejects invalid time constants plus endpoint overflow or positive-domain underflow before decoding the payload.
 
-The event-aware exponential-difference path does not evaluate this shortcut at a missed event's stored deadline. It evolves and clamps the preceding integration state, re-encodes that potential, and returns the exp-temporal reset value zero if this internal event also misses.
+The Gaussian direct exponential applies the same offset-adjusted `t/tau_m` slope and validates delivered endpoints before sampling. Misses still return reset zero rather than decoding their stored deadline carrier.
+
+The event-aware exponential-difference path evolves and clamps its integration state, re-encodes it, then evaluates `exp(delta/tau_s)` with dtype-safe endpoint checks. An internal event miss returns exp-temporal reset zero rather than decoding its stored deadline carrier.
 
 ## Dual Operator Algebra
 

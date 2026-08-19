@@ -1,6 +1,7 @@
 import torch
 from jaxtyping import Float
-from math import isnan, log, exp
+from math import isnan, log, exp, isfinite
+from numbers import Real
 
 from utils.transforms import exp_operator
 
@@ -227,8 +228,19 @@ def _gaussian_exponential_function(
         together with those rails.
 
     Raises:
+        TypeError: If ``tau_m`` is not a real scalar.
+        ValueError: If ``tau_m`` is invalid or delivered exponential endpoints are
+            unrepresentable in the input tensor dtype.
         RuntimeError: If the event-aware encoder does not return ``SpikeSample``.
     """
+    # Validate the physical time constant before sampling so a rejected call cannot
+    # consume or advance the run-wide Gaussian generator.
+    if isinstance(tau_m, bool) or not isinstance(tau_m, Real):
+        raise TypeError("tau_m must be a real scalar")
+    tau_value = float(tau_m)
+    if not isfinite(tau_value) or tau_value <= 0.0:
+        raise ValueError("tau_m must be finite and positive")
+
     # Request one event per input element from the common encoder boundary so its
     # sampled time and fired mask originate from the same Gaussian draw.
     event = neg_identity_transform(
@@ -251,20 +263,41 @@ def _gaussian_exponential_function(
         max=float(event.domain.max),
     )
 
-    # Preserve the deterministic normalized composition, including its fixed scale
-    # removal, while extending the lower physical rail to the reset value zero.
+    # Build the final exponent directly after applying each composition's fixed
+    # offset. For normalized decoding, t = domain.max-x, so subtracting domain.max
+    # leaves -x; both branches then divide the complete exponent by tau_m.
     if normalized:
-        scaling_factor = exp(-float(domain.max) / tau_m)
-        response = scaling_factor * torch.exp(delivered_time)
-        response_max = scaling_factor * exp(float(event.domain.max))
+        offset = float(domain.max)
     else:
-        # The unnormalized path centers the code window before applying its explicit
-        # membrane time constant, matching the existing noise-free tensor mapping.
-        shift_val = float(event.domain.range) / 2.0
-        response = torch.exp((delivered_time - shift_val) / tau_m)
-        response_max = exp(
-            (float(event.domain.max) - shift_val) / tau_m
+        # The unnormalized composition centers the code window instead of removing
+        # the input-domain upper endpoint, matching its deterministic tensor path.
+        offset = float(event.domain.range) / 2.0
+
+    # Decode both carrier endpoints in the payload dtype. Computing after offset
+    # removal avoids an overflowing intermediate exp(t/tau_m) that a later small
+    # current gain might otherwise cancel only algebraically.
+    exponential_endpoints = delivered_time.new_tensor(
+        [
+            (float(event.domain.min) - offset) / tau_value,
+            (float(event.domain.max) - offset) / tau_value,
+        ]
+    )
+    decoded_endpoints = torch.exp(exponential_endpoints)
+    if not bool(
+        (
+            torch.isfinite(decoded_endpoints)
+            & (decoded_endpoints > 0.0)
+        ).all()
+    ):
+        raise ValueError(
+            "Gaussian exponential bounds must be finite and strictly positive "
+            "in the input tensor dtype"
         )
+
+    # Evaluate delivered carriers with the same scaled exponent. The upper endpoint
+    # is the monotonic delivered maximum; reset zero is added only after miss masks.
+    response = torch.exp((delivered_time - offset) / tau_value)
+    response_max = decoded_endpoints[1].item()
 
     # A missed opening event leaves the exponential membrane at reset; its stored
     # deadline is only a finite carrier and must not be decoded as an arriving spike.
