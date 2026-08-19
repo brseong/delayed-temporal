@@ -1,15 +1,15 @@
 #!/bin/bash
 trap 'kill -- -$$' SIGINT SIGTERM
 
-# Neuromorphic noise-model sweep. Each experiment isolates ONE component so its effect on
-# accuracy is attributable. All noise logic lives in utils/transforms/noise.py; the three
-# components (A jitter, B escape hazard, C device mismatch) are independently toggleable and
-# every flag is recorded in the wandb config (cfg = vars(args)).
+# Neuromorphic noise-model sweep. Each experiment isolates one maintained
+# component so its accuracy effect remains attributable: Gaussian spike-time
+# noise or static threshold mismatch. Every evaluator flag is recorded in the
+# W&B config through cfg = vars(args).
 #
-# Magnitudes are small on purpose: the decorated encoders are reused as internal arithmetic
-# primitives, so A/B perturb every spike-time sub-computation and noise compounds across
-# hundreds of sites (see reports/NOISE.md). Values below bracket the ViT-S robustness cliffs measured
-# at θ=2000 (jitter/mismatch ~1e-6…1e-4, hazard lower). Re-calibrate for other θ / model sizes.
+# Gaussian magnitudes are dimensionless fractions of the identity encoder's
+# [0, 2 * theta] coding window. The evaluator converts each fraction into one
+# absolute sigma_t and applies it at every encoder boundary. Static mismatch
+# remains a separate parameter-variation axis and is never combined here.
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/../.." && pwd)"
@@ -24,32 +24,30 @@ dataset_id="imagenet-1k"
 backend="spiking"
 batch_size=32
 theta=2000
+time_noise_seed="${TIME_NOISE_SEED:-0}"
 
 base="--spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${backend}"
+gaussian_base="${base} --gaussian-time-noise --time-noise-mean 0.0 --time-noise-seed ${time_noise_seed}"
 
 flags=(
     "${base}"
-    "${base} --jitter-enabled --jitter-mode potential --noise-std 1e-6"
-    "${base} --jitter-enabled --jitter-mode potential --noise-std 2e-6"
-    "${base} --jitter-enabled --jitter-mode potential --noise-std 5e-6"
-    "${base} --jitter-enabled --jitter-mode potential --noise-std 1e-5"
-    "${base} --hazard-enabled --hazard-delta-u 1e-6"
-    "${base} --hazard-enabled --hazard-delta-u 5e-6"
+    "${gaussian_base} --time-noise-std-frac 1e-6"
+    "${gaussian_base} --time-noise-std-frac 2e-6"
+    "${gaussian_base} --time-noise-std-frac 5e-6"
+    "${gaussian_base} --time-noise-std-frac 1e-5"
     "${base} --mismatch-enabled --mismatch-theta-std 1e-5"
     "${base} --mismatch-enabled --mismatch-theta-std 3e-5"
     "${base} --mismatch-enabled --mismatch-theta-std 5e-5"
 )
 expr_names=(
     "noise_off_baseline"
-    "A_jitter_pot_1e-6"
-    "A_jitter_pot_2e-6"
-    "A_jitter_pot_5e-6"
-    "A_jitter_pot_1e-5"
-    "B_hazard_du1e-6"
-    "B_hazard_du5e-6"
-    "C_mismatch_1e-5"
-    "C_mismatch_3e-5"
-    "C_mismatch_5e-5"
+    "A_gaussian_frac_1e-6"
+    "A_gaussian_frac_2e-6"
+    "A_gaussian_frac_5e-6"
+    "A_gaussian_frac_1e-5"
+    "B_mismatch_1e-5"
+    "B_mismatch_3e-5"
+    "B_mismatch_5e-5"
 )
 
 gpu_pool_init "${cuda_devices[@]}"

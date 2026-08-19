@@ -19,32 +19,32 @@ cuda_devices=(${GPUS:-0 1 2 3})   # override with e.g. GPUS="4 5 6 7"
 source "$repo_root/scripts/lib/gpu_pool.sh"
 backend="hf"
 batch_size=$((32 * 4)) # Adjust based on the number of GPUs and memory constraints
+time_noise_seed="${TIME_NOISE_SEED:-0}"
 
-stds=(0 1e-5 2e-5 3e-5) # Add more std values as needed
-
-flags=(
-    "--spiking-layernorm --spiking-mlp --spiking-attention --spike_time_noise_std ${stds[0]} --model_backend ${backend}"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --spike_time_noise_std ${stds[1]} --model_backend ${backend}"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --spike_time_noise_std ${stds[2]} --model_backend ${backend}"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --spike_time_noise_std ${stds[3]} --model_backend ${backend}"
-)
-expr_names=(
-    "std_${stds[0]}"
-    "std_${stds[1]}"
-    "std_${stds[2]}"
-    "std_${stds[3]}"
-)
+# Fractions are measured against the identity encoder's [0, 2 * theta]
+# coding window. The evaluator converts each fraction into one absolute
+# spike-time standard deviation shared by all encoders.
+time_noise_std_fracs=(0 1e-5 2e-5 3e-5)
 
 gpu_pool_init "${cuda_devices[@]}"
-for index in "${!expr_names[@]}"; do
+for time_noise_std_frac in "${time_noise_std_fracs[@]}"; do
+    expr_name="std_frac_${time_noise_std_frac}"
+    gaussian_flag=""
+    if [[ "${time_noise_std_frac}" != "0" ]]; then
+        gaussian_flag="--gaussian-time-noise"
+    fi
+
     gpu_pool_acquire; gpu=$GPU_POOL_ACQUIRED
-    echo "Running error analysis on GPU ${gpu}: ${expr_names[$index]}"
+    echo "Running Gaussian time-noise analysis on GPU ${gpu}: ${expr_name}"
     script="CUDA_VISIBLE_DEVICES=${gpu} python3 scripts/evaluation/error_analysis_bert.py \
-        --experiment_name ${expr_names[$index]}_${task} --device ${device} \
+        --experiment_name ${expr_name}_${task} --device ${device} \
         --task ${task} \
         --model_id ${model_id} \
         --dataset_name ${dataset_name} --dataset_split ${dataset_split} \
-        ${flags[$index]} --theta ${theta} --activation ${activation}"
+        --spiking-layernorm --spiking-mlp --spiking-attention \
+        --model_backend ${backend} --theta ${theta} --activation ${activation} \
+        ${gaussian_flag} --time-noise-std-frac ${time_noise_std_frac} \
+        --time-noise-mean 0.0 --time-noise-seed ${time_noise_seed}"
     if [[ -n "${dataset_config_name}" ]]; then
         script+=" --dataset_config_name ${dataset_config_name}"
     fi

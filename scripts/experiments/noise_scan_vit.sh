@@ -1,8 +1,9 @@
 #!/bin/bash
 trap 'kill -- -$$' SIGINT SIGTERM
 
-# Fine 11-step noise scan (auto-generated). jitter 1e-6..1e-5, mismatch 1e-5..5e-5,
-# hazard 1e-6..5e-05 (bracketing its measured cliff). 34 experiments total.
+# Fine noise scan with two independent maintained axes. Eleven Gaussian
+# spike-time fractions cover 1e-6..1e-5, and eleven static threshold-mismatch
+# values cover 1e-5..5e-5. Including the noise-off baseline gives 23 runs.
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/../.." && pwd)"
@@ -16,81 +17,38 @@ model_id="/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k"
 dataset_id="imagenet-1k"
 batch_size=32
 theta=2000
+time_noise_seed="${TIME_NOISE_SEED:-0}"
 scan_logdir="${SCAN_LOGDIR:-$repo_root/artifacts/logs/noise_scan}"
 mkdir -p "$scan_logdir"
 
-flags=(
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --jitter-enabled --jitter-mode potential --noise-std 1.000e-06"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --jitter-enabled --jitter-mode potential --noise-std 1.900e-06"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --jitter-enabled --jitter-mode potential --noise-std 2.800e-06"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --jitter-enabled --jitter-mode potential --noise-std 3.700e-06"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --jitter-enabled --jitter-mode potential --noise-std 4.600e-06"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --jitter-enabled --jitter-mode potential --noise-std 5.500e-06"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --jitter-enabled --jitter-mode potential --noise-std 6.400e-06"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --jitter-enabled --jitter-mode potential --noise-std 7.300e-06"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --jitter-enabled --jitter-mode potential --noise-std 8.200e-06"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --jitter-enabled --jitter-mode potential --noise-std 9.100e-06"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --jitter-enabled --jitter-mode potential --noise-std 1.000e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --hazard-enabled --hazard-delta-u 1.000e-06"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --hazard-enabled --hazard-delta-u 5.900e-06"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --hazard-enabled --hazard-delta-u 1.080e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --hazard-enabled --hazard-delta-u 1.570e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --hazard-enabled --hazard-delta-u 2.060e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --hazard-enabled --hazard-delta-u 2.550e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --hazard-enabled --hazard-delta-u 3.040e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --hazard-enabled --hazard-delta-u 3.530e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --hazard-enabled --hazard-delta-u 4.020e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --hazard-enabled --hazard-delta-u 4.510e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --hazard-enabled --hazard-delta-u 5.000e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --mismatch-enabled --mismatch-theta-std 1.000e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --mismatch-enabled --mismatch-theta-std 1.400e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --mismatch-enabled --mismatch-theta-std 1.800e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --mismatch-enabled --mismatch-theta-std 2.200e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --mismatch-enabled --mismatch-theta-std 2.600e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --mismatch-enabled --mismatch-theta-std 3.000e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --mismatch-enabled --mismatch-theta-std 3.400e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --mismatch-enabled --mismatch-theta-std 3.800e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --mismatch-enabled --mismatch-theta-std 4.200e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --mismatch-enabled --mismatch-theta-std 4.600e-05"
-    "--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking --mismatch-enabled --mismatch-theta-std 5.000e-05"
+time_noise_std_fracs=(
+    1.000e-06 1.900e-06 2.800e-06 3.700e-06 4.600e-06 5.500e-06
+    6.400e-06 7.300e-06 8.200e-06 9.100e-06 1.000e-05
 )
-expr_names=(
-    "noise_off_baseline"
-    "A_jitter_1.000e-06"
-    "A_jitter_1.900e-06"
-    "A_jitter_2.800e-06"
-    "A_jitter_3.700e-06"
-    "A_jitter_4.600e-06"
-    "A_jitter_5.500e-06"
-    "A_jitter_6.400e-06"
-    "A_jitter_7.300e-06"
-    "A_jitter_8.200e-06"
-    "A_jitter_9.100e-06"
-    "A_jitter_1.000e-05"
-    "B_hazard_1.000e-06"
-    "B_hazard_5.900e-06"
-    "B_hazard_1.080e-05"
-    "B_hazard_1.570e-05"
-    "B_hazard_2.060e-05"
-    "B_hazard_2.550e-05"
-    "B_hazard_3.040e-05"
-    "B_hazard_3.530e-05"
-    "B_hazard_4.020e-05"
-    "B_hazard_4.510e-05"
-    "B_hazard_5.000e-05"
-    "C_mismatch_1.000e-05"
-    "C_mismatch_1.400e-05"
-    "C_mismatch_1.800e-05"
-    "C_mismatch_2.200e-05"
-    "C_mismatch_2.600e-05"
-    "C_mismatch_3.000e-05"
-    "C_mismatch_3.400e-05"
-    "C_mismatch_3.800e-05"
-    "C_mismatch_4.200e-05"
-    "C_mismatch_4.600e-05"
-    "C_mismatch_5.000e-05"
+mismatch_theta_stds=(
+    1.000e-05 1.400e-05 1.800e-05 2.200e-05 2.600e-05 3.000e-05
+    3.400e-05 3.800e-05 4.200e-05 4.600e-05 5.000e-05
 )
+
+base="--spiking-layernorm --spiking-mlp --spiking-attention --model_backend spiking"
+flags=("${base}")
+expr_names=("noise_off_baseline")
+
+# Gaussian timing noise is sampled at encoder boundaries. The evaluator maps
+# each dimensionless fraction to sigma_t = fraction * (2 * theta), while one
+# run-wide seed makes the scan reproducible.
+for time_noise_std_frac in "${time_noise_std_fracs[@]}"; do
+    flags+=("${base} --gaussian-time-noise --time-noise-std-frac ${time_noise_std_frac} --time-noise-mean 0.0 --time-noise-seed ${time_noise_seed}")
+    expr_names+=("A_gaussian_frac_${time_noise_std_frac}")
+done
+
+# Threshold mismatch is static device variation, not event-time noise. These
+# runs deliberately omit every Gaussian option so the two effects stay
+# independently attributable.
+for mismatch_theta_std in "${mismatch_theta_stds[@]}"; do
+    flags+=("${base} --mismatch-enabled --mismatch-theta-std ${mismatch_theta_std}")
+    expr_names+=("B_mismatch_${mismatch_theta_std}")
+done
 
 gpu_pool_init "${cuda_devices[@]}"
 for index in "${!expr_names[@]}"; do

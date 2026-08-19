@@ -19,7 +19,7 @@ from utils.transformers.models.spiking_bert.configuration_bert import BertConfig
 from utils.transformers.models.spiking_bert.modeling_spiking_bert import BertForSequenceClassification, SpikingLayerNorm
 from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
 from utils.transforms.types import Potential
-from utils.transforms.noise import set_spike_time_noise
+from utils.transforms.noise import get_gaussian_noise_stats, set_gaussian_time_noise
 import evaluate
 from tqdm import tqdm
 
@@ -53,6 +53,16 @@ DATASET_PRESETS = {
 
 @dataclass
 class Arguments:
+    """Command-line configuration consumed by the BERT evaluator.
+
+    Direct Gaussian spike-time error is the only dynamic event-noise model. The
+    dimensionless standard-deviation fraction is converted by evaluation to an
+    absolute value using the common identity-code window ``2 * theta``; mean and
+    seed identify the evaluation-wide seeded noise state.
+    """
+
+    # Dataset, backend, and conversion fields define the deterministic evaluation
+    # path independently from stochastic event timing.
     experiment_name: str
     model_backend: Literal["hf", "spiking"]
     task: Literal["sst2", "agnews", "imdb"]
@@ -72,12 +82,30 @@ class Arguments:
     spiking_mlp: bool
     activation: Literal["relu", "gelu"]
     theta: float
-    spike_time_noise_std: float
-    spike_time_noise_kind: Literal["gaussian", "uniform"]
-    spike_time_noise_eval: bool
+
+    # The Gaussian interface is shared verbatim across all four model evaluators;
+    # distribution selection and train/eval jitter switches are not retained.
+    gaussian_time_noise: bool
+    time_noise_std_frac: float
+    time_noise_mean: float
+    time_noise_seed: int
+
+    # Quantile collection is a deterministic calibration diagnostic rather than a
+    # dynamic-noise control.
     collect_quantiles: bool
 
-def parse_arguments():
+def parse_arguments() -> Arguments:
+    """Parse BERT evaluation and direct Gaussian timing options.
+
+    All model families expose the same four timing-noise arguments. The parser
+    keeps the standard-deviation input dimensionless; conversion to absolute time
+    belongs to :func:`evaluate_bert_model`, not command-line interpretation.
+
+    Returns:
+        A dataset-resolved :class:`Arguments` instance.
+    """
+    # Deterministic backend, dataset, and ablation controls retain their established
+    # defaults while the dynamic-noise interface is replaced independently.
     parser = argparse.ArgumentParser(description="Evaluate Hugging Face BERT on SST-2, AG News, or IMDB.")
     parser.add_argument("--experiment_name", type=str, default="bert_eval",
                         help="Name of the experiment for logging purposes.")
@@ -117,15 +145,38 @@ def parse_arguments():
                         help="Activation function used by the spiking backend config.")
     parser.add_argument("--theta", type=float, default=100.0,
                         help="Domain bound theta used by spiking backend modules.")
-    parser.add_argument("--spike_time_noise_std", type=float, default=0.0,
-                        help="Relative std for spike-time jitter against time-domain range.")
-    parser.add_argument("--spike_time_noise_kind", type=str, choices=["gaussian", "uniform"], default="gaussian",
-                        help="Noise distribution for spike-time jitter.")
-    parser.add_argument("--spike_time_noise_eval", action=argparse.BooleanOptionalAction, default=False,
-                        help="Apply spike-time jitter in eval mode as well.")
+
+    # Direct Gaussian timing uses the shared interface without distribution aliases
+    # or a separate train/eval switch; evaluators are inference-only entry points.
+    parser.add_argument(
+        "--gaussian-time-noise",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Apply direct Gaussian error to every event-aware spike time.",
+    )
+    parser.add_argument(
+        "--time-noise-std-frac",
+        type=float,
+        default=0.0,
+        help="Gaussian time std as a fraction of the identity window 2*theta.",
+    )
+    parser.add_argument(
+        "--time-noise-mean",
+        type=float,
+        default=0.0,
+        help="Gaussian timing mean in absolute time units (default: 0.0).",
+    )
+    parser.add_argument(
+        "--time-noise-seed",
+        type=int,
+        default=0,
+        help="Seed for the evaluation-wide timing-noise generator.",
+    )
     parser.add_argument("--collect-quantiles", action="store_true",
                         help="Collect and print 99.9%% quantiles of absolute activations.")
 
+    # Resolve optional dataset overrides before constructing the typed result; the
+    # Gaussian values themselves are copied without unit conversion or reseeding.
     args = parser.parse_args()
     preset = DATASET_PRESETS[args.task]
     model_id = cast(str, args.model_id or preset["model_id"])
@@ -153,9 +204,10 @@ def parse_arguments():
         spiking_mlp=args.spiking_mlp,
         activation=args.activation,
         theta=args.theta,
-        spike_time_noise_std=args.spike_time_noise_std,
-        spike_time_noise_kind=args.spike_time_noise_kind,
-        spike_time_noise_eval=args.spike_time_noise_eval,
+        gaussian_time_noise=args.gaussian_time_noise,
+        time_noise_std_frac=args.time_noise_std_frac,
+        time_noise_mean=args.time_noise_mean,
+        time_noise_seed=args.time_noise_seed,
         collect_quantiles=args.collect_quantiles,
     )
 
@@ -170,7 +222,24 @@ def infer_text_column(column_names: list[str], preferred: str | None = None) -> 
 
     raise ValueError(f"No supported text column found in dataset columns: {column_names}")
 
-def evaluate_bert_model(args:Arguments):
+def evaluate_bert_model(args: Arguments) -> None:
+    """Evaluate one BERT backend with optional direct Gaussian event timing.
+
+    The user-facing standard deviation is converted once from a fraction of the
+    base identity-code window ``2 * theta`` to absolute time. Evaluation installs
+    one seeded process-wide generator, preserves deterministic execution when the
+    Gaussian flag is disabled, and reports event misses separately from output
+    saturation after the task loop.
+
+    Args:
+        args: Parsed BERT dataset, conversion, and timing-noise settings.
+
+    Raises:
+        RuntimeError: If a Gaussian-enabled model is wrapped in ``DataParallel``.
+        ValueError: If the shared Gaussian configuration rejects its parameters.
+    """
+    # Resolve dataset and backend fields once so later logging and model setup use
+    # the same effective evaluation identity.
     model_backend = args.model_backend
     model_id = cast(str, args.model_id)
     dataset_name = cast(str | None, args.dataset_name)
@@ -182,8 +251,33 @@ def evaluate_bert_model(args:Arguments):
     device_str = args.device
     
     torch_device = torch.device(device_str)
-    
-    cfg = vars(args)
+
+    # Convert the dimensionless CLI scale exactly once using the common identity
+    # encoder window; every event-aware encoder receives this same absolute sigma.
+    identity_time_window = 2.0 * float(args.theta)
+    time_noise_std = float(args.time_noise_std_frac) * identity_time_window
+    gaussian_enabled = bool(
+        model_backend == "spiking" and args.gaussian_time_noise
+    )
+
+    # Installing the state seeds one evaluation-wide generator and clears counters.
+    # The HF backend explicitly disables it to avoid stale state in reused processes.
+    set_gaussian_time_noise(
+        enabled=gaussian_enabled,
+        time_std=time_noise_std,
+        time_mean=args.time_noise_mean,
+        seed=args.time_noise_seed,
+        device=torch_device,
+    )
+
+    # Preserve both the input fraction and derived absolute value in W&B so theta
+    # sweeps remain interpretable without reconstructing the command line.
+    cfg = {
+        **vars(args),
+        "gaussian_time_noise_effective": gaussian_enabled,
+        "identity_time_window": identity_time_window,
+        "time_noise_std": time_noise_std,
+    }
     effective_attn_impl = "eager"
     if model_backend == "spiking" and torch_device.type != "cpu" and args.spiking_attention:
         effective_attn_impl = "spiking_sdpa"
@@ -191,22 +285,22 @@ def evaluate_bert_model(args:Arguments):
     wandb.init(entity="CIDA", project="bert-evaluation", config=cfg, name=args.experiment_name)
     print(f"Using device: {torch_device}")
     print(f"Model backend: {model_backend}")
+    print(
+        "Gaussian time noise — "
+        f"enabled: {gaussian_enabled}, "
+        f"std_frac: {args.time_noise_std_frac}, "
+        f"identity_window: {identity_time_window}, "
+        f"std_abs: {time_noise_std}, "
+        f"mean_abs: {args.time_noise_mean}, "
+        f"seed: {args.time_noise_seed}"
+    )
     if model_backend == "spiking":
         print(
             "Spiking config - "
             f"ln:{args.spiking_layernorm}, attn:{args.spiking_attention}, "
             f"mul:{args.spiking_ln_mul}, log:{args.spiking_ln_log}, "
             f"expdiff:{args.spiking_ln_expdiff}, mlp:{args.spiking_mlp}, "
-            f"act:{args.activation}, theta:{args.theta}, "
-            f"time_noise_std:{args.spike_time_noise_std}, "
-            f"time_noise_kind:{args.spike_time_noise_kind}, "
-            f"time_noise_eval:{args.spike_time_noise_eval}"
-        )
-        # Register global spike-time noise
-        set_spike_time_noise(
-            std=args.spike_time_noise_std,
-            kind=args.spike_time_noise_kind,
-            eval_mode=args.spike_time_noise_eval,
+            f"act:{args.activation}, theta:{args.theta}"
         )
 
     print(f"Loading dataset: {dataset_name}/{dataset_config_name} ({dataset_split})...")
@@ -253,6 +347,15 @@ def evaluate_bert_model(args:Arguments):
         config.hidden_act = args.activation
         config.theta = args.theta
         model = BertForSequenceClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl)
+
+    # This evaluator does not create DataParallel itself. Keep an explicit boundary
+    # check so a future or externally inserted wrapper cannot share one global RNG.
+    if gaussian_enabled and isinstance(model, nn.DataParallel):
+        raise RuntimeError(
+            "Gaussian spike-time noise does not support DataParallel; "
+            "run one evaluation process per GPU"
+        )
+
     if torch_device.type == "cuda":
         model = nn.Module.cuda(model)
     else:
@@ -331,6 +434,39 @@ def evaluate_bert_model(args:Arguments):
     print(f"Evaluation Results for {model_id}:")
     print(f"Accuracy: {final_score['accuracy']:.4f}")
     wandb.log({"Final Accuracy": final_score["accuracy"]})
+
+    # Report the five stored counter fields with event and output denominators kept
+    # separate; derived rates are logging values rather than additional state.
+    if gaussian_enabled:
+        for site, counts in sorted(get_gaussian_noise_stats().items()):
+            events = counts["events"]
+            outputs = counts["outputs"]
+            miss_rate = counts["misses"] / events if events else 0.0
+            underflow_rate = (
+                counts["output_underflows"] / outputs if outputs else 0.0
+            )
+            overflow_rate = (
+                counts["output_overflows"] / outputs if outputs else 0.0
+            )
+            print(
+                f"Gaussian[{site}] events={events}, misses={counts['misses']} "
+                f"(rate={miss_rate:.6g}), outputs={outputs}, "
+                f"underflows={counts['output_underflows']} "
+                f"(rate={underflow_rate:.6g}), "
+                f"overflows={counts['output_overflows']} "
+                f"(rate={overflow_rate:.6g})"
+            )
+            wandb.log({
+                f"Gaussian/{site}/events": events,
+                f"Gaussian/{site}/misses": counts["misses"],
+                f"Gaussian/{site}/miss_rate": miss_rate,
+                f"Gaussian/{site}/outputs": outputs,
+                f"Gaussian/{site}/output_underflows": counts["output_underflows"],
+                f"Gaussian/{site}/output_underflow_rate": underflow_rate,
+                f"Gaussian/{site}/output_overflows": counts["output_overflows"],
+                f"Gaussian/{site}/output_overflow_rate": overflow_rate,
+            })
+
     print("-" * 30)
     wandb.finish()
 

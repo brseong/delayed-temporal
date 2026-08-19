@@ -19,7 +19,7 @@ from utils.transformers.models.spiking_roberta.configuration_roberta import Robe
 from utils.transformers.models.spiking_roberta.modeling_spiking_roberta import RobertaForSequenceClassification, SpikingLayerNorm
 from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
 from utils.transforms.types import Potential
-from utils.transforms.noise import set_spike_time_noise
+from utils.transforms.noise import get_gaussian_noise_stats, set_gaussian_time_noise
 import evaluate
 from tqdm import tqdm
 
@@ -53,6 +53,16 @@ DATASET_PRESETS = {
 
 @dataclass
 class Arguments:
+    """Command-line configuration consumed by the RoBERTa evaluator.
+
+    Direct Gaussian spike-time error is the only dynamic event-noise model. Its
+    standard-deviation fraction remains dimensionless until evaluation converts it
+    with ``2 * theta``; the absolute mean and seed identify one evaluation-wide
+    seeded noise state.
+    """
+
+    # Dataset, backend, and conversion controls specify the deterministic path
+    # independently from stochastic event timing.
     experiment_name: str
     model_backend: Literal["hf", "spiking"]
     task: Literal["sst2", "agnews", "imdb"]
@@ -72,12 +82,29 @@ class Arguments:
     spiking_mlp: bool
     activation: Literal["relu", "gelu"]
     theta: float
-    spike_time_noise_std: float
-    spike_time_noise_kind: Literal["gaussian", "uniform"]
-    spike_time_noise_eval: bool
+
+    # Keep the same four Gaussian fields across every evaluator; no distribution
+    # selector or evaluation-mode jitter toggle remains in the typed interface.
+    gaussian_time_noise: bool
+    time_noise_std_frac: float
+    time_noise_mean: float
+    time_noise_seed: int
+
+    # Quantile collection remains a deterministic calibration diagnostic.
     collect_quantiles: bool
 
-def parse_arguments():
+def parse_arguments() -> Arguments:
+    """Parse RoBERTa evaluation and direct Gaussian timing options.
+
+    Dataset presets are resolved after argparse, while Gaussian scale conversion is
+    deliberately deferred to :func:`evaluate_roberta_model` so logging can retain
+    both the input fraction and its eventual absolute value.
+
+    Returns:
+        A dataset-resolved :class:`Arguments` instance.
+    """
+    # Preserve the existing task and spiking-ablation interface while replacing
+    # only the obsolete dynamic event-noise controls.
     parser = argparse.ArgumentParser(description="Evaluate Hugging Face RoBERTa on SST-2, AG News, or IMDB.")
     parser.add_argument("--experiment_name", type=str, default="roberta_eval",
                         help="Name of the experiment for logging purposes.")
@@ -117,15 +144,38 @@ def parse_arguments():
                         help="Activation function used by the spiking backend config.")
     parser.add_argument("--theta", type=float, default=100.0,
                         help="Domain bound theta used by spiking backend modules.")
-    parser.add_argument("--spike_time_noise_std", type=float, default=0.0,
-                        help="Relative std for spike-time jitter against time-domain range.")
-    parser.add_argument("--spike_time_noise_kind", type=str, choices=["gaussian", "uniform"], default="gaussian",
-                        help="Noise distribution for spike-time jitter.")
-    parser.add_argument("--spike_time_noise_eval", action=argparse.BooleanOptionalAction, default=False,
-                        help="Apply spike-time jitter in eval mode as well.")
+
+    # Use the common Gaussian-only CLI. BooleanOptionalAction also supplies the
+    # explicit --no-gaussian-time-noise form without a compatibility alias.
+    parser.add_argument(
+        "--gaussian-time-noise",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Apply direct Gaussian error to every event-aware spike time.",
+    )
+    parser.add_argument(
+        "--time-noise-std-frac",
+        type=float,
+        default=0.0,
+        help="Gaussian time std as a fraction of the identity window 2*theta.",
+    )
+    parser.add_argument(
+        "--time-noise-mean",
+        type=float,
+        default=0.0,
+        help="Gaussian timing mean in absolute time units (default: 0.0).",
+    )
+    parser.add_argument(
+        "--time-noise-seed",
+        type=int,
+        default=0,
+        help="Seed for the evaluation-wide timing-noise generator.",
+    )
     parser.add_argument("--collect-quantiles", action="store_true",
                         help="Collect and print 99.9%% quantiles of absolute activations.")
 
+    # Resolve task defaults once, then transfer Gaussian values unchanged into the
+    # dataclass; absolute-sigma calculation belongs to the later evaluation step.
     args = parser.parse_args()
     preset = DATASET_PRESETS[args.task]
     model_id = cast(str, args.model_id or preset["model_id"])
@@ -153,9 +203,10 @@ def parse_arguments():
         spiking_mlp=args.spiking_mlp,
         activation=args.activation,
         theta=args.theta,
-        spike_time_noise_std=args.spike_time_noise_std,
-        spike_time_noise_kind=args.spike_time_noise_kind,
-        spike_time_noise_eval=args.spike_time_noise_eval,
+        gaussian_time_noise=args.gaussian_time_noise,
+        time_noise_std_frac=args.time_noise_std_frac,
+        time_noise_mean=args.time_noise_mean,
+        time_noise_seed=args.time_noise_seed,
         collect_quantiles=args.collect_quantiles,
     )
 
@@ -170,7 +221,23 @@ def infer_text_column(column_names: list[str], preferred: str | None = None) -> 
 
     raise ValueError(f"No supported text column found in dataset columns: {column_names}")
 
-def evaluate_roberta_model(args:Arguments):
+def evaluate_roberta_model(args: Arguments) -> None:
+    """Evaluate one RoBERTa backend with optional Gaussian event timing.
+
+    The dimensionless noise fraction is converted once with the identity-code
+    window ``2 * theta`` and installed with one seeded process-wide generator.
+    Gaussian execution rejects this evaluator's multi-GPU ``DataParallel`` path,
+    while deterministic and Hugging Face evaluations retain existing behavior.
+
+    Args:
+        args: Parsed RoBERTa dataset, conversion, and timing-noise settings.
+
+    Raises:
+        RuntimeError: If Gaussian timing would execute through ``DataParallel``.
+        ValueError: If the shared Gaussian configuration rejects its parameters.
+    """
+    # Resolve the effective dataset and backend identity once for model setup,
+    # logging, and calibration metadata.
     model_backend = args.model_backend
     model_id = cast(str, args.model_id)
     dataset_name = cast(str | None, args.dataset_name)
@@ -182,8 +249,44 @@ def evaluate_roberta_model(args:Arguments):
     device_str = args.device
     
     torch_device = torch.device(device_str)
-    
-    cfg = vars(args)
+
+    # Convert the shared relative CLI scale exactly once; all decorated encoders in
+    # this evaluation use the resulting absolute timing standard deviation.
+    identity_time_window = 2.0 * float(args.theta)
+    time_noise_std = float(args.time_noise_std_frac) * identity_time_window
+    gaussian_enabled = bool(
+        model_backend == "spiking" and args.gaussian_time_noise
+    )
+
+    # RoBERTa normally wraps multiple visible GPUs in DataParallel. One mutable
+    # process-wide generator cannot provide valid per-device replica streams.
+    use_data_parallel = (
+        torch_device.type == "cuda" and torch.cuda.device_count() > 1
+    )
+    if gaussian_enabled and use_data_parallel:
+        raise RuntimeError(
+            "Gaussian spike-time noise does not support DataParallel; "
+            "run one evaluation process per GPU"
+        )
+
+    # Seed one evaluation-wide noise state and reset its counters before any model
+    # or dataset work. HF execution explicitly installs the disabled state.
+    set_gaussian_time_noise(
+        enabled=gaussian_enabled,
+        time_std=time_noise_std,
+        time_mean=args.time_noise_mean,
+        seed=args.time_noise_seed,
+        device=torch_device,
+    )
+
+    # Preserve both relative and absolute timing scales in W&B configuration so
+    # theta sweeps can be interpreted directly.
+    cfg = {
+        **vars(args),
+        "gaussian_time_noise_effective": gaussian_enabled,
+        "identity_time_window": identity_time_window,
+        "time_noise_std": time_noise_std,
+    }
     effective_attn_impl = "eager"
     if model_backend == "spiking" and torch_device.type != "cpu" and args.spiking_attention:
         effective_attn_impl = "spiking_sdpa"
@@ -191,22 +294,22 @@ def evaluate_roberta_model(args:Arguments):
     wandb.init(entity="CIDA", project="roberta-evaluation", config=cfg, name=args.experiment_name)
     print(f"Using device: {torch_device}")
     print(f"Model backend: {model_backend}")
+    print(
+        "Gaussian time noise — "
+        f"enabled: {gaussian_enabled}, "
+        f"std_frac: {args.time_noise_std_frac}, "
+        f"identity_window: {identity_time_window}, "
+        f"std_abs: {time_noise_std}, "
+        f"mean_abs: {args.time_noise_mean}, "
+        f"seed: {args.time_noise_seed}"
+    )
     if model_backend == "spiking":
         print(
             "Spiking config - "
             f"ln:{args.spiking_layernorm}, attn:{args.spiking_attention}, "
             f"mul:{args.spiking_ln_mul}, log:{args.spiking_ln_log}, "
             f"expdiff:{args.spiking_ln_expdiff}, mlp:{args.spiking_mlp}, "
-            f"act:{args.activation}, theta:{args.theta}, "
-            f"time_noise_std:{args.spike_time_noise_std}, "
-            f"time_noise_kind:{args.spike_time_noise_kind}, "
-            f"time_noise_eval:{args.spike_time_noise_eval}"
-        )
-        # Register global spike-time noise
-        set_spike_time_noise(
-            std=args.spike_time_noise_std,
-            kind=args.spike_time_noise_kind,
-            eval_mode=args.spike_time_noise_eval,
+            f"act:{args.activation}, theta:{args.theta}"
         )
 
     print(f"Loading dataset: {dataset_name}/{dataset_config_name} ({dataset_split})...")
@@ -257,7 +360,7 @@ def evaluate_roberta_model(args:Arguments):
         model = nn.Module.cpu(model)
     
     # GPU 병렬화 (DataParallel) 설정
-    if torch_device.type == "cuda" and torch.cuda.device_count() > 1:
+    if use_data_parallel:
         print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
         model = nn.DataParallel(model)    
     
@@ -335,6 +438,39 @@ def evaluate_roberta_model(args:Arguments):
     print(f"Evaluation Results for {model_id}:")
     print(f"Accuracy: {final_score['accuracy']:.4f}")
     wandb.log({"Final Accuracy": final_score["accuracy"]})
+
+    # Keep event and output denominators distinct when deriving report-only rates
+    # from the maintained five-field Gaussian statistics records.
+    if gaussian_enabled:
+        for site, counts in sorted(get_gaussian_noise_stats().items()):
+            events = counts["events"]
+            outputs = counts["outputs"]
+            miss_rate = counts["misses"] / events if events else 0.0
+            underflow_rate = (
+                counts["output_underflows"] / outputs if outputs else 0.0
+            )
+            overflow_rate = (
+                counts["output_overflows"] / outputs if outputs else 0.0
+            )
+            print(
+                f"Gaussian[{site}] events={events}, misses={counts['misses']} "
+                f"(rate={miss_rate:.6g}), outputs={outputs}, "
+                f"underflows={counts['output_underflows']} "
+                f"(rate={underflow_rate:.6g}), "
+                f"overflows={counts['output_overflows']} "
+                f"(rate={overflow_rate:.6g})"
+            )
+            wandb.log({
+                f"Gaussian/{site}/events": events,
+                f"Gaussian/{site}/misses": counts["misses"],
+                f"Gaussian/{site}/miss_rate": miss_rate,
+                f"Gaussian/{site}/outputs": outputs,
+                f"Gaussian/{site}/output_underflows": counts["output_underflows"],
+                f"Gaussian/{site}/output_underflow_rate": underflow_rate,
+                f"Gaussian/{site}/output_overflows": counts["output_overflows"],
+                f"Gaussian/{site}/output_overflow_rate": overflow_rate,
+            })
+
     print("-" * 30)
     wandb.finish()
 

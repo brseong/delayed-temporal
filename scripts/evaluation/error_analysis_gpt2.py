@@ -21,7 +21,7 @@ from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
 from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear
 from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
 from utils.transforms.types import Potential
-from utils.transforms.noise import set_spike_time_noise
+from utils.transforms.noise import get_gaussian_noise_stats, set_gaussian_time_noise
 from utils.transforms import types
 from tqdm import tqdm
 
@@ -49,6 +49,16 @@ DATASET_PRESETS = {
 
 @dataclass
 class Arguments:
+    """Command-line configuration consumed by the GPT-2 evaluator.
+
+    Direct Gaussian spike-time error is the sole dynamic event-noise interface.
+    Evaluation converts its dimensionless standard-deviation fraction with the
+    base identity window ``2 * theta`` and uses the absolute mean and seed for one
+    evaluation-wide seeded noise state.
+    """
+
+    # Dataset, backend, and model-conversion controls remain independent from the
+    # stochastic timing experiment selected below.
     experiment_name: str
     model_backend: Literal["hf", "spiking"]
     task: Literal["wikitext2", "wikitext103"]
@@ -69,12 +79,29 @@ class Arguments:
     activation: str
     theta: float
     tau_s: float
-    spike_time_noise_std: float
-    spike_time_noise_kind: Literal["gaussian", "uniform"]
-    spike_time_noise_eval: bool
+
+    # These four fields match ViT, BERT, and RoBERTa exactly; distribution choice
+    # and a separate evaluation-mode switch are intentionally absent.
+    gaussian_time_noise: bool
+    time_noise_std_frac: float
+    time_noise_mean: float
+    time_noise_seed: int
+
+    # Quantile collection is calibration instrumentation, not dynamic noise state.
     collect_quantiles: bool
 
-def parse_arguments():
+def parse_arguments() -> Arguments:
+    """Parse GPT-2 evaluation and direct Gaussian timing options.
+
+    This function resolves WikiText presets and preserves the relative timing scale
+    exactly as entered. Absolute-sigma conversion and generator installation remain
+    responsibilities of :func:`evaluate_gpt2_model`.
+
+    Returns:
+        A dataset-resolved :class:`Arguments` instance.
+    """
+    # Keep language-model, dataset, and spiking-ablation controls unchanged while
+    # replacing only the legacy dynamic-noise arguments.
     parser = argparse.ArgumentParser(description="Evaluate GPT-2 on WikiText-2/103.")
     parser.add_argument("--experiment_name", type=str, default="gpt2_eval",
                         help="Name of the experiment for logging purposes.")
@@ -116,15 +143,38 @@ def parse_arguments():
                         help="Domain bound theta used by spiking backend modules.")
     parser.add_argument("--tau-s", type=float, default=1.0,
                         help="Spike-time constant tau_s used by SpikingLayerNorm.")
-    parser.add_argument("--spike_time_noise_std", type=float, default=0.0,
-                        help="Relative std for spike-time jitter against time-domain range.")
-    parser.add_argument("--spike_time_noise_kind", type=str, choices=["gaussian", "uniform"], default="gaussian",
-                        help="Noise distribution for spike-time jitter.")
-    parser.add_argument("--spike_time_noise_eval", action=argparse.BooleanOptionalAction, default=False,
-                        help="Apply spike-time jitter in eval mode as well.")
+
+    # The Gaussian-only options are identical to the other model evaluators, making
+    # experiment scripts portable without legacy aliases or distribution switches.
+    parser.add_argument(
+        "--gaussian-time-noise",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Apply direct Gaussian error to every event-aware spike time.",
+    )
+    parser.add_argument(
+        "--time-noise-std-frac",
+        type=float,
+        default=0.0,
+        help="Gaussian time std as a fraction of the identity window 2*theta.",
+    )
+    parser.add_argument(
+        "--time-noise-mean",
+        type=float,
+        default=0.0,
+        help="Gaussian timing mean in absolute time units (default: 0.0).",
+    )
+    parser.add_argument(
+        "--time-noise-seed",
+        type=int,
+        default=0,
+        help="Seed for the evaluation-wide timing-noise generator.",
+    )
     parser.add_argument("--collect-quantiles", action="store_true",
                         help="Collect and print 99.9%% quantiles of absolute activations.")
 
+    # Resolve dataset defaults first and copy all Gaussian values without changing
+    # units; evaluation will perform the single 2*theta conversion.
     args = parser.parse_args()
     preset = DATASET_PRESETS[args.task]
     model_id = cast(str, args.model_id or preset["model_id"])
@@ -153,9 +203,10 @@ def parse_arguments():
         activation=args.activation,
         theta=args.theta,
         tau_s=args.tau_s,
-        spike_time_noise_std=args.spike_time_noise_std,
-        spike_time_noise_kind=args.spike_time_noise_kind,
-        spike_time_noise_eval=args.spike_time_noise_eval,
+        gaussian_time_noise=args.gaussian_time_noise,
+        time_noise_std_frac=args.time_noise_std_frac,
+        time_noise_mean=args.time_noise_mean,
+        time_noise_seed=args.time_noise_seed,
         collect_quantiles=args.collect_quantiles,
     )
 
@@ -169,7 +220,23 @@ def infer_text_column(column_names: list[str], preferred: str | None = None) -> 
 
     raise ValueError(f"No supported text column found in dataset columns: {column_names}")
 
-def evaluate_gpt2_model(args: Arguments):
+def evaluate_gpt2_model(args: Arguments) -> None:
+    """Evaluate one GPT-2 backend with optional direct Gaussian event timing.
+
+    The evaluator converts ``time_noise_std_frac`` to absolute time using the base
+    identity-code window ``2 * theta`` and installs one seeded process-wide noise
+    state. Causal-language-model loss and perplexity aggregation remain unchanged;
+    Gaussian event and saturation diagnostics are emitted after the task loop.
+
+    Args:
+        args: Parsed GPT-2 dataset, conversion, and timing-noise settings.
+
+    Raises:
+        RuntimeError: If a Gaussian-enabled model is wrapped in ``DataParallel``.
+        ValueError: If the shared Gaussian configuration rejects its parameters.
+    """
+    # Resolve model and dataset identity once so timing logs and task results refer
+    # to the same effective evaluation configuration.
     model_backend = args.model_backend
     model_id = cast(str, args.model_id)
     dataset_name = cast(str | None, args.dataset_name)
@@ -182,7 +249,32 @@ def evaluate_gpt2_model(args: Arguments):
 
     torch_device = torch.device(device_str)
 
-    cfg = vars(args)
+    # Convert the common user-facing fraction exactly once. tau_s does not rescale
+    # this value; every encoder receives the same absolute sigma based on 2*theta.
+    identity_time_window = 2.0 * float(args.theta)
+    time_noise_std = float(args.time_noise_std_frac) * identity_time_window
+    gaussian_enabled = bool(
+        model_backend == "spiking" and args.gaussian_time_noise
+    )
+
+    # Install one evaluation-wide seeded generator and clear previous counters.
+    # Explicitly disable it for the dense HF backend in reused Python processes.
+    set_gaussian_time_noise(
+        enabled=gaussian_enabled,
+        time_std=time_noise_std,
+        time_mean=args.time_noise_mean,
+        seed=args.time_noise_seed,
+        device=torch_device,
+    )
+
+    # Log both relative and absolute timing scales so theta sweeps do not obscure
+    # the physical perturbation applied by the shared encoder boundary.
+    cfg = {
+        **vars(args),
+        "gaussian_time_noise_effective": gaussian_enabled,
+        "identity_time_window": identity_time_window,
+        "time_noise_std": time_noise_std,
+    }
     effective_attn_impl = "eager"
     if model_backend == "spiking" and torch_device.type != "cpu" and args.spiking_attention:
         effective_attn_impl = "spiking_sdpa"
@@ -190,22 +282,22 @@ def evaluate_gpt2_model(args: Arguments):
     wandb.init(entity="CIDA", project="gpt2-evaluation", config=cfg, name=args.experiment_name)
     print(f"Using device: {torch_device}")
     print(f"Model backend: {model_backend}")
+    print(
+        "Gaussian time noise — "
+        f"enabled: {gaussian_enabled}, "
+        f"std_frac: {args.time_noise_std_frac}, "
+        f"identity_window: {identity_time_window}, "
+        f"std_abs: {time_noise_std}, "
+        f"mean_abs: {args.time_noise_mean}, "
+        f"seed: {args.time_noise_seed}"
+    )
     if model_backend == "spiking":
         print(
             "Spiking config - "
             f"ln:{args.spiking_layernorm}, attn:{args.spiking_attention}, "
             f"mul:{args.spiking_ln_mul}, log:{args.spiking_ln_log}, "
             f"expdiff:{args.spiking_ln_expdiff}, mlp:{args.spiking_mlp}, "
-            f"act:{args.activation}, theta:{args.theta}, tau_s:{args.tau_s}, "
-            f"time_noise_std:{args.spike_time_noise_std}, "
-            f"time_noise_kind:{args.spike_time_noise_kind}, "
-            f"time_noise_eval:{args.spike_time_noise_eval}"
-        )
-        # Register global spike-time noise
-        set_spike_time_noise(
-            std=args.spike_time_noise_std,
-            kind=args.spike_time_noise_kind,
-            eval_mode=args.spike_time_noise_eval,
+            f"act:{args.activation}, theta:{args.theta}, tau_s:{args.tau_s}"
         )
 
     print(f"Loading dataset: {dataset_name}/{dataset_config_name} ({dataset_split})...")
@@ -261,6 +353,14 @@ def evaluate_gpt2_model(args: Arguments):
         config.theta = args.theta
         config.tau_s = args.tau_s
         model = GPT2LMHeadModel.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl)
+
+    # GPT-2 currently constructs no DataParallel wrapper itself. Retain an explicit
+    # guard so future or externally inserted wrapping cannot share one global RNG.
+    if gaussian_enabled and isinstance(model, nn.DataParallel):
+        raise RuntimeError(
+            "Gaussian spike-time noise does not support DataParallel; "
+            "run one evaluation process per GPU"
+        )
 
     if torch_device.type == "cuda":
         model = nn.Module.cuda(model)
@@ -375,6 +475,39 @@ def evaluate_gpt2_model(args: Arguments):
     print(f"Average Loss: {avg_loss:.4f}")
     print(f"Perplexity: {perplexity:.4f}")
     wandb.log({"Final Average Loss": avg_loss, "Final Perplexity": perplexity})
+
+    # Convert only the maintained raw counters into report rates, preserving event
+    # and output denominators as separate physical populations.
+    if gaussian_enabled:
+        for site, counts in sorted(get_gaussian_noise_stats().items()):
+            events = counts["events"]
+            outputs = counts["outputs"]
+            miss_rate = counts["misses"] / events if events else 0.0
+            underflow_rate = (
+                counts["output_underflows"] / outputs if outputs else 0.0
+            )
+            overflow_rate = (
+                counts["output_overflows"] / outputs if outputs else 0.0
+            )
+            print(
+                f"Gaussian[{site}] events={events}, misses={counts['misses']} "
+                f"(rate={miss_rate:.6g}), outputs={outputs}, "
+                f"underflows={counts['output_underflows']} "
+                f"(rate={underflow_rate:.6g}), "
+                f"overflows={counts['output_overflows']} "
+                f"(rate={overflow_rate:.6g})"
+            )
+            wandb.log({
+                f"Gaussian/{site}/events": events,
+                f"Gaussian/{site}/misses": counts["misses"],
+                f"Gaussian/{site}/miss_rate": miss_rate,
+                f"Gaussian/{site}/outputs": outputs,
+                f"Gaussian/{site}/output_underflows": counts["output_underflows"],
+                f"Gaussian/{site}/output_underflow_rate": underflow_rate,
+                f"Gaussian/{site}/output_overflows": counts["output_overflows"],
+                f"Gaussian/{site}/output_overflow_rate": overflow_rate,
+            })
+
     print("-" * 30)
     wandb.finish()
 

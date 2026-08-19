@@ -111,11 +111,38 @@ class ViTConfig(PreTrainedConfig):
         spiking_ln_expdiff=True,
         use_spiking_mlp=True,
         spiking_mlp_exact_gelu=False,
-        noise_std=0.0,
         **kwargs,
     ):
+        """Initialize architecture and deterministic spiking conversion settings.
+
+        The configuration remains checkpoint-compatible with Hugging Face ViT
+        while carrying the fixed operator parameters and ablation switches needed
+        by the local spiking model. Run-wide Gaussian spike-time noise is not model
+        architecture state; evaluators install it separately through the shared
+        noise configuration for each seeded replica.
+
+        Args:
+            hidden_size: Width of token representations.
+            num_hidden_layers: Number of Transformer encoder blocks.
+            num_attention_heads: Number of attention heads per block.
+            intermediate_size: Width of the feed-forward hidden layer.
+            tau_m: Temporal scale used by exponential attention compositions.
+            tau_s: Synaptic temporal scale used by logarithmic compositions.
+            theta: Fixed symmetric potential rail for spiking operators.
+            use_spiking_layernorm: Replace dense LayerNorm with its spiking form.
+            spiking_ln_mul: Use spiking variance multiplication in LayerNorm.
+            spiking_ln_log: Use logarithmic spike encoding in LayerNorm.
+            spiking_ln_expdiff: Use exponential-difference LayerNorm decoding.
+            use_spiking_mlp: Enable the converted spiking MLP path.
+            spiking_mlp_exact_gelu: Select exact GELU inside that MLP ablation.
+            **kwargs: Standard ``PreTrainedConfig`` metadata and output controls.
+        """
+        # Let the upstream configuration base consume serialization metadata and
+        # standard Transformer flags before local architecture fields are stored.
         super().__init__(**kwargs)
 
+        # These attributes describe checkpoint-compatible dense ViT structure and
+        # are independent of any stochastic evaluation replica.
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
@@ -132,6 +159,9 @@ class ViTConfig(PreTrainedConfig):
         self.encoder_stride = encoder_stride
         self.pooler_output_size = pooler_output_size if pooler_output_size else hidden_size
         self.pooler_act = pooler_act
+
+        # Spiking fields are deterministic operator construction parameters. Direct
+        # Gaussian timing configuration deliberately remains process-wide elsewhere.
         self.tau_m = tau_m
         self.tau_s = tau_s
         self.theta = theta
@@ -141,7 +171,6 @@ class ViTConfig(PreTrainedConfig):
         self.spiking_ln_expdiff = spiking_ln_expdiff
         self.use_spiking_mlp = use_spiking_mlp
         self.spiking_mlp_exact_gelu = spiking_mlp_exact_gelu
-        self.noise_std = noise_std
 
 
 __all__ = ["ViTConfig"]
