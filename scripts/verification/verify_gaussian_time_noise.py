@@ -25,7 +25,11 @@ from utils.transforms.noise import (
     get_gaussian_time_noise,
     set_gaussian_time_noise,
 )
-from utils.transforms.potential_to_spike import neg_identity_transform
+from utils.transforms.potential_to_spike import (
+    neg_identity_transform,
+    neg_linear_transform,
+    neg_log_transform,
+)
 from utils.transforms.functions import (
     division_function,
     exponential_function,
@@ -34,6 +38,7 @@ from utils.transforms.functions import (
     swiglu_function,
 )
 from utils.transforms.spike_to_potential import (
+    exp_operator,
     exponential_difference_operator,
     normalized_exp_operator,
 )
@@ -469,6 +474,98 @@ def verify_exponential_time_constant_scaling() -> None:
     # endpoints. Testing float64 equality here catches a silently ignored argument
     # independently of every composed operator.
     for tau_s in (0.5, 1.0, 2.0):
+        # Deadline-relative decay must apply the same time constant while keeping
+        # its endpoint at one. This primitive is tested separately because it owns
+        # dtype-level positive-underflow rejection for wide observation windows.
+        decay_input = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64)
+        decay_domain = TimeBounds(0.0, 1.0)
+        decay, decay_bounds = exp_operator(
+            decay_input,
+            decay_domain,
+            tau_m=tau_s,
+        )
+        assert torch.equal(
+            decay,
+            torch.exp(-(float(decay_domain.max) - decay_input) / tau_s),
+        )
+        assert math.isclose(
+            float(decay_bounds.min),
+            math.exp(-float(decay_domain.range) / tau_s),
+            rel_tol=1e-15,
+        )
+        assert decay_bounds.max == 1.0
+
+        # Negative-log encoding must scale both payload times and the observation
+        # deadline by tau_s. Its endpoint values also lock the inclusive zero/deadline
+        # mapping used by division and LayerNorm.
+        log_input = torch.tensor([0.1, 1.0, 10.0], dtype=torch.float64)
+        log_domain = PotentialBounds(0.1, 10.0)
+        set_gaussian_time_noise(enabled=False)
+        log_time, log_bounds = neg_log_transform(
+            log_input,
+            log_domain,
+            tau_s=tau_s,
+        )
+        expected_log_time = tau_s * (
+            torch.log(log_input.new_tensor(float(log_domain.max)))
+            - torch.log(log_input)
+        )
+        assert torch.allclose(log_time, expected_log_time)
+        assert log_bounds.min == 0.0
+        assert math.isclose(
+            float(log_bounds.max),
+            tau_s
+            * (
+                math.log(float(log_domain.max))
+                - math.log(float(log_domain.min))
+            ),
+            rel_tol=1e-15,
+        )
+
+        # The encoder must not materialize V_max/V in the payload dtype. This
+        # float32 domain has finite endpoints and finite logarithms, but its endpoint
+        # ratio overflows before ``torch.log`` if division is performed first.
+        wide_log_input = torch.tensor([1.0e-30], dtype=torch.float32)
+        wide_log_domain = PotentialBounds(1.0e-30, 1.0e30)
+        wide_log_time, _ = neg_log_transform(
+            wide_log_input,
+            wide_log_domain,
+            tau_s=tau_s,
+        )
+        expected_wide_log_time = tau_s * (
+            torch.log(wide_log_input.new_tensor(float(wide_log_domain.max)))
+            - torch.log(wide_log_input)
+        )
+        assert torch.isfinite(wide_log_time).all()
+        assert torch.equal(wide_log_time, expected_wide_log_time)
+
+        # Endpoint logs also avoid overflowing the Python scalar ratio used to
+        # construct the observation deadline. Both extreme float64 rails remain
+        # representable even though their quotient does not.
+        extreme_log_input = torch.tensor([1.0e-300], dtype=torch.float64)
+        extreme_log_domain = PotentialBounds(1.0e-300, 1.0e300)
+        extreme_log_time, extreme_log_bounds = neg_log_transform(
+            extreme_log_input,
+            extreme_log_domain,
+            tau_s=tau_s,
+        )
+        expected_extreme_deadline = tau_s * (
+            math.log(float(extreme_log_domain.max))
+            - math.log(float(extreme_log_domain.min))
+        )
+        assert torch.isfinite(extreme_log_time).all()
+        assert math.isfinite(float(extreme_log_bounds.max))
+        assert math.isclose(
+            float(extreme_log_time.item()),
+            expected_extreme_deadline,
+            rel_tol=1e-15,
+        )
+        assert math.isclose(
+            float(extreme_log_bounds.max),
+            expected_extreme_deadline,
+            rel_tol=1e-15,
+        )
+
         primitive, primitive_domain = normalized_exp_operator(
             time_value,
             time_domain,
@@ -676,6 +773,19 @@ def verify_exponential_time_constant_scaling() -> None:
         else:
             raise AssertionError(f"accepted unrepresentable domain {invalid_domain}")
 
+    # Deadline-relative decay rejects a window whose earliest response becomes
+    # indistinguishable from reset zero in float32.
+    try:
+        exp_operator(
+            torch.tensor([0.0], dtype=torch.float32),
+            TimeBounds(0.0, 200.0),
+            tau_m=1.0,
+        )
+    except ValueError as error:
+        assert "strictly positive" in str(error)
+    else:
+        raise AssertionError("accepted underflowing exponential-decay window")
+
     # Invalid Gaussian scales are rejected before the internal encoder. Snapshot the
     # generator to prove validation does not consume a sample or shift later events.
     set_gaussian_time_noise(enabled=True, time_std=1.0, seed=1704)
@@ -683,6 +793,20 @@ def verify_exponential_time_constant_scaling() -> None:
         generator = get_gaussian_time_noise().generator
         assert generator is not None
         state_before = generator.get_state().clone()
+        try:
+            neg_log_transform(
+                torch.tensor([1.0], dtype=torch.float64),
+                PotentialBounds(0.1, 10.0),
+                tau_s=0.0,
+                return_spike_sample=True,
+                noise_site="verification.invalid_log_scale",
+            )
+        except ValueError as error:
+            assert "finite and positive" in str(error)
+        else:
+            raise AssertionError("accepted zero negative-log tau_s")
+        assert torch.equal(state_before, generator.get_state())
+
         try:
             exponential_difference_operator(
                 torch.tensor([0.5], dtype=torch.float64),
@@ -698,6 +822,19 @@ def verify_exponential_time_constant_scaling() -> None:
         assert torch.equal(state_before, generator.get_state())
     finally:
         set_gaussian_time_noise(enabled=False)
+
+    # Domain errors are explicit runtime validation rather than optimization-sensitive
+    # assertions, and they apply equally when Gaussian sampling is disabled.
+    try:
+        neg_log_transform(
+            torch.tensor([1.0], dtype=torch.float64),
+            PotentialBounds(0.0, 10.0),
+            tau_s=1.0,
+        )
+    except ValueError as error:
+        assert "strictly positive minimum" in str(error)
+    else:
+        raise AssertionError("accepted non-positive negative-log domain")
 
 
 def verify_gaussian_encoder_boundary() -> None:
@@ -719,6 +856,19 @@ def verify_gaussian_encoder_boundary() -> None:
     # encoder result must remain the negative-identity codeword and declared window.
     set_gaussian_time_noise(enabled=False)
     try:
+        # A non-identity window verifies the affine encoder independently of its
+        # convenience wrapper and locks both endpoint directions exactly.
+        linear_time, linear_domain = neg_linear_transform(
+            potential,
+            domain,
+            window_length=2.0,
+        )
+        assert torch.equal(
+            linear_time,
+            torch.tensor([2.0, 1.5, 0.0], dtype=torch.float64),
+        )
+        assert linear_domain == TimeBounds(0.0, 2.0)
+
         deterministic_time, time_domain = neg_identity_transform(potential, domain)
         assert torch.equal(
             deterministic_time,
@@ -743,6 +893,23 @@ def verify_gaussian_encoder_boundary() -> None:
         # Zero scale enters the physical event path without perturbing timestamps.
         # The endpoint at the deadline is delivered because equality is inclusive.
         set_gaussian_time_noise(enabled=True, time_std=0.0, seed=101)
+        generator = get_gaussian_time_noise().generator
+        assert generator is not None
+        state_before = generator.get_state().clone()
+        try:
+            neg_linear_transform(
+                potential,
+                domain,
+                window_length=0.0,
+                return_spike_sample=True,
+                noise_site="verification.invalid_linear_window",
+            )
+        except ValueError as error:
+            assert "finite and positive" in str(error)
+        else:
+            raise AssertionError("accepted zero negative-linear window")
+        assert torch.equal(state_before, generator.get_state())
+
         parity_sample = neg_identity_transform(
             potential,
             domain,
@@ -784,6 +951,35 @@ def verify_gaussian_encoder_boundary() -> None:
         miss_counts = get_gaussian_noise_stats()["verification.encoder_miss"]
         assert miss_counts["events"] == 2
         assert miss_counts["misses"] == 1
+
+        # Finite Python values can still overflow or underflow float32. The encoder
+        # must reject both cases instead of returning an invalid tensor beside a
+        # superficially finite TimeBounds declaration.
+        for invalid_window in (1.0e300, 1.0e-300):
+            try:
+                neg_linear_transform(
+                    torch.tensor([0.0], dtype=torch.float32),
+                    PotentialBounds(0.0, 1.0),
+                    window_length=invalid_window,
+                )
+            except ValueError as error:
+                assert "input tensor dtype" in str(error)
+            else:
+                raise AssertionError(
+                    f"accepted dtype-unrepresentable window {invalid_window}"
+                )
+
+        # Equal rails pass the outer payload-membership check for an equal payload,
+        # so the encoder itself must explicitly reject the zero-width mapping.
+        try:
+            neg_linear_transform(
+                torch.tensor([1.0], dtype=torch.float64),
+                PotentialBounds(1.0, 1.0),
+            )
+        except ValueError as error:
+            assert "strictly ordered" in str(error)
+        else:
+            raise AssertionError("accepted zero-width negative-linear domain")
     finally:
         # Restore the process-wide singleton even if an assertion fails so importing
         # this verifier from a larger test process cannot leak an enabled replica.

@@ -18,20 +18,63 @@ def exp_operator(
     ) -> tuple[
         Float[torch.Tensor, "*batch dims"],
         PotentialBounds]:
-    """Apply exponential negative transform to the input potentials to produce spike times.
+    """Decode latency relative to a fixed deadline with exponential decay.
+
+    The response is ``exp(-(domain.max-input_value)/tau_m)`` and therefore lies in
+    ``[exp(-domain.range/tau_m), 1]`` for an in-domain carrier. The endpoint interval
+    is evaluated in the input tensor's dtype before the payload so a physical time
+    constant or code window that cannot retain a positive response is rejected.
 
     Args:
-        input_value (Float[torch.Tensor, "*batch dims"]): Input spike times of the neurons.
-        domain (TimeBounds): The range of possible values for the input spike times.
-        tau_m (float, optional): The time constant for the exponential transform. Defaults to 1.0.
+        input_value: Finite spike-time carrier contained in ``domain``.
+        domain: Observation window whose maximum is the fixed readout deadline.
+        tau_m: Positive finite membrane time constant controlling exponential decay.
 
     Raises:
-        NotImplementedError: wave approximation is not implemented yet.
-    
+        TypeError: If ``tau_m`` is not a real scalar.
+        ValueError: If ``tau_m`` is invalid or the earliest decoded endpoint
+            underflows to zero in ``input_value.dtype``.
+
     Returns:
-        tuple[Float[torch.Tensor, "*batch dims"], PotentialBounds]: A tuple containing the transformed spike times and the potential bounds of the output.
-        """
-    return torch.exp(-(domain.max - input_value) / tau_m), PotentialBounds(exp(-(domain.max - domain.min) / tau_m), 1.0)
+        The exponentially decoded potential and its dtype-representable rails.
+    """
+    # Reject invalid physical scales before performing tensor arithmetic. Booleans
+    # are excluded explicitly even though Python treats them as integer subclasses.
+    if isinstance(tau_m, bool) or not isinstance(tau_m, Real):
+        raise TypeError("tau_m must be a real scalar")
+    tau_value = float(tau_m)
+    if not isfinite(tau_value) or tau_value <= 0.0:
+        raise ValueError("tau_m must be finite and positive")
+
+    # Decode the earliest and deadline carriers in the payload dtype and device.
+    # A very wide window or very small tau_m can underflow the earliest response to
+    # zero even though Python's float would still conceal the target dtype limit.
+    endpoint_exponents = input_value.new_tensor(
+        [
+            -float(domain.range) / tau_value,
+            0.0,
+        ]
+    )
+    decoded_endpoints = torch.exp(endpoint_exponents)
+
+    # For an ordered finite window this exponent is never positive and the deadline
+    # endpoint is exactly one, so overflow is impossible. Only reject earliest-time
+    # underflow that would collapse a delivered response onto reset zero.
+    if not bool(decoded_endpoints[0] > 0.0):
+        raise ValueError(
+            "earliest exponential decay response must remain strictly positive "
+            "in the input tensor dtype"
+        )
+
+    # Evaluate the payload with the same deadline-relative exponent and return
+    # concrete scalar rails for device-independent downstream interval arithmetic.
+    response = torch.exp(
+        -(float(domain.max) - input_value) / tau_value
+    )
+    return response, PotentialBounds(
+        decoded_endpoints[0].item(),
+        decoded_endpoints[1].item(),
+    )
 
 @check_domain
 def normalized_exp_operator(

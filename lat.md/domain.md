@@ -30,9 +30,9 @@ The planned removal of runtime-derived bounds across all maintained operators an
 
 Potential-to-spike transforms encode larger analog values as earlier events inside a declared time window.
 
-[[utils/transforms/potential_to_spike.py#neg_linear_transform]] maps a bounded potential to a negative-linear latency. On a symmetric domain `[-theta, theta]`, [[utils/transforms/potential_to_spike.py#neg_identity_transform]] reduces to the useful identity `t = theta - V`.
+[[utils/transforms/potential_to_spike.py#neg_linear_transform]] maps a bounded potential to a negative-linear latency. It rejects invalid or dtype-unrepresentable potential widths and time windows. On `[-theta, theta]`, [[utils/transforms/potential_to_spike.py#neg_identity_transform]] reduces to `t = theta - V`.
 
-[[utils/transforms/potential_to_spike.py#neg_log_transform]] maps a strictly positive potential to a logarithmic latency proportional to `log(V_max / V)`. Its time constant controls the temporal scale and its upper time bound is fixed by the ratio of declared domain endpoints.
+[[utils/transforms/potential_to_spike.py#neg_log_transform]] maps a strictly positive potential to `tau_s log(V_max/V)`. It explicitly rejects invalid scales and non-positive domains; the declared endpoint ratio fixes its upper time bound.
 
 The encoders are decorated by the global noise boundary described in [[noise#Encoder Injection Boundary]]. Even when noise is disabled, their outputs are projected into the declared time range.
 
@@ -40,7 +40,7 @@ The encoders are decorated by the global noise boundary described in [[noise#Enc
 
 Time-to-potential operators turn latency differences into exponential analog values used by division and normalization.
 
-[[utils/transforms/spike_to_potential.py#exp_operator]] computes a bounded exponential relative to the end of a time domain. [[utils/transforms/spike_to_potential.py#exponential_difference_operator]] composes integration, affine encoding, and an exponential stage to represent an exponential of a time difference.
+[[utils/transforms/spike_to_potential.py#exp_operator]] computes a bounded exponential relative to the time-domain deadline and rejects invalid scales or dtype-level positive underflow. [[utils/transforms/spike_to_potential.py#exponential_difference_operator]] composes integration, affine encoding, and an exponential stage to represent an exponential of a time difference.
 
 [[utils/transforms/spike_to_potential.py#normalized_exp_operator]] evaluates `exp(t/tau_m)` and transforms its declared endpoints in the input tensor’s dtype. It rejects invalid time constants plus endpoint overflow or positive-domain underflow before decoding the payload.
 
