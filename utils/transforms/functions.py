@@ -472,13 +472,12 @@ def softmin_function(
     sumexp_v = exp_v.sum(dim=-1, keepdim=True)
     N = input_value.size(-1)
 
-    # Propagate the original worst-case reduction bounds. The deterministic lower
-    # rail is positive, so this path does not require the Gaussian helper's floor.
-    # sumexp_domain = PotentialBounds(exp_domain.min, exp_domain.max * N)
-    # Too high max bound causes numerical instability in division, so use the
-    # original mathematically equivalent worst-case reduction bound.
+    # Division uses one log-encoding domain for both each individual numerator and
+    # the reduced denominator. The lower rail must therefore retain the smallest
+    # single exponential; multiplying it by N would describe only the denominator
+    # and would incorrectly clamp valid low numerators before normalization.
     sumexp_domain = PotentialBounds(
-        exp_domain.min * N,
+        exp_domain.min,
         exp_domain.max * N,
     )
 
@@ -792,9 +791,10 @@ def _gaussian_swiglu_function(
     This private implementation follows
     ``v * (u * f_DIV(1, 1 + psi_NE(phi_NP(beta * u))))``. The direct exponential
     input is sampled explicitly because its delivery mask must select between a
-    decoded response and reset zero. Division and both multiplication stages then
-    reuse their public operators, which dispatch to their own Gaussian physical
-    readouts under the same process-wide configuration.
+    decoded response and reset zero. A fixed current gain cancels the encoded
+    domain's multiplicative exponential bias exactly as in the deterministic path.
+    Division and both multiplication stages then reuse their public operators,
+    which dispatch to Gaussian physical readouts under the same configuration.
 
     Args:
         u: Input controlling both the sigmoid-like gate and gated value.
@@ -802,7 +802,7 @@ def _gaussian_swiglu_function(
         v: Second input multiplied with the gated ``u`` value.
         domain_v: Declared bounds of ``v``.
         beta: Scale applied to ``u`` before gate construction.
-        tau_s: Temporal scale forwarded to division.
+        tau_s: Exponential time constant and temporal scale forwarded to division.
         theta: Symmetric identity-code rail used by multiplication stages.
 
     Returns:
@@ -839,21 +839,36 @@ def _gaussian_swiglu_function(
     if not isinstance(exponential_event, SpikeSample):
         raise RuntimeError("Gaussian SwiGLU encoding must return SpikeSample")
 
-    # Decode only delivered events. Early samples are already stored at the start,
-    # and a missed event leaves this internal exponential response at reset zero.
+    # Clamp the stored carrier to the finite observation window before evaluating
+    # the deadline response. Early samples already live at the window start, while
+    # missed samples retain the deadline only as metadata for downstream accounting.
     delivered_time = torch.clamp(
         exponential_event.time,
         min=float(exponential_event.domain.min),
         max=float(exponential_event.domain.max),
     )
+
+    # The raw deadline response is biased by exp(z_min/tau_s), where z=beta*u.
+    # This is the same fixed factor produced by exp_operator in the deterministic
+    # path and is independent of the sampled input event within this operator call.
+    deadline = delivered_time.new_tensor(float(exponential_event.domain.max))
+    biased_exp = torch.exp(-(deadline - delivered_time) / tau_s)
+    bias_cancellation_gain = exp(-scaled_domain_u_clamped.min / tau_s)
+
+    # Apply the fixed synaptic-current gain only to delivered events. A missed
+    # opening event never initiates the exponential response and therefore remains
+    # at reset zero rather than acquiring a nonzero bias-correction contribution.
     exp_out = torch.where(
         exponential_event.fired,
-        torch.exp(delivered_time),
+        bias_cancellation_gain * biased_exp,
         torch.zeros_like(delivered_time),
     )
+
+    # The delivered maximum occurs at the deadline and equals exp(-z_min/tau_s).
+    # Extend the lower rail to zero solely for the physical missed-event reset.
     exp_domain = PotentialBounds(
         0.0,
-        exp(float(exponential_event.domain.max)),
+        bias_cancellation_gain,
     )
     exp_out = clamp_gaussian_output(
         exp_out,
@@ -909,11 +924,13 @@ def swiglu_function(
     theta: float = 400.0,
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """SwiGLU activation function using spiking operators.
+    """Evaluate SwiGLU with a bias-corrected exponential gate.
 
     The public entry point selects the private event-aware Gaussian implementation
     or the original deterministic five-stage composition while preserving one API,
-    one algebraic definition, and the same propagated output contract.
+    one algebraic definition, and the same propagated output contract. In the
+    deterministic path, the negative exponential neuron's fixed current gain
+    removes the identity encoder's domain-dependent temporal offset before division.
     
     According to Lemma 4.5 (SwiGLU Operator) in the paper:
     f_SwiGLU(u, v) := ψ_M(v, ψ_M(u, f_DIV(1, 1 + ψ_NE(φ_NP(β u)))))
@@ -930,7 +947,8 @@ def swiglu_function(
         v: Second input potential
         domain_v: Potential bounds for v
         beta: Scaling constant for sigmoid computation (default: 1.0)
-        tau_s: Time constant for operators (default: 1.0)
+        tau_s: Positive exponential and logarithmic time constant. At the default
+            value one, the gate is exactly ``sigmoid(beta * u)``.
         theta: Parameter for multiplication operator (default: 400.0)
     
     Returns:
@@ -961,9 +979,28 @@ def swiglu_function(
         min(scaled_domain_u.max, _STABILITY_CAP)
     )
     
-    # Step 2: Apply φ_NP (neg_identity_transform) then ψ_NE (normalized_exp_operator)
-    t_betau, domain_t_betau = neg_identity_transform(scaled_u_clamped, scaled_domain_u_clamped)
-    exp_out, exp_domain = normalized_exp_operator(t_betau, domain_t_betau, tau_m=tau_s)
+    # Step 2: Encode z = beta*u as t_z = z_max-z, then observe the ordinary decaying
+    # exponential at the fixed code-window deadline. That physical response carries
+    # the constant factor exp(z_min/tau_s) in addition to exp(-z/tau_s).
+    t_betau, domain_t_betau = neg_identity_transform(
+        scaled_u_clamped,
+        scaled_domain_u_clamped,
+    )
+    biased_exp, biased_exp_domain = exp_operator(
+        t_betau,
+        domain_t_betau,
+        tau_m=tau_s,
+    )
+
+    # Set one fixed synaptic-current magnitude from the declared static lower
+    # rail. Multiplying by exp(-z_min/tau_s) cancels only the encoder/observation
+    # offset, leaving the desired input-dependent response exp(-z/tau_s).
+    bias_cancellation_gain = exp(-scaled_domain_u_clamped.min / tau_s)
+    exp_out = bias_cancellation_gain * biased_exp
+    exp_domain = PotentialBounds(
+        bias_cancellation_gain * biased_exp_domain.min,
+        bias_cancellation_gain * biased_exp_domain.max,
+    )
     
     # Step 3: Compute sigmoid σ(β u) = f_DIV(1, 1 + ψ_NE(φ_NP(β u)))
     one_plus_exp = 1.0 + exp_out

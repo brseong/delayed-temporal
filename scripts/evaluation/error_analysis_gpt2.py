@@ -355,7 +355,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         model = GPT2LMHeadModel.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl)
 
     # GPT-2 currently constructs no DataParallel wrapper itself. Retain an explicit
-    # guard so future or externally inserted wrapping cannot share one global RNG.
+    # rejection so future or externally inserted wrapping cannot share one global RNG.
     if gaussian_enabled and isinstance(model, nn.DataParallel):
         raise RuntimeError(
             "Gaussian spike-time noise does not support DataParallel; "

@@ -58,6 +58,8 @@ Nonlinear activations are constructed from multiplication, exponential, division
 
 Fixed scalar multiplication is conceptually absorbable into a synaptic weight in the paper’s operation-count abstraction, even when the reference tensor implementation calls the generic multiplication function. [[evaluation#Symbolic Operation-Count Check]] preserves that distinction.
 
+SwiGLU treats the exponential neuron’s deadline response as `biased_exp` and applies a fixed current gain derived from the declared domain. The gain cancels the identity encoder’s constant offset without adding a runtime operator.
+
 ## Spiking Linear and Convolution
 
 Dense and convolutional layers retain pretrained parameters but express multiply-accumulate behavior through the PWM identity.
