@@ -50,7 +50,6 @@ from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
 from utils.transforms import neg_identity_transform
 from utils.transforms.functions import gelu_approximation
 from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_noise
-from utils.transforms.primitive import pulse_width_modulation_operator
 from utils.transforms.types import Potential, PotentialBounds, SpikeSample
 from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear, _apply_norm
@@ -195,9 +194,9 @@ class SpikingConv1D(Conv1D):
         """Apply GPT-2's transposed affine projection through PWM integration.
 
         Common input calibration and weight-bound extraction precede dispatch to the
-        private event-aware method or the original explicit per-synapse PWM path.
-        Both modes preserve Hugging Face's ``[in_features, out_features]`` weight
-        layout, arbitrary leading tensor dimensions, bias, and fan-in bounds.
+        private event-aware method or the delivered-time PWM path. Both modes use the
+        optimized transposed matrix contraction and preserve Hugging Face's
+        ``[in_features, out_features]`` layout, leading dimensions, bias, and bounds.
 
         Args:
             input: GPT-2 activation tensor paired with upstream potential bounds.
@@ -228,33 +227,53 @@ class SpikingConv1D(Conv1D):
                 domain_W,
             )
 
-        # Noise-free execution retains explicit temporal encoding and per-synapse
-        # broadcasting over the output-feature dimension.
-        t_A, domain_t_A = neg_identity_transform(encoded_x, domain_x)
-        y_syn: torch.Tensor
-        y_syn, domain_y_syn = pulse_width_modulation_operator(
-            t_A.unsqueeze(-1), domain_t_A,
-            self.theta, self.theta,
-            self.weight, domain_W,
+        # Convert delivered identity-code times to signed zero-reference pulse widths.
+        # This preserves explicit temporal encoding without broadcasting an extra
+        # output-feature dimension or materializing individual synaptic products.
+        data_time, _ = neg_identity_transform(encoded_x, domain_x)
+        signed_pulse_width = self.theta - data_time
+
+        # Flatten arbitrary leading dimensions for the optimized transposed PWM-MAC.
+        # Conceptually each unmaterialized term is:
+        # pwm_ij, _ = signed_pulse_width_modulation_operator(
+        #     data_time_i, data_time_domain,
+        #     theta, theta,
+        #     self.weight[i, j], weight_domain,
+        #     observation_deadline=2.0 * theta,
+        # )
+        # with the input-feature dimension reduced by the matrix contraction.
+        output_shape = signed_pulse_width.size()[:-1] + (self.nf,)
+        flat_pulse_width = signed_pulse_width.reshape(
+            -1,
+            signed_pulse_width.size(-1),
+        )
+        if self.bias is None:
+            y = torch.matmul(flat_pulse_width, self.weight)
+        else:
+            y = torch.addmm(self.bias, flat_pulse_width, self.weight)
+        y = y.view(output_shape)
+
+        # Preserve the ideal per-synapse product interval and input-feature fan-in.
+        product_candidates = (
+            domain_W.min * domain_x.min,
+            domain_W.min * domain_x.max,
+            domain_W.max * domain_x.min,
+            domain_W.max * domain_x.max,
+        )
+        fan_in = self.weight.size(0)
+        domain_y = PotentialBounds(
+            min(product_candidates) * fan_in,
+            max(product_candidates) * fan_in,
         )
 
-        # Sum the input-feature synapses and scale the endpoint envelope by the same
-        # fan-in represented by the first transposed-weight dimension.
-        N = self.weight.size(0)
-        domain_y: PotentialBounds = PotentialBounds(
-            domain_y_syn.min * N,
-            domain_y_syn.max * N,
-        )
-        y: torch.Tensor = y_syn.sum(dim=-2)
-
-        # Apply learned bias to both the projected value and its conservative bounds.
+        # Addmm already applies the learned bias to values, so translate only the
+        # conservative rails here.
         if self.bias is not None:
             b_min, b_max = self.bias.min().item(), self.bias.max().item()
             domain_y = PotentialBounds(
                 domain_y.min + b_min,
                 domain_y.max + b_max,
             )
-            y = y + self.bias
         return Potential(y, domain_y)
 
 

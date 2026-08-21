@@ -6,7 +6,7 @@ from numbers import Real
 from .noise import clamp_gaussian_output, get_gaussian_time_noise
 from .potential_to_spike import neg_identity_transform
 from .types import OpenBounds, PotentialBounds, SpikeSample, TimeBounds, check_domain
-from .primitive import pulse_width_modulation_operator
+from .primitive import signed_pulse_width_modulation_operator
 
 @check_domain
 def exp_operator(
@@ -151,18 +151,17 @@ def _gaussian_exponential_difference_operator(
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Evaluate exponential difference through event-aware physical readout.
 
-    ``t_A`` is the opening event and ``t_B`` is the closing event for a unit
-    negative drive, producing the intermediate potential ``t_A - t_B``. Tensor
-    inputs represent already delivered events, while ``SpikeSample`` inputs retain
-    their sampled delivery masks. The finite intermediate potential is then encoded
-    again; if that internal exponential event misses, its response remains at reset
-    value zero.
+    ``t_A`` and ``t_B`` supply two causal event-to-deadline rails under a unit
+    negative drive, producing the intermediate potential ``t_A - t_B`` when both
+    arrive. Tensor inputs represent already delivered events, while ``SpikeSample``
+    inputs retain independent delivery masks. The finite intermediate potential is
+    then encoded again; if that internal event misses, its response remains at zero.
 
     Args:
-        t_A: Opening time tensor or event-aware opening sample.
-        domain_t_A: Declared time bounds for the opening input.
-        t_B: Closing time tensor or event-aware closing sample.
-        domain_t_B: Declared time bounds for the closing input.
+        t_A: First time tensor or event-aware sample.
+        domain_t_A: Declared time bounds for the first input.
+        t_B: Second time tensor or event-aware sample.
+        domain_t_B: Declared time bounds for the second input.
         tau_s: Positive finite scale dividing the decoded temporal difference.
 
     Returns:
@@ -203,8 +202,8 @@ def _gaussian_exponential_difference_operator(
             fired=torch.ones_like(time_B, dtype=torch.bool),
         )
 
-    # Both events participate in one physical integration interval and therefore
-    # must be observed against the same fixed deadline before miss masks are applied.
+    # Both causal rails participate in one differential readout and therefore must
+    # use the same fixed observation deadline before their miss masks are applied.
     if not isclose(
         float(event_A.domain.max),
         float(event_B.domain.max),
@@ -215,22 +214,21 @@ def _gaussian_exponential_difference_operator(
             "event-aware exponential difference requires a shared observation deadline"
         )
 
-    # A closing miss leaves an opened trajectory integrating until the deadline.
-    # An opening miss never starts it, leaving the intermediate potential at reset zero.
-    deadline = event_A.time.new_tensor(float(event_A.domain.max))
-    stop_time = torch.where(event_B.fired, event_B.time, deadline)
-    intermediate = torch.where(
-        event_A.fired,
-        -(stop_time - event_A.time),
-        torch.zeros_like(event_A.time),
+    # The fixed -1 drive is the physical exponential-difference current. Reusing the
+    # already sampled events in signed PWM gives -[(T-t_A)-(T-t_B)] = t_A-t_B when
+    # both arrive, while each one-sided miss leaves the other causal rail visible.
+    intermediate, intermediate_domain = signed_pulse_width_modulation_operator(
+        event_A,
+        domain_t_A,
+        event_B,
+        domain_t_B,
+        event_A.time.new_tensor(-1.0),
+        PotentialBounds(-1.0, -1.0),
+        observation_deadline=float(event_A.domain.max),
     )
 
     # The ideal PWM rails remain determined by the declared input-time endpoints.
     # Clamp the noisy observation before it is re-encoded into the exponential stage.
-    intermediate_domain = PotentialBounds(
-        domain_t_A.min - domain_t_B.max,
-        domain_t_A.max - domain_t_B.min,
-    )
     intermediate = intermediate_domain.clamp(
         intermediate,
         name="exponential_difference_p",
@@ -360,12 +358,31 @@ def exponential_difference_operator(
             "SpikeSample inputs require enabled Gaussian time noise"
         )
 
-    # The deterministic PWM stage integrates a unit negative drive, producing the
-    # signed intermediate potential p = t_A - t_B with explicit interval bounds.
-    # p = -1 * (t_B - t_A) = t_A - t_B
-    V_ref = torch.full_like(t_A, fill_value=-1.0)
-    p, domain_p = pulse_width_modulation_operator(
-        t_A, domain_t_A, t_B, domain_t_B, V_ref, PotentialBounds(-1.0, -1.0)
+    # Both physical rails terminate at one observation time. Deterministic tensors
+    # have no miss masks, but accepting mismatched deadlines here would make this
+    # path describe a different circuit from the event-aware implementation.
+    if not isclose(
+        float(domain_t_A.max),
+        float(domain_t_B.max),
+        rel_tol=1.0e-9,
+        abs_tol=1.0e-12,
+    ):
+        raise ValueError(
+            "deterministic exponential difference requires a shared observation "
+            "deadline"
+        )
+
+    # Integrate the fixed unit-negative drive on the two causal rails. The signed
+    # wrapper evaluates their cancelled delivered-time expression directly:
+    # -1 * [(T_obs-t_A) - (T_obs-t_B)] = t_A - t_B.
+    p, domain_p = signed_pulse_width_modulation_operator(
+        t_A,
+        domain_t_A,
+        t_B,
+        domain_t_B,
+        t_A.new_tensor(-1.0),
+        PotentialBounds(-1.0, -1.0),
+        observation_deadline=float(domain_t_A.max),
     )
 
     # Re-encode the bounded intermediate potential with the negative-identity map;

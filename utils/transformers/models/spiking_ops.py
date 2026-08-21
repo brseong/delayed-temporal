@@ -10,7 +10,6 @@ from utils.transforms import neg_identity_transform
 from utils.transforms.functions import multiplication_operator, division_function
 from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_noise
 from utils.transforms.potential_to_spike import neg_log_transform
-from utils.transforms.primitive import pulse_width_modulation_operator
 from utils.transforms.spike_to_potential import exponential_difference_operator
 from utils.transforms.types import Potential, PotentialBounds, SpikeSample, TimeBounds
 
@@ -101,8 +100,8 @@ class SpikingLayerNorm(nn.Module):
         spiking stages use the event-aware operators, while disabled stages use
         their direct PyTorch formulas. When logarithmic encoding is enabled but
         exponential-difference decoding is disabled, this method explicitly
-        resolves opening and closing misses at the shared observation deadline
-        before applying the direct exponential formula. Every returned interval is
+        resolves the two causal rail masks at the shared observation deadline before
+        applying the direct exponential formula. Every returned interval is
         derived from feature count, declared operator bounds, or learned affine
         parameters; the current activation tensor is never measured to define it.
 
@@ -245,8 +244,8 @@ class SpikingLayerNorm(nn.Module):
             tb_err = TimeBounds(0.0, T0)
 
         if self.use_spiking_expdiff:
-            # The event-aware operator owns opening-miss reset, closing-miss deadline
-            # integration, internal exponential misses, and output saturation stats.
+            # The event-aware operator owns both causal external rails, internal
+            # exponential misses, and output saturation statistics.
             y_pos, domain_y_pos = exponential_difference_operator(
                 t_err_pos,
                 tb_err,
@@ -295,8 +294,8 @@ class SpikingLayerNorm(nn.Module):
             )
         else:
             if isinstance(t_sigma, SpikeSample):
-                # All three log encoders describe one physical readout and must use
-                # the same observation deadline before their delivery masks combine.
+                # All three log encoders describe two differential readouts and must
+                # use the same observation deadline before their rail masks combine.
                 if not (
                     math.isclose(
                         float(t_sigma.domain.max),
@@ -315,25 +314,32 @@ class SpikingLayerNorm(nn.Module):
                         "LayerNorm log events require a shared observation deadline"
                     )
 
-                # A missed sigma event is the closing/reference case, so active
-                # trajectories continue to TimeBounds.max. A missed residual event
-                # is the opening/data case and leaves its temporal difference at zero.
+                # Convert the shared sigma event and both residual events to causal
+                # time-to-deadline pulse widths. Each miss leaves only its own rail at
+                # reset, matching signed PWM without invoking the disabled exponential-
+                # difference operator or sampling its internal exponential event.
                 deadline = t_sigma.time.new_tensor(float(t_sigma.domain.max))
-                stop_time = torch.where(
+                sigma_pulse_width = torch.where(
                     t_sigma.fired,
-                    t_sigma.time,
-                    deadline,
+                    (deadline - t_sigma.time).clamp_min(0.0),
+                    torch.zeros_like(t_sigma.time),
                 )
-                delta_pos = torch.where(
+                positive_pulse_width = torch.where(
                     t_err_pos.fired,
-                    stop_time - t_err_pos.time,
+                    (deadline - t_err_pos.time).clamp_min(0.0),
                     torch.zeros_like(t_err_pos.time),
                 )
-                delta_neg = torch.where(
+                negative_pulse_width = torch.where(
                     t_err_neg.fired,
-                    stop_time - t_err_neg.time,
+                    (deadline - t_err_neg.time).clamp_min(0.0),
                     torch.zeros_like(t_err_neg.time),
                 )
+
+                # For delivered pairs, d_err-d_sigma equals t_sigma-t_err, exactly
+                # the exponent used by exponential difference. One-sided misses retain
+                # the surviving rail's signed contribution at the common deadline.
+                delta_pos = positive_pulse_width - sigma_pulse_width
+                delta_neg = negative_pulse_width - sigma_pulse_width
                 y_pos = torch.exp(delta_pos / tau_s)
                 y_neg = torch.exp(delta_neg / tau_s)
             else:
@@ -342,9 +348,9 @@ class SpikingLayerNorm(nn.Module):
                 y_pos = torch.exp((t_sigma - t_err_pos) / tau_s)
                 y_neg = torch.exp((t_sigma - t_err_neg) / tau_s)
 
-            # Both delivered times lie in declared windows. A missed opening event
-            # explicitly contributes delta=0, so include zero before exponentiating
-            # the complete temporal-difference interval monotonically.
+            # Each causal width lies in its declared deadline interval and a miss adds
+            # the reset width zero. Their signed difference therefore spans the same
+            # fixed endpoint interval before monotonic exponentiation.
             delta_min = min(
                 0.0,
                 float(tb_sigma.min) - float(tb_err.max),
@@ -619,8 +625,8 @@ class SpikingLinear(nn.Linear):
 
         Common input calibration and learned-weight bounds are computed once before
         dispatch. Gaussian execution delegates sampled event readout to
-        :meth:`_gaussian_forward`; noise-free execution retains the original
-        per-synapse PWM tensor reduction and bias addition.
+        :meth:`_gaussian_forward`; noise-free execution evaluates the delivered-time
+        PWM-MAC with the same optimized linear kernel.
 
         Args:
             input: Tensor value paired with its upstream potential bounds.
@@ -649,30 +655,41 @@ class SpikingLinear(nn.Linear):
                 domain_W,
             )
 
-        # Noise-free execution encodes each input value and expands its latency over
-        # the output dimension for the original explicit per-synapse PWM operation.
-        t_A, domain_t_A = neg_identity_transform(encoded_x, domain_x)
-        y_syn, domain_y_syn = pulse_width_modulation_operator(
-            t_A.unsqueeze(-2), domain_t_A,
-            self.theta, self.theta,
-            self.weight, domain_W,
+        # Encode delivered data times and subtract them from the scalar zero-codeword
+        # time. This is the noise-free signed pulse width theta-t_A; no deadline-sized
+        # rail tensors or output-by-input synapse tensor need to be materialized.
+        data_time, _ = neg_identity_transform(encoded_x, domain_x)
+        signed_pulse_width = self.theta - data_time
+
+        # The optimized kernel is algebraically identical to summing one explicit
+        # signed PWM call per synapse:
+        # pwm_ji, _ = signed_pulse_width_modulation_operator(
+        #     data_time_i, data_time_domain,
+        #     theta, theta,
+        #     self.weight[j, i], weight_domain,
+        #     observation_deadline=2.0 * theta,
+        # )
+        # y_j = sum_i(pwm_ji) + bias_j.
+        y = nn.functional.linear(signed_pulse_width, self.weight, self.bias)
+
+        # Propagate the same ideal PWM product endpoints and input-feature fan-in used
+        # by the explicit construction, independently of the current activation.
+        product_candidates = (
+            domain_W.min * domain_x.min,
+            domain_W.min * domain_x.max,
+            domain_W.max * domain_x.min,
+            domain_W.max * domain_x.max,
+        )
+        domain_y = PotentialBounds(
+            min(product_candidates) * self.in_features,
+            max(product_candidates) * self.in_features,
         )
 
-        # Reduce all input-feature synapses and scale their endpoint envelope by the
-        # same fan-in count used by the tensor sum.
-        N = self.in_features
-        domain_y: PotentialBounds = PotentialBounds(
-            domain_y_syn.min * N,
-            domain_y_syn.max * N,
-        )
-        y: torch.Tensor = y_syn.sum(dim=-1)
-
-        # Bias remains an ordinary learned affine offset in both the value and its
-        # propagated bounds; layers constructed without bias skip this adjustment.
+        # The optimized kernel already applied bias to the value; translate only the
+        # declared rails here. Layers constructed without bias skip this adjustment.
         if self.bias is not None:
             b_min, b_max = self.bias.min().item(), self.bias.max().item()
             domain_y = PotentialBounds(domain_y.min + b_min, domain_y.max + b_max)
-            y = y + self.bias
         return Potential(y, domain_y)
 
 class SpikingConv2d(nn.Conv2d):
@@ -821,8 +838,8 @@ class SpikingConv2d(nn.Conv2d):
         """Apply convolution through deterministic or Gaussian PWM integration.
 
         The method performs common input calibration and weight-bound extraction,
-        then dispatches to the private event-aware implementation or the original
-        explicit unfold-and-reduce tensor path. Both preserve the module's stride,
+        then dispatches to the private event-aware implementation or the delivered-
+        time PWM path. Both use the optimized convolution kernel and preserve stride,
         padding, dilation, grouping, bias, and conservative fan-in bounds.
 
         Args:
@@ -852,62 +869,51 @@ class SpikingConv2d(nn.Conv2d):
                 domain_W,
             )
 
-        # Noise-free execution starts with the same calibrated identity encoding used
-        # by the Gaussian path before constructing explicit synapse dimensions.
-        t_A, domain_t_A = neg_identity_transform(encoded_x, domain_x)
-        
-        # Manual padding for t_A to handle spiking domain correctly (x=0 corresponds to t=theta)
-        if self.padding[0] > 0 or self.padding[1] > 0:
-            t_A = torch.nn.functional.pad(t_A, (self.padding[1], self.padding[1], self.padding[0], self.padding[0]), value=self.theta)
-        
-        # Unfold input to (B, C_in * kH * kW, L)
-        t_A_unfolded = nn.functional.unfold(
-            t_A, self.kernel_size, self.dilation, padding=0, stride=self.stride
+        # Convert delivered identity-code times to signed pulse widths. Applying
+        # ordinary zero padding to these widths is equivalent to padding event times
+        # with theta, because theta-theta represents zero potential.
+        data_time, _ = neg_identity_transform(encoded_x, domain_x)
+        signed_pulse_width = self.theta - data_time
+
+        # The optimized grouped convolution evaluates the sum of the conceptually
+        # equivalent signed PWM call at every receptive-field synapse:
+        # pwm_synapse, _ = signed_pulse_width_modulation_operator(
+        #     data_time_synapse, data_time_domain,
+        #     theta, theta,
+        #     weight_synapse, weight_domain,
+        #     observation_deadline=2.0 * theta,
+        # )
+        # Avoiding unfold also avoids the explicit output-channel-by-fan-in tensor.
+        y = nn.functional.conv2d(
+            signed_pulse_width,
+            self.weight,
+            self.bias,
+            self.stride,
+            self.padding,
+            self.dilation,
+            self.groups,
         )
-        B, _, L = t_A_unfolded.shape
-        G = self.groups
-        C_out = self.out_channels
-        
-        # Reshape for grouped convolution broadcasting
-        # t_A_unfolded: (B, G, C_in//G * kH * kW, L)
-        t_A_unfolded = t_A_unfolded.view(B, G, -1, L)
-        
-        # weight: (G, C_out//G, C_in//G * kH * kW)
-        V = self.weight.view(G, C_out // G, -1)
-        
-        # Prepare for broadcasting:
-        # V:  (1, G, C_out//G, C_in//G * kH * kW, 1)
-        # dt: (B, G, 1,         C_in//G * kH * kW, L)
-        y_syn, domain_y_syn = pulse_width_modulation_operator(
-            t_A_unfolded.unsqueeze(2), domain_t_A,
-            self.theta, self.theta,
-            V.unsqueeze(0).unsqueeze(-1), domain_W,
-        )
-        
-        # y_syn: (B, G, C_out//G, C_in//G * kH * kW, L)
-        y = y_syn.sum(dim=3).view(B, C_out, L)
-        
-        # Determine output H and W
-        H_in, W_in = x.shape[2:]
+
+        # Derive the unchanged ideal rail from weight/input endpoint products and the
+        # grouped receptive-field fan-in used by the convolution reduction.
         kh, kw = self.kernel_size
-        ph, pw = self.padding
-        sh, sw = self.stride
-        dh, dw = self.dilation
-        H_out = (H_in + 2 * ph - dh * (kh - 1) - 1) // sh + 1
-        W_out = (W_in + 2 * pw - dw * (kw - 1) - 1) // sw + 1
-        
-        y = y.view(B, C_out, H_out, W_out)
-        
-        N = (self.in_channels // G) * kh * kw
-        domain_y: PotentialBounds = PotentialBounds(
-            domain_y_syn.min * N,
-            domain_y_syn.max * N,
+        product_candidates = (
+            domain_W.min * domain_x.min,
+            domain_W.min * domain_x.max,
+            domain_W.max * domain_x.min,
+            domain_W.max * domain_x.max,
         )
-        
+        fan_in = (self.in_channels // self.groups) * kh * kw
+        domain_y = PotentialBounds(
+            min(product_candidates) * fan_in,
+            max(product_candidates) * fan_in,
+        )
+
+        # Bias is already included in the convolution value, so translate only the
+        # propagated bounds using the learned parameter endpoints.
         if self.bias is not None:
             b_min, b_max = self.bias.min().item(), self.bias.max().item()
             domain_y = PotentialBounds(domain_y.min + b_min, domain_y.max + b_max)
-            y = y + self.bias.view(1, -1, 1, 1)
         return Potential(y, domain_y)
 
 

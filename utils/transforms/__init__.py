@@ -1,4 +1,7 @@
 from .potential_to_spike import neg_identity_transform, neg_log_transform
-from .primitive import pulse_width_modulation_operator
+from .primitive import (
+    signed_pulse_width_modulation_operator,
+    unsigned_pulse_width_modulation_operator,
+)
 from .spike_to_potential import exp_operator, exponential_difference_operator
 from .functions import multiplication_operator, scaled_dot_product_function, exponential_function, softmin_function, division_function

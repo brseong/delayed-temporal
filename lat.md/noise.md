@@ -58,21 +58,23 @@ $$
 
 `fired` selects the physical state evolution before readout. It is event metadata, not an output-validity flag. The simulator must not propagate an `invalid` result, abort the operator chain, or replace the readout with an arbitrary fallback.
 
-For event-gated integration with reset potential $V_{\mathrm{reset}}$, opening event $t_{\mathrm{open}}$, closing/reference event $t_{\mathrm{close}}$, and drive $I$, the fixed cases are:
+For signed PWM with reset potential $V_{\mathrm{reset}}$, event times $t_A,t_B$, delivery indicators $f_A,f_B\in\{0,1\}$, and drive $I$, define the two causal pulse widths
 
 $$
-V(T_{\mathrm{obs}})=
-\begin{cases}
-V_{\mathrm{reset}},
-& \text{opening spike misses},\\
-V_{\mathrm{reset}}+I\left(T_{\mathrm{obs}}-t_{\mathrm{open}}\right),
-& \text{opening arrives and closing spike misses},\\
-V_{\mathrm{reset}}+I\left(t_{\mathrm{close}}-t_{\mathrm{open}}\right),
-& \text{both spikes arrive}.
-\end{cases}
+d_A=f_A(T_{\mathrm{obs}}-t_A),
+\qquad
+d_B=f_B(T_{\mathrm{obs}}-t_B).
 $$
 
-Thus an opening miss gives zero synaptic contribution relative to reset, whereas a closing/reference miss continues integration until maximum time. Both cases still produce a valid finite potential after physical rail clamping, so subsequent operators continue normally.
+The differential observation-time state is
+
+$$
+V(T_{\mathrm{obs}})=V_{\mathrm{reset}}+I(d_A-d_B).
+$$
+
+Thus two delivered events give $V_{\mathrm{reset}}+I(t_B-t_A)$, an $A$-only event gives $V_{\mathrm{reset}}+I(T_{\mathrm{obs}}-t_A)$, a $B$-only event gives $V_{\mathrm{reset}}-I(T_{\mathrm{obs}}-t_B)$, and two misses leave reset. Every case remains a finite potential after rail clamping.
+
+A single-event operator such as the internal exponential stage has only one causal rail; its event miss therefore leaves reset zero. LayerNorm's direct exponential ablation applies the same two-rail pulse-width equation but deliberately skips the disabled exponential-difference operator and its internal event.
 
 ## Encoder Injection Boundary
 

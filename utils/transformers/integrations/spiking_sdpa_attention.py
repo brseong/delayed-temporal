@@ -10,7 +10,6 @@ from transformers.utils.import_utils import is_torch_npu_available, is_torch_xpu
 from utils.transforms.functions import scaled_dot_product_function, softmin_function
 from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_noise
 from utils.transforms.potential_to_spike import neg_identity_transform
-from utils.transforms.primitive import pulse_width_modulation_operator
 from utils.transforms.types import PotentialBounds, SpikeSample, TimeBounds
 
 logger = logging.get_logger(__name__)
@@ -96,12 +95,11 @@ def _gaussian_attention_value_readout(
 ) -> torch.Tensor:
     """Read attention values from Gaussian opening and reference events.
 
-    Each value element supplies an opening event, while one scalar zero-reference
-    event is shared by the entire attention invocation. A missing value event
-    contributes reset zero. A missing reference event leaves every delivered value
-    trajectory active until the fixed identity-code deadline. The resulting
-    durations are contracted with attention weights without materializing the full
-    query-by-key-by-feature synapse tensor.
+    Each value element and one scalar zero-reference event supply the two causal
+    rails of signed PWM value integration. Each missed event independently leaves
+    its own rail at reset. The resulting signed pulse widths are contracted with
+    attention weights without materializing the full query-by-key-by-feature
+    synapse tensor.
 
     Args:
         value_clamped: Value tensor already restricted to the symmetric TTFS rail.
@@ -119,9 +117,9 @@ def _gaussian_attention_value_readout(
             ``SpikeSample``.
         ValueError: If value and reference events do not share one deadline.
     """
-    # Every value element independently opens a weighted integration trajectory.
-    # Its finite deadline carrier is never interpreted as a delivered event without
-    # consulting the accompanying fired mask.
+    # Every value element independently supplies one weighted causal rail. Its finite
+    # deadline carrier is never interpreted as a delivered event without consulting
+    # the accompanying fired mask.
     value_event = neg_identity_transform(
         value_clamped,
         domain_v,
@@ -133,7 +131,7 @@ def _gaussian_attention_value_readout(
             "Gaussian attention value encoding must return SpikeSample"
         )
 
-    # The zero codeword is a single physical closing event shared across batch,
+    # The zero codeword supplies one physical reference rail shared across batch,
     # heads, queries, source positions, and value features for this operator call.
     reference_event = neg_identity_transform(
         value_clamped.new_zeros(()),
@@ -146,8 +144,8 @@ def _gaussian_attention_value_readout(
             "Gaussian attention value reference must return SpikeSample"
         )
 
-    # Opening and closing events participate in the same integration interval, so
-    # accepting different deadlines would make their physical duration undefined.
+    # Both rails participate in one differential readout, so accepting different
+    # deadlines would make their common-reference subtraction undefined.
     if not math.isclose(
         float(value_event.domain.max),
         float(reference_event.domain.max),
@@ -158,27 +156,36 @@ def _gaussian_attention_value_readout(
             "Gaussian attention value and reference events require a shared deadline"
         )
 
-    # A delivered reference closes every active trajectory at its sampled time. If
-    # it misses, those trajectories continue until the inclusive observation limit.
+    # Convert the two sampled events into causal pulse widths against their common
+    # deadline. Each miss suppresses only its own rail, so a surviving value or
+    # reference rail remains visible with the correct sign at observation time.
     deadline = value_event.time.new_tensor(float(value_event.domain.max))
-    stop_time = torch.where(
-        reference_event.fired,
-        reference_event.time,
-        deadline,
-    )
-
-    # A missing value event never opens its trajectory and therefore contributes
-    # reset zero. Delivered values retain signed durations if event order reverses.
-    duration = torch.where(
+    value_pulse_width = torch.where(
         value_event.fired,
-        stop_time - value_event.time,
+        (deadline - value_event.time).clamp_min(0.0),
         torch.zeros_like(value_event.time),
     )
+    reference_pulse_width = torch.where(
+        reference_event.fired,
+        (deadline - reference_event.time).clamp_min(0.0),
+        torch.zeros_like(reference_event.time),
+    )
+    signed_pulse_width = value_pulse_width - reference_pulse_width
 
-    # Preserve the deterministic [0, 1] weight contract before contraction. Matmul
-    # directly reduces the source dimension and avoids an (L, S, D) temporary.
+    # Preserve the deterministic [0, 1] drive contract before the optimized PWM-MAC.
+    # Conceptually, every unmaterialized query/source/value-feature synapse is:
+    #
+    # pwm_qsd, _ = signed_pulse_width_modulation_operator(
+    #     value_event_sd, value_event.domain,
+    #     reference_event, reference_event.domain,
+    #     attn_weight_qs, PotentialBounds(0.0, 1.0),
+    #     observation_deadline=float(value_event.domain.max),
+    # )
+    # attn_output_qd = sum_s(pwm_qsd)
+    #
+    # Matmul evaluates that full source reduction without an (L, S, D) temporary.
     bounded_weight = attn_weight.clamp(0.0, 1.0)
-    attn_output = torch.matmul(bounded_weight, duration)
+    attn_output = torch.matmul(bounded_weight, signed_pulse_width)
 
     # The caller supplies one configuration-derived envelope for every request.
     # Record raw saturation before enforcing those fixed ideal output rails.
@@ -322,34 +329,28 @@ def spiking_scaled_dot_product_attention(
             output_domain,
         )
 
-    # Noise-free execution preserves the original explicit PWM composition and its
-    # training keyword, without constructing event-delivery metadata.
-    t_v, domain_tv = neg_identity_transform(
+    # Noise-free execution preserves temporal encoding and its training keyword,
+    # then recovers the delivered signed pulse width without event metadata.
+    value_time, _ = neg_identity_transform(
         value_clamped,
         domain_v,
         training=bool(training),
     )
+    signed_pulse_width = theta - value_time
 
-    domain_w = PotentialBounds(0.0, 1.0)
-
-    # ψ_PWM(t_v[j], θ; w[i,j]) = w[i,j] * (θ − t_v[j]) = w[i,j] * v[j]
-    # 브로드캐스트: (B,H,1,S,D) × (B,H,L,S,1) → (B,H,L,S,D)
-    t_v = t_v.unsqueeze(-3)          # (B, H, 1, S, D)
-    w   = attn_weight.unsqueeze(-1)  # (B, H, L, S, 1)
-
-    out_per_sv, _ = pulse_width_modulation_operator(
-        t_v, domain_tv,
-        theta,   theta,
-        w,   domain_w,
-    )  # → (B, H, L, S, D)
-
-    # S 차원 적분: Σ_j w[i,j] * v[j]  → (B, H, L, D)
-    attn_output = out_per_sv.sum(dim=-2)
-
-    # Debug: Compare output with torch @
-    # torch_output = torch.matmul(torch_weights, value_clamped)
-    # output_error = (attn_output - torch_output).abs().max().item()
-    # print(f"[DEBUG] Final output vs torch.matmul max diff: {output_error:.6f}")
+    # The optimized matrix multiplication evaluates the complete deterministic
+    # PWM reduction. Conceptually every source/value-feature term is:
+    #
+    # pwm_qsd, _ = signed_pulse_width_modulation_operator(
+    #     value_time_sd, value_time_domain,
+    #     theta, theta,
+    #     attn_weight_qs, PotentialBounds(0.0, 1.0),
+    #     observation_deadline=2.0 * theta,
+    # )
+    # attn_output_qd = sum_s(pwm_qsd)
+    #
+    # Matmul avoids materializing the full (B,H,L,S,D) synapse tensor.
+    attn_output = torch.matmul(attn_weight, signed_pulse_width)
 
     # Noise-free and Gaussian execution share the same configured physical rail.
     # Clamping here keeps the returned tensor consistent with the domain that model

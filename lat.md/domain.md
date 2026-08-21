@@ -85,7 +85,7 @@ Clamping turns an unbounded mathematical mapping into a finite simulation domain
 
 Values beyond a potential range are clipped before encoding. Maintained Gaussian sampling distinguishes a delivered event from a deadline miss explicitly, even though both use finite stored times.
 
-A missed event does not erase the analog state. The receiving operator evolves whatever physical state exists until $T_{\mathrm{obs}}$, reads that potential, clamps it to the output rails, and continues the operator chain. The complete opening/closing truth table is [[noise#Observation-Time Potential Invariant]].
+A missed event does not erase another rail's analog state. The receiving operator evolves each delivered causal rail until $T_{\mathrm{obs}}$, reads their differential potential, clamps it to the output rails, and continues the operator chain. The complete signed-PWM truth table is [[noise#Observation-Time Potential Invariant]].
 
 The stored deadline time of a missed spike is only a tensor carrier. It must never be mistaken for a valid latest spike or substituted into a temporal formula without consulting `fired`.
 

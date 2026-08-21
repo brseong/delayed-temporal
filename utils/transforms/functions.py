@@ -7,10 +7,7 @@ from utils.transforms import exp_operator
 
 from .noise import clamp_gaussian_output, get_gaussian_time_noise
 from .types import PotentialBounds, SpikeSample, TimeBounds, check_domain
-from .primitive import (
-    pulse_width_modulation_operator,
-    signed_pulse_width_modulation_operator,
-)
+from .primitive import signed_pulse_width_modulation_operator
 from .potential_to_spike import neg_identity_transform, neg_log_transform
 from .spike_to_potential import normalized_exp_operator, exponential_difference_operator
 
@@ -125,10 +122,10 @@ def multiplication_operator(
     encoding setup, then dispatches either to the private Gaussian event readout or
     to the deterministic analytic PWM primitive.
 
-    In Gaussian mode, a missing data event contributes reset value zero, while a
-    missing reference event leaves integration active until the fixed observation
-    deadline. Those event-specific details remain isolated in the private helper so
-    both paths continue to share one public operator and one bounds contract.
+    In Gaussian mode, data and reference events independently supply two causal
+    time-to-deadline rails. Each miss leaves only its own rail at reset. Those
+    event-specific details remain isolated in the private helper so both paths
+    continue to share one public operator and one ideal bounds contract.
 
     Args:
         V: Potential supplying the constant integration drive.
@@ -159,17 +156,23 @@ def multiplication_operator(
             theta,
         )
 
-    # Noise-free execution retains the original analytic PWM path and scalar closing
-    # time. Convert theta only for the primitive's scalar temporal-bound contract.
+    # Noise-free execution uses delivered tensor times, so signed PWM evaluates the
+    # algebraically cancelled expression V * (theta - data_time) directly. The common
+    # observation deadline remains part of the physical contract without creating
+    # deadline-sized intermediates in this deterministic path.
     th_val = float(theta) if isinstance(theta, (int, float)) else float(theta.max())
-    t_B, domain_t_B = neg_identity_transform(encoded_B, encoder_domain_B)
-    return pulse_width_modulation_operator(
-        t_A=t_B, 
-        domain_t_A=domain_t_B, 
-        t_B=theta, 
-        domain_t_B=th_val, 
-        V=V, 
-        domain_V=domain_V
+    data_time, data_time_domain = neg_identity_transform(
+        encoded_B,
+        encoder_domain_B,
+    )
+    return signed_pulse_width_modulation_operator(
+        t_A=data_time,
+        domain_t_A=data_time_domain,
+        t_B=th_val,
+        domain_t_B=th_val,
+        V=V,
+        domain_V=domain_V,
+        observation_deadline=float(data_time_domain.max),
     )
 
 @check_domain

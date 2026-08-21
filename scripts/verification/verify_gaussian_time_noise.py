@@ -1351,10 +1351,10 @@ def verify_gaussian_exponential_function() -> None:
 def verify_gaussian_exponential_difference_operator() -> None:
     """Verify exponential-difference parity and its three missing-event stages.
 
-    The operator first reads an opening/closing interval into an intermediate
+    The operator first reads two causal signed-PWM rails into an intermediate
     potential, then re-encodes that value through an internal exponential event.
-    An opening miss resets only the intermediate state to zero, a closing miss
-    integrates until the deadline, and an internal miss resets the final response.
+    Either external event can miss independently while the other rail remains at
+    observation time, and an internal miss resets the final response.
 
     Raises:
         AssertionError: If zero-noise parity, observation-time interval physics,
@@ -1398,8 +1398,8 @@ def verify_gaussian_exponential_difference_operator() -> None:
         assert zero_stats["exponential_difference.internal"]["events"] == 2
         assert zero_stats["exponential_difference.internal"]["misses"] == 0
 
-        # A missing opening event never starts integration, so the intermediate
-        # potential is zero. The internal event still arrives and decodes exp(0)=1.
+        # A missing A event leaves only the delivered B rail. Under the fixed -1
+        # drive this produces intermediate +(T_obs-t_B)=+2 and response exp(-2).
         set_gaussian_time_noise(enabled=True, time_std=0.0, seed=602)
         opening_miss = SpikeSample(
             time=torch.tensor([4.0], dtype=torch.float64),
@@ -1418,11 +1418,14 @@ def verify_gaussian_exponential_difference_operator() -> None:
             time_domain,
             tau_s=1.0,
         )
-        assert torch.equal(opening_reset, torch.ones_like(opening_reset))
+        assert torch.allclose(
+            opening_reset,
+            torch.exp(torch.tensor([-2.0], dtype=torch.float64)),
+        )
         assert opening_reset_domain == zero_noise_domain
 
-        # A missing closing event leaves an opened unit-negative trajectory active
-        # from t=1 until deadline 4, yielding intermediate -3 and response exp(3).
+        # A missing B event leaves only the delivered A rail. Under the fixed -1
+        # drive this yields intermediate -(T_obs-t_A)=-3 and response exp(3).
         set_gaussian_time_noise(enabled=True, time_std=0.0, seed=603)
         delivered_open = SpikeSample(
             time=torch.tensor([1.0], dtype=torch.float64),
@@ -1531,8 +1534,9 @@ def verify_gaussian_division_function() -> None:
         assert zero_stats["exponential_difference.internal"]["misses"] == 0
 
         # X at the positive-domain floor encodes exactly at the log deadline while
-        # Y at the ceiling encodes at zero. Mean 0.5 misses only the numerator;
-        # the reset intermediate is then re-encoded with that same deterministic shift.
+        # Y at the ceiling encodes at zero. Mean 0.5 misses only the numerator rail;
+        # the delivered denominator rail produces p=T_log-0.5. Re-encoding p and
+        # applying the same +0.5 shift gives exponential input 1-T_log.
         set_gaussian_time_noise(
             enabled=True,
             time_std=0.0,
@@ -1547,7 +1551,12 @@ def verify_gaussian_division_function() -> None:
         )
         assert torch.allclose(
             numerator_miss,
-            torch.exp(torch.tensor([0.5], dtype=torch.float64)),
+            torch.exp(
+                torch.tensor(
+                    [1.0 - math.log(100.0)],
+                    dtype=torch.float64,
+                )
+            ),
         )
         assert numerator_miss_domain == zero_noise_domain
         numerator_stats = get_gaussian_noise_stats()
@@ -2112,13 +2121,14 @@ def verify_gaussian_spiking_conv1d() -> None:
 
 
 def verify_gaussian_spiking_layernorm() -> None:
-    """Verify LayerNorm ablation bypass, full parity, and nested miss reset.
+    """Verify LayerNorm ablations, signed log-event rails, and nested reset.
 
     LayerNorm can enable or bypass variance multiplication, logarithmic encoding,
     and exponential-difference decoding independently. The regression first proves
     that an entirely dense configuration samples no events even when Gaussian noise
-    is globally enabled. It then checks full-spiking zero-noise parity and forces all
-    nested events late to verify that the final learned affine stage retains its bias.
+    is globally enabled. It checks the direct exponential ablation against explicitly
+    reconstructed signed pulse widths, then checks full-spiking zero-noise parity and
+    forces all nested events late to verify the final learned affine reset value.
 
     Raises:
         AssertionError: If dense bypass, full-spiking parity, site topology,
@@ -2162,6 +2172,74 @@ def verify_gaussian_spiking_layernorm() -> None:
         assert torch.allclose(dense_output.value, dense_expected)
         assert get_gaussian_noise_stats() == {}
 
+        # Keep log encoding enabled while bypassing exponential difference. A fixed
+        # positive shift makes half of each residual rail miss while both shared sigma
+        # rails arrive, isolating the direct branch's symmetric pulse-width equation.
+        direct_exp_layer = SpikingLayerNorm(
+            4,
+            eps=1.0e-5,
+            theta=4.0,
+            tau_s=1.0,
+            clip_margin=0.1,
+            use_spiking_mul=False,
+            use_spiking_log=True,
+            use_spiking_expdiff=False,
+        ).to(dtype=torch.float64)
+        with torch.no_grad():
+            direct_exp_layer.weight.copy_(weight)
+            direct_exp_layer.bias.copy_(bias)
+
+        mean_shift = 0.75
+        set_gaussian_time_noise(
+            enabled=True,
+            time_std=0.0,
+            time_mean=mean_shift,
+            seed=1301,
+        )
+        direct_exp_output = direct_exp_layer(potential)
+        direct_exp_stats = get_gaussian_noise_stats()
+
+        # Reconstruct the nominal log times and deadline carriers independently from
+        # the production branch, then apply d_err-d_sigma before the direct exp call.
+        x_err = value - value.mean(dim=-1, keepdim=True)
+        domain_err = PotentialBounds(0.1, 3.9)
+        x_err_pos = domain_err.clamp(x_err)
+        x_err_neg = domain_err.clamp(-x_err)
+        var_x = (x_err_pos.square() + x_err_neg.square()).mean(
+            dim=-1,
+            keepdim=True,
+        ) + direct_exp_layer.eps
+        domain_var = PotentialBounds(domain_err.min ** 2, domain_err.max ** 2)
+        var_x = domain_var.clamp(var_x)
+        deadline = math.log(domain_err.max / domain_err.min)
+        nominal_sigma = 0.5 * torch.log(
+            value.new_tensor(domain_err.max ** 2) / var_x
+        )
+        nominal_pos = torch.log(value.new_tensor(domain_err.max) / x_err_pos)
+        nominal_neg = torch.log(value.new_tensor(domain_err.max) / x_err_neg)
+
+        def shifted_width(nominal_time: torch.Tensor) -> torch.Tensor:
+            shifted_time = nominal_time + mean_shift
+            fired = shifted_time <= deadline
+            stored_time = shifted_time.clamp(0.0, deadline)
+            return torch.where(
+                fired,
+                deadline - stored_time,
+                torch.zeros_like(stored_time),
+            )
+
+        sigma_width = shifted_width(nominal_sigma)
+        expected_result = torch.exp(
+            shifted_width(nominal_pos) - sigma_width
+        ) - torch.exp(
+            shifted_width(nominal_neg) - sigma_width
+        )
+        expected_direct_exp = weight * expected_result + bias
+        assert torch.allclose(direct_exp_output.value, expected_direct_exp)
+        assert direct_exp_stats["layernorm.log_sigma"]["misses"] == 0
+        assert direct_exp_stats["layernorm.log_positive"]["misses"] == 4
+        assert direct_exp_stats["layernorm.log_negative"]["misses"] == 4
+
         # Enable every spiking stage with identical learned parameters. Zero scale
         # must preserve the established deterministic composition while exposing the
         # precise event multiplicities of two variance products, three log encoders,
@@ -2186,7 +2264,12 @@ def verify_gaussian_spiking_layernorm() -> None:
         zero_noise = full_layer(potential)
         zero_stats = get_gaussian_noise_stats()
         assert torch.allclose(zero_noise.value, deterministic.value)
-        assert zero_noise.domain == deterministic.domain
+        assert bool(
+            (
+                (zero_noise.value >= zero_noise.domain.min)
+                & (zero_noise.value <= zero_noise.domain.max)
+            ).all()
+        )
         assert zero_stats["multiplication.data"]["events"] == 20
         assert zero_stats["multiplication.reference"]["events"] == 3
         assert zero_stats["layernorm.log_sigma"]["events"] == 2
@@ -2196,8 +2279,8 @@ def verify_gaussian_spiking_layernorm() -> None:
         assert all(site_stats["misses"] == 0 for site_stats in zero_stats.values())
 
         # A shift larger than the identity, log, and internal exponential windows
-        # prevents every sampled stage from firing. The final multiplication opening
-        # remains at reset, so only the learned LayerNorm bias reaches the output.
+        # prevents every sampled stage from firing. Both final multiplication rails
+        # remain at reset, so only the learned LayerNorm bias reaches the output.
         set_gaussian_time_noise(
             enabled=True,
             time_std=0.0,
@@ -2214,11 +2297,10 @@ def verify_gaussian_spiking_layernorm() -> None:
         assert forced_stats["exponential_difference.internal"]["misses"] == 16
 
         # Bias is broadcast over the batch after the reset-valued learned-weight
-        # product. LayerNorm currently derives its output domain from this observed
-        # tensor, so the all-miss interval must equal the bias extrema exactly.
+        # product. Noise never narrows the predeclared output rail to observed values.
         expected_bias = bias.expand_as(forced_late.value)
         assert torch.allclose(forced_late.value, expected_bias)
-        assert forced_late.domain == PotentialBounds(bias.min().item(), bias.max().item())
+        assert forced_late.domain == zero_noise.domain
         assert torch.isfinite(forced_late.value).all()
     finally:
         # Restore process-wide state before the attention regression.
@@ -2226,13 +2308,13 @@ def verify_gaussian_spiking_layernorm() -> None:
 
 
 def verify_gaussian_spiking_attention() -> None:
-    """Verify complete attention parity and miss-aware value integration.
+    """Verify complete attention parity and signed-PWM value integration.
 
     The end-to-end check covers score multiplication, softmin, and value readout on
     nontrivial query/key/value tensors. Separate calls to the maintained Gaussian
-    value helper isolate opening and shared-reference misses without allowing noisy
-    score events to obscure the expected weighted duration. Together they fix dense
-    parity, one reference event per call, reset contribution, and deadline readout.
+    value helper isolate data and shared-reference misses without allowing noisy
+    score events to obscure the expected weighted pulse width. Together they fix
+    dense parity, one reference event per call, and symmetric one-sided readout.
 
     Raises:
         AssertionError: If dense or zero-noise attention parity, value-event counts,
@@ -2317,8 +2399,8 @@ def verify_gaussian_spiking_attention() -> None:
         assert zero_stats["attention.value_reference"]["misses"] == 0
 
         # Fix attention weights explicitly so a lower-rail value shift can isolate
-        # opening misses. Every source/value trajectory stays at reset, making the
-        # weighted output exactly zero regardless of otherwise valid weights.
+        # data misses. Every value rail stays at reset, while the delivered reference
+        # rail supplies signed width -1.5; normalized weights preserve that value.
         fixed_weight = torch.tensor(
             [[[[0.2, 0.3, 0.5], [0.6, 0.1, 0.3]]]],
             dtype=torch.float64,
@@ -2338,7 +2420,8 @@ def verify_gaussian_spiking_attention() -> None:
             output_domain,
         )
         data_stats = get_gaussian_noise_stats()
-        assert torch.equal(data_miss, torch.zeros_like(data_miss))
+        expected_data_miss = torch.full_like(data_miss, -1.5)
+        assert torch.allclose(data_miss, expected_data_miss)
         assert data_stats["attention.value"]["misses"] == lower_value.numel()
         assert data_stats["attention.value_reference"]["misses"] == 0
 

@@ -13,10 +13,14 @@ Signed temporal differences must subtract two causal event-to-deadline PWM rails
 - [x] Apply symmetric signed-PWM pulse widths in `SpikingLinear._gaussian_forward` while retaining `torch.nn.functional.linear` as the accelerated evaluation of the complete PWM-MAC.
 - [x] Apply symmetric signed-PWM pulse widths in `SpikingConv2d._gaussian_forward` while retaining `torch.nn.functional.conv2d` as the accelerated grouped PWM-MAC.
 - [x] Apply symmetric signed-PWM pulse widths in GPT-2 `SpikingConv1D._gaussian_forward` while retaining its transposed `torch.addmm` contraction.
-- [ ] Apply symmetric rail readout to attention value integration while retaining its optimized matrix-multiplication kernel.
-- [ ] Migrate exponential difference to the signed wrapper.
-- [ ] Remove the algebraic single-rail PWM implementation after all maintained callers migrate.
-- [ ] Update the manuscript definition, proof, and SOP accounting for two parallel causal integration paths without duplicate encoder spikes.
+- [x] Apply symmetric signed-PWM pulse widths to attention value integration while retaining its optimized matrix-multiplication kernel.
+- [x] Migrate exponential difference to the signed wrapper with its physical fixed unit-negative drive and internal exponential reset stage unchanged.
+- [x] Apply the same symmetric pulse-width equation to LayerNorm's direct exponential ablation without introducing the disabled internal event.
+- [x] Migrate the noise-free `multiplication_operator` call site to signed PWM while retaining direct delivered-tensor evaluation.
+- [x] Migrate deterministic exponential difference to signed PWM with the same shared-deadline requirement as its event-aware path.
+- [x] Replace explicit deterministic affine and attention synapse tensors with optimized kernels that evaluate the same signed PWM reductions.
+- [x] Remove the algebraic single-rail PWM implementation and public export after all maintained callers migrate.
+- [ ] After the planned manuscript rewrite, update its definition, proof, and SOP accounting for two parallel causal integration paths without duplicate encoder spikes. This documentation-only task is intentionally deferred and does not block the maintained implementation.
 
 ## Static Bounds for All Operators
 

@@ -30,7 +30,7 @@ $$
 
 This mapping has four possible current paths from the two timing rails and the two drive signs, but only two accumulator rails. It is a physically plausible differential PWM realization, not an additional computation performed by the behavioral tensor implementation. Device mismatch, common-mode limits, capacitor reset, and differential sensing remain circuit-level concerns outside the maintained simulator.
 
-The signed wrapper returns one potential and derives its ideal range from the shared drive and signed time interval, avoiding the looser range obtained by treating deadline-terminated rails as independent. Existing model callers remain on [[utils/transforms/primitive.py#pulse_width_modulation_operator]] until each call site is migrated.
+The signed wrapper returns one potential and derives its ideal range from the shared drive and signed time interval, avoiding the looser range obtained by treating deadline-terminated rails as independent. The former algebraic single-rail helper has been removed; maintained callers now use these causal primitives or an explicitly equivalent optimized reduction.
 
 These functions evaluate the proposed rail behavior directly on tensors. They are not a circuit netlist, event router, deadline generator, or SPICE transient simulation.
 
@@ -38,7 +38,7 @@ These functions evaluate the proposed rail behavior directly on tensors. They ar
 
 Every event-driven operator must eventually produce the clamped potential physically present at the observation deadline, even when an expected spike never arrives.
 
-The new signed PWM primitive treats its two causal accumulator rails symmetrically: each delivered event contributes its time-to-deadline duration and each missed event contributes reset zero. Existing Gaussian operator call sites still use the older opening/closing trajectory documented in [[noise#Observation-Time Potential Invariant]] until they migrate to the signed wrapper one at a time.
+The signed PWM primitive treats its two causal accumulator rails symmetrically: each delivered event contributes its time-to-deadline duration and each missed event contributes reset zero. Multiplication, affine adapters, attention value integration, exponential difference, and LayerNorm's direct exponential ablation now follow the same invariant.
 
 Operator implementations may differ in their membrane trajectory, current kernel, or rail bounds, but not in this readout policy. A missed spike's stored deadline timestamp is metadata storage and cannot replace the physical state calculation.
 
@@ -52,7 +52,7 @@ The principal compositions live in `utils/transforms/functions.py`. They share a
 
 Multiplication encodes one operand as a latency and uses the other as the integrated potential.
 
-[[utils/transforms/functions.py#multiplication_operator]] clamps the encoded operand to `[-theta, theta]`, obtains `t = theta - B`, and integrates `V` from that event to `theta`. The resulting tensor is `V * B` under the ideal affine mapping.
+[[utils/transforms/functions.py#multiplication_operator]] clamps the encoded operand to `[-theta, theta]`, obtains $t=\theta-B$, and evaluates the delivered data time and scalar $\theta$ reference through signed PWM. The noise-free wrapper directly computes $V(\theta-t)=VB$ after algebraic deadline cancellation.
 
 Under maintained timing noise, the same function requests a decorated event for the encoded operand and one scalar zero-reference event for the operator call. It passes those existing samples to the signed PWM wrapper without resampling: each delivered event contributes its event-to-deadline rail and each miss contributes reset zero. The raw result is then saturation-counted and clamped to the original ideal product rails; no public Gaussian-specific multiplication API exists.
 
@@ -64,7 +64,7 @@ Division converts numerator and denominator to synchronized log latencies, then 
 
 The shared domain is essential because independent offsets would not cancel. Clamping, finite positive floors, and exponential implementation details determine where the simulated result is approximate.
 
-In maintained event-aware execution, division passes both decorated log events into exponential difference. That operator first computes and rail-clamps the physical integration state at $T_{\mathrm{obs}}$, re-encodes this finite state through the ordinary decorated `phi_NP`, and evaluates `psi_NE` only if the internal event arrives. An internal event miss leaves the exponential response at reset zero, so the noisy output envelope includes zero.
+In maintained event-aware execution, division passes both decorated log events into exponential difference. That operator applies a fixed unit-negative drive to the two causal signed-PWM rails, clamps the intermediate $t_A-t_B$ state, re-encodes it through the ordinary decorated `phi_NP`, and evaluates `psi_NE` only if the internal event arrives. Either external miss leaves the other rail visible; an internal event miss leaves the exponential response at reset zero, so the noisy output envelope includes zero.
 
 ### Exponential and Softmin
 
@@ -88,13 +88,13 @@ SwiGLU treats the exponential neuron’s deadline response as `biased_exp` and a
 
 Dense and convolutional layers retain pretrained parameters but express multiply-accumulate behavior through the PWM identity.
 
-[[utils/transformers/models/spiking_ops.py#SpikingLinear]] encodes its input once, broadcasts latency against the weight matrix, integrates, reduces the input dimension, and adds the original bias. [[utils/transformers/models/spiking_ops.py#SpikingConv2d]] applies the same principle after unfolding image patches.
+[[utils/transformers/models/spiking_ops.py#SpikingLinear]] encodes its input once and evaluates the complete signed PWM reduction with the optimized linear kernel. [[utils/transformers/models/spiking_ops.py#SpikingConv2d]] applies the same principle with the grouped convolution kernel.
 
 These classes subclass PyTorch’s corresponding modules so parameter names and shapes remain checkpoint-compatible. In the noise-free tensor simulation they are intended to be numerically equivalent subject to clamping and floating-point arithmetic.
 
 GPT-2 uses its own equivalent adapter, [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#SpikingConv1D]], to match Hugging Face’s transposed `Conv1D` parameter convention.
 
-When maintained timing noise is enabled, all three affine adapters obtain both data and layer-shared zero-reference events through the decorated encoder. They form the two causal pulse widths and evaluate the complete signed PWM-MAC with `torch.nn.functional.linear`, `torch.nn.functional.conv2d`, or GPT-2's transposed `torch.addmm` contraction. These optimized kernels replace explicit per-synapse PWM tensor expansion; the learned weights still represent the integration drives. Every adapter clamps the raw affine result to its declared output rails.
+In noise-free execution, the scalar zero-reference time cancels algebraically and the delivered signed width is passed to `torch.nn.functional.linear`, `torch.nn.functional.conv2d`, or GPT-2's transposed matrix contraction. Under maintained timing noise, all three affine adapters instead obtain data and layer-shared zero-reference events through the decorated encoder and form their two causal widths before calling the same kernels. These optimized reductions replace explicit per-synapse PWM tensor expansion; learned weights remain the integration drives. Every noisy adapter clamps the raw affine result to its declared output rails.
 
 ## Spiking LayerNorm
 
@@ -106,6 +106,8 @@ Three flags independently replace variance multiplication, log encoding, and exp
 
 The Gaussian path derives its output bounds without observing the current activation. The fully dense bypass uses the finite-feature bound $|z_i|\leq\sqrt{d-1}$, while mixed paths propagate exponential-difference ranges through subtraction and the learned affine map.
 
+When log encoding is enabled but exponential difference is bypassed, the method computes causal residual and sigma pulse widths directly and applies $\exp((d_{\mathrm{err}}-d_\sigma)/\tau_s)$. This preserves symmetric one-sided misses without sampling the disabled internal exponential event.
+
 The current implementation has finite-floor and clipping behavior described in [[domain#Signed Values and Dual Rails]]. Ideal algebraic exactness and finite implementation fidelity should be reported separately.
 
 ## Spiking Attention
@@ -116,7 +118,7 @@ Attention composes spiking projections, signed dot products, softmin normalizati
 
 [[utils/transformers/integrations/spiking_sdpa_attention.py#attention_output_bounds]] memoizes the immutable value-integration rail for each $\theta$ and configured maximum source length. Masked scores use the same finite upper endpoint declared to softmin, and Gaussian and noise-free readouts clamp against the common output rail.
 
-In maintained-noise execution, value and scalar zero-reference events come from the same decorated encoder used by affine PWM. Their physical durations are contracted with attention weights by matrix multiplication, avoiding an explicit `(L,S,D)` synapse tensor, and the observation-time output is clamped to its conservative summed rail envelope.
+In noise-free execution, the scalar zero-reference time cancels algebraically and matrix multiplication reduces the delivered signed value widths. Under maintained noise, value and scalar zero-reference events come from the same decorated encoder used by affine PWM. Each event supplies an independent causal pulse width, and a miss leaves only that rail at reset. The same matrix multiplication evaluates the complete attention-weight-driven signed PWM reduction while avoiding an explicit `(L,S,D)` synapse tensor. The raw observation-time output is then saturation-counted and clamped to its conservative summed rail envelope.
 
 [[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_sdpa_attention_forward]] adapts this implementation to the Hugging Face attention interface, including causal-mask selection and grouped-query compatibility checks. Grouped-query execution through the spiking kernel remains unsupported when native repetition cannot be used.
 
@@ -129,6 +131,6 @@ Every operator has domain conditions that are part of its contract rather than o
 - Division assumes the numerator does not exceed the denominator in its current contract.
 - Exponential paths require a bounded input range to avoid overflow or underflow.
 - Attention correctness assumes masks are broadcastable to the score tensor and suppressed before normalization.
-- Signed integration requires event order to be preserved.
+- Signed integration requires both causal rails to share one fixed observation deadline.
 
 Violating these conditions typically produces clipping, assertions, or a numerically valid but semantically different result. [[evaluation#Diagnostics and Instrumentation]] describes the available checks.

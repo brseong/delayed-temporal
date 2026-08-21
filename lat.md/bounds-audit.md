@@ -79,7 +79,7 @@ XY\in
 \right].
 $$
 
-[[utils/transforms/primitive.py#pulse_width_modulation_operator]]와 composed operator는 이 방식을 사용하므로 current activation extrema에 의존하지 않는다.
+[[utils/transforms/primitive.py#signed_pulse_width_modulation_operator]]와 composed operator는 이 방식을 사용하므로 current activation extrema에 의존하지 않는다.
 
 ### Affine projection
 
