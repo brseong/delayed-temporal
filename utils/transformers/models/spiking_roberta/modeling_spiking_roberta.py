@@ -44,6 +44,7 @@ from .configuration_roberta import RobertaConfig
 
 from utils.transforms.functions import gelu_approximation, tanh
 from utils.transforms.types import Potential, PotentialBounds
+from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear, _apply_norm
 
 logger = logging.get_logger(__name__)
@@ -188,6 +189,24 @@ class RobertaSelfAttention(nn.Module):
         self.layer_idx = layer_idx
 
     def forward(self, pot: Potential, attention_mask=None, **kwargs) -> tuple[Potential, torch.Tensor]:
+        """Apply RoBERTa self-attention with fixed backend-specific bounds.
+
+        The eager path remains a convex combination and retains the projected value
+        range. The spiking path derives one immutable output rail from ``theta`` and
+        the configured positional capacity, passes that capacity to the backend,
+        and attaches the same memoized domain to the reshaped context.
+
+        Args:
+            pot: Hidden states paired with their upstream potential bounds.
+            attention_mask: Optional boolean or additive suppression mask.
+            **kwargs: Additional Hugging Face attention controls forwarded unchanged.
+
+        Returns:
+            The attention context paired with its declared domain and the optional
+            attention weights returned by the selected backend.
+        """
+        # Preserve the Potential returned by each projection while reshaping only
+        # the tensor payload into the multi-head attention layout.
         batch_size = pot.value.shape[0]
         new_shape = batch_size, -1, self.num_attention_heads, self.attention_head_size
         
@@ -204,21 +223,49 @@ class RobertaSelfAttention(nn.Module):
             if self.config._attn_implementation in ALL_ATTENTION_FUNCTIONS:
                 attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
-        spiking_kwargs = {}
+        # Start with caller controls so spiking configuration can be installed once
+        # without duplicate keyword expansion at the dispatch boundary.
+        attention_kwargs = dict(kwargs)
+        context_domain = pot_v.domain
         if self.config._attn_implementation == "spiking_sdpa":
-            spiking_kwargs["theta"] = getattr(self.config, "theta", 10.0)
-            spiking_kwargs["tau_m"] = getattr(self.config, "tau_s", 1.0)
+            theta = float(getattr(self.config, "theta", 10.0))
+            source_length_max = int(self.config.max_position_embeddings)
+            attention_kwargs["theta"] = theta
+            attention_kwargs["tau_m"] = getattr(self.config, "tau_s", 1.0)
+            attention_kwargs["source_length_max"] = source_length_max
+            context_domain = attention_output_bounds(theta, source_length_max)
 
+        # Eager training dropout scales surviving normalized weights by 1/(1-p).
+        # Include zero plus both scaled value endpoints without reading its mask.
+        elif self.training and self.dropout.p > 0.0:
+            if self.dropout.p >= 1.0:
+                context_domain = PotentialBounds(0.0, 0.0)
+            else:
+                dropout_scale = 1.0 / (1.0 - self.dropout.p)
+                dropout_candidates = (
+                    0.0,
+                    float(context_domain.min) * dropout_scale,
+                    float(context_domain.max) * dropout_scale,
+                )
+                context_domain = PotentialBounds(
+                    min(dropout_candidates),
+                    max(dropout_candidates),
+                )
+
+        # The spiking backend receives exactly the configuration pair used for the
+        # returned range; eager execution receives the original caller kwargs.
         context_layer, attention_probs = attention_interface(
             self, query_layer, key_layer, value_layer, attention_mask,
             dropout=0.0 if not self.training else self.dropout.p,
             scaling=self.scaling,
-            **spiking_kwargs,
-            **kwargs,
+            **attention_kwargs,
         )
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.reshape(new_context_layer_shape)
-        return Potential(context_layer, pot_v.domain), attention_probs
+
+        # Head merging does not alter the numerical envelope, so retain the selected
+        # fixed domain rather than measuring the current attention output.
+        return Potential(context_layer, context_domain), attention_probs
 
 
 class RobertaSelfOutput(nn.Module):

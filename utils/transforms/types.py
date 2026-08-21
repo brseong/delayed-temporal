@@ -7,9 +7,15 @@ import torch
 from torch import Tensor
 from torch.types import Number
 
-@dataclass
+@dataclass(frozen=True)
 class OpenBounds:
-    """This class represents an open interval (min, max) where min and max are exclusive bounds for the input values."""
+    """Immutable declaration of an open interval with exclusive endpoints.
+
+    Bounds are physical and mathematical contracts carried through the operator
+    graph. Freezing their endpoints prevents calibration, memoization, or a later
+    forward pass from silently widening an interval after it has been declared.
+    Derived intervals must always be represented by newly constructed objects.
+    """
     min: Number # infimum of the domain, exclusive
     max: Number # supremum of the domain, exclusive
 

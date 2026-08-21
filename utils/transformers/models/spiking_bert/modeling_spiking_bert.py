@@ -45,6 +45,7 @@ from .configuration_bert import BertConfig
 
 from utils.transforms.functions import gelu_approximation, tanh
 from utils.transforms.types import Potential, PotentialBounds
+from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear, _apply_norm
 
 logger = logging.get_logger(__name__)
@@ -151,6 +152,24 @@ class BertSelfAttention(nn.Module):
         self.value = SpikingLinear(config.hidden_size, self.all_head_size, theta=_theta)
 
     def forward(self, pot: Potential, attention_mask=None) -> tuple[Potential, torch.Tensor]:
+        """Apply BERT self-attention with a backend-consistent output domain.
+
+        Eager attention preserves the projected-value domain because its normalized
+        weights form a convex combination. The spiking backend uses the model's
+        fixed positional capacity as ``S_max`` and shares one memoized output rail
+        between physical clamping and the returned ``Potential`` metadata.
+
+        Args:
+            pot: Hidden states paired with their declared potential bounds.
+            attention_mask: Optional BERT keep/suppression mask forwarded to the
+                selected attention implementation.
+
+        Returns:
+            The reshaped attention context with its fixed domain and the optional
+            attention weights returned by the selected backend.
+        """
+        # Project once into Q/K/V potentials, then expose the head dimension without
+        # discarding the value projection's domain used by the eager backend.
         batch_size = pot.value.shape[0]
         new_shape = batch_size, -1, self.num_attention_heads, self.attention_head_size
         pot_k = self.key(pot)
@@ -166,11 +185,37 @@ class BertSelfAttention(nn.Module):
             if self.config._attn_implementation in ALL_ATTENTION_FUNCTIONS:
                 attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
+        # Default to the convex-combination range. Only spiking attention replaces
+        # it with a source-capacity rail that is independent of the current sequence.
         kwargs = {}
+        context_domain = pot_v.domain
         if self.config._attn_implementation == "spiking_sdpa":
-            kwargs["theta"] = getattr(self.config, "theta", 10.0)
+            theta = float(getattr(self.config, "theta", 10.0))
+            source_length_max = int(self.config.max_position_embeddings)
+            kwargs["theta"] = theta
             kwargs["tau_m"] = getattr(self.config, "tau_s", 1.0)
+            kwargs["source_length_max"] = source_length_max
+            context_domain = attention_output_bounds(theta, source_length_max)
 
+        # Eager training dropout scales surviving normalized weights by 1/(1-p).
+        # Include zero plus both scaled value endpoints without observing its mask.
+        elif self.training and self.dropout_prob > 0.0:
+            if self.dropout_prob >= 1.0:
+                context_domain = PotentialBounds(0.0, 0.0)
+            else:
+                dropout_scale = 1.0 / (1.0 - self.dropout_prob)
+                dropout_candidates = (
+                    0.0,
+                    float(context_domain.min) * dropout_scale,
+                    float(context_domain.max) * dropout_scale,
+                )
+                context_domain = PotentialBounds(
+                    min(dropout_candidates),
+                    max(dropout_candidates),
+                )
+
+        # Backend clamping receives the same theta and S_max pair used above, so the
+        # memoized helper resolves to the identical immutable domain object.
         context_layer, attention_probs = attention_interface(
             self, query_layer, key_layer, value_layer, attention_mask,
             dropout=0.0 if not self.training else self.dropout_prob,
@@ -178,7 +223,10 @@ class BertSelfAttention(nn.Module):
         )
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.reshape(new_context_layer_shape)
-        return Potential(context_layer, pot_v.domain), attention_probs
+
+        # Merging attention heads changes only layout; keep the selected domain
+        # without inspecting the context tensor's runtime extrema.
+        return Potential(context_layer, context_domain), attention_probs
 
 
 class BertSelfOutput(nn.Module):

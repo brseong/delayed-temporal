@@ -58,6 +58,8 @@ The scripts pass a dimensionless `time_noise_std_frac`. Each evaluator converts 
 
 The maintained Gaussian model requires a seeded decorator-level regression check independent of model datasets and checkpoints.
 
+[[scripts/verification/verify_gaussian_time_noise.py#verify_immutable_memoized_bounds]] rejects mutation of potential and time endpoints and checks that equal attention configurations reuse one bounds object while distinct configurations remain separate.
+
 [[scripts/verification/verify_gaussian_time_noise.py#verify_broadcast_gaussian_time_inputs]] first locks the shared scalar/tensor broadcasting contract, including value alignment plus nominal dtype and device preservation.
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_time_input_validation]] rejects malformed domains, non-floating or non-finite times, negative scales, and nominal codewords outside the declared interval before sampling.
@@ -86,15 +88,15 @@ The maintained Gaussian model requires a seeded decorator-level regression check
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_swiglu_function]] checks current-bias cancellation on an asymmetric domain, exact zero-noise event topology, and reset-valued finite output when every nested event misses.
 
-[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_linear]] checks dense affine parity, one shared reference sample, opening-miss bias retention, and deadline integration after a reference miss.
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_linear]] checks dense affine parity, one shared reference sample, symmetric one-sided signed-PWM readout, and fixed affine output rails.
 
-[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_conv2d]] checks padded dense-convolution parity, one shared reference sample, opening-miss bias retention, and deadline integration over spatial inputs.
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_conv2d]] checks padded dense-convolution parity, one shared reference sample, symmetric one-sided signed-PWM readout, and fixed convolution output rails.
 
-[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_conv1d]] checks GPT-2’s transposed affine layout, arbitrary leading dimensions, shared-reference sampling, bias-only opening misses, and deadline readout.
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_conv1d]] checks GPT-2’s transposed affine layout, arbitrary leading dimensions, shared-reference sampling, symmetric one-sided signed-PWM readout, and fixed output rails.
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_layernorm]] checks the dense ablation’s event-free bypass, full-spiking zero-noise topology, and learned-bias output when every nested event misses.
 
-[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_attention]] checks dense end-to-end attention parity, one shared value reference, opening-miss reset, and reference-miss deadline integration with fixed weights.
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_attention]] checks dense end-to-end attention parity, an in-domain hard mask below the global cap, a request-independent maximum-source output rail, one shared value reference, opening-miss reset, and reference-miss deadline integration with fixed weights.
 
 The regression check covers the sampled distribution and deadline behavior plus affine, multiplication, exponential, exponential-difference, division, LayerNorm, softmin, attention value integration, and per-site counters. Operator checks retain noise-off parity paths and force opening, closing/reference, and internal exp-temporal cases where applicable.
 

@@ -10,6 +10,18 @@ This choice makes large pretrained Transformer evaluation tractable and exposes 
 
 Consequently, [[operators#Primitive PWM Integration]] documents a behavioral primitive, while the older [[architecture#Legacy Discrete-Time Subsystem]] is a separate explicit-time experiment rather than the execution engine for the current Transformer results.
 
+## Accelerated Affine PWM Evaluation
+
+Affine adapters state the PWM equation explicitly but evaluate its complete reduction with optimized PyTorch linear, convolution, or matrix-multiplication kernels.
+
+For a signed data/reference pulse-width pair, `SpikingLinear` evaluates
+
+$$
+y_j=\sum_i W_{ji}(d_{A,i}-d_B)+b_j
+$$
+
+with `torch.nn.functional.linear`. This is an algebraic acceleration of the complete PWM-MAC, not a unit-drive PWM stage followed by a separate dense layer. The learned weight $W_{ji}$ remains the physical integration drive, and the optimized kernel avoids materializing an output-by-input synapse tensor.
+
 ## Compose a Small Operator Vocabulary
 
 Complex Transformer functions are assembled from fixed encoding, integration, and exponential-difference patterns instead of assigning a custom temporal current kernel to each nonlinearity.

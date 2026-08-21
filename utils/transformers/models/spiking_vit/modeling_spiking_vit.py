@@ -42,6 +42,7 @@ from torch.profiler import profile, record_function, ProfilerActivity
 
 from utils.transforms.functions import gelu_approximation
 from utils.transforms.types import Potential, PotentialBounds
+from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import SpikingConv2d, SpikingLayerNorm, SpikingLinear, _apply_norm
 
 
@@ -230,10 +231,28 @@ class ViTSelfAttention(nn.Module):
         self.value = SpikingLinear(config.hidden_size, self.all_head_size, bias=config.qkv_bias, theta=_theta)
 
     def forward(self, pot: Potential) -> tuple[Potential, torch.Tensor]:
+        """Apply ViT self-attention and preserve the selected backend's domain.
+
+        Dense eager attention remains a convex combination of the projected value
+        vectors and therefore retains their incoming domain. The spiking backend
+        instead uses one immutable value-integration rail derived from ``theta`` and
+        the configured patch capacity. Passing the same configuration values to the
+        backend and the memoized range helper keeps its physical clamp and returned
+        ``Potential`` metadata identical without inspecting the current tensor.
+
+        Args:
+            pot: Hidden-state tensor paired with its declared potential bounds.
+
+        Returns:
+            The attention context with its backend-specific fixed domain and the
+            optional attention-weight tensor returned by the selected interface.
+        """
+        # Reshape the three learned projections into explicit head dimensions while
+        # retaining their Potential domains beside the underlying value tensors.
         batch_size = pot.value.shape[0]
         new_shape = batch_size, -1, self.num_attention_heads, self.attention_head_size
 
-        # Q/K/V 투영 — Potential → Potential (도메인 전파)
+        # Q/K/V projection preserves the existing Potential-based range propagation.
         pot_k: Potential = self.key(pot)
         pot_v: Potential = self.value(pot)
         pot_q: Potential = self.query(pot)
@@ -246,11 +265,59 @@ class ViTSelfAttention(nn.Module):
         if self.config._attn_implementation != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
+        # Eager attention is a normalized convex combination, so it retains the
+        # projected-value domain unless the spiking backend selects its wider rail.
         kwargs = {}
+        context_domain = pot_v.domain
         if self.config._attn_implementation == "spiking_sdpa":
-            kwargs["theta"] = getattr(self.config, "theta", 10.0)
+            theta = float(getattr(self.config, "theta", 10.0))
+            kwargs["theta"] = theta
             kwargs["tau_m"] = getattr(self.config, "tau_s", 1.0) # Use tau_s as default fallback for tau_m
 
+            # ViT's fixed source maximum is the configured patch grid plus one class
+            # token. Runtime image interpolation beyond this capacity is rejected by
+            # the backend instead of silently widening its physical output rail.
+            image_size = self.config.image_size
+            patch_size = self.config.patch_size
+            image_hw = (
+                tuple(image_size)
+                if isinstance(image_size, collections.abc.Iterable)
+                else (image_size, image_size)
+            )
+            patch_hw = (
+                tuple(patch_size)
+                if isinstance(patch_size, collections.abc.Iterable)
+                else (patch_size, patch_size)
+            )
+            source_length_max = (
+                (int(image_hw[0]) // int(patch_hw[0]))
+                * (int(image_hw[1]) // int(patch_hw[1]))
+                + 1
+            )
+            kwargs["source_length_max"] = source_length_max
+            context_domain = attention_output_bounds(theta, source_length_max)
+
+        # Dense attention dropout independently removes normalized weights and
+        # scales survivors. During training its weighted sum includes zero and both
+        # projected-value endpoints scaled by 1/(1-p); evaluation remains unchanged.
+        elif self.training and self.dropout_prob > 0.0:
+            if self.dropout_prob >= 1.0:
+                context_domain = PotentialBounds(0.0, 0.0)
+            else:
+                dropout_scale = 1.0 / (1.0 - self.dropout_prob)
+                dropout_candidates = (
+                    0.0,
+                    float(context_domain.min) * dropout_scale,
+                    float(context_domain.max) * dropout_scale,
+                )
+                context_domain = PotentialBounds(
+                    min(dropout_candidates),
+                    max(dropout_candidates),
+                )
+
+        # The selected attention implementation consumes the same fixed maximum used
+        # above; the shared helper cache returns the identical immutable domain in the
+        # spiking backend when it clamps the value-integration output.
         context_layer, attention_probs = attention_interface(
             self, query_layer, key_layer, value_layer, None,
             is_causal=self.is_causal,
@@ -261,8 +328,9 @@ class ViTSelfAttention(nn.Module):
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.reshape(new_context_layer_shape)
 
-        # Attention 출력은 value 벡터들의 볼록 결합 → 도메인은 value 도메인
-        return Potential(context_layer, pot_v.domain), attention_probs
+        # Reshaping merges heads but does not change numerical endpoints, so attach
+        # the domain selected before dispatch without measuring the context tensor.
+        return Potential(context_layer, context_domain), attention_probs
 
 
 class ViTSelfOutput(nn.Module):

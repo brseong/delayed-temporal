@@ -1,6 +1,7 @@
 import torch
 import math
 import wandb
+from functools import cache
 from typing import cast
 
 from transformers.utils.import_utils import is_torch_greater_or_equal
@@ -39,10 +40,59 @@ def use_gqa_in_sdpa(attention_mask: torch.Tensor | None, key: torch.Tensor) -> b
     return _is_torch_greater_or_equal_than_2_5 and attention_mask is None
 
 
+@cache
+def attention_output_bounds(
+    theta: float,
+    source_length_max: int,
+) -> PotentialBounds:
+    """Return the fixed potential rails for attention value integration.
+
+    Each source weight is constrained to ``[0, 1]`` and each encoded value uses
+    the symmetric ``[-theta, theta]`` rail. Summing over the configured maximum
+    source length defines one ideal output rail that is independent of the current
+    request length and of whether Gaussian timing noise is enabled. Identical
+    configuration pairs reuse the same immutable bounds object. Noisy raw readouts
+    outside that rail are counted as saturation before they are clamped.
+
+    Args:
+        theta: Positive finite magnitude of the symmetric value rail.
+        source_length_max: Positive configured maximum number of source positions.
+
+    Returns:
+        The symmetric fixed attention-output envelope
+        ``[-source_length_max * theta, source_length_max * theta]``.
+
+    Raises:
+        TypeError: If ``source_length_max`` is not an integer.
+        ValueError: If either input cannot define finite, non-empty output rails.
+    """
+    # Validate configuration values before multiplying them so malformed model
+    # metadata cannot silently become a request-dependent or infinite domain.
+    theta_value = float(theta)
+    if not math.isfinite(theta_value) or theta_value <= 0.0:
+        raise ValueError("attention theta must be finite and positive")
+    if isinstance(source_length_max, bool) or not isinstance(
+        source_length_max,
+        int,
+    ):
+        raise TypeError("attention source_length_max must be an integer")
+    if source_length_max <= 0:
+        raise ValueError("attention source_length_max must be positive")
+
+    # Form the rail once from the configured maximum rather than inspecting the
+    # current key/value tensor shape. Reject overflow before constructing the object
+    # retained by the process-local memoization table.
+    output_max = theta_value * source_length_max
+    if not math.isfinite(output_max):
+        raise ValueError("attention output bound must be finite")
+    return PotentialBounds(-output_max, output_max)
+
+
 def _gaussian_attention_value_readout(
     value_clamped: torch.Tensor,
     attn_weight: torch.Tensor,
     domain_v: PotentialBounds,
+    output_domain: PotentialBounds,
 ) -> torch.Tensor:
     """Read attention values from Gaussian opening and reference events.
 
@@ -57,6 +107,8 @@ def _gaussian_attention_value_readout(
         value_clamped: Value tensor already restricted to the symmetric TTFS rail.
         attn_weight: Attention weights whose source dimension matches the values.
         domain_v: Fixed symmetric value domain defining the identity-code window.
+        output_domain: Fixed attention-output rail derived from the configured
+            maximum source length, not the current tensor shape.
 
     Returns:
         The physical observation-time attention output clamped to its conservative
@@ -128,14 +180,8 @@ def _gaussian_attention_value_readout(
     bounded_weight = attn_weight.clamp(0.0, 1.0)
     attn_output = torch.matmul(bounded_weight, duration)
 
-    # Independent source weights conservatively sum at most one theta-wide value
-    # per source position. Record raw saturation before enforcing these ideal rails.
-    source_length = int(value_clamped.size(-2))
-    theta = max(abs(float(domain_v.min)), abs(float(domain_v.max)))
-    output_domain = PotentialBounds(
-        -theta * source_length,
-        theta * source_length,
-    )
+    # The caller supplies one configuration-derived envelope for every request.
+    # Record raw saturation before enforcing those fixed ideal output rails.
     return clamp_gaussian_output(
         attn_output,
         output_domain,
@@ -154,6 +200,7 @@ def spiking_scaled_dot_product_attention(
     tau_m: float = 1.0,
     theta: float = 10.0,
     training: bool = False,
+    source_length_max: int | None = None,
 ) -> torch.Tensor:
     """Evaluate scaled dot-product attention with spiking compositions.
 
@@ -174,18 +221,34 @@ def spiking_scaled_dot_product_attention(
         tau_m: Temporal scale used by the softmin composition.
         theta: Symmetric potential rail used by affine TTFS encoders.
         training: Training-state flag forwarded to deterministic value encoding.
+        source_length_max: Configured source-position maximum used to derive one
+            output rail for every request handled by this attention module.
 
     Returns:
         Attention output shaped ``(batch, heads, target, value_features)``.
 
     Raises:
         NotImplementedError: If grouped-query attention is requested directly.
+        ValueError: If the configured source maximum is absent or shorter than the
+            current key/value sequence.
     """
 
     L, S = query.size(-2), key.size(-2)
 
     if enable_gqa:
         raise NotImplementedError("GQA is not implemented yet.")
+
+    # A fixed physical output rail requires an explicit configuration maximum.
+    # Current tensor length may validate that contract but must never define it.
+    if source_length_max is None:
+        raise ValueError("attention source_length_max must be configured")
+    output_domain = attention_output_bounds(theta, source_length_max)
+    if int(value.size(-2)) != S:
+        raise ValueError("attention key and value source lengths must match")
+    if S > source_length_max:
+        raise ValueError(
+            "attention source length exceeds configured source_length_max"
+        )
 
     # Build a boolean mask of positions to suppress, then hard-overwrite scores at those positions.
     masked_pos = None
@@ -226,7 +289,7 @@ def spiking_scaled_dot_product_attention(
 
     # Hard overwrite: force masked scores to a fixed suppressing value.
     if masked_pos is not None:
-        attn_score = torch.where(masked_pos, _SOFTMIN_CAP, attn_score)
+        attn_score = torch.where(masked_pos, softmin_cap, attn_score)
 
     # softmin(f_SDP, τ_m) = softmax(dot(q,k)/(τ_m·√d_k))
     attn_weight, _ = softmin_function(attn_score, score_bound, tau_s=tau_m, domain_shift=softmin_cap)
@@ -256,6 +319,7 @@ def spiking_scaled_dot_product_attention(
             value_clamped,
             attn_weight,
             domain_v,
+            output_domain,
         )
 
     # Noise-free execution preserves the original explicit PWM composition and its
@@ -287,7 +351,10 @@ def spiking_scaled_dot_product_attention(
     # output_error = (attn_output - torch_output).abs().max().item()
     # print(f"[DEBUG] Final output vs torch.matmul max diff: {output_error:.6f}")
 
-    return attn_output
+    # Noise-free and Gaussian execution share the same configured physical rail.
+    # Clamping here keeps the returned tensor consistent with the domain that model
+    # adapters will attach in the following integration step.
+    return output_domain.clamp(attn_output, name="attention_value_output")
 
 def spiking_sdpa_attention_forward(
     module: torch.nn.Module,
@@ -326,6 +393,35 @@ def spiking_sdpa_attention_forward(
 
     # Note: L2Net을 훈련하기 위해 사용하던 불필요한 로깅 제거 및 dropout 처리 정규화
     dropout_prob = dropout if module.training else 0.0
+
+    # Prefer an evaluator-supplied fixed maximum. Standard text models otherwise
+    # use their configured position capacity, which remains request-independent.
+    source_length_max = kwargs.get("source_length_max")
+    config = getattr(module, "config", None)
+    if source_length_max is None and config is not None:
+        source_length_max = getattr(config, "max_position_embeddings", None)
+
+    # ViT has no max-position field, so derive its fixed token capacity from the
+    # configured image and patch geometry, including the class token.
+    if source_length_max is None and config is not None:
+        image_size = getattr(config, "image_size", None)
+        patch_size = getattr(config, "patch_size", None)
+        if image_size is not None and patch_size is not None:
+            image_hw = (
+                (image_size, image_size)
+                if isinstance(image_size, int)
+                else tuple(image_size)
+            )
+            patch_hw = (
+                (patch_size, patch_size)
+                if isinstance(patch_size, int)
+                else tuple(patch_size)
+            )
+            source_length_max = (
+                (int(image_hw[0]) // int(patch_hw[0]))
+                * (int(image_hw[1]) // int(patch_hw[1]))
+                + 1
+            )
     
     attn_output = spiking_scaled_dot_product_attention(
         query,
@@ -337,6 +433,7 @@ def spiking_sdpa_attention_forward(
         tau_m=kwargs.get("tau_m", 1.0),
         theta=kwargs.get("theta", 10.0),
         training=module.training,
+        source_length_max=source_length_max,
         **sdpa_kwargs,
     )
     

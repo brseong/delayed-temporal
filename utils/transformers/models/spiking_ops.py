@@ -95,14 +95,16 @@ class SpikingLayerNorm(nn.Module):
         self.bias = nn.Parameter(torch.zeros(self.normalized_shape))
 
     def _gaussian_forward(self, pot: Potential) -> Potential:
-        """Evaluate LayerNorm while preserving Gaussian event delivery state.
+        """Evaluate LayerNorm with event-aware timing and fixed output bounds.
 
         The three ablation switches retain their existing meanings. Enabled
         spiking stages use the event-aware operators, while disabled stages use
         their direct PyTorch formulas. When logarithmic encoding is enabled but
         exponential-difference decoding is disabled, this method explicitly
         resolves opening and closing misses at the shared observation deadline
-        before applying the direct exponential formula.
+        before applying the direct exponential formula. Every returned interval is
+        derived from feature count, declared operator bounds, or learned affine
+        parameters; the current activation tensor is never measured to define it.
 
         Args:
             pot: Input activation tensor paired with its calibrated bounds.
@@ -114,12 +116,13 @@ class SpikingLayerNorm(nn.Module):
             RuntimeError: If an event-aware logarithmic encoder does not return a
                 ``SpikeSample``.
             ValueError: If logarithmic samples participating in one temporal
-                difference do not share an observation deadline.
+                difference do not share an observation deadline, or if an
+                analytically propagated exponential endpoint is non-finite.
         """
         x: torch.Tensor = pot.value
 
         # With every spiking stage disabled there is no temporal event boundary at
-        # which Gaussian noise can act, so preserve the exact dense LayerNorm path.
+        # which Gaussian noise can act, so preserve the exact dense LayerNorm value.
         if (
             not self.use_spiking_mul
             and not self.use_spiking_log
@@ -132,10 +135,26 @@ class SpikingLayerNorm(nn.Module):
                 self.bias,
                 self.eps,
             )
-            return Potential(
-                out,
-                PotentialBounds(out.min().item(), out.max().item()),
+
+            # For d normalized features, the centered population-normalized value
+            # satisfies |z_i| <= sqrt(d - 1); a non-negative epsilon only contracts
+            # that envelope. This gives a batch-independent alternative to observing
+            # the dense output extrema, including the exact zero rail when d == 1.
+            feature_count = math.prod(self.normalized_shape)
+            normalized_limit = math.sqrt(max(feature_count - 1, 0))
+
+            # Apply each learned gamma and beta to both normalized endpoints before
+            # reducing across features. Parameter inspection is checkpoint state,
+            # not activation calibration, and preserves negative gamma correctly.
+            weight = self.weight.detach()
+            bias = self.bias.detach()
+            lower_candidate = weight * -normalized_limit + bias
+            upper_candidate = weight * normalized_limit + bias
+            dense_domain = PotentialBounds(
+                torch.minimum(lower_candidate, upper_candidate).min().item(),
+                torch.maximum(lower_candidate, upper_candidate).max().item(),
             )
+            return Potential(out, dense_domain)
 
         eps = self.eps
         clip_margin = self.clip_margin
@@ -228,14 +247,14 @@ class SpikingLayerNorm(nn.Module):
         if self.use_spiking_expdiff:
             # The event-aware operator owns opening-miss reset, closing-miss deadline
             # integration, internal exponential misses, and output saturation stats.
-            y_pos, _ = exponential_difference_operator(
+            y_pos, domain_y_pos = exponential_difference_operator(
                 t_err_pos,
                 tb_err,
                 t_sigma,
                 tb_sigma,
                 tau_s=tau_s,
             )
-            y_neg, _ = exponential_difference_operator(
+            y_neg, domain_y_neg = exponential_difference_operator(
                 t_err_neg,
                 tb_err,
                 t_sigma,
@@ -244,18 +263,36 @@ class SpikingLayerNorm(nn.Module):
             )
             result = y_pos - y_neg
 
+            # Both exponential-difference outputs are non-negative dual-rail
+            # magnitudes. Ignore their positive lower endpoints deliberately and
+            # use one relaxed symmetric rail: the signed difference cannot exceed
+            # either magnitude's largest declared upper endpoint in absolute value.
+            result_limit = max(domain_y_pos.max, domain_y_neg.max)
+            result_domain = PotentialBounds(-result_limit, result_limit)
+
             # Retain the existing spiking affine rescaling used by this ablation.
-            # Its Gaussian dispatcher samples the learned-weight multiplication.
-            out = multiplication_operator(
+            # Its Gaussian dispatcher samples the learned-weight multiplication and
+            # returns the fixed product rail used for final affine propagation.
+            weight_domain = PotentialBounds(
+                self.weight.detach().min().item(),
+                self.weight.detach().max().item(),
+            )
+            scaled, scaled_domain = multiplication_operator(
                 result,
-                PotentialBounds(result.min().item(), result.max().item()),
+                result_domain,
                 self.weight,
-                PotentialBounds(
-                    self.weight.min().item(),
-                    self.weight.max().item(),
-                ),
+                weight_domain,
                 theta,
-            )[0] + self.bias
+            )
+            out = scaled + self.bias
+
+            # Bias addition translates the product interval. Global bias endpoints
+            # are sufficient because every feature receives one fixed learned bias.
+            bias = self.bias.detach()
+            out_domain = PotentialBounds(
+                scaled_domain.min + bias.min().item(),
+                scaled_domain.max + bias.max().item(),
+            )
         else:
             if isinstance(t_sigma, SpikeSample):
                 # All three log encoders describe one physical readout and must use
@@ -305,12 +342,53 @@ class SpikingLayerNorm(nn.Module):
                 y_pos = torch.exp((t_sigma - t_err_pos) / tau_s)
                 y_neg = torch.exp((t_sigma - t_err_neg) / tau_s)
 
+            # Both delivered times lie in declared windows. A missed opening event
+            # explicitly contributes delta=0, so include zero before exponentiating
+            # the complete temporal-difference interval monotonically.
+            delta_min = min(
+                0.0,
+                float(tb_sigma.min) - float(tb_err.max),
+            )
+            delta_max = max(
+                0.0,
+                float(tb_sigma.max) - float(tb_err.min),
+            )
+            exponential_endpoints = torch.exp(
+                x.new_tensor([delta_min / tau_s, delta_max / tau_s])
+            )
+            if not bool(torch.isfinite(exponential_endpoints).all()):
+                raise ValueError(
+                    "LayerNorm exponential bounds must be finite in the activation dtype"
+                )
+            y_domain = PotentialBounds(
+                exponential_endpoints[0].item(),
+                exponential_endpoints[1].item(),
+            )
+
+            # Positive and negative rails share the same exponential envelope. Their
+            # difference therefore has a fixed signed interval independent of the
+            # sampled delivery masks and of the current normalized activation.
             result = y_pos - y_neg
+            result_domain = PotentialBounds(
+                y_domain.min - y_domain.max,
+                y_domain.max - y_domain.min,
+            )
             out = self.weight * result + self.bias
 
-        # LayerNorm has no fixed pretrained output rail; preserve the existing exact
-        # observed interval so downstream bound propagation stays synchronized.
-        out_domain = PotentialBounds(out.min().item(), out.max().item())
+            # Propagate the signed result through each feature's learned affine map.
+            # Evaluating both endpoints handles either sign of gamma without using
+            # activation extrema; reducing afterward yields one scalar module rail.
+            weight = self.weight.detach()
+            bias = self.bias.detach()
+            lower_candidate = weight * float(result_domain.min) + bias
+            upper_candidate = weight * float(result_domain.max) + bias
+            out_domain = PotentialBounds(
+                torch.minimum(lower_candidate, upper_candidate).min().item(),
+                torch.maximum(lower_candidate, upper_candidate).max().item(),
+            )
+
+        # Values and metadata now share a predeclared mathematical envelope for all
+        # Gaussian ablation combinations; no forward-pass observation widens it.
         return Potential(out, out_domain)
     
     def forward(self, pot: Potential) -> Potential:
@@ -429,10 +507,9 @@ class SpikingLinear(nn.Linear):
         """Evaluate the affine layer from sampled data and reference events.
 
         ``encoded_x`` must already be clamped to the layer's symmetric identity-code
-        domain. Every data element receives an opening event, while one scalar
-        zero-reference event is shared across the entire layer invocation. Data
-        misses contribute no synaptic integration; a reference miss leaves delivered
-        data trajectories active until the fixed observation deadline.
+        domain. Every data element and one scalar zero-reference event supply the two
+        causal rails of a signed PWM readout. Each missed event leaves its own rail at
+        reset, while the delivered rail remains observable at the fixed deadline.
 
         Args:
             x: Original input tensor used for dtype, device, and scalar allocation.
@@ -473,23 +550,35 @@ class SpikingLinear(nn.Linear):
                 "Gaussian SpikingLinear reference must return SpikeSample"
             )
 
-        # A delivered reference closes every active trajectory at its sampled time;
-        # a miss instead reads those trajectories at TimeBounds.max.
+        # Convert the two sampled events into causal pulse widths measured against
+        # the same observation deadline. Each miss leaves only its own physical rail
+        # at reset; no event ordering or additional sampling is introduced here.
         deadline = data_event.time.new_tensor(float(data_event.domain.max))
-        stop_time = torch.where(
-            reference_event.fired,
-            reference_event.time,
-            deadline,
-        )
-
-        # Opening misses retain reset contribution zero. Apply the learned affine map
-        # to delivered durations so the original bias remains an independent offset.
-        duration = torch.where(
+        data_pulse_width = torch.where(
             data_event.fired,
-            stop_time - data_event.time,
+            (deadline - data_event.time).clamp_min(0.0),
             torch.zeros_like(data_event.time),
         )
-        y = nn.functional.linear(duration, self.weight, self.bias)
+        reference_pulse_width = torch.where(
+            reference_event.fired,
+            (deadline - reference_event.time).clamp_min(0.0),
+            torch.zeros_like(reference_event.time),
+        )
+        signed_pulse_width = data_pulse_width - reference_pulse_width
+
+        # This optimized kernel evaluates the complete PWM-MAC directly:
+        # y_j = sum_i W_ji * (d_Ai - d_B) + b_j. It replaces only the explicit
+        # per-synapse tensor expansion; the weights remain the physical PWM drives.
+        # The conceptually equivalent, deliberately unmaterialized inner operation is:
+        #
+        # pwm_ji, _ = signed_pulse_width_modulation_operator(
+        #     data_event_i, data_event.domain,
+        #     reference_event, reference_event.domain,
+        #     self.weight[j, i], domain_W,
+        #     observation_deadline=float(data_event.domain.max),
+        # )
+        # y_j = sum_i(pwm_ji) + bias_j
+        y = nn.functional.linear(signed_pulse_width, self.weight, self.bias)
 
         # Timing noise does not expand the calibrated ideal affine rails. Form every
         # weight/input endpoint product, then reduce over the full input fan-in.
@@ -504,8 +593,9 @@ class SpikingLinear(nn.Linear):
             max(product_candidates) * self.in_features,
         )
 
-        # Bias is part of both the physical affine output and its declared interval,
-        # even when every opening event misses and synaptic contribution stays zero.
+        # Bias is part of both the physical affine output and its declared interval.
+        # It remains independent of the differential synaptic contribution, including
+        # the nonzero contribution that a surviving rail may produce after one miss.
         if self.bias is not None:
             domain_y = PotentialBounds(
                 domain_y.min + self.bias.min().item(),
@@ -605,11 +695,11 @@ class SpikingConv2d(nn.Conv2d):
     ) -> Potential:
         """Evaluate convolution from sampled data and shared reference events.
 
-        Every encoded input element supplies an opening event, while one scalar
-        zero-reference event is shared by the entire convolution invocation. The
-        resulting physical integration duration is passed directly to PyTorch's
-        grouped convolution kernel, preserving stride, padding, dilation, learned
-        bias, and checkpoint-compatible parameter layout.
+        Every encoded input element and one scalar zero-reference event supply the
+        two causal rails of a signed PWM readout. Their signed pulse width is passed
+        directly to PyTorch's grouped convolution kernel, which accelerates the full
+        PWM-MAC while preserving stride, padding, dilation, learned bias, and the
+        checkpoint-compatible parameter layout.
 
         Args:
             x: Original input tensor used for metadata and scalar allocation.
@@ -650,24 +740,36 @@ class SpikingConv2d(nn.Conv2d):
                 "Gaussian SpikingConv2d reference must return SpikeSample"
             )
 
-        # A reference miss keeps every opened trajectory active until the observation
-        # deadline. A delivered scalar reference closes all of them at one sampled time.
+        # Convert both sampled events into causal pulse widths against one deadline.
+        # Missing data or reference events independently leave their own rail at reset,
+        # so the surviving rail retains its signed observation-time contribution.
         deadline = data_event.time.new_tensor(float(data_event.domain.max))
-        stop_time = torch.where(
-            reference_event.fired,
-            reference_event.time,
-            deadline,
-        )
-
-        # Data misses retain zero synaptic contribution; delivered events keep their
-        # signed durations. Zero padding in conv2d then represents padded zero potential.
-        duration = torch.where(
+        data_pulse_width = torch.where(
             data_event.fired,
-            stop_time - data_event.time,
+            (deadline - data_event.time).clamp_min(0.0),
             torch.zeros_like(data_event.time),
         )
+        reference_pulse_width = torch.where(
+            reference_event.fired,
+            (deadline - reference_event.time).clamp_min(0.0),
+            torch.zeros_like(reference_event.time),
+        )
+        signed_pulse_width = data_pulse_width - reference_pulse_width
+
+        # The optimized convolution evaluates the complete per-receptive-field PWM
+        # reduction. Conceptually, each unmaterialized synapse is equivalent to:
+        #
+        # pwm_synapse, _ = signed_pulse_width_modulation_operator(
+        #     data_event_at_input, data_event.domain,
+        #     reference_event, reference_event.domain,
+        #     self.weight[out_channel, in_channel, kh, kw], domain_W,
+        #     observation_deadline=float(data_event.domain.max),
+        # )
+        # y = sum_receptive_field(pwm_synapse) + bias
+        #
+        # Ordinary conv2d zero padding remains a zero-potential input outside the image.
         y = nn.functional.conv2d(
-            duration,
+            signed_pulse_width,
             self.weight,
             self.bias,
             self.stride,
@@ -695,8 +797,8 @@ class SpikingConv2d(nn.Conv2d):
             max(product_candidates) * fan_in,
         )
 
-        # Bias shifts both the physical value and its declared rails, including the
-        # all-data-missed case where the convolutional contribution remains zero.
+        # Bias shifts both the physical value and its declared rails. It remains
+        # independent of any nonzero contribution left by a surviving one-sided rail.
         if self.bias is not None:
             domain_y = PotentialBounds(
                 domain_y.min + self.bias.min().item(),

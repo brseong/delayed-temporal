@@ -2,9 +2,27 @@
 
 This file tracks concrete follow-up work that is intentionally deferred from the maintained architecture and operator implementation.
 
+## Causal Signed PWM Migration
+
+Signed temporal differences must subtract two causal event-to-deadline PWM rails so neither physical path integrates backward or requires event-order detection.
+
+- [x] Add an unsigned PWM primitive that integrates one event to a fixed future observation deadline and derives bounds from declared endpoints.
+- [x] Add a signed PWM wrapper that reuses one deadline and drive across both event rails so the deadline cancels on subtraction.
+- [x] Extend the signed composition to shared `SpikeSample` inputs with symmetric one-sided-miss readout at the observation deadline, without resampling either event.
+- [x] Migrate Gaussian multiplication to the signed wrapper while preserving its ideal product bounds and output saturation site.
+- [x] Apply symmetric signed-PWM pulse widths in `SpikingLinear._gaussian_forward` while retaining `torch.nn.functional.linear` as the accelerated evaluation of the complete PWM-MAC.
+- [x] Apply symmetric signed-PWM pulse widths in `SpikingConv2d._gaussian_forward` while retaining `torch.nn.functional.conv2d` as the accelerated grouped PWM-MAC.
+- [x] Apply symmetric signed-PWM pulse widths in GPT-2 `SpikingConv1D._gaussian_forward` while retaining its transposed `torch.addmm` contraction.
+- [ ] Apply symmetric rail readout to attention value integration while retaining its optimized matrix-multiplication kernel.
+- [ ] Migrate exponential difference to the signed wrapper.
+- [ ] Remove the algebraic single-rail PWM implementation after all maintained callers migrate.
+- [ ] Update the manuscript definition, proof, and SOP accounting for two parallel causal integration paths without duplicate encoder spikes.
+
 ## Static Bounds for All Operators
 
 Every maintained operator must use bounds fixed before inference; a forward pass must never define its own physical rails from values it has already produced.
+
+The completed source audit, formulas, model-family inventory, and all execution cases are documented in [[bounds-audit]].
 
 ### Why Static Bounds Are Required
 
@@ -24,6 +42,8 @@ The required order is: load or calibrate static input envelopes, derive conserva
 
 Calibration runs with timing noise disabled and is identified by stable operator sites. A checkpoint change, static parameter perturbation, preprocessing change, model-family change, or ablation-path change invalidates the affected calibration and requires rebuilding it before evaluation.
 
+Calibration uncertainty is an engineering tolerance rather than a reason to restore runtime extrema. Each site should store signed lower and upper bounds obtained from representative extrema or quantiles, enlarge them by a documented margin, and report calibration-set and evaluation-set clipping rates. The margin may cover moderate distribution variation, but it must not conceal a domain-propagation error, an invalid operator condition, an attention-mask value outside its declared range, or a Gaussian deadline-miss case. Those cases require analytic interval bounds or a direct implementation fix, and inference must never widen a calibrated bound after observing an activation.
+
 ### Acceptance Criteria
 
 The migration is complete only when static-domain behavior is invariant under evaluation batching and all runtime extrema-derived domain construction has left maintained paths.
@@ -38,7 +58,7 @@ The migration is complete only when static-domain behavior is invariant under ev
 
 The implementation work covers every maintained transform and model adapter, not only LayerNorm or operators that directly emit spikes.
 
-- [ ] Audit every maintained `PotentialBounds` and `TimeBounds` construction, including model inputs, embeddings, residuals, normalization, activations, attention, projections, and task readouts; no forward may infer a domain from the current tensor's extrema.
+- [x] Audit every maintained `PotentialBounds` and `TimeBounds` construction, including model inputs, embeddings, residuals, normalization, activations, attention, projections, and task readouts; the remaining violations are listed in [[bounds-audit#전수 검색 결과]].
 - [ ] Prefer operator-derived interval arithmetic whenever the input bounds and transformation provide a conservative static result.
 - [ ] For paths without a practical analytic envelope, record per-site minima and maxima during a representative noise-free calibration run.
 - [ ] Persist stable site identifiers together with the checkpoint, dataset split, preprocessing, model family, and active ablation configuration used for calibration.
@@ -47,4 +67,8 @@ The implementation work covers every maintained transform and model adapter, not
 - [ ] Clamp every out-of-envelope value against its fixed bound and report underflow and overflow counts without widening that bound at runtime.
 - [ ] Include LayerNorm's pre-affine normalized result in calibration, then derive its post-affine envelope by interval arithmetic from fixed scale and bias endpoints.
 - [ ] Keep spike-time windows configuration-derived: LayerNorm log windows remain fixed by `clip_margin`, `theta`, and `tau_s`, while affine identity encoding remains on its declared symmetric interval.
+- [x] Make declared potential and time bounds immutable so cached or propagated endpoints cannot be widened in place.
+- [x] Keep masked attention scores inside the declared softmin range and clamp both Gaussian and noise-free value readouts to a rail derived from fixed $S_{\max}$ and $\theta$.
+- [x] Attach that shared fixed attention-output range to `Potential` in the ViT, BERT, RoBERTa, and GPT-2 adapters instead of reusing the value range or measuring output extrema.
+- [x] Remove live activation extrema from the Gaussian `SpikingLayerNorm` path by propagating operator intervals and using the finite-feature dense LayerNorm bound.
 - [ ] Verify bounds are identical across batch contents, ordering, and batch size, and add a final source audit that rejects runtime tensor-extrema domain construction in maintained paths.

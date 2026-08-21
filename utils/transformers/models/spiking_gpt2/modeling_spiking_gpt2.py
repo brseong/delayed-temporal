@@ -52,6 +52,7 @@ from utils.transforms.functions import gelu_approximation
 from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_noise
 from utils.transforms.primitive import pulse_width_modulation_operator
 from utils.transforms.types import Potential, PotentialBounds, SpikeSample
+from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear, _apply_norm
 
 logger = logging.get_logger(__name__)
@@ -73,9 +74,9 @@ class SpikingConv1D(Conv1D):
 
         Hugging Face ``Conv1D`` stores weights as ``[in_features, out_features]``.
         This method preserves that layout while replacing each encoded input with a
-        physical integration duration. One scalar zero-reference event is shared by
-        the complete projection call; opening and reference misses follow the same
-        observation-deadline rules as the other affine adapters.
+        signed pair of causal PWM pulse widths. One scalar zero-reference event is
+        shared by the complete projection call, and each missed data or reference
+        event independently leaves its own rail at reset until the common deadline.
 
         Args:
             x: Original input tensor used for metadata and scalar allocation.
@@ -104,7 +105,7 @@ class SpikingConv1D(Conv1D):
                 "Gaussian SpikingConv1D encoding must return SpikeSample"
             )
 
-        # One scalar zero codeword supplies the shared closing event for the entire
+        # One scalar zero codeword supplies the shared reference rail for the entire
         # GPT-2 projection call instead of being resampled per token or feature.
         reference_event = neg_identity_transform(
             x.new_zeros(()),
@@ -117,28 +118,43 @@ class SpikingConv1D(Conv1D):
                 "Gaussian SpikingConv1D reference must return SpikeSample"
             )
 
-        # A delivered reference closes all active trajectories at its sample; a miss
-        # reads them at the fixed deadline shared with every data event.
+        # Convert both sampled events into causal pulse widths against the shared
+        # deadline. A one-sided miss leaves the surviving rail visible with its sign;
+        # no event ordering, additional sampling, or per-token reference is introduced.
         deadline = data_event.time.new_tensor(float(data_event.domain.max))
-        stop_time = torch.where(
-            reference_event.fired,
-            reference_event.time,
-            deadline,
-        )
-
-        # Data misses contribute reset zero. Flatten only the leading dimensions for
-        # addmm, retaining Hugging Face's [in_features, out_features] weight layout.
-        duration = torch.where(
+        data_pulse_width = torch.where(
             data_event.fired,
-            stop_time - data_event.time,
+            (deadline - data_event.time).clamp_min(0.0),
             torch.zeros_like(data_event.time),
         )
-        output_shape = duration.size()[:-1] + (self.nf,)
-        flat_duration = duration.reshape(-1, duration.size(-1))
+        reference_pulse_width = torch.where(
+            reference_event.fired,
+            (deadline - reference_event.time).clamp_min(0.0),
+            torch.zeros_like(reference_event.time),
+        )
+        signed_pulse_width = data_pulse_width - reference_pulse_width
+
+        # The optimized matrix kernel evaluates the complete transposed PWM-MAC.
+        # Conceptually, each unmaterialized input/output synapse is equivalent to:
+        #
+        # pwm_ij, _ = signed_pulse_width_modulation_operator(
+        #     data_event_i, data_event.domain,
+        #     reference_event, reference_event.domain,
+        #     self.weight[i, j], domain_W,
+        #     observation_deadline=float(data_event.domain.max),
+        # )
+        # y_j = sum_i(pwm_ij) + bias_j
+        #
+        # Flatten only leading dimensions for addmm; no synapse tensor is materialized.
+        output_shape = signed_pulse_width.size()[:-1] + (self.nf,)
+        flat_pulse_width = signed_pulse_width.reshape(
+            -1,
+            signed_pulse_width.size(-1),
+        )
         if self.bias is None:
-            y = torch.matmul(flat_duration, self.weight)
+            y = torch.matmul(flat_pulse_width, self.weight)
         else:
-            y = torch.addmm(self.bias, flat_duration, self.weight)
+            y = torch.addmm(self.bias, flat_pulse_width, self.weight)
         y = y.view(output_shape)
 
         # Derive ideal output rails from every weight/input endpoint product and the
@@ -156,7 +172,7 @@ class SpikingConv1D(Conv1D):
         )
 
         # Bias has already been applied by addmm, so only extend the propagated rails
-        # here. In the all-data-missed case it remains the complete affine output.
+        # here. It remains independent of any contribution from a surviving rail.
         if self.bias is not None:
             domain_y = PotentialBounds(
                 domain_y.min + self.bias.min().item(),
@@ -343,14 +359,41 @@ class GPT2Attention(nn.Module):
 
     def forward(
         self,
-        hidden_states: tuple[torch.FloatTensor] | None,
+        hidden_states: Potential,
         past_key_values: Cache | None = None,
         cache_position: torch.LongTensor | None = None,
         attention_mask: torch.FloatTensor | None = None,
         output_attentions: bool | None = False,
         **kwargs,
-    ) -> tuple[torch.Tensor | tuple[torch.Tensor], ...]:
-        query_states, key_states, value_states = self.c_attn(hidden_states).value.split(self.split_size, dim=2)
+    ) -> tuple[Potential, torch.Tensor | None]:
+        """Apply cache-aware GPT-2 attention with analytic domain propagation.
+
+        The combined Q/K/V projection supplies the eager value envelope. Spiking
+        attention replaces it with the memoized rail derived from ``theta`` and
+        ``max_position_embeddings``. Projection and dropout then propagate that
+        fixed envelope analytically, eliminating both runtime output-extrema ranges
+        previously constructed inside this method.
+
+        Args:
+            hidden_states: Input tensor paired with its declared potential bounds.
+            past_key_values: Optional cache carrying prior key and value tensors.
+            cache_position: Positions used when appending to the cache.
+            attention_mask: Optional causal or additive attention mask.
+            output_attentions: Whether the selected backend should expose weights.
+            **kwargs: Additional Hugging Face attention controls.
+
+        Returns:
+            The projected attention output with its fixed propagated domain and the
+            optional attention weights returned by the selected backend.
+        """
+        # Keep the combined projection domain before splitting its tensor payload.
+        # The single envelope conservatively contains the value slice used by eager
+        # attention and remains valid for values read back from the same model cache.
+        projected_qkv = self.c_attn(hidden_states)
+        query_states, key_states, value_states = projected_qkv.value.split(
+            self.split_size,
+            dim=2,
+        )
         shape_kv = (*key_states.shape[:-1], -1, self.head_dim)
         key_states = key_states.view(shape_kv).transpose(1, 2)
         value_states = value_states.view(shape_kv).transpose(1, 2)
@@ -363,7 +406,11 @@ class GPT2Attention(nn.Module):
                 key_states, value_states, self.layer_idx, {"cache_position": cache_position}
             )
 
+        # Eager and standard dense attention begin with the projected-value range.
+        # Spiking attention replaces this below with its fixed physical output rail.
         using_eager = self.config._attn_implementation == "eager"
+        using_spiking = self.config._attn_implementation == "spiking_sdpa"
+        context_domain = projected_qkv.domain
         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
             self.config._attn_implementation, eager_attention_forward
         )
@@ -373,9 +420,13 @@ class GPT2Attention(nn.Module):
                 query_states, key_states, value_states, attention_mask
             )
         else:
-            if self.config._attn_implementation == "spiking_sdpa":
-                kwargs["theta"] = getattr(self.config, "theta", 10.0)
+            if using_spiking:
+                theta = float(getattr(self.config, "theta", 10.0))
+                source_length_max = int(self.config.max_position_embeddings)
+                kwargs["theta"] = theta
                 kwargs["tau_m"] = getattr(self.config, "tau_s", 1.0)
+                kwargs["source_length_max"] = source_length_max
+                context_domain = attention_output_bounds(theta, source_length_max)
 
             attn_output, attn_weights = attention_interface(
                 self,
@@ -387,12 +438,49 @@ class GPT2Attention(nn.Module):
                 **kwargs,
             )
 
+        # Dense attention dropout independently removes normalized weights and scales
+        # survivors by 1/(1-p). Include zero and both scaled endpoints. The spiking
+        # backend already clamps its noisy or dropped readout to the fixed rail.
+        if not using_spiking and self.training and self.attn_dropout.p > 0.0:
+            if self.attn_dropout.p >= 1.0:
+                context_domain = PotentialBounds(0.0, 0.0)
+            else:
+                attention_scale = 1.0 / (1.0 - self.attn_dropout.p)
+                attention_candidates = (
+                    0.0,
+                    float(context_domain.min) * attention_scale,
+                    float(context_domain.max) * attention_scale,
+                )
+                context_domain = PotentialBounds(
+                    min(attention_candidates),
+                    max(attention_candidates),
+                )
+
+        # Head merging changes layout only. The output projection consumes the fixed
+        # attention range and returns its own interval-arithmetic affine envelope.
         attn_output = attn_output.reshape(*attn_output.shape[:-2], -1).contiguous()
-        pot = Potential(attn_output, PotentialBounds(attn_output.min().item(), attn_output.max().item()))
-        attn_output_pot = self.c_proj(pot)
+        attn_output_pot = self.c_proj(Potential(attn_output, context_domain))
         out_val = self.resid_dropout(attn_output_pot.value)
 
-        return Potential(out_val, PotentialBounds(out_val.min().item(), out_val.max().item())), attn_weights
+        # Residual dropout is identity during evaluation. Training includes zero and
+        # scales both affine endpoints without observing the realized dropout mask.
+        output_domain = attn_output_pot.domain
+        if self.training and self.resid_dropout.p > 0.0:
+            if self.resid_dropout.p >= 1.0:
+                output_domain = PotentialBounds(0.0, 0.0)
+            else:
+                residual_scale = 1.0 / (1.0 - self.resid_dropout.p)
+                residual_candidates = (
+                    0.0,
+                    float(output_domain.min) * residual_scale,
+                    float(output_domain.max) * residual_scale,
+                )
+                output_domain = PotentialBounds(
+                    min(residual_candidates),
+                    max(residual_candidates),
+                )
+
+        return Potential(out_val, output_domain), attn_weights
 
 
 class GPT2MLP(nn.Module):

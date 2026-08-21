@@ -4,17 +4,41 @@ The operator system builds Transformer arithmetic from a small timing-and-integr
 
 ## Primitive PWM Integration
 
-Pulse-width modulation is the central primitive: a potential is integrated over the signed interval between two event times.
+Pulse-width modulation uses causal event-to-deadline integration rails, with signed temporal differences formed by subtracting two rails sharing one deadline.
 
-[[utils/transforms/primitive.py#pulse_width_modulation_operator]] computes `V * (t_B - t_A)` and derives its output interval from all endpoint products. Arrival order therefore determines the sign of the temporal difference; preserving that order is a functional requirement of any physical realization.
+[[utils/transforms/primitive.py#unsigned_pulse_width_modulation_operator]] computes $V(T_{\mathrm{obs}}-t)$ on one causal rail whose configured deadline is no earlier than its event domain. [[utils/transforms/primitive.py#signed_pulse_width_modulation_operator]] evaluates the cancelled expression $V(t_B-t_A)$ directly for delivered tensors and exposes the two time-to-deadline durations only when a `SpikeSample` mask is needed.
 
-The code evaluates this identity directly on tensors. It represents the behavior of the proposed primitive, not a circuit netlist, event router, or SPICE transient simulation.
+The event-aware signed wrapper assigns reset duration zero to each missed rail independently. Two delivered events recover $V(t_B-t_A)$, an $A$-only event produces $V(T_{\mathrm{obs}}-t_A)$, a $B$-only event produces $-V(T_{\mathrm{obs}}-t_B)$, and two misses produce zero. Its returned domain remains the ideal both-event range so later saturation accounting can identify one-sided excursions before clamping.
+
+### Differential Physical Realization
+
+A differential accumulator can realize the signed operator with causal, non-negative current paths while the maintained tensor code evaluates only its terminal equation.
+
+Split a signed drive into $V^+=\max(V,0)$ and $V^-=\max(-V,0)$, and let $d_A$ and $d_B$ be the delivered event-to-deadline durations, or zero for a missed event. Two physical accumulator rails may then store
+
+$$
+Q^+ = V^+d_A + V^-d_B,
+\qquad
+Q^- = V^+d_B + V^-d_A.
+$$
+
+Their differential readout is
+
+$$
+Q^+-Q^-=(V^+-V^-)(d_A-d_B)=V(d_A-d_B).
+$$
+
+This mapping has four possible current paths from the two timing rails and the two drive signs, but only two accumulator rails. It is a physically plausible differential PWM realization, not an additional computation performed by the behavioral tensor implementation. Device mismatch, common-mode limits, capacitor reset, and differential sensing remain circuit-level concerns outside the maintained simulator.
+
+The signed wrapper returns one potential and derives its ideal range from the shared drive and signed time interval, avoiding the looser range obtained by treating deadline-terminated rails as independent. Existing model callers remain on [[utils/transforms/primitive.py#pulse_width_modulation_operator]] until each call site is migrated.
+
+These functions evaluate the proposed rail behavior directly on tensors. They are not a circuit netlist, event router, deadline generator, or SPICE transient simulation.
 
 ## Missing-Event Readout
 
-Every event-driven operator produces the clamped potential physically present at the observation deadline, even when an expected spike never arrives.
+Every event-driven operator must eventually produce the clamped potential physically present at the observation deadline, even when an expected spike never arrives.
 
-An opening miss leaves the state at reset. A closing or reference miss leaves the active dynamics running until $T_{\mathrm{obs}}$. Both results are finite potentials and feed the next operator; neither is marked invalid. See [[noise#Observation-Time Potential Invariant]] for the authoritative equations.
+The new signed PWM primitive treats its two causal accumulator rails symmetrically: each delivered event contributes its time-to-deadline duration and each missed event contributes reset zero. Existing Gaussian operator call sites still use the older opening/closing trajectory documented in [[noise#Observation-Time Potential Invariant]] until they migrate to the signed wrapper one at a time.
 
 Operator implementations may differ in their membrane trajectory, current kernel, or rail bounds, but not in this readout policy. A missed spike's stored deadline timestamp is metadata storage and cannot replace the physical state calculation.
 
@@ -30,7 +54,7 @@ Multiplication encodes one operand as a latency and uses the other as the integr
 
 [[utils/transforms/functions.py#multiplication_operator]] clamps the encoded operand to `[-theta, theta]`, obtains `t = theta - B`, and integrates `V` from that event to `theta`. The resulting tensor is `V * B` under the ideal affine mapping.
 
-Under maintained timing noise, the same function requests a decorated event for the encoded operand and one scalar zero-reference event for the operator call. It applies the common observation-time trajectories and clamps the resulting product to the original ideal output rails; no Gaussian-specific multiplication API exists.
+Under maintained timing noise, the same function requests a decorated event for the encoded operand and one scalar zero-reference event for the operator call. It passes those existing samples to the signed PWM wrapper without resampling: each delivered event contributes its event-to-deadline rail and each miss contributes reset zero. The raw result is then saturation-counted and clamped to the original ideal product rails; no public Gaussian-specific multiplication API exists.
 
 ### Division
 
@@ -70,7 +94,7 @@ These classes subclass PyTorch’s corresponding modules so parameter names and 
 
 GPT-2 uses its own equivalent adapter, [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#SpikingConv1D]], to match Hugging Face’s transposed `Conv1D` parameter convention.
 
-When maintained timing noise is enabled, all three affine adapters obtain both data and layer-shared zero-reference events through the decorated encoder. They contract the resulting physical integration durations with the pretrained weights, then clamp the potential read at $T_{\mathrm{obs}}$ to the declared output rails.
+When maintained timing noise is enabled, all three affine adapters obtain both data and layer-shared zero-reference events through the decorated encoder. They form the two causal pulse widths and evaluate the complete signed PWM-MAC with `torch.nn.functional.linear`, `torch.nn.functional.conv2d`, or GPT-2's transposed `torch.addmm` contraction. These optimized kernels replace explicit per-synapse PWM tensor expansion; the learned weights still represent the integration drives. Every adapter clamps the raw affine result to its declared output rails.
 
 ## Spiking LayerNorm
 
@@ -80,6 +104,8 @@ LayerNorm is a multi-stage composition and the most delicate shared operator in 
 
 Three flags independently replace variance multiplication, log encoding, and exponential-difference decoding with tensor equivalents. These switches support causal attribution of error but also mean “spiking LayerNorm enabled” is not enough to identify the exact execution path; all three stage flags must be recorded.
 
+The Gaussian path derives its output bounds without observing the current activation. The fully dense bypass uses the finite-feature bound $|z_i|\leq\sqrt{d-1}$, while mixed paths propagate exponential-difference ranges through subtraction and the learned affine map.
+
 The current implementation has finite-floor and clipping behavior described in [[domain#Signed Values and Dual Rails]]. Ideal algebraic exactness and finite implementation fidelity should be reported separately.
 
 ## Spiking Attention
@@ -87,6 +113,8 @@ The current implementation has finite-floor and clipping behavior described in [
 Attention composes spiking projections, signed dot products, softmin normalization, and PWM-weighted value accumulation.
 
 [[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_scaled_dot_product_attention]] clamps query and key to a fixed symmetric domain, computes negated scaled dot products, applies hard mask suppression, normalizes with softmin, and integrates encoded values against the resulting weights.
+
+[[utils/transformers/integrations/spiking_sdpa_attention.py#attention_output_bounds]] memoizes the immutable value-integration rail for each $\theta$ and configured maximum source length. Masked scores use the same finite upper endpoint declared to softmin, and Gaussian and noise-free readouts clamp against the common output rail.
 
 In maintained-noise execution, value and scalar zero-reference events come from the same decorated encoder used by affine PWM. Their physical durations are contracted with attention weights by matrix multiplication, avoiding an explicit `(L,S,D)` synapse tensor, and the observation-time output is clamped to its conservative summed rail envelope.
 

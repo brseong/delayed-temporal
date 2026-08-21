@@ -6,7 +6,7 @@ The project models analog values, TTFS spike times, and their valid ranges as ex
 
 A `Potential` is a tensor paired with a declared `PotentialBounds` envelope, not a simulated membrane-neuron object.
 
-[[utils/transforms/types.py#Potential]] is the carrier used by Transformer layers. [[utils/transforms/types.py#OpenBounds]] provides a range and clamping operation, while `PotentialBounds` and `TimeBounds` distinguish voltage-like and time-like quantities at the type level.
+[[utils/transforms/types.py#Potential]] is the carrier used by Transformer layers. [[utils/transforms/types.py#OpenBounds]] is an immutable range with a clamping operation, while `PotentialBounds` and `TimeBounds` distinguish voltage-like and time-like quantities at the type level. Derived ranges require new objects rather than endpoint mutation.
 
 Bounds serve three roles:
 
@@ -24,7 +24,7 @@ For example, [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViT
 
 Some fallback and nonlinear paths still construct bounds from observed output minima and maxima. Those paths are useful for simulation but are data-dependent and should not be presented as fixed hardware calibration without an explicit calibration protocol.
 
-The planned removal of runtime-derived bounds across all maintained operators and model adapters is tracked in [[todo#Static Bounds for All Operators]].
+The planned removal of runtime-derived bounds across all maintained operators and model adapters is tracked in [[todo#Static Bounds for All Operators]]. The completed inventory and replacement formulas are [[bounds-audit]].
 
 ## TTFS Encoding
 

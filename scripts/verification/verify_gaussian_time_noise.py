@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
 import math
 from pathlib import Path
 import sys
@@ -51,8 +52,48 @@ from utils.transformers.models.spiking_ops import (
 )
 from utils.transformers.integrations.spiking_sdpa_attention import (
     _gaussian_attention_value_readout,
+    attention_output_bounds,
     spiking_scaled_dot_product_attention,
 )
+
+
+def verify_immutable_memoized_bounds() -> None:
+    """Verify immutable domains and memoized fixed attention rails.
+
+    Static potential and time envelopes must not be widened after construction.
+    Attention additionally reuses one bounds object for each ``(theta, S_max)``
+    configuration so repeated forward calls do not allocate equivalent metadata.
+
+    Raises:
+        AssertionError: If endpoint mutation succeeds, equal attention
+            configurations do not share an object, or distinct configurations are
+            incorrectly aliased.
+    """
+    # PotentialBounds and TimeBounds inherit the frozen endpoint contract from
+    # OpenBounds. Attempt both endpoint names so either generated setter regressing
+    # to a mutable dataclass is detected immediately.
+    potential_domain = PotentialBounds(-2.0, 2.0)
+    time_domain = TimeBounds(0.0, 4.0)
+    for domain, endpoint, replacement in (
+        (potential_domain, "min", -3.0),
+        (time_domain, "max", 5.0),
+    ):
+        try:
+            setattr(domain, endpoint, replacement)
+        except FrozenInstanceError:
+            pass
+        else:
+            raise AssertionError("OpenBounds endpoints must be immutable")
+
+    # Repeated calls with one normalized configuration must return the exact cached
+    # object. A different maximum source length must retain a separate physical rail.
+    first = attention_output_bounds(2.0, 5)
+    repeated = attention_output_bounds(2.0, 5)
+    distinct = attention_output_bounds(2.0, 6)
+    assert repeated is first
+    assert distinct is not first
+    assert first == PotentialBounds(-10.0, 10.0)
+    assert distinct == PotentialBounds(-12.0, 12.0)
 
 
 # @lat: [[evaluation#Evaluation and Verification#Gaussian Spike-Time Verification]]
@@ -1080,10 +1121,11 @@ def verify_gaussian_statistics_contract() -> None:
 def verify_gaussian_multiplication_operator() -> None:
     """Verify multiplication parity, event-specific misses, and saturation.
 
-    Multiplication treats the encoded operand as an opening event and one scalar
-    zero codeword as its closing reference. The checks force each event to miss in
-    isolation, validate the resulting observation-time potential, and confirm that
-    stochastic excursions retain ideal product rails with pre-clamp statistics.
+    Multiplication treats the encoded operand and one scalar zero codeword as two
+    causal signed-PWM rails sharing one observation deadline. The checks force each
+    event to miss in isolation, validate the resulting differential potential, and
+    confirm that stochastic excursions retain ideal product rails with pre-clamp
+    statistics.
 
     Raises:
         AssertionError: If deterministic parity, missing-event physics, output
@@ -1122,7 +1164,8 @@ def verify_gaussian_multiplication_operator() -> None:
         assert zero_noise_domain == deterministic_domain
 
         # With B=-theta the data codeword is nominally at the deadline. A small
-        # positive mean misses only that opening event, so integration stays reset.
+        # positive mean misses only that rail, while the delivered reference rail
+        # contributes -V * (T_obs - t_reference) to the differential readout.
         set_gaussian_time_noise(
             enabled=True,
             time_std=0.0,
@@ -1136,15 +1179,18 @@ def verify_gaussian_multiplication_operator() -> None:
             domain,
             theta,
         )
-        assert torch.equal(data_miss, torch.zeros_like(data_miss))
+        assert torch.equal(
+            data_miss,
+            torch.tensor([-2.25], dtype=torch.float64),
+        )
         assert data_miss_domain == deterministic_domain
         data_stats = get_gaussian_noise_stats()
         assert data_stats["multiplication.data"]["misses"] == 1
         assert data_stats["multiplication.reference"]["misses"] == 0
 
-        # With B=+theta the opening codeword starts at zero. A larger positive mean
-        # keeps it on time but pushes the scalar reference late, so integration runs
-        # from sampled time 2.5 until the fixed deadline 4.0.
+        # With B=+theta the data codeword starts at zero. A larger positive mean
+        # keeps that rail on time but pushes the scalar reference beyond the deadline,
+        # leaving +V * (T_obs - t_data) on the differential readout.
         set_gaussian_time_noise(
             enabled=True,
             time_std=0.0,
@@ -1747,11 +1793,11 @@ def verify_gaussian_swiglu_function() -> None:
 def verify_gaussian_spiking_linear() -> None:
     """Verify affine parity plus isolated data and shared-reference misses.
 
-    A spiking linear layer samples one opening event per input element and one scalar
-    zero-reference event for the complete invocation. Endpoint-valued inputs and
-    deterministic mean shifts isolate each miss class, allowing the regression to
-    check the exact physical duration passed to the learned affine map rather than
-    merely asserting that noisy outputs stay finite.
+    A spiking linear layer samples one data event per input element and one scalar
+    zero-reference event for the complete invocation. These events supply two causal
+    signed-PWM rails. Endpoint-valued inputs and deterministic mean shifts isolate
+    each miss class so the regression checks the exact differential duration passed
+    to the learned affine map rather than merely asserting finite noisy outputs.
 
     Raises:
         AssertionError: If dense parity, event counts, miss-specific affine readout,
@@ -1795,8 +1841,8 @@ def verify_gaussian_spiking_linear() -> None:
         assert zero_stats["linear.reference"]["misses"] == 0
 
         # At the lower input rail, nominal data events already equal the deadline.
-        # A small positive shift misses every opening while the midpoint reference
-        # still arrives, leaving only the learned bias in the affine output.
+        # A small positive shift misses every data rail while the midpoint reference
+        # still arrives, leaving a signed duration of -1.5 for every input feature.
         lower_value = torch.full((2, 3), -2.0, dtype=torch.float64)
         set_gaussian_time_noise(
             enabled=True,
@@ -1806,8 +1852,12 @@ def verify_gaussian_spiking_linear() -> None:
         )
         data_miss = layer(Potential(lower_value, potential.domain))
         data_stats = get_gaussian_noise_stats()
-        expected_bias = layer.bias.expand_as(data_miss.value)
-        assert torch.allclose(data_miss.value, expected_bias)
+        expected_data_miss = torch.nn.functional.linear(
+            torch.full_like(lower_value, -1.5),
+            layer.weight,
+            layer.bias,
+        )
+        assert torch.allclose(data_miss.value, expected_data_miss)
         assert data_stats["linear.data"]["misses"] == lower_value.numel()
         assert data_stats["linear.reference"]["misses"] == 0
 
@@ -1839,13 +1889,13 @@ def verify_gaussian_spiking_linear() -> None:
 
 
 def verify_gaussian_spiking_conv2d() -> None:
-    """Verify convolution parity and shared-reference miss trajectories.
+    """Verify convolution parity and symmetric signed-PWM miss trajectories.
 
-    The Gaussian convolution contracts sampled durations through PyTorch's grouped
-    convolution kernel, whereas the deterministic path explicitly unfolds spike
-    times. A padded spatial example verifies that both implementations preserve the
-    same zero-potential padding, learned bias, conservative rails, and one scalar
-    closing event for the entire layer call.
+    The Gaussian convolution contracts signed sampled pulse widths through PyTorch's
+    grouped convolution kernel, whereas the deterministic path explicitly unfolds
+    spike times. A padded spatial example verifies that both implementations preserve
+    zero-potential padding, learned bias, conservative rails, and one scalar reference
+    event for the entire layer call.
 
     Raises:
         AssertionError: If dense or zero-noise parity, event counts, miss-specific
@@ -1907,9 +1957,9 @@ def verify_gaussian_spiking_conv2d() -> None:
         assert zero_stats["conv2d.data"]["misses"] == 0
         assert zero_stats["conv2d.reference"]["misses"] == 0
 
-        # Lower-rail data events shifted past the deadline never open a trajectory.
-        # Convolving their reset-zero durations leaves the learned bias at every
-        # output location, including border positions affected by padding.
+        # Lower-rail data events shifted past the deadline leave their rails at reset.
+        # The delivered reference rail supplies signed width -1.5 at every real input
+        # location; convolution padding must still supply zero outside the image.
         lower_value = torch.full_like(value, -2.0)
         set_gaussian_time_noise(
             enabled=True,
@@ -1919,8 +1969,16 @@ def verify_gaussian_spiking_conv2d() -> None:
         )
         data_miss = layer(Potential(lower_value, potential.domain))
         data_stats = get_gaussian_noise_stats()
-        expected_bias = layer.bias.view(1, -1, 1, 1).expand_as(data_miss.value)
-        assert torch.allclose(data_miss.value, expected_bias)
+        expected_data_miss = torch.nn.functional.conv2d(
+            torch.full_like(lower_value, -1.5),
+            layer.weight,
+            layer.bias,
+            layer.stride,
+            layer.padding,
+            layer.dilation,
+            layer.groups,
+        )
+        assert torch.allclose(data_miss.value, expected_data_miss)
         assert data_stats["conv2d.data"]["misses"] == lower_value.numel()
         assert data_stats["conv2d.reference"]["misses"] == 0
 
@@ -1956,13 +2014,13 @@ def verify_gaussian_spiking_conv2d() -> None:
 
 
 def verify_gaussian_spiking_conv1d() -> None:
-    """Verify GPT-2 Conv1D parity and miss-aware transposed affine readout.
+    """Verify GPT-2 Conv1D parity and symmetric signed-PWM readout.
 
     Hugging Face Conv1D stores its matrix as ``[in_features, out_features]`` and
     applies it over the final dimension of arbitrary leading shapes. The regression
-    verifies that Gaussian duration contraction preserves this convention, samples
-    one call-wide reference, and follows the same opening/reference miss equations
-    as the shared linear and convolutional adapters.
+    verifies that Gaussian signed-pulse-width contraction preserves this convention,
+    samples one call-wide reference, and follows the same symmetric one-sided-miss
+    equations as the shared linear and convolutional adapters.
 
     Raises:
         AssertionError: If transposed affine parity, leading-shape preservation,
@@ -2007,9 +2065,9 @@ def verify_gaussian_spiking_conv1d() -> None:
         assert zero_stats["conv1d.data"]["misses"] == 0
         assert zero_stats["conv1d.reference"]["misses"] == 0
 
-        # Lower-rail openings shifted beyond the deadline never contribute to addmm;
-        # broadcasting the learned bias over both leading dimensions is then the
-        # complete physical projection output.
+        # Lower-rail data events shifted beyond the deadline leave their rails at
+        # reset. The delivered reference produces signed width -1.5 across every
+        # token and feature before the transposed weight contraction.
         lower_value = torch.full_like(value, -2.0)
         set_gaussian_time_noise(
             enabled=True,
@@ -2019,8 +2077,11 @@ def verify_gaussian_spiking_conv1d() -> None:
         )
         data_miss = layer(Potential(lower_value, potential.domain))
         data_stats = get_gaussian_noise_stats()
-        expected_bias = layer.bias.expand_as(data_miss.value)
-        assert torch.allclose(data_miss.value, expected_bias)
+        expected_data_miss = (
+            torch.matmul(torch.full_like(lower_value, -1.5), layer.weight)
+            + layer.bias
+        )
+        assert torch.allclose(data_miss.value, expected_data_miss)
         assert data_stats["conv1d.data"]["misses"] == lower_value.numel()
         assert data_stats["conv1d.reference"]["misses"] == 0
 
@@ -2190,6 +2251,15 @@ def verify_gaussian_spiking_attention() -> None:
         dtype=torch.float64,
     )
 
+    # Configure five source positions even though this request uses only three.
+    # The resulting rail must remain tied to configuration rather than request shape.
+    source_length_max = 5
+    output_domain = attention_output_bounds(
+        theta=2.0,
+        source_length_max=source_length_max,
+    )
+    assert output_domain == PotentialBounds(-10.0, 10.0)
+
     # With all tensors inside the symmetric rail and scores below the softmin cap,
     # the composed operator must equal ordinary scaled dot-product attention.
     set_gaussian_time_noise(enabled=False)
@@ -2200,6 +2270,7 @@ def verify_gaussian_spiking_attention() -> None:
             value,
             theta=2.0,
             tau_m=1.0,
+            source_length_max=source_length_max,
         )
         dense_weight = torch.softmax(
             torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(query.size(-1)),
@@ -2207,6 +2278,24 @@ def verify_gaussian_spiking_attention() -> None:
         )
         expected = torch.matmul(dense_weight, value)
         assert torch.allclose(deterministic, expected, atol=1e-12, rtol=1e-12)
+
+        # A theta below the global softmin cap previously wrote an out-of-domain
+        # mask value. The fixed upper score endpoint must now remain finite and pass
+        # the operator's declared-domain validation for a real suppression mask.
+        keep_mask = torch.tensor(
+            [[[[True, True, False], [True, False, False]]]],
+            dtype=torch.bool,
+        )
+        masked = spiking_scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=keep_mask,
+            theta=2.0,
+            tau_m=1.0,
+            source_length_max=source_length_max,
+        )
+        assert torch.isfinite(masked).all()
 
         # Zero scale traverses all score and normalization encoders before reaching
         # the value PWM. The final output must remain exact while sampling each value
@@ -2218,6 +2307,7 @@ def verify_gaussian_spiking_attention() -> None:
             value,
             theta=2.0,
             tau_m=1.0,
+            source_length_max=source_length_max,
         )
         zero_stats = get_gaussian_noise_stats()
         assert torch.allclose(zero_noise, deterministic, atol=1e-12, rtol=1e-12)
@@ -2245,6 +2335,7 @@ def verify_gaussian_spiking_attention() -> None:
             lower_value,
             fixed_weight,
             value_domain,
+            output_domain,
         )
         data_stats = get_gaussian_noise_stats()
         assert torch.equal(data_miss, torch.zeros_like(data_miss))
@@ -2265,6 +2356,7 @@ def verify_gaussian_spiking_attention() -> None:
             upper_value,
             fixed_weight,
             value_domain,
+            output_domain,
         )
         reference_stats = get_gaussian_noise_stats()
         expected_reference = torch.full_like(reference_miss, 1.5)
@@ -2272,18 +2364,24 @@ def verify_gaussian_spiking_attention() -> None:
         assert reference_stats["attention.value"]["misses"] == 0
         assert reference_stats["attention.value_reference"]["misses"] == 1
 
-        # The helper's conservative source-sum envelope is [-6, 6] for three source
-        # positions at theta two. Both isolated physical readouts must remain finite
-        # and inside that fixed rail after pre-clamp saturation accounting.
+        # The helper uses the configured five-position envelope [-10, 10], not the
+        # current three-position request. Both physical readouts remain finite and
+        # inside that fixed rail after pre-clamp saturation accounting.
         assert torch.isfinite(data_miss).all()
         assert torch.isfinite(reference_miss).all()
-        assert bool(((reference_miss >= -6.0) & (reference_miss <= 6.0)).all())
+        assert bool(
+            (
+                (reference_miss >= output_domain.min)
+                & (reference_miss <= output_domain.max)
+            ).all()
+        )
     finally:
         # Leave the shared Gaussian configuration disabled after all regressions.
         set_gaussian_time_noise(enabled=False)
 
 
 if __name__ == "__main__":
+    verify_immutable_memoized_bounds()
     verify_broadcast_gaussian_time_inputs()
     verify_gaussian_time_input_validation()
     verify_gaussian_sampler_rng_contract()

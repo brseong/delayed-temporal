@@ -7,7 +7,10 @@ from utils.transforms import exp_operator
 
 from .noise import clamp_gaussian_output, get_gaussian_time_noise
 from .types import PotentialBounds, SpikeSample, TimeBounds, check_domain
-from .primitive import pulse_width_modulation_operator
+from .primitive import (
+    pulse_width_modulation_operator,
+    signed_pulse_width_modulation_operator,
+)
 from .potential_to_spike import neg_identity_transform, neg_log_transform
 from .spike_to_potential import normalized_exp_operator, exponential_difference_operator
 
@@ -66,23 +69,18 @@ def _gaussian_multiplication_operator(
             "Gaussian multiplication reference must return SpikeSample"
         )
 
-    # A delivered reference closes the active trajectory at its sampled time. A
-    # missing reference leaves it active until the inclusive observation deadline.
-    deadline = data_event.time.new_tensor(float(data_event.domain.max))
-    stop_time = torch.where(
-        reference_event.fired,
-        reference_event.time,
-        deadline,
+    # Reuse the already sampled data and reference events in the common signed PWM
+    # readout. Each delivered event opens its own event-to-deadline rail, while each
+    # miss leaves only that rail at reset; this call performs no additional sampling.
+    result, _ = signed_pulse_width_modulation_operator(
+        data_event,
+        data_event.domain,
+        reference_event,
+        reference_event.domain,
+        V,
+        domain_V,
+        observation_deadline=float(data_event.domain.max),
     )
-
-    # A missing opening event leaves the potential at reset zero. For a delivered
-    # opening, preserve the signed physical interval before applying the drive V.
-    duration = torch.where(
-        data_event.fired,
-        stop_time - data_event.time,
-        torch.zeros_like(data_event.time),
-    )
-    result = V * duration
 
     # Gaussian excursions do not expand the representable product rails. Derive the
     # original ideal envelope from all V-bound and factor-bound endpoint products.

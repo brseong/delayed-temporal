@@ -1,0 +1,409 @@
+# Fixed Potential Range Audit
+
+이 보고서는 inference 중 관측한 tensor extrema로 membrane-potential range를 다시 정하는 위치를 전수 조사하고, fixed range와 calibration으로 교체하는 방법을 정리한다.
+
+## 결론
+
+현재 shared/model adapter에는 live activation으로 `PotentialBounds`를 만드는 production 위치가 27곳 남아 있어 model-wide fixed range 조건을 만족하지 않는다.
+
+Transform operator의 time window는 고정되어 있다. 최초 감사의 32곳 중 GPT-2 attention의 2곳과 Gaussian LayerNorm의 3곳은 fixed/analytic range로 교체되었다.
+
+핵심 결과는 다음과 같다.
+
+- `utils/transforms/`의 production operator는 입력 range, threshold $\theta$, time constant $\tau_s,\tau_m$, tensor shape에 대한 interval arithmetic으로 output range를 계산한다. `TimeBounds`를 live activation extrema로 만드는 위치는 없다.
+- 최초 감사에서 shared model operator와 네 model family의 live activation extrema 위치는 각각 7, 4, 4, 9, 8곳이었다. GPT-2 attention 2곳과 Gaussian LayerNorm 3곳을 제거한 현재 합계는 27곳이다.
+- `SpikingLinear`, `SpikingConv2d`, `SpikingConv1D`, `SpikingLayerNorm`은 pretrained weight 또는 bias extrema를 forward마다 다시 읽는다. 값은 inference 중 고정되어도 range가 forward contract가 아니라 실행 결과로 계산된다는 점이 남는다.
+- ViT, BERT, RoBERTa, GPT-2 attention adapter는 이제 Gaussian value integration의 fixed range $[-S_{\max}\theta,S_{\max}\theta]$를 spiking backend와 공유한다.
+- 현재 quantile 수집은 module별 signed minimum과 maximum을 보존하지 않고 모든 module의 $99.9\%$ absolute quantile 중 maximum 하나만 저장하므로 fixed range calibration 자료로 사용할 수 없다.
+- 따라서 migration은 parameter range 고정, model-entry calibration, LayerNorm range propagation, attention output range 전달, activation calibration, residual interval arithmetic 순서로 진행해야 한다.
+
+## 감사 범위와 판정 기준
+
+감사는 maintained path의 모든 `PotentialBounds`와 `TimeBounds` 생성, `Potential` 생성, activation extrema, pretrained parameter extrema, attention range 전달, evaluator quantile 수집을 포함한다.
+
+대상은 다음과 같다.
+
+- `utils/transforms/`: $\phi_{\mathrm{NP}}$, $\phi_{\mathrm{NL}}$, $\psi_{\mathrm{Int}}$, $\psi_{\mathrm{ED}}$, $f_{\mathrm{Mul}}$, $f_{\mathrm{Div}}$, softmin, GELU, Tanh, SwiGLU
+- `utils/transformers/`: shared affine operator, LayerNorm, attention, ViT, BERT, RoBERTa, GPT-2
+- `scripts/evaluation/`: ViT, BERT, RoBERTa, GPT-2 quantile collection과 static parameter perturbation
+
+다음 사용은 위반으로 판정했다.
+
+$$
+[V_{lb},V_{ub}]
+=
+[\min X_{\mathrm{current\ batch}},\max X_{\mathrm{current\ batch}}].
+$$
+
+현재 tensor의 값을 검사하는 `check_domain`, clipping 횟수를 기록하는 진단, error maximum을 출력하는 evaluator 코드는 range를 만들지 않으므로 위반 수에 포함하지 않았다. `__main__` 아래의 local fixture도 production 위치에서 제외했다.
+
+## Fixed Range의 수식 계약
+
+Fixed range는 calibration 또는 interval arithmetic으로 inference 전에 정해지고, forward는 그 range를 읽고 clipping할 수만 있어야 한다.
+
+### Potential과 time window
+
+논문의 membrane-potential space $\mathcal V$와 spike-time space $\mathcal T$ 사이 변환은 fixed potential range $(V_{lb},\theta)$와 finite time window $[0,T]$를 전제로 한다.
+
+$\phi_{\mathrm{NP}}$의 affine encoding은
+
+$$
+t=\theta-V,
+\qquad
+T=\theta-V_{lb},
+$$
+
+이고 symmetric range $[-\theta,\theta]$에서는 $T=2\theta$이다. $\phi_{\mathrm{NL}}$의 negative-log encoding은 positive range $[V_{\min},V_{\max}]$에 대해
+
+$$
+t=\tau_s\bigl(\log V_{\max}-\log V\bigr),
+\qquad
+T=\tau_s\bigl(\log V_{\max}-\log V_{\min}\bigr)
+$$
+
+이다. 두 time window는 모두 configuration과 input range에서 정해지며 current tensor의 extrema를 필요로 하지 않는다.
+
+### Interval arithmetic
+
+두 potential이 $X\in[l_x,u_x]$, $Y\in[l_y,u_y]$이면 residual addition과 multiplication range는 다음과 같이 정해진다.
+
+$$
+X+Y\in[l_x+l_y,u_x+u_y],
+$$
+
+$$
+XY\in
+\left[
+\min\{l_xl_y,l_xu_y,u_xl_y,u_xu_y\},
+\max\{l_xl_y,l_xu_y,u_xl_y,u_xu_y\}
+\right].
+$$
+
+[[utils/transforms/primitive.py#pulse_width_modulation_operator]]와 composed operator는 이 방식을 사용하므로 current activation extrema에 의존하지 않는다.
+
+### Affine projection
+
+Pretrained affine projection은 weight를 checkpoint loading과 static perturbation 뒤에 한 번 읽으면 output range를 정확한 interval arithmetic으로 고정할 수 있다.
+
+입력 feature가 모두 $x_i\in[l_x,u_x]$이고 $w_{ji}^{+}=\max(w_{ji},0)$, $w_{ji}^{-}=\min(w_{ji},0)$이면
+
+$$
+l_j=\sum_i\left(w_{ji}^{+}l_x+w_{ji}^{-}u_x\right)+b_j,
+$$
+
+$$
+u_j=\sum_i\left(w_{ji}^{+}u_x+w_{ji}^{-}l_x\right)+b_j.
+$$
+
+전체 scalar potential range가 필요하면 $V_{lb}=\min_j l_j$, $V_{ub}=\max_j u_j$를 사용한다. Linear, Conv2d, GPT-2 Conv1D 모두 같은 식을 feature 또는 kernel dimension에 적용할 수 있다. 현재처럼 global weight minimum과 maximum에 fan-in을 곱하는 방식도 fixed range이지만 훨씬 넓다.
+
+### Layer Normalization
+
+LayerNorm은 internal positive range와 final affine output range를 분리해야 한다.
+
+`clip_margin=m`, upper threshold가 $\theta$이면 dual-rail input range와 variance encoding range는 현재 composition에서
+
+$$
+x_k^{+},x_k^{-}\in[m,\theta-m],
+\qquad
+V_{\sigma^2}\in[m^2,(\theta-m)^2],
+$$
+
+이며 두 negative-log encoding은 같은 time window를 갖는다.
+
+$$
+T_0
+=\tau_s\log\frac{\theta-m}{m}
+=\frac{\tau_s}{2}\log\frac{(\theta-m)^2}{m^2}.
+$$
+
+Variance에 $\epsilon$을 더한 raw value가 upper bound를 넘으면 range를 넓히지 말고 clipping으로 기록해야 한다. 이는 finite-window LayerNorm approximation의 일부다.
+
+$\psi_{\mathrm{ED}}$가 반환한 두 range를 $Y^{+}\in[l_+,u_+]$, $Y^{-}\in[l_-,u_-]$라 하면 signed result는
+
+$$
+Y^{+}-Y^{-}\in[l_+-u_-,u_+-l_-]
+$$
+
+로 계산할 수 있다. 두 $\psi_{\mathrm{ED}}$ 출력이 non-negative dual rail이면 $U=\max(u_+,u_-)$에 대한 완화된 대칭 range $[-U,U]$도 유효하다. 구현은 이 직관적인 대칭 range를 learned $\gamma$와 곱하고 $\beta$를 더해 observed result 없이 final output range를 정한다.
+
+Dense LayerNorm 분기는 pre-affine normalized value $z_k$를 noise-free calibration으로 측정한 뒤, fixed $z_k\in[l_z,u_z]$와 pretrained $\gamma_k,\beta_k$에 대해
+
+$$
+l_k=\min(\gamma_kl_z,\gamma_ku_z)+\beta_k,
+\qquad
+u_k=\max(\gamma_kl_z,\gamma_ku_z)+\beta_k
+$$
+
+를 적용한다. Calibration을 사용하지 않는 보수적 대안은 normalized feature 수를 $d$라 할 때 $|z_k|\le\sqrt{d-1}$을 사용하는 것이다.
+
+### Activation
+
+Monotone activation은 input range에서 직접 fixed output range를 계산하고, GELU 또는 SiLU처럼 전체 구간에서 monotone하지 않은 activation은 operator composition 또는 calibration을 사용한다.
+
+$$
+\operatorname{ReLU}([l,u])=[\max(0,l),\max(0,u)],
+$$
+
+$$
+\operatorname{Tanh}([l,u])
+=[\operatorname{Tanh}(l),\operatorname{Tanh}(u)]
+\subset[-1,1].
+$$
+
+논문의 tanh-based GELU approximation을 operator-composed path로 실행하면 각 $f_{\mathrm{Mul}}$, Tanh, addition의 range를 그대로 전달할 수 있다. Direct GELU, `gelu_new`, SiLU 분기는 module별 noise-free calibration을 사용해야 한다.
+
+### Attention
+
+Attention은 score, softmin weight, value integration의 range를 각각 고정해야 한다.
+
+$q_d,k_d\in[-\theta,\theta]$이고 head dimension이 $D$이면 negated scaled dot product의 보수적 range는
+
+$$
+-\theta^2\sqrt D
+\le
+-\frac{1}{\sqrt D}\sum_{d=1}^{D}q_dk_d
+\le
+\theta^2\sqrt D.
+$$
+
+현재 score는 $c=\min(\theta,80)$으로 clipping하므로 softmin input range는 $[-c,c]$이다. Masked score도 같은 upper bound $c$를 사용해야 한다. 현재처럼 $80$을 대입하면 $\theta<80$에서 declared range를 벗어난다.
+
+Softmin weight가 $w_{ij}\in[0,1]$이고 source length의 fixed maximum이 $S_{\max}$이면 Gaussian value integration을 포함하는 공통 output range는
+
+$$
+V_{\mathrm{attn}}
+\in[-S_{\max}\theta,S_{\max}\theta].
+$$
+
+Noise-free evaluation에서 $\sum_jw_{ij}=1$이 보장되면 $[-\theta,\theta]$까지 줄일 수 있지만, Gaussian on/off에 따라 range를 바꾸지 않으려면 위의 공통 range를 사용해야 한다. Training dropout까지 지원하면 보수적으로
+
+$$
+V_{\mathrm{attn}}
+\in
+\left[-\frac{S_{\max}\theta}{1-p},
+       \frac{S_{\max}\theta}{1-p}\right]
+$$
+
+를 사용한다.
+
+## 전수 검색 결과
+
+최초 source audit는 32곳을 확인했으며, attention adapter와 Gaussian LayerNorm 전환 뒤 live activation extrema call site는 27곳 남아 있다.
+
+| 구분 | live activation call site | 주요 원인 |
+|---|---:|---|
+| Shared operator | 4 | deterministic LayerNorm output와 dense normalization fallback |
+| ViT | 4 | pixel input, exact/direct GELU, encoder entry |
+| BERT | 4 | embeddings, direct activation, encoder entry, pooler input |
+| RoBERTa | 9 | embeddings, dense ablation, encoder entry, pooler와 task head input |
+| GPT-2 | 6 | model entry, MLP, 세 residual path |
+| 합계 | 27 | 남은 위치가 inference batch의 extrema에 의존 |
+
+### Transform operator
+
+Maintained transform operator의 output range는 configuration, input range, endpoint transformation, reduction shape로 계산되며 activation extrema 위반이 없다.
+
+| 위치 | 현재 range | 판정 |
+|---|---|---|
+| [[utils/transforms/potential_to_spike.py#neg_linear_transform]] | $[0,\text{window\_length}]$ | fixed |
+| [[utils/transforms/potential_to_spike.py#neg_identity_transform]] | input potential span | fixed |
+| [[utils/transforms/potential_to_spike.py#neg_log_transform]] | $[0,\tau_s\log(V_{\max}/V_{\min})]$ | fixed |
+| [[utils/transforms/spike_to_potential.py#exp_operator]] | transformed time endpoints | fixed |
+| [[utils/transforms/spike_to_potential.py#normalized_exp_operator]] | transformed time endpoints | fixed |
+| [[utils/transforms/spike_to_potential.py#exponential_difference_operator]] | interval arithmetic과 exponential endpoints | fixed |
+| [[utils/transforms/functions.py#multiplication_operator]] | potential/time endpoint products | fixed; tensor `theta` 지원은 제거하고 scalar $\theta$만 허용해야 함 |
+| [[utils/transforms/functions.py#scaled_dot_product_function]] | product range와 head dimension | fixed |
+| [[utils/transforms/functions.py#softmin_function]] | exponential range와 source length | fixed |
+| [[utils/transforms/functions.py#division_function]] | shared positive range와 time difference | fixed |
+| [[utils/transforms/functions.py#gelu_approximation]] | composed interval arithmetic | fixed |
+| [[utils/transforms/functions.py#tanh]] | composed interval arithmetic | fixed |
+| [[utils/transforms/functions.py#swiglu_function]] | composed interval arithmetic | fixed |
+
+`check_domain`의 tensor `min/max`는 declared range membership 검사이며 range 생성이 아니다. `functions.py`에서 scalar로 선언된 `theta`에 tensor가 들어오면 `theta.max()`를 사용하는 분기는 현재 model call에서 사용되지 않으며, static mismatch는 module input offset으로 이미 분리되어 있으므로 제거하는 편이 명확하다.
+
+### Shared operator
+
+Shared operator에는 4개의 activation-derived call site와 forward-time parameter extrema 계산이 남아 있다.
+
+| 함수 | 수 | 현재 동작 | 교체 |
+|---|---:|---|---|
+| [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#_gaussian_forward]] | 0 | $\psi_{\mathrm{ED}}$ range 차와 affine interval을 전달하며 all-dense branch는 $|z_i|\leq\sqrt{d-1}$ 사용 | 완료 |
+| [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#forward]] | 3 | deterministic branch에서 같은 세 위치 사용 | Gaussian branch와 동일한 fixed range 사용 |
+| [[utils/transformers/models/spiking_ops.py#_apply_norm]] | 1 | ordinary `nn.LayerNorm` output extrema 사용 | module별 pre-affine calibration과 $\gamma,\beta$ interval 사용 |
+| [[utils/transformers/models/spiking_ops.py#SpikingLinear#forward]] | 0 | activation range는 interval arithmetic이지만 weight와 bias extrema를 매 forward 계산 | checkpoint와 perturbation 뒤 affine range를 한 번 계산 |
+| [[utils/transformers/models/spiking_ops.py#SpikingConv2d#forward]] | 0 | activation range는 interval arithmetic이지만 kernel과 bias extrema를 매 forward 계산 | grouped kernel dimension에 affine 식을 적용해 한 번 계산 |
+
+LayerNorm internal ranges $[m,\theta-m]$, $[m^2,(\theta-m)^2]$와 $T_0$는 이미 configuration-derived다. Gaussian path는 returned range를 보존하지만 deterministic `forward`와 ordinary LayerNorm fallback은 아직 activation extrema를 사용한다.
+
+### ViT
+
+ViT에는 4개의 activation-derived call site가 있고 residual addition은 이미 interval arithmetic을 사용한다.
+
+| 함수 | 수 | 현재 동작 | 교체 |
+|---|---:|---|---|
+| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTPatchEmbeddings#forward]] | 1 | current `pixel_values` extrema를 Conv2d input range로 사용 | image processor의 fixed input range 또는 preprocessing별 calibration |
+| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTIntermediate#forward]] | 2 | direct tanh-GELU와 configured dense activation output extrema 사용 | operator-composed GELU range 또는 activation별 calibration |
+| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTEncoder#forward]] | 1 | embedding output extrema를 첫 range로 사용 | patch projection, class token, position embedding의 fixed range를 합산하거나 encoder-entry calibration |
+| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTLayer#forward]] | 0 | 두 residual range를 endpoint addition으로 계산 | 유지 |
+
+Image processor가 channel별 $x_c=(r_c-\mu_c)/\sigma_c$, $r_c\in[0,1]$을 사용하면 pixel range는 preprocessing metadata에서 직접 계산할 수 있다. Custom preprocessing 또는 `inputs_embeds`는 별도 calibration identity가 필요하다.
+
+### BERT
+
+BERT에는 4개의 activation-derived call site가 있고 attention/output residual은 interval addition을 사용한다.
+
+| 함수 | 수 | 현재 동작 | 교체 |
+|---|---:|---|---|
+| [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertEmbeddings#forward]] | 1 | word, token type, position embedding 합의 extrema를 LayerNorm input range로 사용 | 세 embedding table의 fixed parameter range 합 또는 embedding-output calibration |
+| [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertIntermediate#forward]] | 1 | non-spiking activation output extrema 사용 | ReLU/Tanh analytic range; GELU calibration 또는 composed operator range |
+| [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertEncoder#forward]] | 1 | normalized embedding을 다시 측정 | embedding LayerNorm이 반환한 fixed range 전달 |
+| [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertPooler#forward]] | 1 | first token을 다시 측정 | final hidden-state range를 slice와 함께 전달 |
+
+ReLU branch는 현재 pre-activation range를 그대로 유지해 negative lower bound도 포함한다. 안전하지만 불필요하게 넓으므로 $[\max(0,l),\max(0,u)]$로 줄일 수 있다.
+
+### RoBERTa
+
+RoBERTa에는 dense ablation과 task head 때문에 가장 많은 9개의 activation-derived call site가 있다.
+
+| 함수 | 수 | 현재 동작 | 교체 |
+|---|---:|---|---|
+| [[utils/transformers/models/spiking_roberta/modeling_spiking_roberta.py#RobertaEmbeddings#forward]] | 1 | embedding sum extrema 사용 | embedding table range 합 또는 calibration |
+| [[utils/transformers/models/spiking_roberta/modeling_spiking_roberta.py#RobertaSelfOutput#forward]] | 1 | dense projection ablation output extrema 사용 | frozen affine range |
+| [[utils/transformers/models/spiking_roberta/modeling_spiking_roberta.py#RobertaIntermediate#forward]] | 1 | dense projection과 activation output extrema 사용 | frozen affine range 뒤 activation range 또는 calibration |
+| [[utils/transformers/models/spiking_roberta/modeling_spiking_roberta.py#RobertaOutput#forward]] | 1 | dense projection ablation output extrema 사용 | frozen affine range |
+| [[utils/transformers/models/spiking_roberta/modeling_spiking_roberta.py#RobertaEncoder#forward]] | 1 | encoder-entry extrema 사용 | embedding LayerNorm range 전달 |
+| [[utils/transformers/models/spiking_roberta/modeling_spiking_roberta.py#RobertaPooler#forward]] | 1 | first token extrema 사용 | final hidden-state range 전달 |
+| [[utils/transformers/models/spiking_roberta/modeling_spiking_roberta.py#RobertaLMHead#forward]] | 2 | head input과 dense GELU output extrema 사용 | final hidden-state range 전달; GELU calibration 또는 composition |
+| [[utils/transformers/models/spiking_roberta/modeling_spiking_roberta.py#RobertaClassificationHead#forward]] | 1 | first token extrema 사용 | final hidden-state range 전달 |
+
+Task head가 tensor만 받는 현재 API가 range를 잃는 원인이다. Head 안에서 다시 측정하지 말고 model output과 함께 fixed range를 전달하거나, head module이 calibration에서 정해진 input range를 보유해야 한다.
+
+### GPT-2
+
+GPT-2에는 최초 8개의 activation-derived call site가 있었으며, attention의 2곳을 제거한 뒤 6곳이 남았다.
+
+| 함수 | 수 | 현재 동작 | 교체 |
+|---|---:|---|---|
+| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Attention#forward]] | 0 | backend별 fixed range를 `c_proj`에 전달하고 projection/dropout range를 analytic propagation | 완료 |
+| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2MLP#forward]] | 2 | activation output과 final dropout output extrema 사용 | activation range/calibration 뒤 Conv1D range 전달; evaluation dropout은 range 불변 |
+| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Block#forward]] | 3 | attention, optional cross-attention, MLP residual output extrema 사용 | residual endpoint addition |
+| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Model#forward]] | 1 | token-plus-position embedding extrema 사용 | embedding table range 합 또는 model-entry calibration |
+| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#SpikingConv1D#forward]] | 0 | weight와 bias extrema를 매 forward 계산 | checkpoint와 perturbation 뒤 transposed affine range를 한 번 계산 |
+
+현재 spiking GPT-2 MLP도 projection만 spiking이며 activation은 `ACT2FN`을 직접 실행한다. Default `gelu_new`, GELU, SiLU는 calibration이 필요하고 ReLU/Tanh는 analytic range를 사용할 수 있다. Cross-attention은 constructor에서 거부되지만 residual code가 남아 있으므로, 지원하지 않는 동안 해당 branch를 제거하거나 지원 시 별도 fixed range를 정의해야 한다.
+
+### Attention backend
+
+Attention에는 live extrema 외에도 declared range와 실제 clamped output이 달라질 수 있는 두 문제가 있다.
+
+| 위치 | 판정 | 필요한 변경 |
+|---|---|---|
+| [[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_scaled_dot_product_attention]] | Q/K/V와 score range는 fixed; masked score도 declared upper score bound $c$ 사용 | 완료 |
+| [[utils/transformers/integrations/spiking_sdpa_attention.py#_gaussian_attention_value_readout]] | [[utils/transformers/integrations/spiking_sdpa_attention.py#attention_output_bounds]]가 정한 $[-S_{\max}\theta,S_{\max}\theta]$를 사용하고 adapter가 memoized range를 재사용 | 완료 |
+| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTSelfAttention#forward]] | spiking backend는 patch-grid $S_{\max}$의 memoized output range를 부착하고 eager backend는 `pot_v.domain` 유지 | 완료 |
+| [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertSelfAttention#forward]] | `max_position_embeddings` 기반 memoized spiking output range 부착 | 완료 |
+| [[utils/transformers/models/spiking_roberta/modeling_spiking_roberta.py#RobertaSelfAttention#forward]] | `max_position_embeddings` 기반 memoized spiking output range 부착 | 완료 |
+| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Attention#forward]] | spiking/eager attention, projection, dropout range를 fixed/analytic propagation | 완료 |
+
+Variable sequence length에서는 current $S$로 range를 바꾸면 같은 module의 range가 request마다 달라진다. BERT/RoBERTa evaluator의 `max_length`, ViT patch count, GPT-2 `max_position_embeddings`를 $S_{\max}$로 사용해야 한다. Cache-aware generation도 같은 $S_{\max}$를 유지해야 한다.
+
+### Evaluation과 calibration
+
+네 evaluator의 quantile 수집은 진단용이며 fixed potential range calibration contract를 충족하지 않는다.
+
+| 위치 | 현재 동작 | 부족한 정보 |
+|---|---|---|
+| [[scripts/evaluation/error_analysis_vit.py#evaluate_vit_model]] | module output의 absolute $99.9\%$ quantile을 list에 모은 뒤 global maximum 하나 저장 | module name, signed lower/upper bound, sample count, preprocessing, ablation identity |
+| [[scripts/evaluation/error_analysis_bert.py#evaluate_bert_model]] | 같은 global maximum 방식 | dataset/task별 module range |
+| [[scripts/evaluation/error_analysis_roberta.py#evaluate_roberta_model]] | 같은 global maximum 방식 | dataset/task별 module range |
+| [[scripts/evaluation/error_analysis_gpt2.py#evaluate_gpt2_model]] | 같은 global maximum 방식 | sequence length, cache state, activation branch별 range |
+
+Calibration은 Gaussian timing noise를 반드시 disable하고 `model.eval()`에서 수행해야 한다. 현재 CLI는 `--collect-quantiles`와 Gaussian option을 동시에 허용하므로 calibration mode에서 이를 명시적으로 거부해야 한다.
+
+ViT의 [[scripts/evaluation/error_analysis_vit.py#apply_parameter_noise]]는 static weight/bias perturbation을 model loading 뒤에 적용한다. 따라서 affine parameter range는 `from_pretrained`, dtype/device conversion, static parameter perturbation이 끝난 뒤 고정해야 한다. Static threshold mismatch는 input potential을 shift하지만 encoder range $[-\theta,\theta]$는 유지하고 clipping 통계로 관측한다.
+
+## 모든 실행 경우의 처리
+
+Fixed range는 backend, noise, ablation, shape가 달라지는 모든 실행 경우에 대해 선택 규칙이 명시되어야 한다.
+
+| 경우 | 처리 |
+|---|---|
+| Gaussian off/on 또는 seed 변경 | 같은 fixed potential range 사용; output range는 Gaussian miss를 포함하는 합집합 사용 |
+| LayerNorm stage ablation | flag 조합별 calibration identity를 분리하거나 모든 조합을 포함하는 보수적 range 사용 |
+| Spiking attention/eager attention | backend별 fixed range를 저장; 한 run에서는 선택한 backend의 range만 사용 |
+| Evaluation dropout | `model.eval()`에서 identity이므로 input range 유지 |
+| Training dropout | $1/(1-p)$ scaling과 zero를 포함한 range 사용; 지원하지 않으면 fixed-range inference에서 명시적으로 거부 |
+| Variable sequence length | current length가 아니라 configured $S_{\max}$ 사용 |
+| GPT-2 cache generation | `max_position_embeddings`까지 같은 range 유지; cache length로 range를 다시 만들지 않음 |
+| Custom `inputs_embeds` | embedding-table 식을 사용할 수 없으므로 별도 calibrated input range 요구 |
+| ViT custom preprocessing 또는 image size | preprocessing와 patch count별 calibration identity 분리 |
+| float16, bfloat16, float32 | dtype별 calibration과 endpoint representability 검사; dtype 변경 시 range 재생성 |
+| Static weight/bias perturbation | perturbation 뒤 parameter range와 derived affine range 재생성 |
+| Static threshold mismatch | 같은 $\theta$ range를 유지하고 clipping 변화만 기록 |
+| DataParallel | process-wide noise와 calibration state를 공유하지 않도록 거부하거나 replica별 immutable copy 사용 |
+| Missing calibration entry | current tensor를 측정해 보완하지 말고 evaluation을 실패시킴 |
+
+## Calibration 기록 형식
+
+Calibration은 module별 signed lower/upper potential range를 보존하고, 같은 configuration에서 재사용할 수 있는 정보와 함께 저장해야 한다.
+
+각 기록에는 최소한 다음 값이 필요하다.
+
+- stable module name과 input/output 구분
+- $V_{lb}$, $V_{ub}$, sample count
+- extrema 또는 선택한 quantile과 calibration-set clipping rate
+- checkpoint와 model family
+- dataset split과 preprocessing
+- `theta`, `tau_s`, `tau_m`, `clip_margin`, dtype
+- LayerNorm, attention, MLP ablation flags와 activation 이름
+- sequence length 또는 image/patch shape의 fixed maximum
+- static weight/bias perturbation과 static threshold mismatch 설정
+
+Observed extrema를 쓰는 경우 calibration set 밖의 입력을 보장하지 못한다. Quantile을 쓰는 경우 clipping을 의도적으로 허용하므로 quantile과 inference clipping rate를 함께 보고해야 한다. 어떤 경우에도 inference output으로 $V_{lb},V_{ub}$를 갱신하면 안 된다.
+
+## 권장 migration 순서
+
+Dependency 순서대로 fixed range를 도입하면 각 단계에서 current tensor extrema를 하나의 원인과 함께 제거할 수 있다.
+
+1. Pretrained parameter와 embedding table의 range를 checkpoint loading, dtype/device conversion, static perturbation 뒤 한 번 고정한다.
+2. `SpikingLinear`, `SpikingConv2d`, `SpikingConv1D`가 forward에서 parameter extrema를 읽지 않고 precomputed affine range를 사용하게 한다.
+3. `SpikingLayerNorm`이 $\psi_{\mathrm{ED}}$와 $f_{\mathrm{Mul}}$의 returned range를 전달하게 하고, dense branch에는 calibrated pre-affine range를 사용한다.
+4. Attention이 tensor와 fixed output range를 함께 전달하게 하고 mask suppression을 score upper bound와 일치시킨다.
+5. ViT, BERT, RoBERTa, GPT-2 model entry를 embedding interval arithmetic 또는 calibration range로 교체한다.
+6. Direct GELU, `gelu_new`, SiLU와 dense ablation path에 activation별 fixed range를 적용한다.
+7. Pooler와 task head가 final hidden-state range를 slice와 함께 전달하도록 한다.
+8. GPT-2 residual을 endpoint addition으로 바꾸고 dropout range를 evaluation contract와 일치시킨다.
+9. 네 evaluator에 calibration-only run, signed per-module 기록, metadata validation, missing-entry failure를 추가한다.
+10. Source audit와 batch-order, batch-size, Gaussian-seed invariance verification을 permanent verification에 추가한다.
+
+## 검증 기준
+
+Migration 완료는 numerical output뿐 아니라 declared potential range의 불변성으로 검증해야 한다.
+
+필수 검증은 다음과 같다.
+
+- 같은 sample을 다른 order와 batch size로 실행해 모든 module의 `PotentialBounds`가 동일함을 확인한다.
+- 같은 input에서 Gaussian seed만 바꾸어 sampled time과 output은 달라도 `PotentialBounds`, `TimeBounds`가 동일함을 확인한다.
+- Gaussian off/on 모두 같은 fixed range를 사용하고 miss와 saturation만 달라지는지 확인한다.
+- Calibration range 밖의 raw output이 range를 넓히지 않고 underflow/overflow count를 증가시키는지 확인한다.
+- Checkpoint, preprocessing, dtype, ablation, sequence maximum이 다르면 calibration load가 실패하는지 확인한다.
+- `PotentialBounds(current.min(), current.max())`와 같은 source pattern이 maintained forward에 남지 않았는지 확인한다.
+- Weight와 bias `.min()/.max()`가 maintained forward에 남지 않고 initialization/calibration 단계에만 존재하는지 확인한다.
+- Masked attention에서 score가 declared range 안에 있고 BERT/RoBERTa/GPT-2 causal mask smoke test가 통과하는지 확인한다.
+- `verify_gaussian_time_noise.py`의 operator parity, miss, saturation 검증과 `verify_sop.py`를 다시 실행한다.
+
+## Manuscript와의 일치
+
+논문의 fixed potential range, threshold, time window, clipping, per-layer calibration 표현은 migration 방향과 일치하지만 두 문장은 static configuration과 batch-derived range를 구분하도록 정리할 필요가 있다.
+
+- “fixed potential range $(V_{lb},\theta)$ guarantees every encodable value fires within $[0,T]$”는 이 보고서의 contract와 일치한다.
+- “$T$ is dynamically determined based on $\theta$”는 $\theta$가 inference 전에 고정된다는 뜻이면 위반이 아니다. 구현 설명에서는 $T=2\theta$ 또는 negative-log 식처럼 configuration-derived임을 명시해야 한다.
+- LayerNorm의 “configured dynamically with $V_{lb}=0$”도 current batch가 아니라 operator configuration이라는 뜻으로 명확히 해야 한다.
+- “matching $\theta$ to the actual activation range via per-layer calibration”은 model-entry와 activation calibration의 근거가 된다. Calibration split과 clipping rate를 함께 보고해야 한다.
+
+## 최종 판정
+
+Audit 자체는 완료되었지만 구현은 아직 fixed potential range contract를 만족하지 않는다.
+
+Transform algebra와 time window는 이미 static하고 attention range 전달 및 Gaussian LayerNorm range propagation도 완료되었다. 남은 작업은 shared/model adapter의 27개 activation-derived range, affine class의 forward-time parameter extrema, calibration persistence를 제거하거나 고정하는 것이다. 이 항목들이 끝나기 전에는 batch-independent physical dynamic range가 구현되었다고 볼 수 없다.
