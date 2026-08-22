@@ -303,7 +303,7 @@ Bound 증폭은 operator contract 오류와 calibration 대상이 섞여 있으�
 | Complete | softmin | normalized weight의 $[0,1]$ 불변식 대신 generic division range를 반환했음 | public $[0,1]$ rail 적용과 Gaussian saturation 기록 완료 |
 | Complete | tanh | bounded activation 대신 transformed generic division range를 반환했음 | public $[-1,1]$ rail 적용과 Gaussian saturation 기록 완료 |
 | Complete | sigmoid-like gates | GELU와 SwiGLU gate가 generic division range를 downstream product에 전달했음 | public $[0,1]$ gate와 Gaussian saturation 기록 완료 |
-| Critical | division | 알려진 operand ordering을 generic exponential ratio가 버림 | $X\leq Y$ contract와 ideal rail 밖 Gaussian saturation 적용 |
+| Complete | division | 알려진 operand ordering을 generic exponential ratio가 버렸음 | constrained wrapper에 public $[0,1]$ rail과 Gaussian saturation 적용; LayerNorm의 unrestricted exponential difference는 유지 |
 | Critical | spiking/mixed LayerNorm | `clip_margin` ratio만으로도 $10^7$–$10^8$ rail 생성 | module-output calibration과 clamp |
 | High | scaled dot product | $\theta^2\sqrt D$ 뒤 score cap으로 큰 clipping 가능 | layer/head score calibration과 clamp rate 기록 |
 | High | attention value integration | $S_{\max}\theta$가 sequence capacity와 함께 증가 | noise-free invariant를 참고해 공통 calibrated rail을 정하고 Gaussian saturation을 별도 검증 |
@@ -311,7 +311,7 @@ Bound 증폭은 operator contract 오류와 calibration 대상이 섞여 있으�
 | High | ViT/GPT-2 residual | interval width가 block depth와 함께 누적 | block별 post-add calibration과 clamp |
 | Medium | dense LayerNorm, embeddings, task heads | finite하지만 model width 또는 parameter table extrema에 비해 넓음 | calibration으로 tighten하고 fixed metadata 전달 |
 
-Softmin의 public ideal range는 바로잡았지만 current division intermediate는 넓은 generic ratio를 아직 만들 수 있다. Calibration infrastructure 전에 division의 operand-ordering range를 수정해야 하며, 그렇지 않으면 collection graph가 final softmin clamp에 도달하기 전에 overflow할 수 있다.
+Constrained division은 $X\leq Y$를 public $[0,1]$ rail에 반영하고 Gaussian event-order inversion과 one-sided miss의 raw overflow를 clamp 전에 기록한다. Generic exponential-difference primitive에는 이 ordering을 적용하지 않으므로 LayerNorm의 두 positive rail은 1보다 큰 magnitude를 계속 표현할 수 있다.
 
 ## 전수 검색 결과
 
@@ -341,7 +341,7 @@ Maintained transform operator의 output range는 configuration, input range, end
 | [[utils/transforms/functions.py#multiplication_operator]] | potential/time endpoint products | fixed; tensor `theta` 지원은 제거하고 scalar $\theta$만 허용해야 함 |
 | [[utils/transforms/functions.py#scaled_dot_product_function]] | product range와 head dimension | fixed |
 | [[utils/transforms/functions.py#softmin_function]] | structural normalized-weight range $[0,1]$ | fixed; Gaussian excursion은 clamp 전 기록 |
-| [[utils/transforms/functions.py#division_function]] | shared positive range와 time difference | fixed |
+| [[utils/transforms/functions.py#division_function]] | constrained public range $[0,1]$ | fixed; Gaussian overflow는 clamp 전 기록하고 unrestricted exponential difference는 별도 유지 |
 | [[utils/transforms/functions.py#gelu_approximation]] | composed interval arithmetic | fixed |
 | [[utils/transforms/functions.py#gelu_approximation_sigmoid]] | input range와 structural gate $[0,1]$의 product | fixed; Gaussian gate excursion은 clamp 전 기록 |
 | [[utils/transforms/functions.py#tanh]] | structural activation range $[-1,1]$ | fixed; Gaussian excursion은 clamp 전 기록 |

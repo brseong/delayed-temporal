@@ -69,7 +69,8 @@ The implementation work covers every maintained transform and model adapter, not
 
 - [x] Audit every maintained `PotentialBounds` and `TimeBounds` construction, including model inputs, embeddings, residuals, normalization, activations, attention, projections, and task readouts; the remaining violations are listed in [[bounds-audit#전수 검색 결과]].
 - [x] Correct multiplication bounds to use the encoded operand's declared clamped endpoints instead of multiplying every ideal result by the full `theta` rail.
-- [ ] Restrict ideal division output ranges with `X <= Y`; count and clamp Gaussian excursions instead of propagating the generic exponential ratio.
+- [x] Restrict ordered division output to the noise-independent $[0,1]$ range; count and clamp Gaussian excursions without restricting the unrestricted exponential-difference primitive used by dual-rail LayerNorm.
+- [x] Permanently verify division noise-mode domain identity, zero-noise output statistics, numerator-miss in-range behavior, denominator-miss overflow clamping, internal reset zero, and unrestricted exponential difference for LayerNorm.
 - [x] Return softmin weights on the structural $[0,1]$ domain and count Gaussian excursions before the final rail clamp.
 - [x] Permanently verify softmin noise-mode domain identity, zero-noise saturation counts, forced-miss excursion accounting, and final $[0,1]$ clamping.
 - [x] Return tanh on the structural $[-1,1]$ domain and count Gaussian excursions before the final activation clamp.

@@ -92,6 +92,8 @@ The maintained Gaussian model requires a seeded decorator-level regression check
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_swiglu_function]] checks current-bias cancellation on an asymmetric domain, output rails reconstructed from a fixed $[0,1]$ gate, exact zero-noise gate counters, forced gate saturation, and reset-valued finite output when every nested event misses.
 
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_division_function]] checks the common $[0,1]$ division domain, exact deterministic and zero-noise ratios, output saturation counters for both one-sided misses, internal reset zero, and preservation of unrestricted exponential difference for dual-rail LayerNorm.
+
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_linear]] checks dense affine parity, one shared reference sample, symmetric one-sided signed-PWM readout, output-row absolute-sum rails, and post-freeze parameter/threshold mutation rejection.
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_conv2d]] checks padded dense-convolution parity, one shared reference sample, symmetric one-sided signed-PWM readout, output-channel absolute-sum rails, and post-freeze mutation rejection.

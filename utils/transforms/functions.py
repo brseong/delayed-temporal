@@ -662,12 +662,14 @@ def division_function(
     joint_domain: PotentialBounds,
     tau_s: float
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Divide two positive potentials through log timing and exponential difference.
+    """Divide ordered positive potentials through a constrained temporal ratio.
 
     Both operands are projected into one shared domain so the fixed offset of their
-    negative-log encodings cancels. This public entry point performs common input
-    preparation and ordering validation, then selects either the private Gaussian
-    event implementation or the original deterministic tensor composition.
+    negative-log encodings cancels. The explicit ``X <= Y`` contract restricts the
+    public ratio to ``[0, 1]`` even though the underlying unrestricted exponential-
+    difference primitive must retain both event orderings for dual-rail consumers
+    such as LayerNorm. Gaussian event errors may produce a raw ratio above one; that
+    excursion is counted before the public rail clamps it.
 
     Args:
         X: Numerator tensor.
@@ -676,7 +678,7 @@ def division_function(
         tau_s: Common logarithmic encoding and temporal decoding scale.
 
     Returns:
-        The ratio-like exponential-difference response and its propagated bounds.
+        The bounded ratio response and the noise-independent interval ``[0, 1]``.
 
     Raises:
         AssertionError: If any clamped numerator exceeds its denominator.
@@ -686,40 +688,58 @@ def division_function(
     X = joint_domain.clamp(X, name="division_X")
     Y = joint_domain.clamp(Y, name="division_Y")
 
-    # The current operator contract restricts the represented ratio to X/Y <= 1;
-    # reject invalid ordering before sampling so failed calls consume no RNG state.
+    # The constrained division contract requires X/Y <= 1. Validate this relation
+    # before sampling so an invalid call never consumes Gaussian generator state.
     assert torch.all(X <= Y), (
         "For division to be valid, each element of X must be less than or equal "
         "to the corresponding element of Y."
     )
 
+    # Fix the public rail from the division invariant rather than inheriting the
+    # generic exp-difference interval. Reset zero from an internal event miss is part
+    # of this same rail, keeping metadata identical with Gaussian noise on or off.
+    result_domain = PotentialBounds(0.0, 1.0)
+
     # Dispatch only after all common preprocessing and validation. The private path
-    # retains both delivery masks through its physical exponential-difference readout.
+    # retains both delivery masks through its physical exponential-difference readout;
+    # importantly, this restriction is not installed on that reusable primitive.
     if get_gaussian_time_noise().enabled:
-        return _gaussian_division_function(X, Y, joint_domain, tau_s)
+        result, _ = _gaussian_division_function(X, Y, joint_domain, tau_s)
+    else:
+        # Both transforms must use the same domain to synchronize their fixed offsets.
+        # t_X = -\tau_s * log(X/T) = -\tau_s * (log(X) - log(T))
+        # t_Y = -\tau_s * log(Y/T) = -\tau_s * (log(Y) - log(T))
+        t_X, tb_X = neg_log_transform(X, joint_domain, tau_s=tau_s)
+        t_Y, tb_Y = neg_log_transform(Y, joint_domain, tau_s=tau_s)
 
-    # Both transforms must use the same domain to synchronize their fixed offsets.
-    # t_X = -\tau_s * log(X/T) = -\tau_s * (log(X) - log(T))
-    # t_Y = -\tau_s * log(Y/T) = -\tau_s * (log(Y) - log(T))
-    t_X, tb_X = neg_log_transform(X, joint_domain, tau_s=tau_s)
-    t_Y, tb_Y = neg_log_transform(Y, joint_domain, tau_s=tau_s)
+        # Keep deterministic latencies inside their analytic interval before temporal
+        # subtraction, preventing endpoint roundoff from expanding the ratio envelope.
+        t_X = t_X.clamp(min=tb_X.min, max=tb_X.max)
+        t_Y = t_Y.clamp(min=tb_Y.min, max=tb_Y.max)
 
-    # Keep deterministic latencies inside their analytic interval before temporal
-    # subtraction, preventing endpoint roundoff from expanding the ratio envelope.
-    t_X = t_X.clamp(min=tb_X.min, max=tb_X.max)
-    t_Y = t_Y.clamp(min=tb_Y.min, max=tb_Y.max)
+        # f_DIV(X, Y) = exp((t_Y - t_X) / tau_s)
+        # = exp(-t_X / tau_s) * exp(t_Y / tau_s)
+        # = exp(log(X/T)) * exp(-log(Y/T)) = X/Y
+        result, _ = exponential_difference_operator(
+            t_X,
+            tb_X,
+            t_Y,
+            tb_Y,
+            tau_s=tau_s,
+        )
 
-    # f_DIV(X, Y) = exp((t_Y - t_X) / tau_s)
-    # = exp(-t_X / tau_s) * exp(t_Y / tau_s)
-    # = exp(log(X/T)) * exp(-log(Y/T)) = X/Y
-    result, domain_result = exponential_difference_operator(
-        t_X,
-        tb_X,
-        t_Y,
-        tb_Y,
-        tau_s=tau_s,
+    # Enforce the constrained public contract after either implementation. With
+    # Gaussian noise enabled this records raw inversions or one-sided-miss overflow;
+    # deterministic endpoint roundoff is clamped without creating Gaussian stats.
+    return (
+        clamp_gaussian_output(
+            result,
+            result_domain,
+            site="division.output",
+            name="division_result",
+        ),
+        result_domain,
     )
-    return result, domain_result
 
 @check_domain
 def gelu_approximation(

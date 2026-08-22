@@ -60,11 +60,11 @@ Under maintained timing noise, the same function requests a decorated event for 
 
 Division converts numerator and denominator to synchronized log latencies, then exponentiates their difference.
 
-[[utils/transforms/functions.py#division_function]] requires `X <= Y` elementwise and uses the same positive joint domain for both log encoders. [[utils/transforms/spike_to_potential.py#exponential_difference_operator]] then maps the latency difference back to the ratio.
+[[utils/transforms/functions.py#division_function]] requires `X <= Y` elementwise, uses the same positive joint domain for both log encoders, and returns the noise-independent public range $[0,1]$. [[utils/transforms/spike_to_potential.py#exponential_difference_operator]] remains an unrestricted primitive because dual-rail LayerNorm requires both temporal orderings.
 
 The shared domain is essential because independent offsets would not cancel. Clamping, finite positive floors, and exponential implementation details determine where the simulated result is approximate.
 
-In maintained event-aware execution, division passes both decorated log events into exponential difference. That operator applies a fixed unit-negative drive to the two causal signed-PWM rails, clamps the intermediate $t_A-t_B$ state, re-encodes it through the ordinary decorated `phi_NP`, and evaluates `psi_NE` only if the internal event arrives. Either external miss leaves the other rail visible; an internal event miss leaves the exponential response at reset zero, so the noisy output envelope includes zero.
+In maintained event-aware execution, division passes both decorated log events into exponential difference. That operator applies a fixed unit-negative drive to the two causal signed-PWM rails, clamps the intermediate $t_A-t_B$ state, re-encodes it through the ordinary decorated `phi_NP`, and evaluates `psi_NE` only if the internal event arrives. Either external miss leaves the other rail visible and an internal event miss leaves the response at reset zero. Raw division responses above one are counted as output overflow before the public $[0,1]$ clamp.
 
 ### Exponential and Softmin
 

@@ -1517,23 +1517,27 @@ def verify_gaussian_exponential_difference_operator() -> None:
 
 
 def verify_gaussian_division_function() -> None:
-    """Verify division parity and propagation of its three event masks.
+    """Verify constrained division without restricting generic exponential difference.
 
     Division independently log-encodes numerator and denominator, then delegates
-    their complete event records to exponential difference. The regression checks
-    exact zero-noise ratios, a deterministic numerator miss, and fixed-seed cases
-    that isolate denominator and internal exponential misses.
+    their complete event records to the unrestricted exponential-difference primitive.
+    The public wrapper must return one noise-independent ``[0, 1]`` domain, preserve
+    exact deterministic and zero-noise ratios, count raw Gaussian overflow before
+    clamping, and retain reset zero when the internal exponential event misses.
 
     Raises:
-        AssertionError: If ratios, reset/deadline propagation, site attribution,
-            finite rails, or internal-event reset behavior regresses.
+        AssertionError: If ratio values, public bounds, reset/deadline propagation,
+            saturation accounting, site attribution, or unrestricted exponential-
+            difference behavior regresses.
     """
     domain = PotentialBounds(0.1, 10.0)
+    expected_domain = PotentialBounds(0.0, 1.0)
     numerator = torch.tensor([0.2, 1.0, 5.0], dtype=torch.float64)
     denominator = torch.tensor([1.0, 2.0, 10.0], dtype=torch.float64)
 
-    # The deterministic shared-log-domain construction must cancel its fixed offset
-    # and reproduce X/Y for every valid element satisfying X <= Y.
+    # The deterministic shared-log-domain construction must cancel its fixed offset,
+    # reproduce X/Y, and expose the constrained public rail rather than the generic
+    # exponential ratio [domain.min/domain.max, domain.max/domain.min].
     set_gaussian_time_noise(enabled=False)
     try:
         deterministic, deterministic_domain = division_function(
@@ -1543,9 +1547,11 @@ def verify_gaussian_division_function() -> None:
             tau_s=1.0,
         )
         assert torch.allclose(deterministic, numerator / denominator)
+        assert deterministic_domain == expected_domain
 
         # Zero scale samples both external log events and the internal exponential
-        # event without changing values. Reset support extends only the lower rail.
+        # event without changing values. Public metadata remains identical across
+        # noise modes, and representable ratios create no saturation.
         set_gaussian_time_noise(enabled=True, time_std=0.0, seed=701)
         zero_noise, zero_noise_domain = division_function(
             numerator,
@@ -1554,19 +1560,23 @@ def verify_gaussian_division_function() -> None:
             tau_s=1.0,
         )
         assert torch.allclose(zero_noise, deterministic)
-        assert zero_noise_domain.min == 0.0
-        assert abs(
-            float(zero_noise_domain.max) - float(deterministic_domain.max)
-        ) < 1e-10
+        assert zero_noise_domain == expected_domain
         zero_stats = get_gaussian_noise_stats()
         assert zero_stats["division.numerator"]["misses"] == 0
         assert zero_stats["division.denominator"]["misses"] == 0
         assert zero_stats["exponential_difference.internal"]["misses"] == 0
+        assert zero_stats["division.output"] == {
+            "events": 0,
+            "misses": 0,
+            "outputs": numerator.numel(),
+            "output_underflows": 0,
+            "output_overflows": 0,
+        }
 
         # X at the positive-domain floor encodes exactly at the log deadline while
         # Y at the ceiling encodes at zero. Mean 0.5 misses only the numerator rail;
-        # the delivered denominator rail produces p=T_log-0.5. Re-encoding p and
-        # applying the same +0.5 shift gives exponential input 1-T_log.
+        # the remaining physical trajectory stays below one and therefore must not
+        # be confused with the opposite one-sided miss that overflows the public rail.
         set_gaussian_time_noise(
             enabled=True,
             time_std=0.0,
@@ -1588,15 +1598,19 @@ def verify_gaussian_division_function() -> None:
                 )
             ),
         )
-        assert numerator_miss_domain == zero_noise_domain
+        assert numerator_miss_domain == expected_domain
         numerator_stats = get_gaussian_noise_stats()
         assert numerator_stats["division.numerator"]["misses"] == 1
         assert numerator_stats["division.denominator"]["misses"] == 0
         assert numerator_stats["exponential_difference.internal"]["misses"] == 0
+        assert numerator_stats["division.output"]["outputs"] == 1
+        assert numerator_stats["division.output"]["output_underflows"] == 0
+        assert numerator_stats["division.output"]["output_overflows"] == 0
 
         # Equal operands have equal nominal log times, so independent draws can
         # isolate the denominator. Seed 9 yields an on-time numerator, late closing
-        # event, and on-time internal event; the result must remain finite in rails.
+        # event, and on-time internal event. The raw result exceeds one, must count
+        # exactly one overflow, and must be delivered on the public upper rail.
         equal_value = torch.tensor([1.0], dtype=torch.float64)
         set_gaussian_time_noise(enabled=True, time_std=5.0, seed=9)
         denominator_miss, denominator_miss_domain = division_function(
@@ -1609,17 +1623,19 @@ def verify_gaussian_division_function() -> None:
         assert denominator_stats["division.numerator"]["misses"] == 0
         assert denominator_stats["division.denominator"]["misses"] == 1
         assert denominator_stats["exponential_difference.internal"]["misses"] == 0
-        assert denominator_miss_domain == zero_noise_domain
-        assert torch.isfinite(denominator_miss).all()
-        assert bool(
-            (
-                (denominator_miss >= denominator_miss_domain.min)
-                & (denominator_miss <= denominator_miss_domain.max)
-            ).all()
-        )
+        assert denominator_miss_domain == expected_domain
+        assert torch.equal(denominator_miss, torch.ones_like(denominator_miss))
+        assert denominator_stats["division.output"] == {
+            "events": 0,
+            "misses": 0,
+            "outputs": 1,
+            "output_underflows": 0,
+            "output_overflows": 1,
+        }
 
         # Seed 4 keeps both log events on time but misses the internal re-encoding.
-        # That stage owns the final exponential response, so its miss must reset to zero.
+        # That stage owns the final exponential response, so its miss must remain
+        # reset zero inside the same public rail and must not count as saturation.
         set_gaussian_time_noise(enabled=True, time_std=5.0, seed=4)
         internal_miss, internal_miss_domain = division_function(
             equal_value,
@@ -1632,9 +1648,30 @@ def verify_gaussian_division_function() -> None:
         assert internal_stats["division.denominator"]["misses"] == 0
         assert internal_stats["exponential_difference.internal"]["misses"] == 1
         assert torch.equal(internal_miss, torch.zeros_like(internal_miss))
-        assert internal_miss_domain == zero_noise_domain
+        assert internal_miss_domain == expected_domain
         assert internal_stats["exponential_difference.output"]["output_underflows"] == 0
         assert internal_stats["exponential_difference.output"]["output_overflows"] == 0
+        assert internal_stats["division.output"] == {
+            "events": 0,
+            "misses": 0,
+            "outputs": 1,
+            "output_underflows": 0,
+            "output_overflows": 0,
+        }
+
+        # The [0, 1] restriction belongs only to division_function. A direct
+        # exponential-difference call retains the reverse event ordering and a value
+        # above one, which the signed dual-rail LayerNorm path requires.
+        set_gaussian_time_noise(enabled=False)
+        unrestricted, unrestricted_domain = exponential_difference_operator(
+            torch.tensor([0.0], dtype=torch.float64),
+            TimeBounds(0.0, 2.0),
+            torch.tensor([2.0], dtype=torch.float64),
+            TimeBounds(0.0, 2.0),
+            tau_s=1.0,
+        )
+        assert unrestricted.item() > 1.0
+        assert unrestricted_domain.max > 1.0
     finally:
         # Restore global state before the normalization-operator regression.
         set_gaussian_time_noise(enabled=False)
