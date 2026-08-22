@@ -1119,7 +1119,7 @@ def verify_gaussian_statistics_contract() -> None:
 
 
 def verify_gaussian_multiplication_operator() -> None:
-    """Verify multiplication parity, event-specific misses, and saturation.
+    """Verify multiplication parity, factor-specific rails, misses, and saturation.
 
     Multiplication treats the encoded operand and one scalar zero codeword as two
     causal signed-PWM rails sharing one observation deadline. The checks force each
@@ -1150,6 +1150,21 @@ def verify_gaussian_multiplication_operator() -> None:
         assert torch.equal(deterministic, drive * operand)
         assert deterministic_domain == PotentialBounds(-4.0, 4.0)
 
+        # A fixed coefficient still uses the full identity-encoder time window, but
+        # its ideal product rail must retain the declared singleton factor instead of
+        # acquiring a spurious full-theta multiplier.
+        fixed_factor = torch.full_like(drive, 0.25)
+        fixed_factor_domain = PotentialBounds(0.25, 0.25)
+        fixed_deterministic, fixed_domain = multiplication_operator(
+            drive,
+            domain,
+            fixed_factor,
+            fixed_factor_domain,
+            theta,
+        )
+        assert torch.equal(fixed_deterministic, drive * fixed_factor)
+        assert fixed_domain == PotentialBounds(-0.5, 0.5)
+
         # Zero timing scale still enters both decorated event encoders. Its physical
         # readout and declared rails must exactly match the deterministic operator.
         set_gaussian_time_noise(enabled=True, time_std=0.0, seed=401)
@@ -1162,6 +1177,19 @@ def verify_gaussian_multiplication_operator() -> None:
         )
         assert torch.equal(zero_noise, deterministic)
         assert zero_noise_domain == deterministic_domain
+
+        # Exercise the private Gaussian helper with the same narrow factor contract.
+        # Zero timing noise preserves the fixed-coefficient value and rail exactly,
+        # proving that deterministic and event-aware dispatch share one bound rule.
+        fixed_zero_noise, fixed_zero_noise_domain = multiplication_operator(
+            drive,
+            domain,
+            fixed_factor,
+            fixed_factor_domain,
+            theta,
+        )
+        assert torch.equal(fixed_zero_noise, fixed_deterministic)
+        assert fixed_zero_noise_domain == fixed_domain
 
         # With B=-theta the data codeword is nominally at the deadline. A small
         # positive mean misses only that rail, while the delivered reference rail
@@ -1800,7 +1828,7 @@ def verify_gaussian_swiglu_function() -> None:
 
 
 def verify_gaussian_spiking_linear() -> None:
-    """Verify affine parity plus isolated data and shared-reference misses.
+    """Verify frozen affine bounds plus isolated signed-PWM event misses.
 
     A spiking linear layer samples one data event per input element and one scalar
     zero-reference event for the complete invocation. These events supply two causal
@@ -1809,8 +1837,8 @@ def verify_gaussian_spiking_linear() -> None:
     to the learned affine map rather than merely asserting finite noisy outputs.
 
     Raises:
-        AssertionError: If dense parity, event counts, miss-specific affine readout,
-            propagated rails, or output finiteness regresses.
+        AssertionError: If dense parity, output-specific frozen bounds, mutation
+            rejection, event counts, miss readout, or output finiteness regresses.
     """
     layer = SpikingLinear(3, 2, bias=True, theta=2.0, dtype=torch.float64)
     with torch.no_grad():
@@ -1835,6 +1863,15 @@ def verify_gaussian_spiking_linear() -> None:
         deterministic = layer(potential)
         expected = torch.nn.functional.linear(value, layer.weight, layer.bias)
         assert torch.allclose(deterministic.value, expected, atol=1e-12, rtol=1e-12)
+
+        # Reconstruct the output-specific safety rail independently. Each row has
+        # radius theta*sum(abs(weight)), then its own bias translates both endpoints.
+        linear_radius = layer.theta * layer.weight.detach().abs().sum(dim=1)
+        expected_domain = PotentialBounds(
+            (layer.bias.detach() - linear_radius).min().item(),
+            (layer.bias.detach() + linear_radius).max().item(),
+        )
+        assert deterministic.domain == expected_domain
 
         # Zero scale enters the event-aware implementation without changing either
         # data or scalar reference times. Verify exact value/domain parity and that
@@ -1892,23 +1929,44 @@ def verify_gaussian_spiking_linear() -> None:
         assert reference_stats["linear.data"]["misses"] == 0
         assert reference_stats["linear.reference"]["misses"] == 1
         assert torch.isfinite(reference_miss.value).all()
+
+        # A standard in-place parameter update after first use must invalidate the
+        # frozen rail. Explicit refresh is required before a new inference regime.
+        with torch.no_grad():
+            layer.bias.add_(0.01)
+        try:
+            layer(potential)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("SpikingLinear accepted stale frozen bounds")
+        assert layer.freeze_parameter_bounds(refresh=True) != expected_domain
+
+        # Threshold is also part of the frozen identity because it scales every
+        # output-row radius even when checkpoint parameters remain unchanged.
+        layer.theta = 3.0
+        try:
+            layer.freeze_parameter_bounds()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("SpikingLinear accepted a stale threshold bound")
     finally:
         # Restore process-wide state before the convolutional adapter regression.
         set_gaussian_time_noise(enabled=False)
 
 
 def verify_gaussian_spiking_conv2d() -> None:
-    """Verify convolution parity and symmetric signed-PWM miss trajectories.
+    """Verify frozen convolution bounds and signed-PWM miss trajectories.
 
     The Gaussian convolution contracts signed sampled pulse widths through PyTorch's
-    grouped convolution kernel, whereas the deterministic path explicitly unfolds
-    spike times. A padded spatial example verifies that both implementations preserve
-    zero-potential padding, learned bias, conservative rails, and one scalar reference
-    event for the entire layer call.
+    grouped convolution kernel, and the deterministic path uses the same optimized
+    reduction. A padded spatial example verifies zero-potential padding, one scalar
+    reference event, output-channel absolute-sum rails, and mutation invalidation.
 
     Raises:
-        AssertionError: If dense or zero-noise parity, event counts, miss-specific
-            convolution readout, padding semantics, or finite rails regress.
+        AssertionError: If dense or zero-noise parity, frozen bounds, mutation
+            rejection, event counts, miss readout, padding, or finiteness regresses.
     """
     layer = SpikingConv2d(
         1,
@@ -1952,6 +2010,15 @@ def verify_gaussian_spiking_conv2d() -> None:
             layer.groups,
         )
         assert torch.allclose(deterministic.value, expected, atol=1e-12, rtol=1e-12)
+
+        # Each output channel owns one kernel absolute-sum radius. Padding cannot
+        # enlarge this full-receptive-field safety rail, and bias shifts endpoints.
+        conv_radius = layer.theta * layer.weight.detach().abs().sum(dim=(1, 2, 3))
+        expected_domain = PotentialBounds(
+            (layer.bias.detach() - conv_radius).min().item(),
+            (layer.bias.detach() + conv_radius).max().item(),
+        )
+        assert deterministic.domain == expected_domain
 
         # Zero scale samples every spatial activation once and one reference once.
         # Its direct duration convolution must preserve both values and propagated
@@ -2017,23 +2084,36 @@ def verify_gaussian_spiking_conv2d() -> None:
         assert reference_stats["conv2d.data"]["misses"] == 0
         assert reference_stats["conv2d.reference"]["misses"] == 1
         assert torch.isfinite(reference_miss.value).all()
+
+        # Cache reuse must not hide a later static perturbation. Refresh explicitly
+        # establishes the only supported transition to a new parameter regime.
+        with torch.no_grad():
+            layer.weight.add_(0.01)
+        try:
+            layer(potential)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("SpikingConv2d accepted stale frozen bounds")
+        assert layer.freeze_parameter_bounds(refresh=True) != expected_domain
     finally:
         # Restore process-wide state before the GPT-2 projection regression.
         set_gaussian_time_noise(enabled=False)
 
 
 def verify_gaussian_spiking_conv1d() -> None:
-    """Verify GPT-2 Conv1D parity and symmetric signed-PWM readout.
+    """Verify GPT-2 Conv1D frozen bounds and signed-PWM readout.
 
     Hugging Face Conv1D stores its matrix as ``[in_features, out_features]`` and
     applies it over the final dimension of arbitrary leading shapes. The regression
     verifies that Gaussian signed-pulse-width contraction preserves this convention,
-    samples one call-wide reference, and follows the same symmetric one-sided-miss
-    equations as the shared linear and convolutional adapters.
+    freezes output-column absolute-sum rails, samples one call-wide reference, rejects
+    stale parameter versions, and follows symmetric one-sided-miss equations.
 
     Raises:
         AssertionError: If transposed affine parity, leading-shape preservation,
-            event counts, miss readouts, rails, or finiteness regress.
+            frozen bounds, mutation rejection, event counts, misses, or finiteness
+            regresses.
     """
     layer = SpikingConv1D(2, 3, theta=2.0).to(dtype=torch.float64)
     with torch.no_grad():
@@ -2061,6 +2141,15 @@ def verify_gaussian_spiking_conv1d() -> None:
         expected = torch.matmul(value, layer.weight) + layer.bias
         assert deterministic.value.shape == value.shape[:-1] + (layer.nf,)
         assert torch.allclose(deterministic.value, expected, atol=1e-12, rtol=1e-12)
+
+        # Conv1D stores fan-in on dimension zero, so each output column's absolute
+        # sum defines its safety radius before learned bias translates the endpoints.
+        conv1d_radius = layer.theta * layer.weight.detach().abs().sum(dim=0)
+        expected_domain = PotentialBounds(
+            (layer.bias.detach() - conv1d_radius).min().item(),
+            (layer.bias.detach() + conv1d_radius).max().item(),
+        )
+        assert deterministic.domain == expected_domain
 
         # Zero scale enters addmm-based Gaussian execution. All data carriers remain
         # exact and the one scalar reference must not be replicated per token.
@@ -2115,6 +2204,18 @@ def verify_gaussian_spiking_conv1d() -> None:
         assert reference_stats["conv1d.data"]["misses"] == 0
         assert reference_stats["conv1d.reference"]["misses"] == 1
         assert torch.isfinite(reference_miss.value).all()
+
+        # Mutating the transposed projection after its first use must fail until an
+        # explicit refresh establishes a coherent new parameter-bound pair.
+        with torch.no_grad():
+            layer.bias.add_(0.01)
+        try:
+            layer(potential)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("SpikingConv1D accepted stale frozen bounds")
+        assert layer.freeze_parameter_bounds(refresh=True) != expected_domain
     finally:
         # Restore process-wide state before the LayerNorm regression.
         set_gaussian_time_noise(enabled=False)

@@ -62,12 +62,105 @@ class SpikingConv1D(Conv1D):
         super().__init__(nf, nx, **kwargs)
         self.theta = theta
 
+    def freeze_parameter_bounds(
+        self,
+        *,
+        refresh: bool = False,
+    ) -> PotentialBounds:
+        """Freeze GPT-2's transposed affine output rail for inference.
+
+        Hugging Face stores ``Conv1D`` weights as ``[in_features, out_features]``.
+        For the symmetric input interval ``[-theta, theta]``, output feature ``j``
+        therefore has radius ``theta * sum_i(abs(W_ij))``. Bias translates each
+        feature interval before their endpoints are reduced to one immutable domain.
+
+        Args:
+            refresh: Recompute after an intentional parameter update. The default
+                rejects mutations made after the first freeze.
+
+        Returns:
+            The immutable module-wide transposed affine output domain.
+
+        Raises:
+            RuntimeError: If parameters or ``theta`` changed after freezing without
+                refresh, or changed while bounds were being calculated.
+            ValueError: If ``theta`` or a derived output endpoint is invalid.
+
+        Notes:
+            Mutation checks use PyTorch parameter version counters. Standard
+            ``torch.no_grad()`` in-place changes are detected; direct ``.data`` writes
+            bypass that bookkeeping and are unsupported.
+        """
+        # Validate and capture theta before cache lookup. Its symmetric input rail is
+        # part of the projection-bound identity even when weights remain unchanged.
+        if isinstance(self.theta, bool):
+            raise ValueError("SpikingConv1D theta must be finite and positive")
+        theta = float(self.theta)
+        if not math.isfinite(theta) or theta <= 0.0:
+            raise ValueError("SpikingConv1D theta must be finite and positive")
+
+        # Record transposed weight, optional bias, and threshold identities before
+        # reading values. The None sentinel keeps bias-less projections cacheable.
+        versions = (
+            self.weight._version,
+            self.bias._version if self.bias is not None else None,
+            theta,
+        )
+        cached = self.__dict__.get("_frozen_parameter_bounds")
+
+        # A matching cache is the complete inference-time contract. Any later
+        # checkpoint or perturbation write must request an explicit refresh instead
+        # of leaving new projection values attached to stale rails.
+        if cached is not None and not refresh:
+            cached_versions, cached_domain = cached
+            if versions != cached_versions:
+                raise RuntimeError(
+                    "SpikingConv1D parameters or theta changed after bounds were frozen; "
+                    "call freeze_parameter_bounds(refresh=True) before inference"
+                )
+            return cached_domain
+
+        # Conv1D's first weight axis is fan-in, so reduction over dimension zero gives
+        # one exact safety radius per output feature. Float64 accumulation prevents a
+        # low-precision sum from underestimating or overflowing the declared bound.
+        weight = self.weight.detach()
+        radius = weight.abs().sum(dim=0, dtype=torch.float64) * theta
+        if self.bias is None:
+            bias = torch.zeros_like(radius)
+        else:
+            bias = self.bias.detach().to(dtype=torch.float64)
+        lower = bias - radius
+        upper = bias + radius
+        if not bool(torch.isfinite(lower).all() and torch.isfinite(upper).all()):
+            raise ValueError("SpikingConv1D parameter-derived bounds must be finite")
+        output_domain = PotentialBounds(lower.min().item(), upper.max().item())
+
+        # Check for concurrent writes before publishing the scalar endpoints. This
+        # guarantees the cache describes one coherent parameter version.
+        final_versions = (
+            self.weight._version,
+            self.bias._version if self.bias is not None else None,
+            float(self.theta),
+        )
+        if final_versions != versions:
+            raise RuntimeError(
+                "SpikingConv1D parameters changed while bounds were being frozen"
+            )
+
+        # Keep derived metadata outside the state dict to preserve Hugging Face
+        # checkpoint keys, then reuse the exact immutable object in every forward.
+        self.__dict__["_frozen_parameter_bounds"] = (
+            final_versions,
+            output_domain,
+        )
+        return output_domain
+
     def _gaussian_forward(
         self,
         x: torch.Tensor,
         encoded_x: torch.Tensor,
         domain_x: PotentialBounds,
-        domain_W: PotentialBounds,
+        output_domain: PotentialBounds,
     ) -> Potential:
         """Evaluate GPT-2's transposed affine projection from sampled events.
 
@@ -81,7 +174,7 @@ class SpikingConv1D(Conv1D):
             x: Original input tensor used for metadata and scalar allocation.
             encoded_x: Input clamped to the symmetric identity-code domain.
             domain_x: Symmetric input rails ``[-theta, theta]``.
-            domain_W: Min/max bounds of the transposed Conv1D weight matrix.
+            output_domain: Frozen parameter-derived projection output rail.
 
         Returns:
             A bounded ``Potential`` with the original leading dimensions and ``nf``
@@ -139,7 +232,7 @@ class SpikingConv1D(Conv1D):
         # pwm_ij, _ = signed_pulse_width_modulation_operator(
         #     data_event_i, data_event.domain,
         #     reference_event, reference_event.domain,
-        #     self.weight[i, j], domain_W,
+        #     self.weight[i, j], weight_domain,
         #     observation_deadline=float(data_event.domain.max),
         # )
         # y_j = sum_i(pwm_ij) + bias_j
@@ -156,46 +249,25 @@ class SpikingConv1D(Conv1D):
             y = torch.addmm(self.bias, flat_pulse_width, self.weight)
         y = y.view(output_shape)
 
-        # Derive ideal output rails from every weight/input endpoint product and the
-        # input-feature fan-in represented by the first weight dimension.
-        product_candidates = (
-            domain_W.min * domain_x.min,
-            domain_W.min * domain_x.max,
-            domain_W.max * domain_x.min,
-            domain_W.max * domain_x.max,
-        )
-        fan_in = self.weight.size(0)
-        domain_y = PotentialBounds(
-            min(product_candidates) * fan_in,
-            max(product_candidates) * fan_in,
-        )
-
-        # Bias has already been applied by addmm, so only extend the propagated rails
-        # here. It remains independent of any contribution from a surviving rail.
-        if self.bias is not None:
-            domain_y = PotentialBounds(
-                domain_y.min + self.bias.min().item(),
-                domain_y.max + self.bias.max().item(),
-            )
-
-        # Record raw projection saturation before returning the bounded potential to
-        # the next GPT-2 attention or MLP operation.
+        # Record raw saturation against the frozen output-specific safety rail before
+        # returning the bounded potential. Timing misses may change the observation-
+        # time value but never mutate the declared projection domain.
         return Potential(
             clamp_gaussian_output(
                 y,
-                domain_y,
+                output_domain,
                 site="conv1d.output",
                 name="conv1d_y",
             ),
-            domain_y,
+            output_domain,
         )
 
     def forward(self, input: Potential) -> Potential:
         """Apply GPT-2's transposed affine projection through PWM integration.
 
-        Common input calibration and weight-bound extraction precede dispatch to the
-        private event-aware method or the delivered-time PWM path. Both modes use the
-        optimized transposed matrix contraction and preserve Hugging Face's
+        Common input calibration and one frozen output-specific parameter rail
+        precede dispatch to the event-aware or delivered-time PWM path. Both modes
+        use the optimized transposed matrix contraction and preserve Hugging Face's
         ``[in_features, out_features]`` layout, leading dimensions, bias, and bounds.
 
         Args:
@@ -210,12 +282,9 @@ class SpikingConv1D(Conv1D):
         domain_x = PotentialBounds(-self.theta, self.theta)
         encoded_x = domain_x.clamp(x, name="conv1d_x")
 
-        # Compute one transposed-weight interval for both paths. Preserve the existing
-        # infinitesimal expansion when all learned weights are exactly identical.
-        w_min, w_max = self.weight.min().item(), self.weight.max().item()
-        if w_min == w_max:
-            w_min, w_max = w_min - 1e-8, w_max + 1e-8
-        domain_W: PotentialBounds = PotentialBounds(w_min, w_max)
+        # Freeze transposed-weight and bias bounds after checkpoint loading or static
+        # perturbation. Later calls reuse the exact domain after mutation validation.
+        output_domain = self.freeze_parameter_bounds()
 
         # Isolate event sampling, shared-reference timing, addmm, and saturation
         # logging inside the private Gaussian implementation.
@@ -224,7 +293,7 @@ class SpikingConv1D(Conv1D):
                 x,
                 encoded_x,
                 domain_x,
-                domain_W,
+                output_domain,
             )
 
         # Convert delivered identity-code times to signed zero-reference pulse widths.
@@ -253,28 +322,9 @@ class SpikingConv1D(Conv1D):
             y = torch.addmm(self.bias, flat_pulse_width, self.weight)
         y = y.view(output_shape)
 
-        # Preserve the ideal per-synapse product interval and input-feature fan-in.
-        product_candidates = (
-            domain_W.min * domain_x.min,
-            domain_W.min * domain_x.max,
-            domain_W.max * domain_x.min,
-            domain_W.max * domain_x.max,
-        )
-        fan_in = self.weight.size(0)
-        domain_y = PotentialBounds(
-            min(product_candidates) * fan_in,
-            max(product_candidates) * fan_in,
-        )
-
-        # Addmm already applies the learned bias to values, so translate only the
-        # conservative rails here.
-        if self.bias is not None:
-            b_min, b_max = self.bias.min().item(), self.bias.max().item()
-            domain_y = PotentialBounds(
-                domain_y.min + b_min,
-                domain_y.max + b_max,
-            )
-        return Potential(y, domain_y)
+        # Addmm already applies learned bias, and the frozen domain already contains
+        # its endpoint translation. No parameter scan occurs in this forward pass.
+        return Potential(y, output_domain)
 
 
 def eager_attention_forward(module, query, key, value, attention_mask, **kwargs):

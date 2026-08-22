@@ -93,6 +93,174 @@ class SpikingLayerNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(self.normalized_shape))
         self.bias = nn.Parameter(torch.zeros(self.normalized_shape))
 
+    def freeze_parameter_bounds(
+        self,
+        *,
+        refresh: bool = False,
+    ) -> tuple[PotentialBounds, PotentialBounds, PotentialBounds]:
+        """Freeze learned parameter and final output bounds for this ablation.
+
+        LayerNorm has three distinct affine-input envelopes. A fully dense module
+        uses ``sqrt(d - 1)`` for population-normalized features. A direct exponential
+        path uses ``R - 1/R``, and a spiking exponential-difference path uses the
+        relaxed magnitude ``R``, where ``R = (theta-clip_margin)/clip_margin``.
+        This method combines the active envelope with learned scale and bias once,
+        after checkpoint loading and static perturbation.
+
+        Args:
+            refresh: Recompute metadata after an intentional parameter or
+                configuration update. The default rejects stale cached bounds.
+
+        Returns:
+            A tuple containing frozen weight bounds, frozen bias bounds, and the
+            module's final output domain for its current ablation configuration.
+
+        Raises:
+            RuntimeError: If parameters or bound-relevant configuration changed
+                after freezing without refresh, or changed during recomputation.
+            ValueError: If a physical scale, stabilizer, parameter, or derived
+                endpoint is non-finite or violates the LayerNorm domain contract.
+
+        Notes:
+            Parameter mutation checks use PyTorch version counters and therefore do
+            not support direct ``parameter.data`` writes. Standard checkpoint loads
+            and ``torch.no_grad()`` perturbations are detected.
+        """
+        # Validate every scalar that determines the active mathematical envelope
+        # before consulting the cache. A configuration change must never reuse rails
+        # computed for a different TTFS window or ablation topology.
+        if isinstance(self.theta, bool):
+            raise ValueError("SpikingLayerNorm theta must be finite and positive")
+        theta = float(self.theta)
+        margin = float(self.clip_margin)
+        tau_s = float(self.tau_s)
+        eps = float(self.eps)
+        if not math.isfinite(theta) or theta <= 0.0:
+            raise ValueError("SpikingLayerNorm theta must be finite and positive")
+        if not math.isfinite(margin) or margin <= 0.0 or margin >= theta / 2.0:
+            raise ValueError(
+                "SpikingLayerNorm clip_margin must satisfy 0 < margin < theta / 2"
+            )
+        if not math.isfinite(tau_s) or tau_s <= 0.0:
+            raise ValueError("SpikingLayerNorm tau_s must be finite and positive")
+        if not math.isfinite(eps) or eps < 0.0:
+            raise ValueError("SpikingLayerNorm eps must be finite and non-negative")
+
+        # Parameter versions and all bound-relevant scalar switches form one cache
+        # identity. This catches threshold, margin, time-scale, epsilon, and ablation
+        # mutations even when gamma and beta remain byte-identical.
+        identity = (
+            self.weight._version,
+            self.bias._version,
+            theta,
+            margin,
+            tau_s,
+            eps,
+            bool(self.use_spiking_mul),
+            bool(self.use_spiking_log),
+            bool(self.use_spiking_expdiff),
+        )
+        cached = self.__dict__.get("_frozen_parameter_bounds")
+        if cached is not None and not refresh:
+            cached_identity, cached_bounds = cached
+            if identity != cached_identity:
+                raise RuntimeError(
+                    "SpikingLayerNorm parameters or configuration changed after "
+                    "bounds were frozen; call freeze_parameter_bounds(refresh=True) "
+                    "before inference"
+                )
+            return cached_bounds
+
+        # Read learned affine parameters once in float64. The scalar weight and bias
+        # domains are retained because the spiking final-scale multiplication still
+        # consumes the declared gamma interval as part of its operator contract.
+        weight = self.weight.detach().to(dtype=torch.float64)
+        bias = self.bias.detach().to(dtype=torch.float64)
+        if not bool(torch.isfinite(weight).all() and torch.isfinite(bias).all()):
+            raise ValueError("SpikingLayerNorm affine parameters must be finite")
+        weight_domain = PotentialBounds(weight.min().item(), weight.max().item())
+        bias_domain = PotentialBounds(bias.min().item(), bias.max().item())
+
+        # Select the fixed pre-affine magnitude for the active ablation. The spiking
+        # expdiff branch deliberately preserves its existing relaxed [-R,R] contract,
+        # while direct exponential subtraction can use the tighter R-1/R interval.
+        all_dense = not (
+            self.use_spiking_mul
+            or self.use_spiking_log
+            or self.use_spiking_expdiff
+        )
+        ratio = (theta - margin) / margin
+        if all_dense:
+            feature_count = math.prod(self.normalized_shape)
+            result_limit = math.sqrt(max(feature_count - 1, 0))
+            effective_weight = weight
+        elif self.use_spiking_expdiff:
+            result_limit = ratio
+            effective_weight = weight.clamp(-theta, theta)
+        else:
+            result_limit = ratio - 1.0 / ratio
+            effective_weight = weight
+        if not math.isfinite(result_limit) or result_limit < 0.0:
+            raise ValueError("SpikingLayerNorm normalized bound must be finite")
+
+        # Dense and direct branches apply gamma featurewise, giving an exact global
+        # endpoint reduction. The spiking final multiplication currently propagates
+        # one global gamma interval, so preserve that broader operator-level contract
+        # to contain Gaussian factor-event excursions before final bias addition.
+        if self.use_spiking_expdiff and not all_dense:
+            effective_min = effective_weight.min().item()
+            effective_max = effective_weight.max().item()
+            product_candidates = (
+                -result_limit * effective_min,
+                -result_limit * effective_max,
+                result_limit * effective_min,
+                result_limit * effective_max,
+            )
+            output_domain = PotentialBounds(
+                min(product_candidates) + bias_domain.min,
+                max(product_candidates) + bias_domain.max,
+            )
+        else:
+            lower_candidate = effective_weight * -result_limit + bias
+            upper_candidate = effective_weight * result_limit + bias
+            output_domain = PotentialBounds(
+                torch.minimum(lower_candidate, upper_candidate).min().item(),
+                torch.maximum(lower_candidate, upper_candidate).max().item(),
+            )
+        if not math.isfinite(float(output_domain.min)) or not math.isfinite(
+            float(output_domain.max)
+        ):
+            raise ValueError("SpikingLayerNorm output bounds must be finite")
+
+        # Rebuild the identity after reductions so concurrent parameter or scalar
+        # configuration writes cannot publish a mixed-version metadata tuple.
+        final_identity = (
+            self.weight._version,
+            self.bias._version,
+            float(self.theta),
+            float(self.clip_margin),
+            float(self.tau_s),
+            float(self.eps),
+            bool(self.use_spiking_mul),
+            bool(self.use_spiking_log),
+            bool(self.use_spiking_expdiff),
+        )
+        if final_identity != identity:
+            raise RuntimeError(
+                "SpikingLayerNorm parameters or configuration changed while bounds "
+                "were being frozen"
+            )
+
+        # Derived bounds are intentionally absent from the state dict. Checkpoint
+        # compatibility remains unchanged, while later calls reuse immutable scalar
+        # metadata until an explicit refresh establishes a new inference regime.
+        frozen_bounds = (weight_domain, bias_domain, output_domain)
+        self.__dict__["_frozen_parameter_bounds"] = (
+            final_identity,
+            frozen_bounds,
+        )
+        return frozen_bounds
+
     def _gaussian_forward(self, pot: Potential) -> Potential:
         """Evaluate LayerNorm with event-aware timing and fixed output bounds.
 
@@ -102,8 +270,8 @@ class SpikingLayerNorm(nn.Module):
         exponential-difference decoding is disabled, this method explicitly
         resolves the two causal rail masks at the shared observation deadline before
         applying the direct exponential formula. Every returned interval is
-        derived from feature count, declared operator bounds, or learned affine
-        parameters; the current activation tensor is never measured to define it.
+        retrieved from one frozen parameter/configuration contract; the current
+        activation tensor is never measured to define it.
 
         Args:
             pot: Input activation tensor paired with its calibrated bounds.
@@ -120,6 +288,13 @@ class SpikingLayerNorm(nn.Module):
         """
         x: torch.Tensor = pot.value
 
+        # Freeze all learned-parameter and ablation-dependent intervals before any
+        # event sampling occurs. Reusing this immutable contract keeps Gaussian
+        # delivery masks from changing the declared output domain between calls.
+        weight_domain, _bias_domain, output_domain = (
+            self.freeze_parameter_bounds()
+        )
+
         # With every spiking stage disabled there is no temporal event boundary at
         # which Gaussian noise can act, so preserve the exact dense LayerNorm value.
         if (
@@ -135,25 +310,9 @@ class SpikingLayerNorm(nn.Module):
                 self.eps,
             )
 
-            # For d normalized features, the centered population-normalized value
-            # satisfies |z_i| <= sqrt(d - 1); a non-negative epsilon only contracts
-            # that envelope. This gives a batch-independent alternative to observing
-            # the dense output extrema, including the exact zero rail when d == 1.
-            feature_count = math.prod(self.normalized_shape)
-            normalized_limit = math.sqrt(max(feature_count - 1, 0))
-
-            # Apply each learned gamma and beta to both normalized endpoints before
-            # reducing across features. Parameter inspection is checkpoint state,
-            # not activation calibration, and preserves negative gamma correctly.
-            weight = self.weight.detach()
-            bias = self.bias.detach()
-            lower_candidate = weight * -normalized_limit + bias
-            upper_candidate = weight * normalized_limit + bias
-            dense_domain = PotentialBounds(
-                torch.minimum(lower_candidate, upper_candidate).min().item(),
-                torch.maximum(lower_candidate, upper_candidate).max().item(),
-            )
-            return Potential(out, dense_domain)
+            # Even though this branch has no sampled temporal stage, it shares the
+            # same frozen metadata lifecycle as every other ablation combination.
+            return Potential(out, output_domain)
 
         eps = self.eps
         clip_margin = self.clip_margin
@@ -270,13 +429,9 @@ class SpikingLayerNorm(nn.Module):
             result_domain = PotentialBounds(-result_limit, result_limit)
 
             # Retain the existing spiking affine rescaling used by this ablation.
-            # Its Gaussian dispatcher samples the learned-weight multiplication and
-            # returns the fixed product rail used for final affine propagation.
-            weight_domain = PotentialBounds(
-                self.weight.detach().min().item(),
-                self.weight.detach().max().item(),
-            )
-            scaled, scaled_domain = multiplication_operator(
+            # The multiplier consumes the frozen gamma interval, while the final
+            # module interval comes from the same pre-sampling metadata contract.
+            scaled, _ = multiplication_operator(
                 result,
                 result_domain,
                 self.weight,
@@ -284,14 +439,6 @@ class SpikingLayerNorm(nn.Module):
                 theta,
             )
             out = scaled + self.bias
-
-            # Bias addition translates the product interval. Global bias endpoints
-            # are sufficient because every feature receives one fixed learned bias.
-            bias = self.bias.detach()
-            out_domain = PotentialBounds(
-                scaled_domain.min + bias.min().item(),
-                scaled_domain.max + bias.max().item(),
-            )
         else:
             if isinstance(t_sigma, SpikeSample):
                 # All three log encoders describe two differential readouts and must
@@ -366,44 +513,23 @@ class SpikingLayerNorm(nn.Module):
                 raise ValueError(
                     "LayerNorm exponential bounds must be finite in the activation dtype"
                 )
-            y_domain = PotentialBounds(
-                exponential_endpoints[0].item(),
-                exponential_endpoints[1].item(),
-            )
-
-            # Positive and negative rails share the same exponential envelope. Their
-            # difference therefore has a fixed signed interval independent of the
-            # sampled delivery masks and of the current normalized activation.
+            # The finite endpoint check above protects the actual activation dtype.
+            # The corresponding signed interval and affine propagation were already
+            # evaluated in ``freeze_parameter_bounds`` using stable scalar math.
             result = y_pos - y_neg
-            result_domain = PotentialBounds(
-                y_domain.min - y_domain.max,
-                y_domain.max - y_domain.min,
-            )
             out = self.weight * result + self.bias
 
-            # Propagate the signed result through each feature's learned affine map.
-            # Evaluating both endpoints handles either sign of gamma without using
-            # activation extrema; reducing afterward yields one scalar module rail.
-            weight = self.weight.detach()
-            bias = self.bias.detach()
-            lower_candidate = weight * float(result_domain.min) + bias
-            upper_candidate = weight * float(result_domain.max) + bias
-            out_domain = PotentialBounds(
-                torch.minimum(lower_candidate, upper_candidate).min().item(),
-                torch.maximum(lower_candidate, upper_candidate).max().item(),
-            )
-
-        # Values and metadata now share a predeclared mathematical envelope for all
-        # Gaussian ablation combinations; no forward-pass observation widens it.
-        return Potential(out, out_domain)
+        # Every Gaussian ablation combination now returns the same immutable object
+        # until parameters or bound-defining configuration are explicitly refreshed.
+        return Potential(out, output_domain)
     
     def forward(self, pot: Potential) -> Potential:
-        """Apply LayerNorm through the selected deterministic or Gaussian stages.
+        """Apply LayerNorm with configuration-derived output bounds.
 
         Gaussian timing noise is process-wide mutable state, so the decision is
         made once at the public method boundary. Event-aware execution delegates
-        to :meth:`_gaussian_forward`; the remainder of this method preserves the
-        original tensor-only implementation used when timing noise is disabled.
+        to :meth:`_gaussian_forward`; deterministic execution reuses the same frozen
+        parameter and output-domain contract without reading runtime extrema.
 
         Args:
             pot: Input activation tensor paired with its calibrated bounds.
@@ -416,13 +542,23 @@ class SpikingLayerNorm(nn.Module):
         if get_gaussian_time_noise().enabled:
             return self._gaussian_forward(pot)
 
-        # The disabled branch deliberately remains the established deterministic
-        # path, including all three stage-ablation combinations and their formulas.
+        # The deterministic branch retains all three stage-ablation combinations,
+        # but its metadata must be fixed before observing this invocation's output.
         x: torch.Tensor = pot.value
+
+        # Freeze the learned affine intervals and active ablation envelope before
+        # deterministic arithmetic begins. Repeated inference calls validate only
+        # the cache identity and reuse the same immutable output-domain object.
+        weight_domain, _bias_domain, output_domain = (
+            self.freeze_parameter_bounds()
+        )
 
         if not self.use_spiking_mul and not self.use_spiking_log and not self.use_spiking_expdiff:
             out = nn.functional.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
-            return Potential(out, PotentialBounds(out.min().item(), out.max().item()))
+
+            # The dense value remains PyTorch-exact, while its finite-feature affine
+            # envelope comes from the precomputed contract shared with Gaussian mode.
+            return Potential(out, output_domain)
 
         eps = self.eps
         clip_margin = self.clip_margin
@@ -476,23 +612,67 @@ class SpikingLayerNorm(nn.Module):
             tb_err = TimeBounds(0.0, T0)
 
         if self.use_spiking_expdiff:
-            y_pos, _ = exponential_difference_operator(t_err_pos, tb_err, t_sigma, tb_sigma, tau_s=tau_s)
-            y_neg, _ = exponential_difference_operator(t_err_neg, tb_err, t_sigma, tb_sigma, tau_s=tau_s)
+            # Preserve both exponential output domains rather than recovering a rail
+            # from their realized tensor difference after the operator has run.
+            y_pos, domain_y_pos = exponential_difference_operator(
+                t_err_pos,
+                tb_err,
+                t_sigma,
+                tb_sigma,
+                tau_s=tau_s,
+            )
+            y_neg, domain_y_neg = exponential_difference_operator(
+                t_err_neg,
+                tb_err,
+                t_sigma,
+                tb_sigma,
+                tau_s=tau_s,
+            )
             result: torch.Tensor = y_pos - y_neg
-            out = multiplication_operator(
+
+            # The dual-rail exponential magnitudes are non-negative. Relax their
+            # signed difference to one symmetric interval whose magnitude is the
+            # larger declared upper rail, matching the event-aware construction.
+            result_limit = max(domain_y_pos.max, domain_y_neg.max)
+            result_domain = PotentialBounds(-result_limit, result_limit)
+
+            # Propagate the signed interval through the learned scale using its
+            # frozen gamma domain. The final module rail was derived from this same
+            # ablation contract, so no parameter reduction is needed here.
+            scaled, _ = multiplication_operator(
                 result,
-                PotentialBounds(result.min().item(), result.max().item()),
+                result_domain,
                 self.weight,
-                PotentialBounds(self.weight.min().item(), self.weight.max().item()),
-                theta)[0] + self.bias
+                weight_domain,
+                theta,
+            )
+            out = scaled + self.bias
         else:
             y_pos = torch.exp((t_sigma - t_err_pos) / tau_s)
             y_neg = torch.exp((t_sigma - t_err_neg) / tau_s)
             result = y_pos - y_neg
             out = self.weight * result + self.bias
 
-        out_domain = PotentialBounds(out.min().item(), out.max().item())
-        return Potential(out, out_domain)
+            # Both delivered time tensors lie in their fixed declared windows. Form
+            # the complete temporal-difference interval and transform its endpoints
+            # monotonically through the direct exponential ablation.
+            delta_min = float(tb_sigma.min) - float(tb_err.max)
+            delta_max = float(tb_sigma.max) - float(tb_err.min)
+            exponential_endpoints = torch.exp(
+                x.new_tensor([delta_min / tau_s, delta_max / tau_s])
+            )
+            if not bool(torch.isfinite(exponential_endpoints).all()):
+                raise ValueError(
+                    "LayerNorm exponential bounds must be finite in the activation "
+                    "dtype"
+                )
+            # This check protects representability in the activation dtype. Stable
+            # scalar endpoint propagation and learned affine reduction were already
+            # completed once by ``freeze_parameter_bounds``.
+
+        # Noise configuration now changes only value-generation semantics; both
+        # execution modes attach the exact same frozen metadata object.
+        return Potential(out, output_domain)
 
 
 class SpikingLinear(nn.Linear):
@@ -503,12 +683,114 @@ class SpikingLinear(nn.Linear):
         super().__init__(in_features, out_features, bias=bias, device=device, dtype=dtype)
         self.theta = theta
 
+    def freeze_parameter_bounds(
+        self,
+        *,
+        refresh: bool = False,
+    ) -> PotentialBounds:
+        """Freeze the parameter-derived affine output domain for inference.
+
+        The first call is intended to occur after checkpoint loading, dtype/device
+        conversion, and any static weight or bias perturbation. For the symmetric
+        input rail ``[-theta, theta]``, each output feature ``j`` has the exact
+        parameter-derived interval ``[b_j-r_j, b_j+r_j]``, where
+        ``r_j = theta * sum_i(abs(W_ji))``. Reducing those featurewise endpoints is
+        tighter than multiplying global weight extrema by the input fan-in.
+
+        Args:
+            refresh: Recompute the frozen domain after an intentional parameter
+                update. The default rejects mutations made after the first freeze.
+
+        Returns:
+            The immutable module-wide affine output domain.
+
+        Raises:
+            RuntimeError: If parameters or ``theta`` changed after freezing and
+                ``refresh`` is false, or change during recomputation.
+            ValueError: If ``theta`` or a derived endpoint is non-finite, or if
+                ``theta`` is not positive.
+
+        Notes:
+            Mutation detection relies on PyTorch's parameter version counters.
+            Standard ``torch.no_grad()`` in-place updates are detected; unsupported
+            ``parameter.data`` writes bypass autograd bookkeeping and must not be
+            used by checkpoint conversion or perturbation code.
+        """
+        # Validate and capture the configured symmetric input magnitude before cache
+        # lookup. Changing theta changes both identity-code rails and affine bounds,
+        # so it belongs to the same frozen configuration identity as parameters.
+        if isinstance(self.theta, bool):
+            raise ValueError("SpikingLinear theta must be finite and positive")
+        theta = float(self.theta)
+        if not math.isfinite(theta) or theta <= 0.0:
+            raise ValueError("SpikingLinear theta must be finite and positive")
+
+        # Parameter mutation counters let repeated forward calls reuse scalar bounds
+        # without rescanning tensors. Bias-less layers use a stable sentinel, and the
+        # validated theta token detects threshold changes after the initial freeze.
+        versions = (
+            self.weight._version,
+            self.bias._version if self.bias is not None else None,
+            theta,
+        )
+        cached = self.__dict__.get("_frozen_parameter_bounds")
+
+        # A valid cache is returned verbatim. If checkpoint loading, perturbation, or
+        # optimization changed a parameter after freezing, fail instead of silently
+        # pairing new values with stale physical rails.
+        if cached is not None and not refresh:
+            cached_versions, cached_domain = cached
+            if versions != cached_versions:
+                raise RuntimeError(
+                    "SpikingLinear parameters or theta changed after bounds were frozen; "
+                    "call freeze_parameter_bounds(refresh=True) before inference"
+                )
+            return cached_domain
+
+        # Accumulate rounded checkpoint parameters in float64 once, avoiding both
+        # low-precision reduction overflow and the old global-extrema-times-fan-in
+        # relaxation. The operation stays on the parameter device and returns only
+        # two scalar endpoints to Python.
+        weight = self.weight.detach()
+        radius = weight.abs().sum(dim=1, dtype=torch.float64) * theta
+        if self.bias is None:
+            bias = torch.zeros_like(radius)
+        else:
+            bias = self.bias.detach().to(dtype=torch.float64)
+        lower = bias - radius
+        upper = bias + radius
+        if not bool(torch.isfinite(lower).all() and torch.isfinite(upper).all()):
+            raise ValueError("SpikingLinear parameter-derived bounds must be finite")
+        output_domain = PotentialBounds(lower.min().item(), upper.max().item())
+
+        # Detect a concurrent write across the reduction boundary before publishing
+        # the cache. Intentional static perturbation can explicitly refresh afterward;
+        # an unnoticed race must never establish a mixed-version bound.
+        final_versions = (
+            self.weight._version,
+            self.bias._version if self.bias is not None else None,
+            float(self.theta),
+        )
+        if final_versions != versions:
+            raise RuntimeError(
+                "SpikingLinear parameters changed while bounds were being frozen"
+            )
+
+        # Store an immutable PotentialBounds object outside the state dict. Checkpoint
+        # compatibility is unchanged, while every later inference call can reuse the
+        # same scalar rail until an explicit refresh authorizes new parameters.
+        self.__dict__["_frozen_parameter_bounds"] = (
+            final_versions,
+            output_domain,
+        )
+        return output_domain
+
     def _gaussian_forward(
         self,
         x: torch.Tensor,
         encoded_x: torch.Tensor,
         domain_x: PotentialBounds,
-        domain_W: PotentialBounds,
+        output_domain: PotentialBounds,
     ) -> Potential:
         """Evaluate the affine layer from sampled data and reference events.
 
@@ -521,7 +803,8 @@ class SpikingLinear(nn.Linear):
             x: Original input tensor used for dtype, device, and scalar allocation.
             encoded_x: Input tensor clamped to ``domain_x``.
             domain_x: Symmetric input rails ``[-theta, theta]``.
-            domain_W: Min/max bounds of the learned weight tensor.
+            output_domain: Pre-frozen affine output rail shared with deterministic
+                execution and already incorporating learned weight and bias bounds.
 
         Returns:
             A bounded ``Potential`` containing the physical affine readout.
@@ -580,53 +863,34 @@ class SpikingLinear(nn.Linear):
         # pwm_ji, _ = signed_pulse_width_modulation_operator(
         #     data_event_i, data_event.domain,
         #     reference_event, reference_event.domain,
-        #     self.weight[j, i], domain_W,
+        #     self.weight[j, i], weight_domain,
         #     observation_deadline=float(data_event.domain.max),
         # )
         # y_j = sum_i(pwm_ji) + bias_j
         y = nn.functional.linear(signed_pulse_width, self.weight, self.bias)
 
-        # Timing noise does not expand the calibrated ideal affine rails. Form every
-        # weight/input endpoint product, then reduce over the full input fan-in.
-        product_candidates = (
-            domain_W.min * domain_x.min,
-            domain_W.min * domain_x.max,
-            domain_W.max * domain_x.min,
-            domain_W.max * domain_x.max,
-        )
-        domain_y = PotentialBounds(
-            min(product_candidates) * self.in_features,
-            max(product_candidates) * self.in_features,
-        )
-
-        # Bias is part of both the physical affine output and its declared interval.
-        # It remains independent of the differential synaptic contribution, including
-        # the nonzero contribution that a surviving rail may produce after one miss.
-        if self.bias is not None:
-            domain_y = PotentialBounds(
-                domain_y.min + self.bias.min().item(),
-                domain_y.max + self.bias.max().item(),
-            )
-
-        # Count raw affine saturation before returning the rail-clamped potential to
-        # the next Transformer operation.
+        # Count raw affine saturation against the frozen ideal rail before passing
+        # the clamped physical result to the next Transformer operation. A one-sided
+        # event miss may exceed the delivered-event safety interval and is measured
+        # here rather than widening the frozen domain.
         return Potential(
             clamp_gaussian_output(
                 y,
-                domain_y,
+                output_domain,
                 site="linear.output",
                 name="linear_y",
             ),
-            domain_y,
+            output_domain,
         )
 
     def forward(self, input: Potential) -> Potential:
-        """Apply the spiking affine map through deterministic or Gaussian PWM.
+        """Apply the affine PWM map against one frozen parameter-derived rail.
 
-        Common input calibration and learned-weight bounds are computed once before
-        dispatch. Gaussian execution delegates sampled event readout to
-        :meth:`_gaussian_forward`; noise-free execution evaluates the delivered-time
-        PWM-MAC with the same optimized linear kernel.
+        The symmetric identity-code domain is fixed by ``theta``. The affine output
+        domain is frozen on first use after checkpoint loading and static parameter
+        perturbation, then shared by deterministic and Gaussian execution. Gaussian
+        execution delegates sampled event readout to :meth:`_gaussian_forward`;
+        noise-free execution evaluates the same PWM-MAC with the optimized kernel.
 
         Args:
             input: Tensor value paired with its upstream potential bounds.
@@ -640,19 +904,20 @@ class SpikingLinear(nn.Linear):
         domain_x = PotentialBounds(-self.theta, self.theta)
         encoded_x = domain_x.clamp(x, name="linear_x")
 
-        # Compute learned-weight endpoints once so both physical implementations use
-        # an identical interval-arithmetic contract for the affine output.
-        w_min, w_max = self.weight.min().item(), self.weight.max().item()
-        domain_W: PotentialBounds = PotentialBounds(w_min, w_max)
+        # Freeze the output-specific absolute-sum rail on first use and validate the
+        # parameter mutation counters thereafter. Both execution modes receive this
+        # exact immutable object, so a noise toggle cannot alter declared bounds.
+        output_domain = self.freeze_parameter_bounds()
 
         # Keep event sampling, shared-reference handling, and saturation statistics
-        # isolated in the private Gaussian method.
+        # isolated in the private Gaussian method. Passing only the frozen output
+        # rail avoids every forward-time weight or bias endpoint reduction.
         if get_gaussian_time_noise().enabled:
             return self._gaussian_forward(
                 x,
                 encoded_x,
                 domain_x,
-                domain_W,
+                output_domain,
             )
 
         # Encode delivered data times and subtract them from the scalar zero-codeword
@@ -672,25 +937,10 @@ class SpikingLinear(nn.Linear):
         # y_j = sum_i(pwm_ji) + bias_j.
         y = nn.functional.linear(signed_pulse_width, self.weight, self.bias)
 
-        # Propagate the same ideal PWM product endpoints and input-feature fan-in used
-        # by the explicit construction, independently of the current activation.
-        product_candidates = (
-            domain_W.min * domain_x.min,
-            domain_W.min * domain_x.max,
-            domain_W.max * domain_x.min,
-            domain_W.max * domain_x.max,
-        )
-        domain_y = PotentialBounds(
-            min(product_candidates) * self.in_features,
-            max(product_candidates) * self.in_features,
-        )
-
-        # The optimized kernel already applied bias to the value; translate only the
-        # declared rails here. Layers constructed without bias skip this adjustment.
-        if self.bias is not None:
-            b_min, b_max = self.bias.min().item(), self.bias.max().item()
-            domain_y = PotentialBounds(domain_y.min + b_min, domain_y.max + b_max)
-        return Potential(y, domain_y)
+        # The optimized kernel already includes learned bias. Return the previously
+        # frozen affine rail directly; no current activation or parameter reduction
+        # participates in deterministic forward-time metadata construction.
+        return Potential(y, output_domain)
 
 class SpikingConv2d(nn.Conv2d):
     """2D convolution via ψ_PWM operator. Numerically identical to nn.Conv2d."""
@@ -703,12 +953,107 @@ class SpikingConv2d(nn.Conv2d):
                          bias=bias, device=device, dtype=dtype)
         self.theta = theta
 
+    def freeze_parameter_bounds(
+        self,
+        *,
+        refresh: bool = False,
+    ) -> PotentialBounds:
+        """Freeze an output-specific convolution safety rail for inference.
+
+        For input values in ``[-theta, theta]``, output channel ``j`` has radius
+        ``theta * sum(abs(kernel_j))`` over its grouped receptive field. Optional
+        bias translates that channel interval before all channel endpoints are
+        reduced to the scalar domain carried by ``Potential``. The bound is frozen
+        after loading and static perturbation, not rebuilt from every forward pass.
+
+        Args:
+            refresh: Recompute after an intentional parameter update. Without this
+                flag, mutation after the first freeze is rejected.
+
+        Returns:
+            The immutable module-wide convolution output domain.
+
+        Raises:
+            RuntimeError: If parameters or ``theta`` changed after freezing without
+                refresh, or changed while the new domain was being calculated.
+            ValueError: If ``theta`` is invalid or the derived endpoints are not
+                finite.
+
+        Notes:
+            PyTorch parameter version counters detect normal ``torch.no_grad()``
+            in-place updates. Direct ``parameter.data`` writes bypass this mechanism
+            and are unsupported in checkpoint and perturbation code.
+        """
+        # Validate and capture theta before cache lookup. The convolution's symmetric
+        # input rail changes with theta even when its kernel stays byte-identical.
+        if isinstance(self.theta, bool):
+            raise ValueError("SpikingConv2d theta must be finite and positive")
+        theta = float(self.theta)
+        if not math.isfinite(theta) or theta <= 0.0:
+            raise ValueError("SpikingConv2d theta must be finite and positive")
+
+        # Capture both parameter versions and the threshold configuration before
+        # reading tensor values. Bias-less convolutions retain a stable None sentinel.
+        versions = (
+            self.weight._version,
+            self.bias._version if self.bias is not None else None,
+            theta,
+        )
+        cached = self.__dict__.get("_frozen_parameter_bounds")
+
+        # Reuse a valid immutable rail without scanning any kernel values. A changed
+        # version must fail clearly rather than combine perturbed weights with stale
+        # physical output bounds.
+        if cached is not None and not refresh:
+            cached_versions, cached_domain = cached
+            if versions != cached_versions:
+                raise RuntimeError(
+                    "SpikingConv2d parameters or theta changed after bounds were frozen; "
+                    "call freeze_parameter_bounds(refresh=True) before inference"
+                )
+            return cached_domain
+
+        # Sum each output channel's actual grouped kernel in float64. The stored
+        # kernel already contains only the input channels belonging to its group, so
+        # reducing dimensions 1-3 handles grouping without a separate fan-in factor.
+        weight = self.weight.detach()
+        radius = weight.abs().sum(dim=(1, 2, 3), dtype=torch.float64) * theta
+        if self.bias is None:
+            bias = torch.zeros_like(radius)
+        else:
+            bias = self.bias.detach().to(dtype=torch.float64)
+        lower = bias - radius
+        upper = bias + radius
+        if not bool(torch.isfinite(lower).all() and torch.isfinite(upper).all()):
+            raise ValueError("SpikingConv2d parameter-derived bounds must be finite")
+        output_domain = PotentialBounds(lower.min().item(), upper.max().item())
+
+        # Refuse to publish a mixed-version interval if a concurrent writer changed
+        # either tensor during the one-time reduction.
+        final_versions = (
+            self.weight._version,
+            self.bias._version if self.bias is not None else None,
+            float(self.theta),
+        )
+        if final_versions != versions:
+            raise RuntimeError(
+                "SpikingConv2d parameters changed while bounds were being frozen"
+            )
+
+        # Keep the cache out of the state dict so checkpoint keys remain compatible.
+        # Repeated inference calls reuse this exact immutable PotentialBounds object.
+        self.__dict__["_frozen_parameter_bounds"] = (
+            final_versions,
+            output_domain,
+        )
+        return output_domain
+
     def _gaussian_forward(
         self,
         x: torch.Tensor,
         encoded_x: torch.Tensor,
         domain_x: PotentialBounds,
-        domain_W: PotentialBounds,
+        output_domain: PotentialBounds,
     ) -> Potential:
         """Evaluate convolution from sampled data and shared reference events.
 
@@ -722,7 +1067,7 @@ class SpikingConv2d(nn.Conv2d):
             x: Original input tensor used for metadata and scalar allocation.
             encoded_x: Input clamped to the symmetric identity-code domain.
             domain_x: Symmetric input rails ``[-theta, theta]``.
-            domain_W: Min/max bounds of the convolution weights.
+            output_domain: Frozen parameter-derived convolution output rail.
 
         Returns:
             A bounded ``Potential`` containing the physical convolution readout.
@@ -779,7 +1124,7 @@ class SpikingConv2d(nn.Conv2d):
         # pwm_synapse, _ = signed_pulse_width_modulation_operator(
         #     data_event_at_input, data_event.domain,
         #     reference_event, reference_event.domain,
-        #     self.weight[out_channel, in_channel, kh, kw], domain_W,
+        #     self.weight[out_channel, in_channel, kh, kw], weight_domain,
         #     observation_deadline=float(data_event.domain.max),
         # )
         # y = sum_receptive_field(pwm_synapse) + bias
@@ -795,52 +1140,26 @@ class SpikingConv2d(nn.Conv2d):
             self.groups,
         )
 
-        # Preserve the ideal calibrated envelope: combine every weight/input endpoint
-        # product and multiply by the grouped receptive-field fan-in.
-        product_candidates = (
-            domain_W.min * domain_x.min,
-            domain_W.min * domain_x.max,
-            domain_W.max * domain_x.min,
-            domain_W.max * domain_x.max,
-        )
-        kernel_height, kernel_width = self.kernel_size
-        fan_in = (
-            (self.in_channels // self.groups)
-            * kernel_height
-            * kernel_width
-        )
-        domain_y = PotentialBounds(
-            min(product_candidates) * fan_in,
-            max(product_candidates) * fan_in,
-        )
-
-        # Bias shifts both the physical value and its declared rails. It remains
-        # independent of any nonzero contribution left by a surviving one-sided rail.
-        if self.bias is not None:
-            domain_y = PotentialBounds(
-                domain_y.min + self.bias.min().item(),
-                domain_y.max + self.bias.max().item(),
-            )
-
-        # Record clamp-before-rail saturation over every output activation, then
-        # return the bounded potential expected by downstream Transformer blocks.
+        # Record saturation against the frozen output-specific safety rail before
+        # returning the bounded potential. One-sided timing misses may leave a raw
+        # value outside the ideal delivered-event range, but never widen its domain.
         return Potential(
             clamp_gaussian_output(
                 y,
-                domain_y,
+                output_domain,
                 site="conv2d.output",
                 name="conv2d_y",
             ),
-            domain_y,
+            output_domain,
         )
 
     def forward(self, input: Potential) -> Potential:
         """Apply convolution through deterministic or Gaussian PWM integration.
 
-        The method performs common input calibration and weight-bound extraction,
-        then dispatches to the private event-aware implementation or the delivered-
-        time PWM path. Both use the optimized convolution kernel and preserve stride,
-        padding, dilation, grouping, bias, and conservative fan-in bounds.
+        The method performs common input calibration, freezes an output-specific
+        parameter rail, then dispatches to the event-aware or delivered-time PWM
+        path. Both use the optimized convolution kernel and preserve stride, padding,
+        dilation, grouping, bias, and identical output metadata.
 
         Args:
             input: Spatial activation tensor paired with upstream potential bounds.
@@ -854,10 +1173,9 @@ class SpikingConv2d(nn.Conv2d):
         domain_x = PotentialBounds(-self.theta, self.theta)
         encoded_x = domain_x.clamp(x, name="conv2d_x")
 
-        # Share one learned-weight interval between the direct convolution helper and
-        # the explicit deterministic PWM bound propagation.
-        w_min, w_max = self.weight.min().item(), self.weight.max().item()
-        domain_W: PotentialBounds = PotentialBounds(w_min, w_max)
+        # Freeze grouped-kernel and bias bounds once after loading or perturbation.
+        # Subsequent calls validate mutation counters and reuse this exact rail.
+        output_domain = self.freeze_parameter_bounds()
 
         # Keep event sampling, shared-reference readout, and output saturation logging
         # isolated in the private Gaussian method.
@@ -866,7 +1184,7 @@ class SpikingConv2d(nn.Conv2d):
                 x,
                 encoded_x,
                 domain_x,
-                domain_W,
+                output_domain,
             )
 
         # Convert delivered identity-code times to signed pulse widths. Applying
@@ -894,34 +1212,75 @@ class SpikingConv2d(nn.Conv2d):
             self.groups,
         )
 
-        # Derive the unchanged ideal rail from weight/input endpoint products and the
-        # grouped receptive-field fan-in used by the convolution reduction.
-        kh, kw = self.kernel_size
-        product_candidates = (
-            domain_W.min * domain_x.min,
-            domain_W.min * domain_x.max,
-            domain_W.max * domain_x.min,
-            domain_W.max * domain_x.max,
-        )
-        fan_in = (self.in_channels // self.groups) * kh * kw
-        domain_y = PotentialBounds(
-            min(product_candidates) * fan_in,
-            max(product_candidates) * fan_in,
-        )
-
-        # Bias is already included in the convolution value, so translate only the
-        # propagated bounds using the learned parameter endpoints.
-        if self.bias is not None:
-            b_min, b_max = self.bias.min().item(), self.bias.max().item()
-            domain_y = PotentialBounds(domain_y.min + b_min, domain_y.max + b_max)
-        return Potential(y, domain_y)
+        # Bias is already included by conv2d, and its contribution is already stored
+        # in the frozen rail. No parameter reduction occurs during this forward pass.
+        return Potential(y, output_domain)
 
 
 def _apply_norm(norm: nn.Module, pot: Potential) -> Potential:
+    """Apply a supported LayerNorm while preserving a static potential domain.
+
+    Spiking LayerNorm owns its complete operator-specific bound propagation. An
+    ordinary PyTorch LayerNorm instead uses the finite-feature population-normalized
+    envelope and propagates its learned affine parameters over both endpoints. This
+    helper never derives metadata from the normalized tensor produced in this call.
+
+    Args:
+        norm: A ``SpikingLayerNorm`` or ``torch.nn.LayerNorm`` module.
+        pot: Input tensor and its upstream potential bounds.
+
+    Returns:
+        The normalized tensor paired with a configuration- and parameter-derived
+        output domain.
+
+    Raises:
+        TypeError: If ``norm`` is not one of the supported LayerNorm modules.
+    """
+    # SpikingLayerNorm already propagates every enabled ablation stage and learned
+    # affine transformation, so preserve that single source of domain semantics.
     if isinstance(norm, SpikingLayerNorm):
         return norm(pot)
+
+    # A generic nn.Module has no known analytic normalization envelope. Reject it
+    # explicitly instead of observing its current output and silently presenting a
+    # batch-specific interval as a static physical range.
+    if not isinstance(norm, nn.LayerNorm):
+        raise TypeError(
+            "_apply_norm supports only SpikingLayerNorm or torch.nn.LayerNorm"
+        )
+
+    # Compute the ordinary LayerNorm value without changing PyTorch semantics.
+    # Population normalization over d elements satisfies |z_i| <= sqrt(d-1), and
+    # non-negative epsilon can only contract this conservative endpoint interval.
     out = norm(pot.value)
-    return Potential(out, PotentialBounds(out.min().item(), out.max().item()))
+    feature_count = math.prod(norm.normalized_shape)
+    normalized_limit = math.sqrt(max(feature_count - 1, 0))
+
+    # LayerNorm without an affine stage returns the normalized value directly. Its
+    # symmetric analytic envelope is independent of input ordering and batch size.
+    if not norm.elementwise_affine:
+        return Potential(
+            out,
+            PotentialBounds(-normalized_limit, normalized_limit),
+        )
+
+    # Apply each learned scale and optional bias to both endpoints. Featurewise
+    # minima and maxima handle negative gamma, while the final reduction produces
+    # the scalar module-wide domain expected by Potential.
+    weight = norm.weight.detach()
+    bias: torch.Tensor | float = (
+        norm.bias.detach() if norm.bias is not None else 0.0
+    )
+    lower_candidate = weight * -normalized_limit + bias
+    upper_candidate = weight * normalized_limit + bias
+    output_domain = PotentialBounds(
+        torch.minimum(lower_candidate, upper_candidate).min().item(),
+        torch.maximum(lower_candidate, upper_candidate).max().item(),
+    )
+
+    # Return the unchanged dense result with a predeclared analytic envelope; no
+    # extrema from ``out`` participate in the physical domain contract.
+    return Potential(out, output_domain)
 
 
 if __name__ == "__main__":

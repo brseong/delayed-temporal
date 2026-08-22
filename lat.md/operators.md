@@ -52,9 +52,9 @@ The principal compositions live in `utils/transforms/functions.py`. They share a
 
 Multiplication encodes one operand as a latency and uses the other as the integrated potential.
 
-[[utils/transforms/functions.py#multiplication_operator]] clamps the encoded operand to `[-theta, theta]`, obtains $t=\theta-B$, and evaluates the delivered data time and scalar $\theta$ reference through signed PWM. The noise-free wrapper directly computes $V(\theta-t)=VB$ after algebraic deadline cancellation.
+[[utils/transforms/functions.py#multiplication_operator]] clamps the encoded operand to `[-theta, theta]`, obtains $t=\theta-B$, and evaluates the delivered data time and scalar $\theta$ reference through signed PWM. The noise-free wrapper directly computes $V(\theta-t)=VB$ after algebraic deadline cancellation. Its ideal output interval uses the caller-declared factor endpoints after clamping them to the encoder rail, so fixed coefficients and bounded gates do not acquire a full-$\theta$ range.
 
-Under maintained timing noise, the same function requests a decorated event for the encoded operand and one scalar zero-reference event for the operator call. It passes those existing samples to the signed PWM wrapper without resampling: each delivered event contributes its event-to-deadline rail and each miss contributes reset zero. The raw result is then saturation-counted and clamped to the original ideal product rails; no public Gaussian-specific multiplication API exists.
+Under maintained timing noise, the same function requests a decorated event for the encoded operand and one scalar zero-reference event for the operator call. It passes those existing samples to the signed PWM wrapper without resampling: each delivered event contributes its event-to-deadline rail and each miss contributes reset zero. The raw result is then saturation-counted and clamped to the same declared-factor product rails; no public Gaussian-specific multiplication API exists.
 
 ### Division
 
@@ -92,6 +92,10 @@ Dense and convolutional layers retain pretrained parameters but express multiply
 
 These classes subclass PyTorch’s corresponding modules so parameter names and shapes remain checkpoint-compatible. In the noise-free tensor simulation they are intended to be numerically equivalent subject to clamping and floating-point arithmetic.
 
+The three affine adapters freeze parameter-derived safety rails after checkpoint loading and static perturbation. [[utils/transformers/models/spiking_ops.py#SpikingLinear#freeze_parameter_bounds]] and [[utils/transformers/models/spiking_ops.py#SpikingConv2d#freeze_parameter_bounds]] reduce each output row or grouped kernel, while [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#SpikingConv1D#freeze_parameter_bounds]] reduces the transposed weight's input dimension. Each uses $r_j=\theta\sum_i|W_{ji}|$ with optional bias, reuses an immutable result, and rejects later standard in-place parameter or threshold changes unless explicitly refreshed.
+
+[[utils/transformers/models/spiking_ops.py#SpikingLinear#forward]], [[utils/transformers/models/spiking_ops.py#SpikingConv2d#forward]], and [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#SpikingConv1D#forward]] attach the same frozen rail to deterministic and Gaussian outputs, so changing noise configuration does not change metadata. Their Gaussian helpers use it directly for saturation accounting and clamping without rescanning weight or bias bounds.
+
 GPT-2 uses its own equivalent adapter, [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#SpikingConv1D]], to match Hugging Face’s transposed `Conv1D` parameter convention.
 
 In noise-free execution, the scalar zero-reference time cancels algebraically and the delivered signed width is passed to `torch.nn.functional.linear`, `torch.nn.functional.conv2d`, or GPT-2's transposed matrix contraction. Under maintained timing noise, all three affine adapters instead obtain data and layer-shared zero-reference events through the decorated encoder and form their two causal widths before calling the same kernels. These optimized reductions replace explicit per-synapse PWM tensor expansion; learned weights remain the integration drives. Every noisy adapter clamps the raw affine result to its declared output rails.
@@ -104,7 +108,11 @@ LayerNorm is a multi-stage composition and the most delicate shared operator in 
 
 Three flags independently replace variance multiplication, log encoding, and exponential-difference decoding with tensor equivalents. These switches support causal attribution of error but also mean “spiking LayerNorm enabled” is not enough to identify the exact execution path; all three stage flags must be recorded.
 
-The Gaussian path derives its output bounds without observing the current activation. The fully dense bypass uses the finite-feature bound $|z_i|\leq\sqrt{d-1}$, while mixed paths propagate exponential-difference ranges through subtraction and the learned affine map.
+Gaussian and deterministic paths derive output bounds without observing the current activation. The fully dense bypass uses the finite-feature bound $|z_i|\leq\sqrt{d-1}$, while mixed paths propagate exponential-difference ranges through subtraction and the learned affine map.
+
+[[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#freeze_parameter_bounds]] precomputes learned weight, bias, and final output domains for the active ablation configuration. Dense, direct exponential, and spiking exponential-difference modes respectively use normalized magnitudes $\sqrt{d-1}$, $R-1/R$, and $R$, where $R=(\theta-m)/m$. [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#_gaussian_forward]] and [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#forward]] reuse the same immutable domain, so a noise toggle changes value-generation semantics but not metadata.
+
+[[utils/transformers/models/spiking_ops.py#_apply_norm]] applies the same finite-feature envelope to ordinary `torch.nn.LayerNorm`, then transforms both endpoints with its learned scale and optional bias. Modules without an affine stage retain the symmetric normalized envelope.
 
 When log encoding is enabled but exponential difference is bypassed, the method computes causal residual and sigma pulse widths directly and applies $\exp((d_{\mathrm{err}}-d_\sigma)/\tau_s)$. This preserves symmetric one-sided misses without sampling the disabled internal exponential event.
 

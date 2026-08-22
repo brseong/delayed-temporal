@@ -42,11 +42,15 @@ Static bounds turn domains into predeclared physical and mathematical contracts 
 
 Calibration and interval arithmetic establish an immutable bound table before evaluation, after which forward execution may only consume, propagate, compare, and clamp against those bounds.
 
+The objective is not to replace every runtime range with the widest possible analytic interval. Analytic propagation is used only where it stays meaningful and depth-independent; calibration fixes sites whose bounds are difficult to derive, data-dependent, or inflated by repeated residual interval addition.
+
 The required order is: load or calibrate static input envelopes, derive conservative operator outputs, evaluate the raw tensor, record excursions against the fixed output rail, clamp, and pass the unchanged declared envelope downstream. Neither clean nor noisy execution may widen a bound.
 
 Calibration runs with timing noise disabled and is identified by stable operator sites. A checkpoint change, static parameter perturbation, preprocessing change, model-family change, or ablation-path change invalidates the affected calibration and requires rebuilding it before evaluation.
 
 Calibration uncertainty is an engineering tolerance rather than a reason to restore runtime extrema. Each site should store signed lower and upper bounds obtained from representative extrema or quantiles, enlarge them by a documented margin, and report calibration-set and evaluation-set clipping rates. The margin may cover moderate distribution variation, but it must not conceal a domain-propagation error, an invalid operator condition, an attention-mask value outside its declared range, or a Gaussian deadline-miss case. Those cases require analytic interval bounds or a direct implementation fix, and inference must never widen a calibrated bound after observing an activation.
+
+Calibration is a two-pass workflow. The collection pass records unclamped raw site values in deterministic evaluation mode; after ranges and margins are frozen, a validation pass applies the same clamps as inference and measures their clipping rates. A failed validation rebuilds the table rather than updating it online.
 
 ### Acceptance Criteria
 
@@ -56,6 +60,7 @@ The migration is complete only when static-domain behavior is invariant under ev
 - [ ] Changing the Gaussian seed changes sampled events and outputs but never changes any declared potential or time bound.
 - [ ] Every out-of-envelope value increments pre-clamp underflow or overflow statistics without mutating the envelope.
 - [ ] Evaluation fails clearly when a required calibrated bound is absent or incompatible instead of silently measuring the current tensor.
+- [ ] Pre-norm residual bounds come from fixed per-block calibration entries and therefore do not widen through recursive interval addition during inference.
 - [ ] A final source audit and direct tests reject `PotentialBounds` or `TimeBounds` constructed from live forward-tensor extrema.
 
 ### Implementation Checklist
@@ -63,16 +68,34 @@ The migration is complete only when static-domain behavior is invariant under ev
 The implementation work covers every maintained transform and model adapter, not only LayerNorm or operators that directly emit spikes.
 
 - [x] Audit every maintained `PotentialBounds` and `TimeBounds` construction, including model inputs, embeddings, residuals, normalization, activations, attention, projections, and task readouts; the remaining violations are listed in [[bounds-audit#전수 검색 결과]].
+- [x] Correct multiplication bounds to use the encoded operand's declared clamped endpoints instead of multiplying every ideal result by the full `theta` rail.
+- [ ] Restrict ideal division and softmin output ranges with `X <= Y` and normalized-weight invariants; count and clamp Gaussian excursions instead of propagating the generic exponential ratio.
+- [ ] Return structural ranges for tanh and sigmoid-like gates instead of forwarding widened internal division ranges.
+- [x] Replace global-extrema-times-fan-in bounds in all three affine adapters with output-specific parameter absolute-sum safety rails before applying calibration.
 - [ ] Prefer operator-derived interval arithmetic whenever the input bounds and transformation provide a conservative static result.
 - [ ] For paths without a practical analytic envelope, record per-site minima and maxima during a representative noise-free calibration run.
 - [ ] Persist stable site identifiers together with the checkpoint, dataset split, preprocessing, model family, and active ablation configuration used for calibration.
+- [ ] Add explicit collection, frozen-validation, and inference modes so a site cannot measure and clamp against a range created by the same forward invocation.
 - [ ] Freeze learned-parameter bounds once after checkpoint loading or static perturbation instead of recomputing parameter extrema on every forward.
+- [x] Add `SpikingLinear.freeze_parameter_bounds` with output-specific absolute-sum rails, immutable reuse, mutation rejection, and explicit refresh.
+- [x] Allow `SpikingLinear._gaussian_forward` to use the frozen output rail for saturation accounting without rescanning parameters.
+- [x] Connect `SpikingLinear.forward` so deterministic and Gaussian execution attach the same frozen output rail and deterministic execution performs no parameter extrema scan.
+- [x] Remove the transitional `domain_W` argument and fallback from `SpikingLinear._gaussian_forward`, eliminating the remaining Gaussian weight scan.
+- [x] Apply the same frozen output-channel absolute-sum rail, parameter/threshold mutation validation, and noise-independent metadata to grouped `SpikingConv2d`.
+- [x] Apply the same frozen output-column absolute-sum rail, parameter/threshold mutation validation, and noise-independent metadata to GPT-2 `SpikingConv1D`.
+- [x] Add `SpikingLayerNorm.freeze_parameter_bounds` for dense, direct exponential, and spiking exponential-difference envelopes with parameter/configuration mutation rejection.
+- [x] Connect `SpikingLayerNorm._gaussian_forward` to frozen weight, bias, and final output domains before event sampling.
+- [x] Connect deterministic `SpikingLayerNorm.forward` to the same frozen parameter and output contract.
 - [ ] Initialize model-entry potential bounds from calibration rather than measuring the first or current batch.
 - [ ] Clamp every out-of-envelope value against its fixed bound and report underflow and overflow counts without widening that bound at runtime.
 - [ ] Include LayerNorm's pre-affine normalized result in calibration, then derive its post-affine envelope by interval arithmetic from fixed scale and bias endpoints.
+- [ ] Calibrate and clamp every pre-norm residual output per block, recording raw underflow and overflow before attaching the frozen output range.
+- [ ] Calibrate attention score clamp sites per layer/head and attention value outputs per layer, with sequence-capacity metadata and separate Gaussian saturation validation.
 - [ ] Keep spike-time windows configuration-derived: LayerNorm log windows remain fixed by `clip_margin`, `theta`, and `tau_s`, while affine identity encoding remains on its declared symmetric interval.
 - [x] Make declared potential and time bounds immutable so cached or propagated endpoints cannot be widened in place.
 - [x] Keep masked attention scores inside the declared softmin range and clamp both Gaussian and noise-free value readouts to a rail derived from fixed $S_{\max}$ and $\theta$.
 - [x] Attach that shared fixed attention-output range to `Potential` in the ViT, BERT, RoBERTa, and GPT-2 adapters instead of reusing the value range or measuring output extrema.
 - [x] Remove live activation extrema from the Gaussian `SpikingLayerNorm` path by propagating operator intervals and using the finite-feature dense LayerNorm bound.
+- [x] Remove live activation extrema from deterministic `SpikingLayerNorm.forward` with the same operator intervals and finite-feature dense bound.
+- [x] Remove live output extrema from ordinary `nn.LayerNorm` calls in `_apply_norm` with the finite-feature bound and learned affine endpoint propagation.
 - [ ] Verify bounds are identical across batch contents, ordering, and batch size, and add a final source audit that rejects runtime tensor-extrema domain construction in maintained paths.

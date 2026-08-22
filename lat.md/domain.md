@@ -18,9 +18,9 @@ Although `OpenBounds` is named as an open interval, its runtime clamp includes n
 
 ## Domain Propagation
 
-The intended model-wide policy measures initial activation extrema once and then propagates conservative ranges through interval arithmetic.
+The intended model-wide policy combines tight, depth-independent interval arithmetic with per-site calibration for nonlinear or recursively widening ranges.
 
-For example, [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTEncoder#forward]] wraps embedding output in a `Potential`; spiking linear layers derive output bounds from input and weight intervals; residual connections add lower and upper endpoints.
+For example, spiking linear layers derive local output bounds from fixed input and weight intervals. Pre-norm residual streams do not recursively add those intervals across all blocks; each post-add block output instead uses a frozen calibrated range and records excursions before clamping.
 
 Some fallback and nonlinear paths still construct bounds from observed output minima and maxima. Those paths are useful for simulation but are data-dependent and should not be presented as fixed hardware calibration without an explicit calibration protocol.
 

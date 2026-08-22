@@ -16,8 +16,8 @@ def _gaussian_multiplication_operator(
     V: torch.Tensor,
     domain_V: PotentialBounds,
     encoded_B: torch.Tensor,
-    domain_B: PotentialBounds,
-    theta: float,
+    encoder_domain_B: PotentialBounds,
+    ideal_domain_B: PotentialBounds,
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Evaluate multiplication from sampled data and zero-reference events.
 
@@ -30,8 +30,9 @@ def _gaussian_multiplication_operator(
         V: Potential supplying the constant integration drive.
         domain_V: Declared bounds of the integration drive.
         encoded_B: Pre-clamped operand encoded into the opening event.
-        domain_B: Symmetric ``[-theta, theta]`` identity-encoder domain.
-        theta: Nominal zero-reference time and multiplication-factor rail.
+        encoder_domain_B: Symmetric ``[-theta, theta]`` identity-encoder domain.
+        ideal_domain_B: Caller-declared factor interval after endpoint clamping to
+            the physical encoder rail. This defines the ideal product output rail.
 
     Returns:
         The observation-time physical readout clamped to its ideal product rails,
@@ -44,7 +45,7 @@ def _gaussian_multiplication_operator(
     # than the finite deadline carrier stored in time, controls whether integration starts.
     data_event = neg_identity_transform(
         encoded_B,
-        domain_B,
+        encoder_domain_B,
         return_spike_sample=True,
         noise_site="multiplication.data",
     )
@@ -57,7 +58,7 @@ def _gaussian_multiplication_operator(
     # scalar time and fired flag broadcast across every data event without resampling.
     reference_event = neg_identity_transform(
         encoded_B.new_zeros(()),
-        domain_B,
+        encoder_domain_B,
         return_spike_sample=True,
         noise_site="multiplication.reference",
     )
@@ -79,14 +80,14 @@ def _gaussian_multiplication_operator(
         observation_deadline=float(data_event.domain.max),
     )
 
-    # Gaussian excursions do not expand the representable product rails. Derive the
-    # original ideal envelope from all V-bound and factor-bound endpoint products.
-    th_val = float(theta) if isinstance(theta, (int, float)) else float(theta.max())
+    # Gaussian excursions do not expand the ideal product rails. The encoder still
+    # spans the full physical window, but ordinary delivered values are restricted
+    # by the caller's factor contract after endpoint clamping to that window.
     result_candidates = (
-        domain_V.min * -th_val,
-        domain_V.min * th_val,
-        domain_V.max * -th_val,
-        domain_V.max * th_val,
+        domain_V.min * ideal_domain_B.min,
+        domain_V.min * ideal_domain_B.max,
+        domain_V.max * ideal_domain_B.min,
+        domain_V.max * ideal_domain_B.max,
     )
     result_domain = PotentialBounds(
         min(result_candidates),
@@ -131,15 +132,26 @@ def multiplication_operator(
         V: Potential supplying the constant integration drive.
         domain_V: Declared bounds of the integration drive.
         B: Potential encoded into the opening spike time.
-        domain_B: Declared caller bounds used by input-domain validation.
+        domain_B: Declared caller bounds used by input validation and, after
+            endpoint clamping to the encoder rail, by ideal product propagation.
         theta: Symmetric encoder rail and nominal zero-reference time.
 
     Returns:
         The physically read multiplication result and its ideal output rails.
     """
-    # Multiplication always uses the calibrated symmetric identity-code interval,
-    # while the caller-supplied domain has already served input validation.
-    encoder_domain_B = PotentialBounds(-theta, theta)
+    # Multiplication always uses the symmetric identity-code window physically. Keep
+    # that encoder interval separate from the narrower mathematical factor contract
+    # so fixed coefficients and bounded gates do not inherit a spurious theta factor.
+    th_val = float(theta) if isinstance(theta, (int, float)) else float(theta.max())
+    encoder_domain_B = PotentialBounds(-th_val, th_val)
+
+    # Clamping is monotone, so clamping both declared endpoints gives the complete
+    # range of factors that can reach the encoder. This also handles a caller domain
+    # wholly above or below the physical rail by collapsing it to one endpoint.
+    ideal_domain_B = PotentialBounds(
+        min(max(float(domain_B.min), -th_val), th_val),
+        min(max(float(domain_B.max), -th_val), th_val),
+    )
 
     # Clamp the encoded operand once before dispatch so deterministic and Gaussian
     # implementations receive the exact same nominal potential tensor.
@@ -153,19 +165,18 @@ def multiplication_operator(
             domain_V,
             encoded_B,
             encoder_domain_B,
-            theta,
+            ideal_domain_B,
         )
 
     # Noise-free execution uses delivered tensor times, so signed PWM evaluates the
     # algebraically cancelled expression V * (theta - data_time) directly. The common
     # observation deadline remains part of the physical contract without creating
     # deadline-sized intermediates in this deterministic path.
-    th_val = float(theta) if isinstance(theta, (int, float)) else float(theta.max())
     data_time, data_time_domain = neg_identity_transform(
         encoded_B,
         encoder_domain_B,
     )
-    return signed_pulse_width_modulation_operator(
+    result, _ = signed_pulse_width_modulation_operator(
         t_A=data_time,
         domain_t_A=data_time_domain,
         t_B=th_val,
@@ -173,6 +184,20 @@ def multiplication_operator(
         V=V,
         domain_V=domain_V,
         observation_deadline=float(data_time_domain.max),
+    )
+
+    # Delivered deterministic values cannot leave the caller-derived product range.
+    # Return the same ideal endpoints used by Gaussian saturation rather than the
+    # signed PWM primitive's deliberately broader full-code-window interval.
+    result_candidates = (
+        domain_V.min * ideal_domain_B.min,
+        domain_V.min * ideal_domain_B.max,
+        domain_V.max * ideal_domain_B.min,
+        domain_V.max * ideal_domain_B.max,
+    )
+    return result, PotentialBounds(
+        min(result_candidates),
+        max(result_candidates),
     )
 
 @check_domain
