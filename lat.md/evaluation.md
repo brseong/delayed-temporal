@@ -84,9 +84,13 @@ The maintained Gaussian model requires a seeded decorator-level regression check
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_division_function]] checks ratio parity and tracks numerator, denominator, and internal exponential misses through shared-domain log encoding to finite output rails.
 
-[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_softmin_function]] checks dense and zero-noise normalization, numerator-safe shared log bounds, nested event counts, and finite rail-bounded readout when all external events miss.
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_tanh_function]] checks deterministic and zero-noise tanh parity on the common $[-1,1]$ domain, nested event topology, forced structural saturation, and finite final clamping.
 
-[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_swiglu_function]] checks current-bias cancellation on an asymmetric domain, exact zero-noise event topology, and reset-valued finite output when every nested event misses.
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_sigmoid_gelu_function]] checks the sigmoid approximation against $x\,\sigma(1.702x)$, reconstructs its output domain from the fixed $[0,1]$ gate, and forces gate saturation without widening the final product rails.
+
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_softmin_function]] checks dense and zero-noise normalization on the common structural $[0,1]$ domain, numerator-safe shared log bounds, nested event counts, final saturation denominators, and finite rail-bounded readout when all external events miss. Forced excursion accounting may occur at division or at the final softmin clamp without changing the public contract.
+
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_swiglu_function]] checks current-bias cancellation on an asymmetric domain, output rails reconstructed from a fixed $[0,1]$ gate, exact zero-noise gate counters, forced gate saturation, and reset-valued finite output when every nested event misses.
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_linear]] checks dense affine parity, one shared reference sample, symmetric one-sided signed-PWM readout, output-row absolute-sum rails, and post-freeze parameter/threshold mutation rejection.
 
@@ -94,7 +98,7 @@ The maintained Gaussian model requires a seeded decorator-level regression check
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_conv1d]] checks GPT-2’s transposed affine layout, arbitrary leading dimensions, shared-reference sampling, symmetric one-sided signed-PWM readout, output-column absolute-sum rails, and post-freeze mutation rejection.
 
-[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_layernorm]] checks the dense ablation’s event-free bypass, full-spiking zero-noise topology, and learned-bias output when every nested event misses.
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_layernorm]] checks the dense ablation’s event-free bypass, full-spiking zero-noise topology, learned-bias output when every nested event misses, independent analytic domains for all eight ablation topologies, immutable cache reuse across noise modes, and parameter/configuration mutation rejection with explicit refresh.
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_attention]] checks dense end-to-end attention parity, an in-domain hard mask below the global cap, a request-independent maximum-source output rail, one shared value reference, and symmetric one-sided signed-PWM integration with fixed weights.
 

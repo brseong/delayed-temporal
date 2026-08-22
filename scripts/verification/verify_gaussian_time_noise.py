@@ -34,9 +34,11 @@ from utils.transforms.potential_to_spike import (
 from utils.transforms.functions import (
     division_function,
     exponential_function,
+    gelu_approximation_sigmoid,
     multiplication_operator,
     softmin_function,
     swiglu_function,
+    tanh,
 )
 from utils.transforms.spike_to_potential import (
     exp_operator,
@@ -1638,19 +1640,262 @@ def verify_gaussian_division_function() -> None:
         set_gaussian_time_noise(enabled=False)
 
 
+def verify_gaussian_tanh_function() -> None:
+    """Verify tanh parity, structural rails, and excursion clamping.
+
+    The maintained tanh composition scales its input, evaluates a negative
+    exponential, divides one by the one-plus-exponential response, and maps that
+    gate onto ``[-1, 1]``. This regression verifies exact deterministic and
+    zero-noise values, noise-mode-independent structural metadata, and pre-clamp
+    saturation accounting under a deterministic positive timing shift.
+
+    Raises:
+        AssertionError: If analytic parity, event topology, structural bounds,
+            saturation accounting, or final clamping regresses.
+    """
+    value = torch.tensor(
+        [-2.0, -1.0, 0.0, 1.0, 2.0],
+        dtype=torch.float64,
+    )
+    domain = PotentialBounds(-2.0, 2.0)
+    expected = torch.tanh(value)
+    expected_domain = PotentialBounds(-1.0, 1.0)
+
+    # Noise-disabled evaluation fixes the mathematical reference. The returned
+    # metadata must use tanh's structural range rather than a linearly transformed
+    # version of the generic division interval.
+    set_gaussian_time_noise(enabled=False)
+    try:
+        deterministic, deterministic_domain = tanh(
+            value,
+            domain,
+            tau_s=1.0,
+            theta=4.0,
+        )
+        assert torch.allclose(
+            deterministic,
+            expected,
+            atol=1.0e-12,
+            rtol=1.0e-12,
+        )
+        assert deterministic_domain == expected_domain
+
+        # Zero standard deviation traverses multiplication, exponential, division,
+        # and the public tanh clamp without perturbing any carrier. It must preserve
+        # both values and rails while counting every final activation exactly once.
+        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=851)
+        zero_noise, zero_noise_domain = tanh(
+            value,
+            domain,
+            tau_s=1.0,
+            theta=4.0,
+        )
+        assert torch.allclose(
+            zero_noise,
+            deterministic,
+            atol=1.0e-12,
+            rtol=1.0e-12,
+        )
+        assert zero_noise_domain == expected_domain
+        zero_stats = get_gaussian_noise_stats()
+        assert zero_stats["multiplication.data"]["events"] == value.numel()
+        assert zero_stats["multiplication.reference"]["events"] == 1
+        assert zero_stats["exponential.input"]["events"] == value.numel()
+        assert zero_stats["division.numerator"]["events"] == value.numel()
+        assert zero_stats["division.denominator"]["events"] == value.numel()
+        assert zero_stats["tanh.output"]["outputs"] == value.numel()
+        assert zero_stats["tanh.output"]["output_underflows"] == 0
+        assert zero_stats["tanh.output"]["output_overflows"] == 0
+
+        # A positive shift creates one-sided observation-time trajectories whose raw
+        # mapped values exceed tanh's upper rail. Saturation may be recorded by a
+        # tightened division first or by tanh itself, but it must remain observable.
+        set_gaussian_time_noise(
+            enabled=True,
+            time_std=0.0,
+            time_mean=0.5,
+            seed=852,
+        )
+        shifted, shifted_domain = tanh(
+            value,
+            domain,
+            tau_s=1.0,
+            theta=4.0,
+        )
+        shifted_stats = get_gaussian_noise_stats()
+        assert shifted_domain == expected_domain
+        assert shifted_stats["tanh.output"]["outputs"] == value.numel()
+        division_output_stats = shifted_stats.get(
+            "division.output",
+            {
+                "output_overflows": 0,
+                "output_underflows": 0,
+            },
+        )
+        structural_saturations = (
+            shifted_stats["tanh.output"]["output_overflows"]
+            + shifted_stats["tanh.output"]["output_underflows"]
+            + division_output_stats["output_overflows"]
+            + division_output_stats["output_underflows"]
+        )
+        assert structural_saturations > 0
+
+        # The returned activation must remain a finite carrier in tanh's fixed rail
+        # regardless of which nested event produced the pre-clamp excursion.
+        assert torch.isfinite(shifted).all()
+        assert bool(
+            (
+                (shifted >= expected_domain.min)
+                & (shifted <= expected_domain.max)
+            ).all()
+        )
+    finally:
+        # Restore process-wide state before the sigmoid-GELU regression.
+        set_gaussian_time_noise(enabled=False)
+
+
+def verify_gaussian_sigmoid_gelu_function() -> None:
+    """Verify sigmoid-GELU parity and its fixed gate contract.
+
+    The sigmoid approximation composes ``x * sigmoid(1.702*x)``. The internal
+    normalized ratio must use ``[0, 1]`` before the final multiplication so the
+    GELU output interval depends only on the declared input range, not on a generic
+    exponential division window. The regression covers exact values, event counts,
+    gate saturation, and finite rail-clamped output.
+
+    Raises:
+        AssertionError: If analytic parity, fixed gate-derived output bounds,
+            nested event topology, saturation accounting, or clamping regresses.
+    """
+    value = torch.tensor(
+        [-2.0, -1.0, 0.0, 1.0, 2.0],
+        dtype=torch.float64,
+    )
+    domain = PotentialBounds(-2.0, 2.0)
+    expected = value * torch.sigmoid(1.702 * value)
+
+    # Multiplying the declared signed input by a gate in [0,1] yields [-2,2].
+    # This expected domain is reconstructed independently of the production
+    # division metadata and therefore detects any reintroduced generic gate rail.
+    gate_domain = PotentialBounds(0.0, 1.0)
+    product_candidates = (
+        domain.min * gate_domain.min,
+        domain.min * gate_domain.max,
+        domain.max * gate_domain.min,
+        domain.max * gate_domain.max,
+    )
+    expected_domain = PotentialBounds(
+        min(product_candidates),
+        max(product_candidates),
+    )
+
+    # Establish the deterministic composed reference and its structural gate-derived
+    # output interval before any process-wide Gaussian state is enabled.
+    set_gaussian_time_noise(enabled=False)
+    try:
+        deterministic, deterministic_domain = gelu_approximation_sigmoid(
+            value,
+            domain,
+            tau_s=1.0,
+            theta=8.0,
+        )
+        assert torch.allclose(
+            deterministic,
+            expected,
+            atol=1.0e-12,
+            rtol=1.0e-12,
+        )
+        assert deterministic_domain == expected_domain
+
+        # Zero-noise event-aware execution must preserve the complete composition.
+        # Two multiplication calls scale and gate the input; one gate output counter
+        # is recorded per activation without underflow or overflow.
+        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=861)
+        zero_noise, zero_noise_domain = gelu_approximation_sigmoid(
+            value,
+            domain,
+            tau_s=1.0,
+            theta=8.0,
+        )
+        assert torch.allclose(
+            zero_noise,
+            deterministic,
+            atol=1.0e-12,
+            rtol=1.0e-12,
+        )
+        assert zero_noise_domain == expected_domain
+        zero_stats = get_gaussian_noise_stats()
+        assert zero_stats["multiplication.data"]["events"] == 2 * value.numel()
+        assert zero_stats["multiplication.reference"]["events"] == 2
+        assert zero_stats["exponential.input"]["events"] == value.numel()
+        assert zero_stats["division.numerator"]["events"] == value.numel()
+        assert zero_stats["division.denominator"]["events"] == value.numel()
+        assert zero_stats["gelu_sigmoid.gate"]["outputs"] == value.numel()
+        assert zero_stats["gelu_sigmoid.gate"]["output_underflows"] == 0
+        assert zero_stats["gelu_sigmoid.gate"]["output_overflows"] == 0
+
+        # The selected deterministic timing shift produces gate values above one in
+        # the current physical composition. Accept saturation at division or gate so
+        # a future tighter division contract does not invalidate this public check.
+        set_gaussian_time_noise(
+            enabled=True,
+            time_std=0.0,
+            time_mean=0.5,
+            seed=862,
+        )
+        shifted, shifted_domain = gelu_approximation_sigmoid(
+            value,
+            domain,
+            tau_s=1.0,
+            theta=8.0,
+        )
+        shifted_stats = get_gaussian_noise_stats()
+        assert shifted_domain == expected_domain
+        assert shifted_stats["gelu_sigmoid.gate"]["outputs"] == value.numel()
+        division_output_stats = shifted_stats.get(
+            "division.output",
+            {
+                "output_overflows": 0,
+                "output_underflows": 0,
+            },
+        )
+        structural_saturations = (
+            shifted_stats["gelu_sigmoid.gate"]["output_overflows"]
+            + shifted_stats["gelu_sigmoid.gate"]["output_underflows"]
+            + division_output_stats["output_overflows"]
+            + division_output_stats["output_underflows"]
+        )
+        assert structural_saturations > 0
+
+        # The final multiplication consumes the fixed gate and returns a finite value
+        # inside the independently reconstructed product interval.
+        assert torch.isfinite(shifted).all()
+        assert bool(
+            (
+                (shifted >= expected_domain.min)
+                & (shifted <= expected_domain.max)
+            ).all()
+        )
+    finally:
+        # Restore process-wide state before softmin verification.
+        set_gaussian_time_noise(enabled=False)
+
+
 def verify_gaussian_softmin_function() -> None:
-    """Verify softmin normalization, shared bounds, and nested event accounting.
+    """Verify softmin normalization, structural rails, and nested accounting.
 
     Softmin passes individual exponentials and their reduction through one shared
     logarithmic division domain. The regression includes endpoint-heavy rows that
     expose an invalid denominator-only lower bound, then checks that zero Gaussian
-    scale preserves the deterministic composition and its probability mass. A
-    forced-late case verifies finite observation-time outputs and exact nested-site
-    event counts without assuming missed-event readouts remain normalized.
+    scale preserves the deterministic composition and its probability mass. Both
+    noise modes must return the structural normalized-weight interval ``[0, 1]``.
+    A forced-late case verifies exact nested event counts, pre-clamp saturation
+    accounting, and finite rail-bounded observation-time outputs.
 
     Raises:
         AssertionError: If dense parity, zero-noise parity, normalization, shared
-            rail propagation, forced-miss accounting, or finite clamping regresses.
+            rail propagation, structural bounds, saturation accounting,
+            forced-miss accounting, or finite clamping regresses.
     """
     domain = PotentialBounds(-2.0, 2.0)
     scores = torch.tensor(
@@ -1661,6 +1906,7 @@ def verify_gaussian_softmin_function() -> None:
         dtype=torch.float64,
     )
     expected = torch.softmax(-scores, dim=-1)
+    expected_domain = PotentialBounds(0.0, 1.0)
 
     # Endpoint-heavy scores force the smallest individual exponential below the
     # denominator's N-scaled minimum. Exact dense parity therefore proves that the
@@ -1669,6 +1915,7 @@ def verify_gaussian_softmin_function() -> None:
     try:
         deterministic, deterministic_domain = softmin_function(scores, domain)
         assert torch.allclose(deterministic, expected, atol=1e-12, rtol=1e-12)
+        assert deterministic_domain == expected_domain
         assert torch.allclose(
             deterministic.sum(dim=-1),
             torch.ones(scores.size(0), dtype=scores.dtype),
@@ -1677,20 +1924,22 @@ def verify_gaussian_softmin_function() -> None:
         )
 
         # Zero standard deviation still exercises every event-aware encoder and
-        # decoder. It must preserve values while extending only the lower output
-        # rail to include the reset value available after an internal event miss.
+        # decoder. It must preserve values while returning exactly the same public
+        # structural rails as deterministic execution, independent of the wider
+        # ratio metadata used inside the composed division operator.
         set_gaussian_time_noise(enabled=True, time_std=0.0, seed=801)
         zero_noise, zero_noise_domain = softmin_function(scores, domain)
         assert torch.allclose(zero_noise, deterministic, atol=1e-12, rtol=1e-12)
-        assert zero_noise_domain.min == 0.0
-        assert abs(
-            float(zero_noise_domain.max) - float(deterministic_domain.max)
-        ) < 1e-10
+        assert zero_noise_domain == expected_domain
+        assert deterministic_domain == zero_noise_domain
         zero_stats = get_gaussian_noise_stats()
         assert zero_stats["exponential.input"]["events"] == scores.numel()
         assert zero_stats["division.numerator"]["events"] == scores.numel()
         assert zero_stats["division.denominator"]["events"] == scores.size(0)
         assert zero_stats["exponential_difference.internal"]["events"] == scores.numel()
+        assert zero_stats["softmin.output"]["outputs"] == scores.numel()
+        assert zero_stats["softmin.output"]["output_underflows"] == 0
+        assert zero_stats["softmin.output"]["output_overflows"] == 0
         assert all(site_stats["misses"] == 0 for site_stats in zero_stats.values())
 
         # A deterministic positive timing shift larger than every involved window
@@ -1708,10 +1957,31 @@ def verify_gaussian_softmin_function() -> None:
         assert forced_stats["exponential.input"]["misses"] == scores.numel()
         assert forced_stats["division.numerator"]["misses"] == scores.numel()
         assert forced_stats["division.denominator"]["misses"] == scores.size(0)
-        assert forced_late_domain == zero_noise_domain
+        assert forced_late_domain == expected_domain
+
+        # Every final weight participates in the softmin saturation denominator.
+        # The current composition records forced-late overflows at this final site;
+        # a tightened division may clamp and count the same physical excursion one
+        # level earlier, so accept either site while requiring observable saturation.
+        assert forced_stats["softmin.output"]["outputs"] == scores.numel()
+        division_output_stats = forced_stats.get(
+            "division.output",
+            {
+                "output_overflows": 0,
+                "output_underflows": 0,
+            },
+        )
+        structural_saturations = (
+            forced_stats["softmin.output"]["output_overflows"]
+            + forced_stats["softmin.output"]["output_underflows"]
+            + division_output_stats["output_overflows"]
+            + division_output_stats["output_underflows"]
+        )
+        assert structural_saturations > 0
 
         # Observation-time trajectories and the final rail clamp must always return
-        # finite carriers, even when upstream normalization events never arrive.
+        # finite weights in [0,1], even when upstream events never arrive and the
+        # unnormalized observation-time trajectory no longer sums to probability one.
         assert torch.isfinite(forced_late).all()
         assert bool(
             (
@@ -1725,17 +1995,19 @@ def verify_gaussian_softmin_function() -> None:
 
 
 def verify_gaussian_swiglu_function() -> None:
-    """Verify current-bias cancellation and nested Gaussian SwiGLU events.
+    """Verify current-bias cancellation and the fixed SwiGLU gate contract.
 
     The activation must reproduce ``v*u*sigmoid(beta*u)`` at the default temporal
     scale even when the declared ``u`` domain is asymmetric. That case exposes any
     uncancelled identity-encoder offset directly. The regression also fixes the
     number of sampled events across the exponential, division, and two multiplication
-    stages, then forces all events late to verify reset propagation and finite rails.
+    stages. It also verifies the structural ``[0,1]`` sigmoid gate, forced gate
+    saturation, and all-late reset propagation on finite final rails.
 
     Raises:
-        AssertionError: If analytic parity, zero-noise parity, event topology,
-            forced-miss reset behavior, or finite output bounds regress.
+        AssertionError: If analytic parity, zero-noise parity, gate bounds,
+            saturation accounting, event topology, forced-miss reset behavior,
+            or finite output bounds regress.
     """
     u = torch.tensor([-0.75, 0.0, 1.0, 2.0], dtype=torch.float64)
     v = torch.tensor([1.0, -0.5, 2.0, 0.25], dtype=torch.float64)
@@ -1743,6 +2015,31 @@ def verify_gaussian_swiglu_function() -> None:
     domain_v = PotentialBounds(-2.0, 2.0)
     beta = 0.7
     expected = v * u * torch.sigmoid(beta * u)
+
+    # Reconstruct both product domains from the fixed gate interval. The first
+    # multiplication maps u*gate into [-1,3]; multiplying that by v in [-2,2]
+    # produces the final module-wide interval [-6,6].
+    gate_domain = PotentialBounds(0.0, 1.0)
+    swish_candidates = (
+        domain_u.min * gate_domain.min,
+        domain_u.min * gate_domain.max,
+        domain_u.max * gate_domain.min,
+        domain_u.max * gate_domain.max,
+    )
+    expected_swish_domain = PotentialBounds(
+        min(swish_candidates),
+        max(swish_candidates),
+    )
+    output_candidates = (
+        domain_v.min * expected_swish_domain.min,
+        domain_v.min * expected_swish_domain.max,
+        domain_v.max * expected_swish_domain.min,
+        domain_v.max * expected_swish_domain.max,
+    )
+    expected_domain = PotentialBounds(
+        min(output_candidates),
+        max(output_candidates),
+    )
 
     # An asymmetric input domain makes the encoded temporal offset nonzero and
     # distinct from half the code-window width. Dense parity therefore verifies the
@@ -1759,6 +2056,7 @@ def verify_gaussian_swiglu_function() -> None:
             theta=8.0,
         )
         assert torch.allclose(deterministic, expected, atol=1e-12, rtol=1e-12)
+        assert deterministic_domain == expected_domain
 
         # Zero Gaussian scale traverses the event-aware implementation without
         # perturbing any carrier. It must match both the corrected deterministic
@@ -1774,15 +2072,61 @@ def verify_gaussian_swiglu_function() -> None:
             theta=8.0,
         )
         assert torch.allclose(zero_noise, deterministic, atol=1e-12, rtol=1e-12)
-        assert zero_noise_domain == deterministic_domain
+        assert zero_noise_domain == expected_domain
         zero_stats = get_gaussian_noise_stats()
         assert zero_stats["swiglu.exponential_input"]["events"] == u.numel()
         assert zero_stats["division.numerator"]["events"] == u.numel()
         assert zero_stats["division.denominator"]["events"] == u.numel()
         assert zero_stats["exponential_difference.internal"]["events"] == u.numel()
+        assert zero_stats["swiglu.gate"]["outputs"] == u.numel()
+        assert zero_stats["swiglu.gate"]["output_underflows"] == 0
+        assert zero_stats["swiglu.gate"]["output_overflows"] == 0
         assert zero_stats["multiplication.data"]["events"] == 2 * u.numel()
         assert zero_stats["multiplication.reference"]["events"] == 2
         assert all(site_stats["misses"] == 0 for site_stats in zero_stats.values())
+
+        # A moderate positive shift creates an observation-time sigmoid excursion
+        # while retaining finite nested carriers. Saturation may occur in a tightened
+        # division or at the explicit SwiGLU gate, but it cannot widen final metadata.
+        set_gaussian_time_noise(
+            enabled=True,
+            time_std=0.0,
+            time_mean=0.5,
+            seed=902,
+        )
+        gate_shifted, gate_shifted_domain = swiglu_function(
+            u,
+            domain_u,
+            v,
+            domain_v,
+            beta=beta,
+            tau_s=1.0,
+            theta=8.0,
+        )
+        gate_stats = get_gaussian_noise_stats()
+        assert gate_shifted_domain == expected_domain
+        assert gate_stats["swiglu.gate"]["outputs"] == u.numel()
+        division_output_stats = gate_stats.get(
+            "division.output",
+            {
+                "output_overflows": 0,
+                "output_underflows": 0,
+            },
+        )
+        gate_saturations = (
+            gate_stats["swiglu.gate"]["output_overflows"]
+            + gate_stats["swiglu.gate"]["output_underflows"]
+            + division_output_stats["output_overflows"]
+            + division_output_stats["output_underflows"]
+        )
+        assert gate_saturations > 0
+        assert torch.isfinite(gate_shifted).all()
+        assert bool(
+            (
+                (gate_shifted >= expected_domain.min)
+                & (gate_shifted <= expected_domain.max)
+            ).all()
+        )
 
         # A shift beyond every code window forces the direct exponential event,
         # division events, internal re-encoding, and both multiplication stages to
@@ -1791,7 +2135,7 @@ def verify_gaussian_swiglu_function() -> None:
             enabled=True,
             time_std=0.0,
             time_mean=20.0,
-            seed=902,
+            seed=903,
         )
         forced_late, forced_late_domain = swiglu_function(
             u,
@@ -1814,7 +2158,7 @@ def verify_gaussian_swiglu_function() -> None:
         # remain at reset. The returned carrier must still use the unchanged finite
         # deterministic rails so later operators can consume it normally.
         assert torch.equal(forced_late, torch.zeros_like(forced_late))
-        assert forced_late_domain == deterministic_domain
+        assert forced_late_domain == expected_domain
         assert torch.isfinite(forced_late).all()
         assert bool(
             (
@@ -2222,7 +2566,7 @@ def verify_gaussian_spiking_conv1d() -> None:
 
 
 def verify_gaussian_spiking_layernorm() -> None:
-    """Verify LayerNorm ablations, signed log-event rails, and nested reset.
+    """Verify LayerNorm event semantics and frozen bound contracts.
 
     LayerNorm can enable or bypass variance multiplication, logarithmic encoding,
     and exponential-difference decoding independently. The regression first proves
@@ -2230,10 +2574,14 @@ def verify_gaussian_spiking_layernorm() -> None:
     is globally enabled. It checks the direct exponential ablation against explicitly
     reconstructed signed pulse widths, then checks full-spiking zero-noise parity and
     forces all nested events late to verify the final learned affine reset value.
+    Finally, all eight ablation topologies independently reconstruct their expected
+    analytic domains, reuse one immutable metadata object across noise modes, and
+    reject stale parameter or configuration caches until explicitly refreshed.
 
     Raises:
         AssertionError: If dense bypass, full-spiking parity, site topology,
-            all-miss bias retention, dynamic output bounds, or finiteness regress.
+            all-miss bias retention, frozen bounds, mutation rejection, refresh,
+            or finiteness regress.
     """
     value = torch.tensor(
         [[-1.5, -0.25, 0.75, 1.0], [0.5, -1.0, 1.5, -0.5]],
@@ -2244,8 +2592,8 @@ def verify_gaussian_spiking_layernorm() -> None:
     bias = torch.tensor([0.1, -0.2, 0.05, 0.3], dtype=torch.float64)
 
     # With all operator stages disabled, Gaussian configuration must not invent an
-    # injection site. The module remains ordinary pretrained LayerNorm and reports
-    # the exact observed output interval used by its current Potential contract.
+    # injection site. The module remains ordinary pretrained LayerNorm while its
+    # metadata uses the finite-feature affine envelope frozen before evaluation.
     dense_layer = SpikingLayerNorm(
         4,
         eps=1.0e-5,
@@ -2403,6 +2751,185 @@ def verify_gaussian_spiking_layernorm() -> None:
         assert torch.allclose(forced_late.value, expected_bias)
         assert forced_late.domain == zero_noise.domain
         assert torch.isfinite(forced_late.value).all()
+
+        # Enumerate the complete three-flag topology instead of checking only the
+        # dense and fully spiking endpoints. Mixed paths select different physical
+        # value computations, but each must freeze metadata before noise sampling.
+        for use_spiking_mul in (False, True):
+            for use_spiking_log in (False, True):
+                for use_spiking_expdiff in (False, True):
+                    ablation_layer = SpikingLayerNorm(
+                        4,
+                        eps=1.0e-5,
+                        theta=4.0,
+                        tau_s=1.0,
+                        clip_margin=0.1,
+                        use_spiking_mul=use_spiking_mul,
+                        use_spiking_log=use_spiking_log,
+                        use_spiking_expdiff=use_spiking_expdiff,
+                    ).to(dtype=torch.float64)
+                    with torch.no_grad():
+                        ablation_layer.weight.copy_(weight)
+                        ablation_layer.bias.copy_(bias)
+
+                    # Reconstruct the two learned-parameter domains independently.
+                    # These endpoints are checkpoint metadata and must not depend on
+                    # the activation batch or on whether Gaussian noise is enabled.
+                    expected_weight_domain = PotentialBounds(
+                        weight.min().item(),
+                        weight.max().item(),
+                    )
+                    expected_bias_domain = PotentialBounds(
+                        bias.min().item(),
+                        bias.max().item(),
+                    )
+
+                    # Select the analytic pre-affine magnitude for this topology.
+                    # Dense normalization uses the finite-feature theorem, direct
+                    # exponential subtraction uses R-1/R, and the spiking
+                    # exponential-difference contract retains its relaxed R rail.
+                    all_dense = not (
+                        use_spiking_mul
+                        or use_spiking_log
+                        or use_spiking_expdiff
+                    )
+                    ratio = (
+                        ablation_layer.theta - ablation_layer.clip_margin
+                    ) / ablation_layer.clip_margin
+                    if all_dense:
+                        result_limit = math.sqrt(value.shape[-1] - 1)
+                        effective_weight = weight
+                    elif use_spiking_expdiff:
+                        result_limit = ratio
+                        effective_weight = weight.clamp(
+                            -ablation_layer.theta,
+                            ablation_layer.theta,
+                        )
+                    else:
+                        result_limit = ratio - 1.0 / ratio
+                        effective_weight = weight
+
+                    # The spiking final multiplication propagates one global gamma
+                    # interval, whereas dense and direct branches apply gamma and
+                    # beta featurewise. Mirror those distinct mathematical contracts
+                    # without reading any production cache or activation extrema.
+                    if use_spiking_expdiff and not all_dense:
+                        product_candidates = (
+                            -result_limit * effective_weight.min().item(),
+                            -result_limit * effective_weight.max().item(),
+                            result_limit * effective_weight.min().item(),
+                            result_limit * effective_weight.max().item(),
+                        )
+                        expected_output_domain = PotentialBounds(
+                            min(product_candidates) + bias.min().item(),
+                            max(product_candidates) + bias.max().item(),
+                        )
+                    else:
+                        lower_candidate = (
+                            effective_weight * -result_limit + bias
+                        )
+                        upper_candidate = (
+                            effective_weight * result_limit + bias
+                        )
+                        expected_output_domain = PotentialBounds(
+                            torch.minimum(
+                                lower_candidate,
+                                upper_candidate,
+                            ).min().item(),
+                            torch.maximum(
+                                lower_candidate,
+                                upper_candidate,
+                            ).max().item(),
+                        )
+
+                    # First freeze publishes one tuple containing all three immutable
+                    # domains. A second lookup must return that exact tuple rather
+                    # than rebuilding equal objects from parameter tensors.
+                    frozen_bounds = ablation_layer.freeze_parameter_bounds()
+                    assert frozen_bounds[0] == expected_weight_domain
+                    assert frozen_bounds[1] == expected_bias_domain
+                    assert frozen_bounds[2] == expected_output_domain
+                    assert (
+                        ablation_layer.freeze_parameter_bounds()
+                        is frozen_bounds
+                    )
+
+                    # Toggle only process-wide timing noise. Zero standard deviation
+                    # must preserve values and both execution paths must attach the
+                    # same cached output object, including the event-free dense case.
+                    set_gaussian_time_noise(enabled=False)
+                    deterministic_ablation = ablation_layer(potential)
+                    set_gaussian_time_noise(
+                        enabled=True,
+                        time_std=0.0,
+                        seed=1310,
+                    )
+                    gaussian_ablation = ablation_layer(potential)
+                    assert torch.allclose(
+                        gaussian_ablation.value,
+                        deterministic_ablation.value,
+                    )
+                    assert deterministic_ablation.domain is frozen_bounds[2]
+                    assert gaussian_ablation.domain is frozen_bounds[2]
+                    assert bool(
+                        (
+                            (deterministic_ablation.value >= frozen_bounds[2].min)
+                            & (deterministic_ablation.value <= frozen_bounds[2].max)
+                        ).all()
+                    )
+
+        # A standard in-place parameter update must invalidate the first frozen
+        # regime. Explicit refresh is the only supported transition after checkpoint
+        # loading or static perturbation, and it must publish a new output domain.
+        mutation_layer = SpikingLayerNorm(
+            4,
+            eps=1.0e-5,
+            theta=4.0,
+            tau_s=1.0,
+            clip_margin=0.1,
+            use_spiking_mul=True,
+            use_spiking_log=True,
+            use_spiking_expdiff=True,
+        ).to(dtype=torch.float64)
+        with torch.no_grad():
+            mutation_layer.weight.copy_(weight)
+            mutation_layer.bias.copy_(bias)
+        original_bounds = mutation_layer.freeze_parameter_bounds()
+        with torch.no_grad():
+            mutation_layer.bias.add_(0.25)
+        try:
+            mutation_layer(potential)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(
+                "SpikingLayerNorm accepted stale parameter bounds"
+            )
+        parameter_bounds = mutation_layer.freeze_parameter_bounds(refresh=True)
+        assert parameter_bounds[2] != original_bounds[2]
+
+        # Bound-defining configuration belongs to the same cache identity as gamma
+        # and beta. Changing the clip margin changes R and must also fail closed until
+        # refresh recomputes every domain for the new physical time window.
+        mutation_layer.clip_margin = 0.2
+        try:
+            mutation_layer.freeze_parameter_bounds()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(
+                "SpikingLayerNorm accepted stale configuration bounds"
+            )
+        configuration_bounds = mutation_layer.freeze_parameter_bounds(
+            refresh=True
+        )
+        assert configuration_bounds[2] != parameter_bounds[2]
+
+        # A refreshed deterministic call must consume the newly published object;
+        # this also proves that invalidation does not permanently poison the module.
+        set_gaussian_time_noise(enabled=False)
+        refreshed_output = mutation_layer(potential)
+        assert refreshed_output.domain is configuration_bounds[2]
     finally:
         # Restore process-wide state before the attention regression.
         set_gaussian_time_noise(enabled=False)
@@ -2578,6 +3105,8 @@ if __name__ == "__main__":
     verify_gaussian_exponential_function()
     verify_gaussian_exponential_difference_operator()
     verify_gaussian_division_function()
+    verify_gaussian_tanh_function()
+    verify_gaussian_sigmoid_gelu_function()
     verify_gaussian_softmin_function()
     verify_gaussian_swiglu_function()
     verify_gaussian_spiking_linear()

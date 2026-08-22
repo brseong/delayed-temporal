@@ -69,8 +69,13 @@ The implementation work covers every maintained transform and model adapter, not
 
 - [x] Audit every maintained `PotentialBounds` and `TimeBounds` construction, including model inputs, embeddings, residuals, normalization, activations, attention, projections, and task readouts; the remaining violations are listed in [[bounds-audit#전수 검색 결과]].
 - [x] Correct multiplication bounds to use the encoded operand's declared clamped endpoints instead of multiplying every ideal result by the full `theta` rail.
-- [ ] Restrict ideal division and softmin output ranges with `X <= Y` and normalized-weight invariants; count and clamp Gaussian excursions instead of propagating the generic exponential ratio.
-- [ ] Return structural ranges for tanh and sigmoid-like gates instead of forwarding widened internal division ranges.
+- [ ] Restrict ideal division output ranges with `X <= Y`; count and clamp Gaussian excursions instead of propagating the generic exponential ratio.
+- [x] Return softmin weights on the structural $[0,1]$ domain and count Gaussian excursions before the final rail clamp.
+- [x] Permanently verify softmin noise-mode domain identity, zero-noise saturation counts, forced-miss excursion accounting, and final $[0,1]$ clamping.
+- [x] Return tanh on the structural $[-1,1]$ domain and count Gaussian excursions before the final activation clamp.
+- [x] Permanently verify tanh deterministic/zero-noise parity, the common $[-1,1]$ domain, forced excursion accounting, and final clamping.
+- [x] Return sigmoid-GELU and Gaussian/deterministic SwiGLU gates on the structural $[0,1]$ domain before downstream multiplication.
+- [x] Permanently verify sigmoid-GELU and SwiGLU gate-derived output domains, zero-noise counters, forced gate excursion accounting, and finite clamping.
 - [x] Replace global-extrema-times-fan-in bounds in all three affine adapters with output-specific parameter absolute-sum safety rails before applying calibration.
 - [ ] Prefer operator-derived interval arithmetic whenever the input bounds and transformation provide a conservative static result.
 - [ ] For paths without a practical analytic envelope, record per-site minima and maxima during a representative noise-free calibration run.
@@ -86,6 +91,7 @@ The implementation work covers every maintained transform and model adapter, not
 - [x] Add `SpikingLayerNorm.freeze_parameter_bounds` for dense, direct exponential, and spiking exponential-difference envelopes with parameter/configuration mutation rejection.
 - [x] Connect `SpikingLayerNorm._gaussian_forward` to frozen weight, bias, and final output domains before event sampling.
 - [x] Connect deterministic `SpikingLayerNorm.forward` to the same frozen parameter and output contract.
+- [x] Permanently verify all eight `SpikingLayerNorm` ablation domains, deterministic/zero-noise metadata identity, stale-cache rejection, and explicit refresh.
 - [ ] Initialize model-entry potential bounds from calibration rather than measuring the first or current batch.
 - [ ] Clamp every out-of-envelope value against its fixed bound and report underflow and overflow counts without widening that bound at runtime.
 - [ ] Include LayerNorm's pre-affine normalized result in calibration, then derive its post-affine envelope by interval arithmetic from fixed scale and bias endpoints.

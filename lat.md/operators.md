@@ -70,7 +70,7 @@ In maintained event-aware execution, division passes both decorated log events i
 
 The attention normalization path represents a negated score followed by exponential normalization as softmin.
 
-[[utils/transforms/functions.py#exponential_function]] composes affine encoding and an exponential temporal operator. [[utils/transforms/functions.py#softmin_function]] exponentiates scores, reduces the denominator, and invokes division to normalize along the last dimension.
+[[utils/transforms/functions.py#exponential_function]] composes affine encoding and an exponential temporal operator. [[utils/transforms/functions.py#softmin_function]] exponentiates scores, reduces the denominator, and invokes division to normalize along the last dimension. Its public output domain is always the structural normalized-weight interval $[0,1]$; Gaussian observation-time excursions are counted at `softmin.output` before the returned tensor is clamped to those rails.
 
 Scaled dot product is implemented by [[utils/transforms/functions.py#scaled_dot_product_function]], which sums pairwise products and negates the usual attention logits. Applying softmin to those negated scores recovers the conventional softmax direction.
 
@@ -78,11 +78,11 @@ Scaled dot product is implemented by [[utils/transforms/functions.py#scaled_dot_
 
 Nonlinear activations are constructed from multiplication, exponential, division, and affine constants rather than treated as arbitrary current kernels.
 
-[[utils/transforms/functions.py#gelu_approximation]] uses the cubic tanh approximation, including dynamic products for `x^2`, `x^3`, the gate, and gated output. [[utils/transforms/functions.py#tanh]] reduces tanh to an exponential and division identity. [[utils/transforms/functions.py#swiglu_function]] composes a sigmoid-like gate with two products.
+[[utils/transforms/functions.py#gelu_approximation]] uses the cubic tanh approximation, including dynamic products for `x^2`, `x^3`, the gate, and gated output. [[utils/transforms/functions.py#tanh]] reduces tanh to an exponential and division identity, then returns the structural $[-1,1]$ domain and records Gaussian excursions before clamping. [[utils/transforms/functions.py#gelu_approximation_sigmoid]] and [[utils/transforms/functions.py#swiglu_function]] clamp their completed sigmoid-like gates to $[0,1]$ before downstream multiplication; Gaussian gate excursions are recorded without widening the propagated product domains.
 
 Fixed scalar multiplication is conceptually absorbable into a synaptic weight in the paper’s operation-count abstraction, even when the reference tensor implementation calls the generic multiplication function. [[evaluation#Symbolic Operation-Count Check]] preserves that distinction.
 
-SwiGLU treats the exponential neuron’s deadline response as `biased_exp` and applies a fixed current gain derived from the declared domain. The gain cancels the identity encoder’s constant offset without adding a runtime operator.
+SwiGLU treats the exponential neuron’s deadline response as `biased_exp` and applies a fixed current gain derived from the declared domain. The gain cancels the identity encoder’s constant offset without adding a runtime operator. [[utils/transforms/functions.py#_gaussian_swiglu_function]] and the deterministic branch share the same $[0,1]$ gate contract.
 
 ## Spiking Linear and Convolution
 

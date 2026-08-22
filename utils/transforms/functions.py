@@ -491,13 +491,15 @@ def softmin_function(
     tau_s: float = 1.0,
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Normalize scores with the composed softmin operator.
+    """Normalize scores into a fixed structural weight interval.
 
     The construction exponentiates negated-score timing responses, reduces them
     along the final dimension, and divides each response by that sum. Gaussian mode
     delegates to the private implementation that reconciles exponential reset zero
-    with the finite positive log domain; deterministic mode retains the original
-    three-stage tensor composition.
+    with the finite positive log domain; deterministic mode retains the same
+    three-stage tensor composition. Regardless of internal exponential and division
+    ranges, the public softmin contract is the normalized-weight interval ``[0, 1]``.
+    Gaussian observation-time excursions are counted before the final rail clamp.
 
     Args:
         input_value: Bounded score tensor normalized along its final dimension.
@@ -505,18 +507,39 @@ def softmin_function(
         tau_s: Shared exponential and logarithmic temporal scale.
 
     Returns:
-        The softmin weights and their propagated potential bounds.
+        Rail-clamped softmin weights and the fixed ``[0, 1]`` potential bounds.
 
     According to Lemma 4.3, the normalization is composed as
     ``w_softmin,ij ≈ f_DIV(s_ij, sum_k s_ik)`` after exponentiating scores.
     """
+    # Every normalized exponential weight is structurally bounded by zero and one:
+    # its numerator is non-negative and no larger than the sum in its denominator.
+    # Use this invariant as public metadata rather than propagating a generic ratio
+    # interval whose upper endpoint grows with score range and source length.
+    weight_domain = PotentialBounds(0.0, 1.0)
+
     # Keep the reset-to-positive-floor policy and event-aware sub-operator sequence
-    # isolated from the deterministic composition behind one public API.
+    # isolated from the deterministic composition behind one public API. The helper
+    # returns its raw division rail only as internal metadata; it must not escape the
+    # stronger structural contract established at this boundary.
     if get_gaussian_time_noise().enabled:
-        return _gaussian_softmin_function(
+        weight, _ = _gaussian_softmin_function(
             input_value,
             domain,
             tau_s=tau_s,
+        )
+
+        # Missed numerator, denominator, or internal exponential events can violate
+        # ideal normalization at observation time. Count those raw excursions at a
+        # stable softmin site, then clamp them without widening the weight interval.
+        return (
+            clamp_gaussian_output(
+                weight,
+                weight_domain,
+                site="softmin.output",
+                name="softmin_weight",
+            ),
+            weight_domain,
         )
 
     # 1. Exponential potential transformation: exp_v = exp(-s_ij / tau_s)
@@ -540,12 +563,27 @@ def softmin_function(
         exp_domain.max * N,
     )
 
-    # 3. Apply the Division Operator: f_DIV(exp_v, sumexp_v)
-    return division_function(
+    # 3. Apply the Division Operator: f_DIV(exp_v, sumexp_v). Its generic internal
+    # interval remains an implementation detail because numerator <= denominator is
+    # known from this reduction even when the division operator serves other callers.
+    weight, _ = division_function(
         X=exp_v,
         Y=sumexp_v,
         joint_domain=sumexp_domain,
         tau_s=tau_s,
+    )
+
+    # Enforce the same rail with noise disabled so metadata is invariant under the
+    # global noise toggle. Ideal deterministic weights lie inside the interval; the
+    # clamp is a fail-safe and does not create Gaussian saturation statistics.
+    return (
+        clamp_gaussian_output(
+            weight,
+            weight_domain,
+            site="softmin.output",
+            name="softmin_weight",
+        ),
+        weight_domain,
     )
 
 
@@ -743,8 +781,27 @@ def gelu_approximation_sigmoid(
     theta: float = 400.0,
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Approximate GELU activation using spiking operators (sigmoid form)."""
-    # Step 1: f_NP(1.702v)
+    """Approximate GELU with a structurally bounded sigmoid gate.
+
+    The approximation computes ``v * sigmoid(1.702 * v / tau_s)`` from
+    multiplication, exponential, and division operators. The completed sigmoid gate
+    is mathematically restricted to ``[0, 1]`` even when its internal division
+    carries a broader generic ratio interval. Gaussian gate excursions are counted
+    before the gate is clamped and passed to the final multiplication.
+
+    Args:
+        input_value: Activation tensor contained by ``domain``.
+        domain: Declared input potential interval.
+        tau_s: Shared exponential and logarithmic temporal scale.
+        theta: Symmetric identity-code rail used by multiplication.
+
+    Returns:
+        The sigmoid-form GELU approximation and its interval-arithmetic output
+        domain derived from ``domain`` and the fixed gate interval ``[0, 1]``.
+    """
+    # Step 1: scale the activation by the fixed sigmoid coefficient. The declared
+    # interval follows the same positive affine map and remains independent of the
+    # current activation tensor or Gaussian samples.
     scale_const = 1.702
     scale_bound = PotentialBounds(scale_const, scale_const)
     scaled_input, _ = multiplication_operator(
@@ -754,40 +811,58 @@ def gelu_approximation_sigmoid(
         scale_bound,
         theta,
     )
-    scaled_domain = PotentialBounds(scale_const * domain.min, scale_const * domain.max)
-
-    # Stability cap for exp: exp(20) is safe, exp(400) overflows.
-    # Since exp(-1.702*v) is used for sigmoid, we only need to worry about v being very negative.
-    _STABILITY_CAP = 80.0
-    scaled_input_clamped = scaled_input.clamp(min=-_STABILITY_CAP, max=_STABILITY_CAP)
-    scaled_domain_clamped = PotentialBounds(
-        max(scaled_domain.min, -_STABILITY_CAP),
-        min(scaled_domain.max, _STABILITY_CAP),
+    scaled_domain = PotentialBounds(
+        scale_const * domain.min,
+        scale_const * domain.max,
     )
 
-    # Step 2: f_NE(f_NP(1.702v))
-    # Note: exponential_function outputs C * exp(-1.702v)
-    neg_exp_out, neg_exp_domain = exponential_function(scaled_input_clamped, scaled_domain_clamped, tau_m=tau_s)
+    # Step 2: intersect both the value and declared interval with the established
+    # exponential stability cap. Keeping these two views synchronized prevents the
+    # encoder metadata from claiming a wider range than the tensor it receives.
+    stability_cap = 80.0
+    scaled_input_clamped = scaled_input.clamp(
+        min=-stability_cap,
+        max=stability_cap,
+    )
+    scaled_domain_clamped = PotentialBounds(
+        max(scaled_domain.min, -stability_cap),
+        min(scaled_domain.max, stability_cap),
+    )
 
-    # Step 3: f_DIV(C, C + f_NE(f_NP(1.702v)))
-    # This mathematically equals 1 / (1 + exp(-1.702v))
-    div_out, div_domain = division_function(
+    # Step 3: construct exp(-1.702v/tau_s). The constant numerator one and the
+    # one-plus-exponential denominator share one positive log-encoding domain.
+    neg_exp_out, neg_exp_domain = exponential_function(
+        scaled_input_clamped,
+        scaled_domain_clamped,
+        tau_m=tau_s,
+    )
+
+    # Step 4: evaluate the physical division first, then replace its generic ratio
+    # metadata with the sigmoid invariant. Observation-time misses may push the raw
+    # gate outside [0,1], so record that excursion before downstream multiplication.
+    gate, _ = division_function(
         X=torch.full_like(neg_exp_out, 1.0),
         Y=1.0 + neg_exp_out,
         joint_domain=PotentialBounds(1.0, neg_exp_domain.max + 1.0),
         tau_s=tau_s,
     )
-
-    # Step 4: f_M(v, div_out)
-    gelu_approx, gelu_domain = multiplication_operator(
-        domain.clamp(input_value, name="gelu_x"),
-        domain,
-        div_domain.clamp(div_out),
-        div_domain,
-        theta=theta,
+    gate_domain = PotentialBounds(0.0, 1.0)
+    gate = clamp_gaussian_output(
+        gate,
+        gate_domain,
+        site="gelu_sigmoid.gate",
+        name="gelu_sigmoid_gate",
     )
 
-    return gelu_approx, gelu_domain
+    # Step 5: the final product consumes only the fixed gate domain. Its endpoint
+    # arithmetic therefore cannot inherit the division window's exponential growth.
+    return multiplication_operator(
+        domain.clamp(input_value, name="gelu_x"),
+        domain,
+        gate,
+        gate_domain,
+        theta=theta,
+    )
 
 
 @check_domain
@@ -799,40 +874,83 @@ def tanh(
     theta: float = 400.0,
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Approximate tanh activation using spiking operators.
-    
-    According to Lemma 4.4 (Derivation of tanh Approximation) in the paper:
-    f_tanh(v) := 2 * f_Div(1,1+f_Exp (-2v)) - 1
+    """Approximate tanh with a fixed structural output interval.
+
+    According to Lemma 4.4, the composed approximation is
+    ``f_tanh(v) := 2 * f_Div(1, 1 + f_Exp(-2v)) - 1``. The internal division
+    operator may carry a conservative generic ratio interval, but the completed
+    activation is mathematically bounded by ``[-1, 1]``. Gaussian observation-time
+    excursions are counted before the final activation clamp.
+
+    Args:
+        input_value: Activation tensor contained by ``domain``.
+        domain: Declared input potential interval.
+        tau_s: Shared exponential and logarithmic temporal scale.
+        theta: Symmetric identity-code rail used by multiplication.
+
+    Returns:
+        The composed tanh approximation clamped to ``[-1, 1]`` together with that
+        fixed structural potential domain.
     """
-    # Step 1: f_NP(-2v)
+    # Step 1: scale the input by two through the maintained multiplication operator.
+    # The following negative exponential supplies the sign in exp(-2v), so the
+    # multiplier itself remains the positive constant used by the original formula.
     scale_const = 2.0
     scale_bound = PotentialBounds(scale_const, scale_const)
     scaled_input, _ = multiplication_operator(
-        input_value, domain,
-        input_value.new_tensor(scale_const).expand_as(input_value), scale_bound,
-        theta)
-    scaled_domain = PotentialBounds(scale_const * domain.min, scale_const * domain.max)
-    
-    # Stability cap for exp: exp(20) is safe, exp(400) overflows.
-    # Since exp(-1.702*v) is used for sigmoid, we only need to worry about v being very negative.
-    _STABILITY_CAP = 80.0
-    scaled_input_clamped = scaled_input.clamp(min=-_STABILITY_CAP, max=_STABILITY_CAP)
-    scaled_domain_clamped = PotentialBounds(max(scaled_domain.min, -_STABILITY_CAP), min(scaled_domain.max, _STABILITY_CAP))
-
-    # Step 2: f_NE(f_NP(1.702v))
-    # Note: exponential_function outputs C * exp(-1.702v)
-    neg_exp_out, neg_exp_domain = exponential_function(scaled_input_clamped, scaled_domain_clamped, tau_m=tau_s)
-    
-    # Step 3: f_DIV(C, C + f_NE(f_NP(1.702v)))
-    # This mathematically equals 1 / (1 + exp(-1.702v))
-    div_out, div_domain = division_function(
-        X=torch.full_like(neg_exp_out, 1.0), 
-        Y=1.0 + neg_exp_out, 
-        joint_domain=PotentialBounds(1.0, neg_exp_domain.max + 1.0), 
-        tau_s=tau_s
+        input_value,
+        domain,
+        input_value.new_tensor(scale_const).expand_as(input_value),
+        scale_bound,
+        theta,
     )
-    
-    return 2.0 * div_out - 1.0, PotentialBounds(2.0 * div_domain.min - 1.0, 2.0 * div_domain.max - 1.0)
+    scaled_domain = PotentialBounds(
+        scale_const * domain.min,
+        scale_const * domain.max,
+    )
+
+    # Step 2: constrain the direct exponential argument to the established numerical
+    # stability interval. The declared domain follows the same endpoint intersection
+    # so the encoder and tensor value retain one synchronized potential contract.
+    stability_cap = 80.0
+    scaled_input_clamped = scaled_input.clamp(
+        min=-stability_cap,
+        max=stability_cap,
+    )
+    scaled_domain_clamped = PotentialBounds(
+        max(scaled_domain.min, -stability_cap),
+        min(scaled_domain.max, stability_cap),
+    )
+
+    # Step 3: construct exp(-2v) with the same temporal scale used by division. The
+    # returned exponential domain defines a positive joint log-encoding interval for
+    # the constant numerator and its one-plus-exponential denominator.
+    neg_exp_out, neg_exp_domain = exponential_function(
+        scaled_input_clamped,
+        scaled_domain_clamped,
+        tau_m=tau_s,
+    )
+    div_out, _ = division_function(
+        X=torch.full_like(neg_exp_out, 1.0),
+        Y=1.0 + neg_exp_out,
+        joint_domain=PotentialBounds(1.0, neg_exp_domain.max + 1.0),
+        tau_s=tau_s,
+    )
+
+    # Step 4: map the sigmoid-like ratio from [0,1] onto the tanh interval [-1,1].
+    # Timing misses may place the raw physical ratio outside its ideal rail, so count
+    # any resulting activation excursion before enforcing the structural bound.
+    tanh_value = 2.0 * div_out - 1.0
+    tanh_domain = PotentialBounds(-1.0, 1.0)
+    return (
+        clamp_gaussian_output(
+            tanh_value,
+            tanh_domain,
+            site="tanh.output",
+            name="tanh_result",
+        ),
+        tanh_domain,
+    )
 
 
 def _gaussian_swiglu_function(
@@ -943,11 +1061,23 @@ def _gaussian_swiglu_function(
         1.0 + exp_domain.min,
         1.0 + exp_domain.max,
     )
-    sigmoid_out, sigmoid_domain = division_function(
+    sigmoid_out, _ = division_function(
         X=torch.ones_like(one_plus_exp),
         Y=one_plus_exp,
         joint_domain=one_plus_exp_domain,
         tau_s=tau_s,
+    )
+
+    # The completed sigmoid-like gate is a normalized positive ratio in [0,1].
+    # External or internal event misses may create raw observation-time excursions;
+    # count them here and prevent the generic division interval from reaching either
+    # downstream multiplication stage.
+    sigmoid_domain = PotentialBounds(0.0, 1.0)
+    sigmoid_out = clamp_gaussian_output(
+        sigmoid_out,
+        sigmoid_domain,
+        site="swiglu.gate",
+        name="swiglu_gate",
     )
 
     # Step 4: psi_M(u, sigmoid) forms the gated Swish value. Its event-aware
@@ -1067,16 +1197,23 @@ def swiglu_function(
     # denominator 1 + exp_out; using 1 + exp_domain.min would clamp the numerator.
     one_plus_exp_domain = PotentialBounds(1.0, 1.0 + exp_domain.max)
     
-    sigmoid_out, sigmoid_domain = division_function(
+    sigmoid_out, _ = division_function(
         X=torch.ones_like(one_plus_exp),
         Y=one_plus_exp,
         joint_domain=one_plus_exp_domain,
-        tau_s=tau_s
+        tau_s=tau_s,
     )
 
-    # Expand the internal gate rail to the physical reset value zero. This absorbs
-    # endpoint roundoff before multiplication and matches the Gaussian gate contract.
-    sigmoid_domain = PotentialBounds(0.0, sigmoid_domain.max)
+    # The sigmoid-like ratio is structurally bounded by [0,1]. Apply the identical
+    # gate contract used by Gaussian execution so toggling timing noise changes only
+    # values and counters, never the metadata propagated through either product.
+    sigmoid_domain = PotentialBounds(0.0, 1.0)
+    sigmoid_out = clamp_gaussian_output(
+        sigmoid_out,
+        sigmoid_domain,
+        site="swiglu.gate",
+        name="swiglu_gate",
+    )
     
     # Step 4: Compute Swish: ψ_M(u, σ(β u)) = u * σ(β u)
     swish_out, swish_domain = multiplication_operator(
