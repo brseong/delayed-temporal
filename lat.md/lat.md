@@ -7,4 +7,5 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[decisions]] — Rationale and trade-offs behind the project’s major architectural choices.
 - [[noise]] — Gaussian event timing, fixed-deadline potential readout, static non-idealities, and verification.
 - [[evaluation]] — Experiment entry points, metrics, diagnostics, sweeps, and verification boundaries.
+- [[hardware]] — BrainScaleS-2 TTFS encoding, physical and mock pooling backends, raw-event analysis, and artifacts.
 - [[todo]] — Deferred implementation work with explicit completion and validation requirements.

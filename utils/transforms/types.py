@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Protocol, Callable, NamedTuple, TypeVar
+from typing import Callable, NamedTuple, ParamSpec, Protocol, TypeVar
 from functools import wraps
 import inspect
 
@@ -80,7 +80,11 @@ def _record_clamp_stats(module_name: str, clamp_name: str | None, original: Tens
     _CLAMP_STATS[tag]["overflow"] += overflow
     _CLAMP_STATS[tag]["total"] += total
 
-class NeuralTransform[InT: OpenBounds, OutT: OpenBounds](Protocol):
+InT = TypeVar("InT", bound=OpenBounds)
+OutT = TypeVar("OutT", bound=OpenBounds)
+
+
+class NeuralTransform(Protocol[InT, OutT]):
     def __call__(self, input_value: Tensor, domain: InT, **kwargs) -> tuple[Tensor, OutT]: ...
 
 
@@ -97,7 +101,11 @@ class Potential(NamedTuple):
     domain: 'PotentialBounds'
 
 
-def check_domain[**P, R](func: Callable[P, R]) -> Callable[P, R]:
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def check_domain(func: Callable[P, R]) -> Callable[P, R]:
     """Decorator to check if input tensors are within their specified domains."""
     sig = inspect.signature(func)
     @wraps(func)

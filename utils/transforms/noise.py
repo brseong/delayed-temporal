@@ -19,7 +19,7 @@ run in one process without DataParallel replication.
 import math
 from dataclasses import dataclass
 from functools import wraps
-from typing import Callable, TypedDict
+from typing import Callable, ParamSpec, TypedDict, TypeVar
 
 import torch
 from torch import Tensor
@@ -501,7 +501,11 @@ def _sample_gaussian_spike_time(
 # Gaussian encoder injection boundary
 # ---------------------------------------------------------------------------
 
-def inject_spike_time_noise[**P, OutT: OpenBounds](
+P = ParamSpec("P")
+OutT = TypeVar("OutT", bound=OpenBounds)
+
+
+def inject_spike_time_noise(
     func: Callable[P, tuple[Tensor, OutT]],
 ) -> Callable[P, tuple[Tensor, OutT] | SpikeSample]:
     """Decorate a deterministic encoder with event-aware Gaussian time noise.
