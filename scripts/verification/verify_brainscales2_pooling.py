@@ -221,7 +221,7 @@ def verify_mock_analysis_and_artifacts() -> None:
 
 
 def verify_notebook_is_valid_json() -> None:
-    notebook = Path("scripts/notebooks/brainscales2_pooling.ipynb")
+    notebook = Path("scripts/notebooks/ebrains_brainscales2_pooling.ipynb")
     payload = json.loads(notebook.read_text(encoding="utf-8"))
     assert payload["nbformat"] == 4
     assert payload["metadata"]["kernelspec"]["display_name"] == "EBRAINS-experimental"
@@ -231,7 +231,13 @@ def verify_notebook_is_valid_json() -> None:
     )
     assert "setup_hardware_client()" in source
     assert "jupyter-notebooks-experimental" in source
-    assert "--backend hardware --quick --allow-environment-calibration" in source
+    assert "%pip install --quiet --disable-pip-version-check jaxtyping matplotlib" in source
+    assert "sys.executable" in source
+    assert "RUN_HARDWARE_SMOKE = False" in source
+    assert "RUN_OPERATING_POINT_SWEEP = False" in source
+    assert "RUN_FULL_EXPERIMENT = False" in source
+    assert '"--allow-environment-calibration"' in source
+    assert '"--pool-sizes", 1, 2, 4, 8, 16' in source
 
 
 def main() -> None:
