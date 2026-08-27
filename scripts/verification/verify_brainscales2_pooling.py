@@ -236,9 +236,13 @@ def verify_notebook_is_valid_json() -> None:
     assert 'DEMOS_ROOT = Path("/tmp/brainscales2-demos")' in source
     assert "%pip install --quiet --disable-pip-version-check jaxtyping matplotlib" in source
     assert "sys.executable" in source
-    assert "RUN_HARDWARE_SMOKE = False" in source
-    assert "RUN_OPERATING_POINT_SWEEP = False" in source
-    assert "RUN_FULL_EXPERIMENT = False" in source
+    for run_flag in (
+        "RUN_HARDWARE_SMOKE",
+        "RUN_OPERATING_POINT_SWEEP",
+        "RUN_FULL_EXPERIMENT",
+    ):
+        assert f"{run_flag} =" in source
+        assert f"if {run_flag}:" in source
     assert '"--allow-environment-calibration"' in source
     assert '"--pool-sizes", 1, 2, 4, 8, 16' in source
 
