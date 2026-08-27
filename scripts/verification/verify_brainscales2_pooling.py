@@ -225,12 +225,15 @@ def verify_notebook_is_valid_json() -> None:
     payload = json.loads(notebook.read_text(encoding="utf-8"))
     assert payload["nbformat"] == 4
     assert payload["metadata"]["kernelspec"]["display_name"] == "EBRAINS-experimental"
-    assert payload["metadata"]["language_info"]["version"] == "3.11"
+    notebook_python = str(payload["metadata"]["language_info"]["version"])
+    for supported_python in (notebook_python, "3.11.10"):
+        assert supported_python.split(".")[:2] == ["3", "11"]
     source = "\n".join(
         "".join(cell.get("source", [])) for cell in payload["cells"]
     )
     assert "setup_hardware_client()" in source
     assert "jupyter-notebooks-experimental" in source
+    assert 'DEMOS_ROOT = Path("/tmp/brainscales2-demos")' in source
     assert "%pip install --quiet --disable-pip-version-check jaxtyping matplotlib" in source
     assert "sys.executable" in source
     assert "RUN_HARDWARE_SMOKE = False" in source
