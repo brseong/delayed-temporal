@@ -73,6 +73,38 @@ def calibration_sha256(path: Path | None) -> str | None:
     return digest.hexdigest()
 
 
+def _fixture_calibration_from_file(path: Path) -> tuple[Any, str]:
+    """Load a .pbin across hxtorch releases with and without hxtorch.core."""
+    try:
+        calib_helper = import_module("hxtorch.core.utils").calib_helper
+    except ModuleNotFoundError as error:
+        if error.name not in ("hxtorch.core", "hxtorch.core.utils"):
+            raise
+    else:
+        return (
+            calib_helper.fixture_calibration_from_file(str(path)),
+            "hxtorch.core.utils.calib_helper.fixture_calibration_from_file",
+        )
+
+    sta = import_module("dlens_vx_v3.sta")
+    grenade = import_module("pygrenade_vx")
+    abstract = import_module("pygrenade_vx.network.abstract")
+
+    dumper = sta.DumperDone()
+    sta.from_portablebinary(dumper, path.read_bytes())
+    chip = sta.convert_to_chip(dumper)
+    calibration = abstract.FixtureCalibration()
+    calibration.chips = {
+        grenade.common.ExecutionInstanceOnExecutor(
+            grenade.common.ExecutionInstanceID(0),
+            grenade.common.ConnectionOnExecutor(0),
+        ): {
+            grenade.common.ChipOnConnection(): chip,
+        },
+    }
+    return calibration, "portable-binary-fixture-fallback"
+
+
 class MockPoolBackend:
     """Seeded synthetic backend with explicit static, shared, and local noise."""
 
@@ -367,10 +399,10 @@ class BrainScaleS2PoolBackend:
             experiment.inter_batch_entry_wait = int(
                 round(config.inter_batch_wait_s / _fpga_time_scale_s())
             )
+            calibration_loader = None
             if config.calibration_path is not None:
-                calib_helper = import_module("hxtorch.core.utils").calib_helper
-                experiment.calibration = calib_helper.fixture_calibration_from_file(
-                    str(config.calibration_path)
+                experiment.calibration, calibration_loader = (
+                    _fixture_calibration_from_file(config.calibration_path)
                 )
 
             synapse = hxsnn.Synapse(
@@ -455,6 +487,7 @@ class BrainScaleS2PoolBackend:
                     "hxtorch_version": getattr(hxtorch, "__version__", "unknown"),
                     "chip_identifier": chip_identifier,
                     "calibration_sha256": calibration_sha256(config.calibration_path),
+                    "calibration_loader": calibration_loader,
                 },
             )
         finally:
@@ -495,10 +528,10 @@ class BrainScaleS2PoolBackend:
             experiment.inter_batch_entry_wait = int(
                 round(config.inter_batch_wait_s / _fpga_time_scale_s())
             )
+            calibration_loader = None
             if config.calibration_path is not None:
-                calib_helper = import_module("hxtorch.core.utils").calib_helper
-                experiment.calibration = calib_helper.fixture_calibration_from_file(
-                    str(config.calibration_path)
+                experiment.calibration, calibration_loader = (
+                    _fixture_calibration_from_file(config.calibration_path)
                 )
 
             input_channels = 1 if routing == "broadcast" else pool_size
@@ -575,6 +608,7 @@ class BrainScaleS2PoolBackend:
                     "backend": "hardware",
                     "hxtorch_version": getattr(hxtorch, "__version__", "unknown"),
                     "chip_identifier": chip_identifier,
+                    "calibration_loader": calibration_loader,
                     "calibration_sha256": calibration_sha256(config.calibration_path),
                     "raw_spike_api": raw_api,
                     "clamped_values": int(encoding.clamp_mask.sum().item()),

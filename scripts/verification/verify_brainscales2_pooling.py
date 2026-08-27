@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 import json
 import sys
 
@@ -27,6 +29,7 @@ from utils.hardware.brainscales2.artifacts import (
 from utils.hardware.brainscales2.backend import (
     MockPoolBackend,
     _find_raw_spikes,
+    _fixture_calibration_from_file,
     _legacy_experiment_observables,
     _raw_events_to_tensors,
     resolve_physical_neuron_indices,
@@ -183,6 +186,75 @@ def verify_placement_and_raw_events() -> None:
     )
     assert float(first[0, 1]) == 17.0e-9
     assert bool(fired[0, 1]) and int(count[0, 1]) == 1
+
+
+def verify_fixture_calibration_loader() -> None:
+    class Coordinate:
+        def __init__(self, *values):
+            self.values = values
+
+    class Dumper:
+        data = b""
+
+    class FakeSTA:
+        DumperDone = Dumper
+
+        @staticmethod
+        def from_portablebinary(dumper, data):
+            dumper.data = data
+
+        @staticmethod
+        def convert_to_chip(dumper):
+            return ("chip", dumper.data)
+
+    class FixtureCalibration:
+        pass
+
+    common = SimpleNamespace(
+        ExecutionInstanceOnExecutor=Coordinate,
+        ExecutionInstanceID=Coordinate,
+        ConnectionOnExecutor=Coordinate,
+        ChipOnConnection=Coordinate,
+    )
+    fallback_modules = {
+        "dlens_vx_v3.sta": FakeSTA,
+        "pygrenade_vx": SimpleNamespace(common=common),
+        "pygrenade_vx.network.abstract": SimpleNamespace(
+            FixtureCalibration=FixtureCalibration
+        ),
+    }
+
+    def fallback_import(name):
+        if name == "hxtorch.core.utils":
+            raise ModuleNotFoundError(name="hxtorch.core")
+        return fallback_modules[name]
+
+    with TemporaryDirectory() as temporary:
+        calibration_path = Path(temporary) / "spiking_cocolist.pbin"
+        calibration_path.write_bytes(b"portable calibration")
+        with patch(
+            "utils.hardware.brainscales2.backend.import_module",
+            side_effect=fallback_import,
+        ):
+            calibration, loader = _fixture_calibration_from_file(calibration_path)
+        assert loader == "portable-binary-fixture-fallback"
+        connections = next(iter(calibration.chips.values()))
+        assert next(iter(connections.values())) == (
+            "chip",
+            b"portable calibration",
+        )
+
+        marker = object()
+        modern_helper = SimpleNamespace(
+            fixture_calibration_from_file=lambda path: (marker, path)
+        )
+        with patch(
+            "utils.hardware.brainscales2.backend.import_module",
+            return_value=SimpleNamespace(calib_helper=modern_helper),
+        ):
+            modern, loader = _fixture_calibration_from_file(calibration_path)
+        assert modern == (marker, str(calibration_path))
+        assert loader.startswith("hxtorch.core.utils")
 
 
 def verify_mock_analysis_and_artifacts() -> None:
@@ -373,6 +445,7 @@ def main() -> None:
     verify_log_encoding_and_validation()
     verify_software_noise_guard()
     verify_placement_and_raw_events()
+    verify_fixture_calibration_loader()
     verify_mock_analysis_and_artifacts()
     verify_notebook_is_valid_json()
     verify_cadc_diagnostic_and_artifacts()
