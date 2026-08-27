@@ -2,6 +2,7 @@
 
 from .config import (
     BrainScaleS2PoolConfig,
+    CADCDiagnosticResult,
     PoolRunResult,
     TTFSHardwareEncoding,
 )
@@ -16,6 +17,7 @@ from .backend import (
 
 __all__ = [
     "BrainScaleS2PoolConfig",
+    "CADCDiagnosticResult",
     "PoolRunResult",
     "TTFSHardwareEncoding",
     "encode_potential_for_brainscales2",

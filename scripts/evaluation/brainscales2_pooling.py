@@ -22,12 +22,16 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from utils.hardware.brainscales2.analysis import (
+    analyze_cadc_diagnostic,
     bootstrap_variance_floor,
     fit_variance_floor,
     score_operating_point,
     summarize_pool_result,
 )
-from utils.hardware.brainscales2.artifacts import write_experiment_artifacts
+from utils.hardware.brainscales2.artifacts import (
+    write_cadc_diagnostic_artifacts,
+    write_experiment_artifacts,
+)
 from utils.hardware.brainscales2.backend import (
     BrainScaleS2PoolBackend,
     MockPoolBackend,
@@ -46,7 +50,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Validate TTFS first-spike neuron pooling on BrainScaleS-2",
     )
-    parser.add_argument("--phase", choices=("calibrate", "run"), default="run")
+    parser.add_argument(
+        "--phase",
+        choices=("diagnose-cadc", "calibrate", "run"),
+        default="run",
+    )
     parser.add_argument("--backend", choices=("mock", "hardware"), default="mock")
     parser.add_argument("--encoding", choices=("identity", "log"), default="identity")
     parser.add_argument("--pool-sizes", type=int, nargs="+", default=[1, 2, 4, 8, 16])
@@ -274,6 +282,33 @@ def environment_manifest() -> dict[str, Any]:
     }
 
 
+def diagnose_cadc(
+    args: argparse.Namespace,
+    backend: PoolBackend,
+    config: BrainScaleS2PoolConfig,
+) -> None:
+    """Measure a single PSP before attempting sparse first-spike sweeps."""
+    if not isinstance(backend, BrainScaleS2PoolBackend):
+        raise RuntimeError("diagnose-cadc requires --backend hardware")
+    result = backend.diagnose_cadc(config)
+    analysis = analyze_cadc_diagnostic(result, config)
+    write_cadc_diagnostic_artifacts(
+        args.output_dir,
+        config=config,
+        result=result,
+        analysis=analysis,
+        extra_manifest={"environment": environment_manifest()},
+    )
+    report = {
+        "viable": analysis["viable"],
+        "reason": analysis["reason"],
+        "selected": analysis["selected"],
+        "aggregate": analysis["aggregate"],
+    }
+    print(json.dumps(report, indent=2, sort_keys=True), flush=True)
+    print(f"Wrote CADC diagnostic artifacts to {args.output_dir}")
+
+
 def calibrate_operating_point(
     args: argparse.Namespace,
     backend: PoolBackend,
@@ -343,6 +378,9 @@ def main() -> None:
     config = make_config(args)
     potential = make_potential(args, config)
     backend = make_backend(args.backend)
+    if args.phase == "diagnose-cadc":
+        diagnose_cadc(args, backend, config)
+        return
     if args.phase == "calibrate":
         calibrate_operating_point(args, backend, potential, config)
         return

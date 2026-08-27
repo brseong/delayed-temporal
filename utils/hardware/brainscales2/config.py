@@ -152,6 +152,38 @@ class TTFSHardwareEncoding:
         return self.injected_time_s.numel()
 
 
+@dataclass(frozen=True)
+class CADCDiagnosticResult:
+    """Paired no-input and single-PSP traces for operating-point selection."""
+
+    baseline_cadc: torch.Tensor
+    stimulated_cadc: torch.Tensor
+    baseline_spikes: torch.Tensor
+    stimulated_spikes: torch.Tensor
+    time_s: torch.Tensor
+    stimulus_time_s: float
+    physical_coordinates: tuple[int, ...]
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        expected = self.baseline_cadc.shape
+        if len(expected) != 3:
+            raise ValueError("CADC traces must have shape [trial, time, neuron]")
+        if self.stimulated_cadc.shape != expected:
+            raise ValueError("baseline and stimulated CADC traces must match")
+        if (
+            self.baseline_spikes.shape != expected
+            or self.stimulated_spikes.shape != expected
+        ):
+            raise ValueError("diagnostic spike grids must match CADC traces")
+        if self.time_s.ndim != 1 or self.time_s.numel() != expected[1]:
+            raise ValueError("time_s must match the CADC time dimension")
+        if len(self.physical_coordinates) != expected[2]:
+            raise ValueError("one physical coordinate is required per diagnostic neuron")
+        if not 0.0 < self.stimulus_time_s < float(self.time_s[-1]):
+            raise ValueError("stimulus_time_s must lie inside the diagnostic trace")
+
+
 @dataclass
 class PoolRunResult:
     """Raw first-spike observations for one pool/placement/routing condition."""

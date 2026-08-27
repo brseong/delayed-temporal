@@ -13,7 +13,7 @@ import torch
 
 from utils.transforms.types import Potential
 
-from .config import BrainScaleS2PoolConfig, PoolRunResult
+from .config import BrainScaleS2PoolConfig, CADCDiagnosticResult, PoolRunResult
 
 
 def _json_value(value: Any) -> Any:
@@ -32,6 +32,85 @@ def _json_value(value: Any) -> Any:
 
 def condition_key(result: PoolRunResult) -> str:
     return f"M{result.pool_size}_{result.placement}_{result.routing}"
+
+
+def write_cadc_diagnostic_artifacts(
+    output_dir: Path,
+    *,
+    config: BrainScaleS2PoolConfig,
+    result: CADCDiagnosticResult,
+    analysis: dict[str, object],
+    extra_manifest: dict[str, Any] | None = None,
+) -> None:
+    """Persist paired CADC traces and the next-stage recommendation."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    condition = {
+        "key": "cadc_single_psp",
+        "pool_size": len(result.physical_coordinates),
+        "placement": "same-quadrant",
+        "routing": "broadcast",
+        "physical_coordinates": list(result.physical_coordinates),
+        "metadata": result.metadata,
+    }
+    manifest: dict[str, Any] = {
+        "schema_version": 1,
+        "phase": "diagnose-cadc",
+        "config": config.to_manifest_dict(),
+        "conditions": [condition],
+        "diagnostic": analysis.get("aggregate"),
+        "viable": analysis.get("viable"),
+        "reason": analysis.get("reason"),
+    }
+    if extra_manifest:
+        manifest.update(extra_manifest)
+    (output_dir / "manifest.json").write_text(
+        json.dumps(_json_value(manifest), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    rows = list(analysis.get("per_neuron", []))
+    _write_rows(output_dir / "summary.csv", rows)
+    torch.save(
+        {
+            "baseline_cadc": result.baseline_cadc,
+            "stimulated_cadc": result.stimulated_cadc,
+            "baseline_spikes": result.baseline_spikes,
+            "stimulated_spikes": result.stimulated_spikes,
+            "time_s": result.time_s,
+            "stimulus_time_s": result.stimulus_time_s,
+            "physical_coordinates": result.physical_coordinates,
+        },
+        output_dir / "cadc_traces.pt",
+    )
+    recommendation = {
+        "viable": analysis.get("viable"),
+        "reason": analysis.get("reason"),
+        "selected": analysis.get("selected"),
+        "aggregate": analysis.get("aggregate"),
+        "config": config.to_manifest_dict(),
+    }
+    (output_dir / "recommended_operating_point.json").write_text(
+        json.dumps(_json_value(recommendation), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+    time_us = result.time_s * 1.0e6
+    baseline = result.baseline_cadc.mean(dim=(0, 2))
+    stimulated = result.stimulated_cadc.mean(dim=(0, 2))
+    figure, axis = plt.subplots(figsize=(7.0, 4.5))
+    axis.plot(time_us, baseline, label="no input")
+    axis.plot(time_us, stimulated, label="single input")
+    axis.axvline(result.stimulus_time_s * 1.0e6, color="black", linestyle="--")
+    axis.set_xlabel("hardware time [µs]")
+    axis.set_ylabel("mean membrane CADC [a.u.]")
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(output_dir / "cadc_trace.png", dpi=180)
+    plt.close(figure)
 
 
 def write_experiment_artifacts(

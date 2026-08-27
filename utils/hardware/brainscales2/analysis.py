@@ -8,7 +8,7 @@ import math
 
 import torch
 
-from .config import PoolRunResult
+from .config import BrainScaleS2PoolConfig, CADCDiagnosticResult, PoolRunResult
 
 
 Estimator = Literal["corrected-mean", "mean", "median", "earliest"]
@@ -247,13 +247,118 @@ def bootstrap_variance_floor(
 
 
 def score_operating_point(result: PoolRunResult) -> dict[str, float]:
-    """Score a candidate for high delivery and low multi-spike incidence."""
+    """Score delivery while rejecting multi-spike and pre-input activity."""
     fired_rate = float(result.fired.float().mean())
     multi_spike_rate = float((result.spike_count > 1).float().mean())
-    score = abs(fired_rate - 0.97) + 10.0 * multi_spike_rate
+    input_time = result.nominal_input_s.reshape(1, -1, 1)
+    premature = result.fired & (result.first_spike_s < input_time - 1.0e-9)
+    premature_spike_rate = float(premature.float().mean())
+    score = (
+        abs(fired_rate - 0.97)
+        + 10.0 * multi_spike_rate
+        + 10.0 * premature_spike_rate
+    )
     return {
         "fired_rate": fired_rate,
         "multi_spike_rate": multi_spike_rate,
+        "premature_spike_rate": premature_spike_rate,
         "score": score,
     }
 
+
+def analyze_cadc_diagnostic(
+    result: CADCDiagnosticResult,
+    config: BrainScaleS2PoolConfig,
+) -> dict[str, object]:
+    """Measure PSP separation without equating CADC and parameter units."""
+    pre_stimulus = result.time_s < result.stimulus_time_s
+    post_stimulus = result.time_s >= result.stimulus_time_s
+    if int(pre_stimulus.sum()) < 2 or int(post_stimulus.sum()) < 2:
+        raise ValueError("CADC diagnostic requires samples before and after stimulus")
+
+    baseline_reference = result.baseline_cadc[:, pre_stimulus].median(dim=1).values
+    paired_psp = result.stimulated_cadc - result.baseline_cadc
+    peak_delta = paired_psp[:, post_stimulus].amax(dim=1)
+    baseline_excursion = (
+        result.baseline_cadc - baseline_reference.unsqueeze(1)
+    )[:, post_stimulus].abs().amax(dim=1)
+
+    baseline_fired = result.baseline_spikes.sum(dim=1) > 0
+    stimulated_fired = result.stimulated_spikes[:, post_stimulus].sum(dim=1) > 0
+    baseline_fired_rate = float(baseline_fired.float().mean())
+    stimulated_fired_rate = float(stimulated_fired.float().mean())
+
+    peak_flat = peak_delta.reshape(-1).to(torch.float64)
+    excursion_flat = baseline_excursion.reshape(-1).to(torch.float64)
+    signal_floor = float(torch.quantile(peak_flat, 0.10))
+    signal_median = float(torch.quantile(peak_flat, 0.50))
+    noise_ceiling = max(0.0, float(torch.quantile(excursion_flat, 0.99)))
+
+    minimum_gap = noise_ceiling + 2.0
+    maximum_gap = 0.85 * signal_floor
+    already_viable = baseline_fired_rate <= 0.01 and stimulated_fired_rate >= 0.90
+    trace_viable = (
+        baseline_fired_rate <= 0.01
+        and math.isfinite(maximum_gap)
+        and maximum_gap > minimum_gap
+    )
+    viable = already_viable or trace_viable
+
+    selected: dict[str, float] | None = (
+        {
+            "threshold": float(config.threshold),
+            "synaptic_weight": float(config.synaptic_weight),
+            "i_synin_gm": float(config.i_synin_gm),
+        }
+        if already_viable
+        else None
+    )
+
+    per_neuron: list[dict[str, float | int]] = []
+    for neuron, coordinate in enumerate(result.physical_coordinates):
+        per_neuron.append(
+            {
+                "neuron": neuron,
+                "physical_coordinate": coordinate,
+                "baseline_cadc": float(baseline_reference[:, neuron].mean()),
+                "baseline_excursion_q99": float(
+                    torch.quantile(
+                        baseline_excursion[:, neuron].to(torch.float64), 0.99
+                    )
+                ),
+                "psp_peak_q10": float(
+                    torch.quantile(peak_delta[:, neuron].to(torch.float64), 0.10)
+                ),
+                "psp_peak_median": float(peak_delta[:, neuron].median()),
+                "baseline_fired_rate": float(
+                    baseline_fired[:, neuron].float().mean()
+                ),
+                "stimulated_fired_rate": float(
+                    stimulated_fired[:, neuron].float().mean()
+                ),
+            }
+        )
+
+    return {
+        "viable": viable,
+        "reason": (
+            "current operating point already produces input-triggered spikes"
+            if already_viable
+            else (
+                "single PSP is measurable; select threshold with a raw-spike sweep"
+                if trace_viable
+                else "single PSP is not separable; increase i_synin_gm or input fan-in"
+            )
+        ),
+        "selected": selected,
+        "aggregate": {
+            "baseline_fired_rate": baseline_fired_rate,
+            "stimulated_fired_rate": stimulated_fired_rate,
+            "noise_excursion_q99_cadc": noise_ceiling,
+            "psp_peak_q10_cadc": signal_floor,
+            "psp_peak_median_cadc": signal_median,
+            "minimum_threshold_gap_cadc": minimum_gap,
+            "maximum_threshold_gap_cadc": maximum_gap,
+        },
+        "per_neuron": per_neuron,
+    }

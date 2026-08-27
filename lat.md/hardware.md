@@ -26,6 +26,8 @@ One immutable configuration records both project-time conversion and the physica
 
 [[utils/hardware/brainscales2/config.py#PoolRunResult]] stores tensors shaped `[trial, sample, neuron]` for first-spike time, delivery, and spike count. It also records injected input times, physical neuron indices, the original input shape, and backend metadata.
 
+[[utils/hardware/brainscales2/config.py#CADCDiagnosticResult]] stores paired no-input and single-input membrane/spike traces shaped `[trial, time, neuron]`. CADC values remain hardware ADC units and are never interpreted directly as threshold parameter codes.
+
 ## Execution Backends
 
 Physical and synthetic executions implement one pool-level interface while keeping EBRAINS-only imports optional.
@@ -35,6 +37,8 @@ Physical and synthetic executions implement one pool-level interface while keepi
 Dense spike grids are not accepted as a fallback output because their configured `dt` can hide the jitter being measured. Integer FPGA timestamps use the grenade clock constant unless a release-specific scale is explicitly supplied. A configurable 50-microsecond inter-batch guard prevents residual membrane state from leaking between samples and trials.
 
 [[utils/hardware/brainscales2/backend.py#MockPoolBackend]] provides deterministic seeded static offsets, trial-shared disturbances, neuron-local residuals, and misses. It validates the complete local pipeline without claiming physical calibration.
+
+[[utils/hardware/brainscales2/backend.py#BrainScaleS2PoolBackend#diagnose_cadc]] is the sole dense-observable exception. It records fixed-neuron baseline and one-PSP CADC traces before a run; accepted jitter data still comes only from sparse raw spike timestamps.
 
 ## Placement and Routing Ablations
 
@@ -54,12 +58,14 @@ Analysis separates calibration-only offsets from held-out pooling statistics and
 
 [[utils/hardware/brainscales2/artifacts.py#write_experiment_artifacts]] writes a manifest, long-form raw event CSV, tensor archive, summary table, variance fit, and plot. The manifest includes configuration, calibration hash, chip and software metadata, placement, routing, and input-domain provenance.
 
+[[utils/hardware/brainscales2/analysis.py#analyze_cadc_diagnostic]] compares a paired one-PSP response against no-input excursions. [[utils/hardware/brainscales2/artifacts.py#write_cadc_diagnostic_artifacts]] writes the traces, per-neuron summary, plot, and recommendation without converting CADC amplitudes into threshold codes.
+
 ## Experiment Entry Point and Verification
 
 The CLI owns operating-point selection, condition orchestration, and reproducible output while the notebook remains a thin launcher.
 
-[[scripts/evaluation/brainscales2_pooling.py#main]] supports mock and hardware runs, quick smoke settings, an operating-point calibration phase, fixed potential sweeps, all configured pooling conditions, and artifact generation. Hardware execution is intended for the EBRAINS experimental kernel and does not add hxtorch to the base requirements.
+[[scripts/evaluation/brainscales2_pooling.py#main]] supports a CADC diagnostic phase, mock and hardware runs, quick smoke settings, a raw-spike operating-point calibration phase, fixed potential sweeps, all configured pooling conditions, and artifact generation. Calibration penalizes misses, multiple spikes, and spikes occurring before their nominal input.
 
-The launcher targets the EBRAINS experimental kernel's Python 3.11 runtime. [[utils/transforms/types.py#NeuralTransform]] and [[utils/transforms/noise.py#inject_spike_time_noise]] use legacy `TypeVar` and `ParamSpec` declarations so the reused project encoders import there. `scripts/notebooks/ebrains_brainscales2_pooling.ipynb` installs only `jaxtyping` and `matplotlib` with kernel-scoped `%pip`, invokes the CLI through `sys.executable`, enables the small hardware smoke by default while leaving longer sweeps disabled, and loads `setup_hardware_client` from a writable `/tmp` checkout of the official demos.
+The launcher targets the EBRAINS experimental kernel's Python 3.11 runtime. [[utils/transforms/types.py#NeuralTransform]] and [[utils/transforms/noise.py#inject_spike_time_noise]] use legacy `TypeVar` and `ParamSpec` declarations so the reused project encoders import there. `scripts/notebooks/ebrains_brainscales2_pooling.ipynb` installs only `jaxtyping` and `matplotlib` with kernel-scoped `%pip`, invokes the CLI through `sys.executable`, and runs CADC diagnosis, a bounded raw-spike sweep, then the hardware smoke by default. It loads `setup_hardware_client` from a writable `/tmp` checkout of the official demos.
 
-[[scripts/verification/verify_brainscales2_pooling.py#main]] checks affine and logarithmic endpoints, routing shapes, invalid domains, the software-noise guard, placement, raw-event reduction, mock reproducibility, variance-floor recovery, artifacts, and the safe EBRAINS notebook launcher contract. Notebook metadata must identify Python 3.11, while Jupyter-written patch suffixes such as `3.11.10` remain valid. Saved run flags may be either false or true because users enable stages in place; verification requires each mutable flag and its execution guard rather than its current value.
+[[scripts/verification/verify_brainscales2_pooling.py#main]] checks affine and logarithmic endpoints, routing shapes, invalid domains, the software-noise guard, placement, raw-event reduction, mock reproducibility, synthetic CADC separation, variance-floor recovery, artifacts, and the safe EBRAINS notebook launcher contract. Notebook metadata must identify Python 3.11, while Jupyter-written patch suffixes such as `3.11.10` remain valid. Saved run flags may be either false or true because users enable stages in place; verification requires each mutable flag and its execution guard rather than its current value.

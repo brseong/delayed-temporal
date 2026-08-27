@@ -15,11 +15,15 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from utils.hardware.brainscales2.analysis import (
+    analyze_cadc_diagnostic,
     bootstrap_variance_floor,
     fit_variance_floor,
     summarize_pool_result,
 )
-from utils.hardware.brainscales2.artifacts import write_experiment_artifacts
+from utils.hardware.brainscales2.artifacts import (
+    write_cadc_diagnostic_artifacts,
+    write_experiment_artifacts,
+)
 from utils.hardware.brainscales2.backend import (
     MockPoolBackend,
     _find_raw_spikes,
@@ -27,7 +31,10 @@ from utils.hardware.brainscales2.backend import (
     _raw_events_to_tensors,
     resolve_physical_neuron_indices,
 )
-from utils.hardware.brainscales2.config import BrainScaleS2PoolConfig
+from utils.hardware.brainscales2.config import (
+    BrainScaleS2PoolConfig,
+    CADCDiagnosticResult,
+)
 from utils.hardware.brainscales2.encoding import encode_potential_for_brainscales2
 from utils.transforms.noise import set_gaussian_time_noise
 from utils.transforms.types import Potential, PotentialBounds
@@ -254,6 +261,79 @@ def verify_mock_analysis_and_artifacts() -> None:
         assert len(manifest["conditions"]) == len(config.pool_sizes)
 
 
+def verify_cadc_diagnostic_and_artifacts() -> None:
+    config = BrainScaleS2PoolConfig(
+        trials=8,
+        pool_sizes=(1, 4),
+        placements=("same-quadrant",),
+        routings=("broadcast",),
+    )
+    time_s = torch.arange(config.runtime_steps, dtype=torch.float64) * config.dt_s
+    baseline = torch.full(
+        (config.trials, config.runtime_steps, 4),
+        80.0,
+        dtype=torch.float64,
+    )
+    baseline += 0.25 * torch.sin(
+        torch.arange(config.runtime_steps, dtype=torch.float64)
+    ).reshape(1, -1, 1)
+    stimulated = baseline.clone()
+    post = time_s >= config.input_early_s
+    response = 18.0 * torch.exp(
+        -(time_s[post] - config.input_early_s) / 5.0e-6
+    )
+    stimulated[:, post] += response.reshape(1, -1, 1)
+    zeros = torch.zeros_like(baseline)
+    result = CADCDiagnosticResult(
+        baseline_cadc=baseline,
+        stimulated_cadc=stimulated,
+        baseline_spikes=zeros,
+        stimulated_spikes=zeros,
+        time_s=time_s,
+        stimulus_time_s=config.input_early_s,
+        physical_coordinates=(0, 1, 2, 3),
+        metadata={"backend": "synthetic"},
+    )
+    analysis = analyze_cadc_diagnostic(result, config)
+    assert analysis["viable"] is True
+    assert analysis["selected"] is None
+
+    nonseparable = CADCDiagnosticResult(
+        baseline_cadc=baseline,
+        stimulated_cadc=baseline.clone(),
+        baseline_spikes=zeros,
+        stimulated_spikes=zeros,
+        time_s=time_s,
+        stimulus_time_s=config.input_early_s,
+        physical_coordinates=(0, 1, 2, 3),
+    )
+    assert analyze_cadc_diagnostic(nonseparable, config)["viable"] is False
+
+    with TemporaryDirectory() as temporary:
+        output = Path(temporary)
+        write_cadc_diagnostic_artifacts(
+            output,
+            config=config,
+            result=result,
+            analysis=analysis,
+            extra_manifest={"verification": True},
+        )
+        for name in (
+            "manifest.json",
+            "summary.csv",
+            "cadc_traces.pt",
+            "recommended_operating_point.json",
+        ):
+            assert (output / name).is_file(), name
+        recommendation = json.loads(
+            (output / "recommended_operating_point.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert recommendation["viable"] is True
+        assert recommendation["selected"] is None
+
+
 def verify_notebook_is_valid_json() -> None:
     notebook = Path("scripts/notebooks/ebrains_brainscales2_pooling.ipynb")
     payload = json.loads(notebook.read_text(encoding="utf-8"))
@@ -271,6 +351,7 @@ def verify_notebook_is_valid_json() -> None:
     assert "%pip install --quiet --disable-pip-version-check jaxtyping matplotlib" in source
     assert "sys.executable" in source
     for run_flag in (
+        "RUN_CADC_DIAGNOSTIC",
         "RUN_HARDWARE_SMOKE",
         "RUN_OPERATING_POINT_SWEEP",
         "RUN_FULL_EXPERIMENT",
@@ -279,6 +360,8 @@ def verify_notebook_is_valid_json() -> None:
         assert f"if {run_flag}:" in source
     assert '"--allow-environment-calibration"' in source
     assert '"--pool-sizes", 1, 2, 4, 8, 16' in source
+    assert '"--phase", "diagnose-cadc"' in source
+    assert "recommended_operating_point.json" in source
 
 
 def main() -> None:
@@ -288,6 +371,7 @@ def main() -> None:
     verify_placement_and_raw_events()
     verify_mock_analysis_and_artifacts()
     verify_notebook_is_valid_json()
+    verify_cadc_diagnostic_and_artifacts()
     print("BrainScaleS-2 TTFS pooling verification passed")
 
 

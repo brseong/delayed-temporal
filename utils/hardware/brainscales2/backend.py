@@ -16,6 +16,7 @@ from utils.transforms.types import Potential
 
 from .config import (
     BrainScaleS2PoolConfig,
+    CADCDiagnosticResult,
     PlacementMode,
     PoolRunResult,
     RoutingMode,
@@ -334,6 +335,131 @@ class BrainScaleS2PoolBackend:
         except ImportError:
             return False
         return True
+
+    def diagnose_cadc(
+        self,
+        config: BrainScaleS2PoolConfig,
+        *,
+        pool_size: int = 4,
+        placement: PlacementMode = "same-quadrant",
+    ) -> CADCDiagnosticResult:
+        """Record paired baseline and one-input PSP traces on fixed neurons."""
+        config.require_reproducible_calibration()
+        indices = resolve_physical_neuron_indices(pool_size, placement)
+        stimulus_time_s = config.input_early_s
+        stimulus_step = int(round(stimulus_time_s / config.dt_s))
+        if not 1 <= stimulus_step < config.runtime_steps - 1:
+            raise ValueError("diagnostic stimulus must leave pre/post CADC samples")
+
+        try:
+            hxtorch = import_module("hxtorch")
+            hxsnn = import_module("hxtorch.spiking")
+        except ImportError as error:
+            raise RuntimeError(
+                "BrainScaleS-2 CADC diagnosis requires the EBRAINS hxtorch environment"
+            ) from error
+
+        initialized = False
+        try:
+            hxtorch.init_hardware()
+            initialized = True
+            experiment = hxsnn.Experiment(dt=config.dt_s)
+            experiment.inter_batch_entry_wait = int(
+                round(config.inter_batch_wait_s / _fpga_time_scale_s())
+            )
+            if config.calibration_path is not None:
+                calib_helper = import_module("hxtorch.core.utils").calib_helper
+                experiment.calibration = calib_helper.fixture_calibration_from_file(
+                    str(config.calibration_path)
+                )
+
+            synapse = hxsnn.Synapse(
+                in_features=1,
+                out_features=pool_size,
+                experiment=experiment,
+            )
+            synapse.weight.data.fill_(config.synaptic_weight)
+            lif = hxsnn.LIF(
+                size=pool_size,
+                experiment=experiment,
+                tau_mem=config.tau_mem_s,
+                tau_syn=config.tau_syn_s,
+                leak=config.leak,
+                reset=config.reset,
+                threshold=config.threshold,
+                refractory_time=config.refractory_time_s,
+                i_synin_gm=config.i_synin_gm,
+                synapse_dac_bias=config.synapse_dac_bias,
+                placement_constraint=_logical_neuron_coordinates(indices),
+                enable_spike_recording=True,
+                enable_cadc_recording=True,
+                cadc_time_shift=-1,
+                enable_madc_recording=False,
+            )
+
+            # Each trial is a paired no-input/stimulated batch entry.
+            batch_count = 2 * config.trials
+            inputs = torch.zeros(
+                (config.runtime_steps, batch_count, 1),
+                dtype=torch.float32,
+            )
+            inputs[stimulus_step, 1::2, 0] = 1.0
+            synapse_output = synapse(hxsnn.LIFObservables(spikes=inputs))
+            observables = lif(synapse_output)
+            hxsnn.run(experiment, config.runtime_steps)
+
+            cadc = getattr(observables, "membrane_cadc", None)
+            spikes = getattr(observables, "spikes", None)
+            if not isinstance(cadc, torch.Tensor) or not isinstance(spikes, torch.Tensor):
+                raise RuntimeError(
+                    "installed hxtorch did not return dense CADC and spike observables"
+                )
+            batch_first = (batch_count, config.runtime_steps, pool_size)
+            time_first = (config.runtime_steps, batch_count, pool_size)
+            if tuple(spikes.shape) != tuple(cadc.shape):
+                raise RuntimeError(
+                    "CADC and spike diagnostic observables have different shapes: "
+                    f"cadc={tuple(cadc.shape)}, spikes={tuple(spikes.shape)}"
+                )
+            if tuple(cadc.shape) == time_first:
+                cadc = cadc.permute(1, 0, 2)
+                spikes = spikes.permute(1, 0, 2)
+            elif tuple(cadc.shape) != batch_first:
+                raise RuntimeError(
+                    "unexpected hxtorch diagnostic observable shape: "
+                    f"cadc={tuple(cadc.shape)}, expected one of "
+                    f"{batch_first} or {time_first}"
+                )
+
+            cadc = cadc.detach().cpu().to(torch.float64)
+            spikes = spikes.detach().cpu().to(torch.float64)
+            baseline_cadc = cadc[0::2].contiguous()
+            stimulated_cadc = cadc[1::2].contiguous()
+            baseline_spikes = spikes[0::2].contiguous()
+            stimulated_spikes = spikes[1::2].contiguous()
+
+            chip_identifier = None
+            get_identifier = getattr(hxtorch, "get_unique_identifier", None)
+            if callable(get_identifier):
+                chip_identifier = [str(value) for value in get_identifier()]
+            return CADCDiagnosticResult(
+                baseline_cadc=baseline_cadc,
+                stimulated_cadc=stimulated_cadc,
+                baseline_spikes=baseline_spikes,
+                stimulated_spikes=stimulated_spikes,
+                time_s=torch.arange(cadc.shape[1], dtype=torch.float64) * config.dt_s,
+                stimulus_time_s=stimulus_time_s,
+                physical_coordinates=indices,
+                metadata={
+                    "backend": "hardware",
+                    "hxtorch_version": getattr(hxtorch, "__version__", "unknown"),
+                    "chip_identifier": chip_identifier,
+                    "calibration_sha256": calibration_sha256(config.calibration_path),
+                },
+            )
+        finally:
+            if initialized:
+                hxtorch.release_hardware()
 
     def run(
         self,
