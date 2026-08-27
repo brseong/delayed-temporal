@@ -358,7 +358,10 @@ def verify_notebook_is_valid_json() -> None:
     ):
         assert f"{run_flag} =" in source
         assert f"if {run_flag}:" in source
-    assert '"--allow-environment-calibration"' in source
+    assert '"--allow-environment-calibration"' not in source
+    assert "save_nightly_calibration(str(SMOKE_CALIBRATION_PATH))" in source
+    assert '"--calibration", SMOKE_CALIBRATION_PATH' in source
+    assert "spiking_nightly_calibration.pbin" in source
     assert '"--pool-sizes", 1, 2, 4, 8, 16' in source
     assert '"--phase", "diagnose-cadc"' in source
     assert "recommended_operating_point.json" in source
