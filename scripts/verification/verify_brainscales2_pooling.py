@@ -22,6 +22,8 @@ from utils.hardware.brainscales2.analysis import (
 from utils.hardware.brainscales2.artifacts import write_experiment_artifacts
 from utils.hardware.brainscales2.backend import (
     MockPoolBackend,
+    _find_raw_spikes,
+    _legacy_experiment_observables,
     _raw_events_to_tensors,
     resolve_physical_neuron_indices,
 )
@@ -142,6 +144,38 @@ def verify_placement_and_raw_events() -> None:
     assert bool(fired[0, 0]) and bool(fired[1, 1])
     assert int(count[0, 0]) == 2
     assert torch.isnan(first[0, 1])
+
+    class LegacySpikeHandle:
+        def get_data(self):
+            return [(17, 0, 1)]
+
+    class LegacyObservables:
+        spikes = LegacySpikeHandle()
+
+    class LegacyExtractor:
+        def get(self, descriptor):
+            assert descriptor == "population-7"
+            return LegacyObservables()
+
+    class LegacyExperiment:
+        _hw_data_extractor = LegacyExtractor()
+
+    class LegacyLIF:
+        descriptor = "population-7"
+
+    legacy = _legacy_experiment_observables(LegacyExperiment(), LegacyLIF())
+    raw, raw_api = _find_raw_spikes(legacy)
+    assert raw == [(17, 0, 1)]
+    assert raw_api.endswith("LegacySpikeHandle.get_data")
+    first, fired, count = _raw_events_to_tensors(
+        raw,
+        batch_count=1,
+        pool_size=2,
+        raw_time_scale_s=1.0e-9,
+        deadline_s=60.0e-6,
+    )
+    assert float(first[0, 1]) == 17.0e-9
+    assert bool(fired[0, 1]) and int(count[0, 1]) == 1
 
 
 def verify_mock_analysis_and_artifacts() -> None:

@@ -208,6 +208,16 @@ def _find_raw_spikes(*roots: Any) -> tuple[Any, str]:
     )
 
 
+def _legacy_experiment_observables(experiment: Any, lif: Any) -> Any | None:
+    """Return raw observables retained by pre-13 EBRAINS hxtorch releases."""
+    extractor = getattr(experiment, "_hw_data_extractor", None)
+    descriptor = getattr(lif, "descriptor", None)
+    get_observables = getattr(extractor, "get", None)
+    if not callable(get_observables) or descriptor is None:
+        return None
+    return get_observables(descriptor)
+
+
 def _fpga_time_scale_s() -> float:
     """Resolve the installed grenade FPGA tick duration in seconds."""
     errors: list[str] = []
@@ -401,7 +411,14 @@ class BrainScaleS2PoolBackend:
             synapse_output = synapse(hxsnn.LIFObservables(spikes=inputs))
             observables = lif(synapse_output)
             run_output = hxsnn.run(experiment, config.runtime_steps)
-            raw, raw_api = _find_raw_spikes(lif, observables, run_output, experiment)
+            legacy_observables = _legacy_experiment_observables(experiment, lif)
+            raw, raw_api = _find_raw_spikes(
+                legacy_observables,
+                lif,
+                observables,
+                run_output,
+                experiment,
+            )
 
             batch_count = config.trials * encoding.sample_count
             first, fired, count = _raw_events_to_tensors(
