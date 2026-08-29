@@ -228,11 +228,13 @@ __marimo__/
 /analysis
 /reports
 
-# generated experiment artifacts
-/artifacts/logs/
-/artifacts/quantiles/
-/artifacts/figures/
-/artifacts/wandb/
+# Generated experiment artifacts are denied by default. Reproducible result
+# bundles must be explicitly allowlisted by their complete run identifier.
+/artifacts/*
+!/artifacts/brainscales2/
+/artifacts/brainscales2/*
+!/artifacts/brainscales2/20260829T084007Z/
+!/artifacts/brainscales2/20260829T084007Z/**
 /*_logs/
 /beta_pool_logs.txt
 .claude

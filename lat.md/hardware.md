@@ -62,6 +62,8 @@ Analysis separates calibration-only offsets from held-out pooling statistics and
 
 [[utils/hardware/brainscales2/artifacts.py#write_experiment_artifacts]] writes a manifest, long-form raw event CSV, tensor archive, summary table, variance fit, and plot. The manifest includes configuration, calibration hash, chip and software metadata, placement, routing, and input-domain provenance.
 
+Generated artifacts are ignored by default. The repository allowlist admits only `artifacts/brainscales2/20260829T084007Z/`, preserving this accepted full-run bundle without making later local or EBRAINS outputs implicitly trackable.
+
 [[utils/hardware/brainscales2/analysis.py#analyze_cadc_diagnostic]] compares a paired one-PSP response against no-input excursions. [[utils/hardware/brainscales2/artifacts.py#write_cadc_diagnostic_artifacts]] writes the traces, per-neuron summary, plot, and recommendation without converting CADC amplitudes into threshold codes.
 
 ## Experiment Entry Point and Verification
