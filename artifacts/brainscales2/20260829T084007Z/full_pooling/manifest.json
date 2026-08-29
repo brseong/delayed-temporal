@@ -1,0 +1,808 @@
+{
+  "conditions": [
+    {
+      "key": "M1_same-quadrant_broadcast",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0
+      ],
+      "placement": "same-quadrant",
+      "pool_size": 1,
+      "routing": "broadcast"
+    },
+    {
+      "key": "M2_same-quadrant_broadcast",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        1
+      ],
+      "placement": "same-quadrant",
+      "pool_size": 2,
+      "routing": "broadcast"
+    },
+    {
+      "key": "M4_same-quadrant_broadcast",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "placement": "same-quadrant",
+      "pool_size": 4,
+      "routing": "broadcast"
+    },
+    {
+      "key": "M8_same-quadrant_broadcast",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "placement": "same-quadrant",
+      "pool_size": 8,
+      "routing": "broadcast"
+    },
+    {
+      "key": "M16_same-quadrant_broadcast",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "placement": "same-quadrant",
+      "pool_size": 16,
+      "routing": "broadcast"
+    },
+    {
+      "key": "M1_same-quadrant_independent",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0
+      ],
+      "placement": "same-quadrant",
+      "pool_size": 1,
+      "routing": "independent"
+    },
+    {
+      "key": "M2_same-quadrant_independent",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        1
+      ],
+      "placement": "same-quadrant",
+      "pool_size": 2,
+      "routing": "independent"
+    },
+    {
+      "key": "M4_same-quadrant_independent",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "placement": "same-quadrant",
+      "pool_size": 4,
+      "routing": "independent"
+    },
+    {
+      "key": "M8_same-quadrant_independent",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "placement": "same-quadrant",
+      "pool_size": 8,
+      "routing": "independent"
+    },
+    {
+      "key": "M16_same-quadrant_independent",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "placement": "same-quadrant",
+      "pool_size": 16,
+      "routing": "independent"
+    },
+    {
+      "key": "M1_cross-quadrant_broadcast",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0
+      ],
+      "placement": "cross-quadrant",
+      "pool_size": 1,
+      "routing": "broadcast"
+    },
+    {
+      "key": "M2_cross-quadrant_broadcast",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        128
+      ],
+      "placement": "cross-quadrant",
+      "pool_size": 2,
+      "routing": "broadcast"
+    },
+    {
+      "key": "M4_cross-quadrant_broadcast",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        128,
+        256,
+        384
+      ],
+      "placement": "cross-quadrant",
+      "pool_size": 4,
+      "routing": "broadcast"
+    },
+    {
+      "key": "M8_cross-quadrant_broadcast",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        128,
+        256,
+        384,
+        1,
+        129,
+        257,
+        385
+      ],
+      "placement": "cross-quadrant",
+      "pool_size": 8,
+      "routing": "broadcast"
+    },
+    {
+      "key": "M16_cross-quadrant_broadcast",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        128,
+        256,
+        384,
+        1,
+        129,
+        257,
+        385,
+        2,
+        130,
+        258,
+        386,
+        3,
+        131,
+        259,
+        387
+      ],
+      "placement": "cross-quadrant",
+      "pool_size": 16,
+      "routing": "broadcast"
+    },
+    {
+      "key": "M1_cross-quadrant_independent",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0
+      ],
+      "placement": "cross-quadrant",
+      "pool_size": 1,
+      "routing": "independent"
+    },
+    {
+      "key": "M2_cross-quadrant_independent",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        128
+      ],
+      "placement": "cross-quadrant",
+      "pool_size": 2,
+      "routing": "independent"
+    },
+    {
+      "key": "M4_cross-quadrant_independent",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        128,
+        256,
+        384
+      ],
+      "placement": "cross-quadrant",
+      "pool_size": 4,
+      "routing": "independent"
+    },
+    {
+      "key": "M8_cross-quadrant_independent",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        128,
+        256,
+        384,
+        1,
+        129,
+        257,
+        385
+      ],
+      "placement": "cross-quadrant",
+      "pool_size": 8,
+      "routing": "independent"
+    },
+    {
+      "key": "M16_cross-quadrant_independent",
+      "metadata": {
+        "analog_parameter_control": "fixed-by-pinned-calibration",
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "clamped_values": 0,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_analog_parameters": {
+          "i_synin_gm": 500.0,
+          "leak": 80.0,
+          "reset": 80.0,
+          "synapse_dac_bias": 600.0,
+          "tau_mem_s": 2e-05,
+          "tau_syn_s": 1e-06,
+          "threshold": 125.0
+        },
+        "requested_analog_parameters_applied": false
+      },
+      "physical_coordinates": [
+        0,
+        128,
+        256,
+        384,
+        1,
+        129,
+        257,
+        385,
+        2,
+        130,
+        258,
+        386,
+        3,
+        131,
+        259,
+        387
+      ],
+      "placement": "cross-quadrant",
+      "pool_size": 16,
+      "routing": "independent"
+    }
+  ],
+  "config": {
+    "allow_environment_calibration": false,
+    "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2/20260829T084007Z/spiking_cocolist.pbin",
+    "dt_s": 1e-06,
+    "encoding": "identity",
+    "i_synin_gm": 500.0,
+    "input_early_s": 5e-06,
+    "input_fan_in": 4,
+    "input_late_s": 2.5e-05,
+    "inter_batch_wait_s": 5e-05,
+    "leak": 80.0,
+    "mock_local_std_s": 8e-07,
+    "mock_miss_probability": 0.01,
+    "mock_response_delay_s": 5e-06,
+    "mock_shared_std_s": 2.5e-07,
+    "mock_static_std_s": 5e-07,
+    "observation_deadline_s": 6e-05,
+    "placements": [
+      "same-quadrant",
+      "cross-quadrant"
+    ],
+    "pool_sizes": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "project_tau_s": 1.0,
+    "raw_time_scale_s": null,
+    "refractory_time_s": 1e-06,
+    "reset": 80.0,
+    "routings": [
+      "broadcast",
+      "independent"
+    ],
+    "seed": 0,
+    "synapse_dac_bias": 600.0,
+    "synaptic_weight": 63.0,
+    "tau_mem_s": 2e-05,
+    "tau_syn_s": 1e-06,
+    "threshold": 125.0,
+    "trials": 256
+  },
+  "environment": {
+    "created_at": "2026-08-29T08:43:00.199448+00:00",
+    "ebrains_release": null,
+    "git_revision": "d55de5408ad232796ab41a2674ff9a6f51b7a59e",
+    "platform": "Linux-6.1.0-52-amd64-x86_64-with-glibc2.39",
+    "python": "3.11.10",
+    "torch": "2.5.1"
+  },
+  "input": {
+    "potential_max": 400.0,
+    "potential_min": -400.0,
+    "shape": [
+      11
+    ]
+  },
+  "schema_version": 1
+}

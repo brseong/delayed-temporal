@@ -1,0 +1,5 @@
+a_s2,c_s2,placement,routing,estimator,a_ci_low_s2,a_ci_high_s2,c_ci_low_s2,c_ci_high_s2
+1.0044164538162642e-12,1.8110738283407776e-14,same-quadrant,broadcast,corrected-mean,-3.897202710711646e-14,1.7084078697451578e-12,-2.520808608242913e-13,3.8873352447131937e-13
+1.0044164538162606e-12,1.8110738283410537e-14,same-quadrant,broadcast,mean,,,,
+7.538413348160018e-13,2.6868585728366953e-13,same-quadrant,broadcast,median,,,,
+5.81093759874441e-13,4.4143343222523007e-13,same-quadrant,broadcast,earliest,,,,

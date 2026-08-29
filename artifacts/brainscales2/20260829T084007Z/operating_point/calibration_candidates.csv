@@ -1,0 +1,5 @@
+threshold,synaptic_weight,i_synin_gm,input_fan_in,analog_parameter_control,requested_analog_parameters_applied,fired_rate,multi_spike_rate,premature_spike_rate,score
+125.0,63.0,500.0,1,fixed-by-pinned-calibration,False,0.0,0.0,0.0,0.97
+125.0,63.0,500.0,2,fixed-by-pinned-calibration,False,0.0,0.0,0.0,0.97
+125.0,63.0,500.0,3,fixed-by-pinned-calibration,False,0.7604166865348816,0.0,0.0,0.20958331346511838
+125.0,63.0,500.0,4,fixed-by-pinned-calibration,False,1.0,0.0,0.0,0.030000000000000027

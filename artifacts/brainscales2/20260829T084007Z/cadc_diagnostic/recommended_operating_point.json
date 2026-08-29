@@ -1,0 +1,53 @@
+{
+  "aggregate": {
+    "baseline_fired_rate": 0.0,
+    "maximum_threshold_gap_cadc": 12.67047170639038,
+    "minimum_threshold_gap_cadc": 5.0,
+    "noise_excursion_q99_cadc": 3.0,
+    "psp_peak_median_cadc": 15.769580841064453,
+    "psp_peak_q10_cadc": 14.906437301635743,
+    "stimulated_fired_rate": 0.0
+  },
+  "config": {
+    "allow_environment_calibration": false,
+    "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2/20260829T084007Z/spiking_cocolist.pbin",
+    "dt_s": 1e-06,
+    "encoding": "identity",
+    "i_synin_gm": 700.0,
+    "input_early_s": 5e-06,
+    "input_fan_in": 1,
+    "input_late_s": 2.5e-05,
+    "inter_batch_wait_s": 5e-05,
+    "leak": 80.0,
+    "mock_local_std_s": 8e-07,
+    "mock_miss_probability": 0.01,
+    "mock_response_delay_s": 5e-06,
+    "mock_shared_std_s": 2.5e-07,
+    "mock_static_std_s": 5e-07,
+    "observation_deadline_s": 6e-05,
+    "placements": [
+      "same-quadrant"
+    ],
+    "pool_sizes": [
+      1,
+      4
+    ],
+    "project_tau_s": 1.0,
+    "raw_time_scale_s": null,
+    "refractory_time_s": 1e-06,
+    "reset": 80.0,
+    "routings": [
+      "broadcast"
+    ],
+    "seed": 0,
+    "synapse_dac_bias": 600.0,
+    "synaptic_weight": 63.0,
+    "tau_mem_s": 2e-05,
+    "tau_syn_s": 1e-06,
+    "threshold": 125.0,
+    "trials": 8
+  },
+  "reason": "single PSP is measurable; select threshold with a raw-spike sweep",
+  "selected": null,
+  "viable": true
+}
