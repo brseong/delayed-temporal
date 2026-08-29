@@ -4,14 +4,14 @@
 
 ## 결론
 
-현재 model adapter에는 live activation으로 `PotentialBounds`를 만드는 production 위치가 19곳 남아 있어 model-wide fixed range 조건을 만족하지 않는다. ViT의 production 경로에서는 이 위반을 모두 제거했다.
+현재 model adapter에는 live activation으로 `PotentialBounds`를 만드는 production 위치가 15곳 남아 있어 model-wide fixed range 조건을 만족하지 않는다. BERT production 경로의 위반은 모두 제거했다.
 
 Transform operator의 time window는 고정되어 있다. 최초 감사의 32곳 중 GPT-2 attention의 2곳, Gaussian 및 deterministic LayerNorm의 각 3곳, ordinary LayerNorm helper의 1곳은 fixed/analytic range로 교체되었다.
 
 핵심 결과는 다음과 같다.
 
 - `utils/transforms/`의 production operator는 입력 range, threshold $\theta$, time constant $\tau_s,\tau_m$, tensor shape에 대한 interval arithmetic으로 output range를 계산한다. `TimeBounds`를 live activation extrema로 만드는 위치는 없다.
-- 최초 감사에서 shared model operator와 네 model family의 live activation extrema 위치는 각각 7, 4, 4, 9, 8곳이었다. Shared operator 7곳, ViT 4곳, GPT-2 attention 2곳을 제거한 현재 합계는 19곳이다.
+- 최초 감사에서 shared model operator와 네 model family의 live activation extrema 위치는 각각 7, 4, 4, 9, 8곳이었다. Shared operator 7곳, ViT와 BERT 각 4곳, GPT-2 attention 2곳을 제거한 현재 합계는 15곳이다.
 - `SpikingLinear`, `SpikingConv2d`, `SpikingConv1D`는 upstream fixed input range의 양 끝점을 weight 부호별로 선택해 exact affine range를 memoize하고 이후 parameter mutation을 검증한다. `SpikingLayerNorm`의 Gaussian과 deterministic 경로도 ablation별 frozen weight, bias, output domain을 공유한다.
 - ViT, BERT, RoBERTa, GPT-2 attention adapter는 이제 Gaussian value integration의 fixed range $[-S_{\max}\theta,S_{\max}\theta]$를 spiking backend와 공유한다.
 - 기존 quantile 수집은 진단용으로 남아 있다. ViT layer-wise calibration은 별도 artifact에 signed extrema, fixed-bin histogram, quantile, margin, training-subset identity, layer clipping을 보존한다.
@@ -319,16 +319,16 @@ Constrained division은 $X\leq Y$를 public $[0,1]$ rail에 반영하고 Gaussia
 
 ## 전수 검색 결과
 
-최초 source audit는 32곳을 확인했으며, attention adapter, 모든 shared LayerNorm 경로, ViT adapter 전환 뒤 live activation extrema call site는 19곳 남아 있다.
+최초 source audit는 32곳을 확인했으며, attention adapter, 모든 shared LayerNorm 경로, ViT와 BERT adapter 전환 뒤 live activation extrema call site는 15곳 남아 있다.
 
 | 구분 | live activation call site | 주요 원인 |
 |---|---:|---|
 | Shared operator | 0 | 모든 LayerNorm 경로가 analytic/operator range 사용 |
 | ViT | 0 | preprocessing range, analytic activation range, calibrated encoder entry로 전환 완료 |
-| BERT | 4 | embeddings, direct activation, encoder entry, pooler input |
+| BERT | 0 | frozen embedding-table interval과 upstream `Potential` 전달로 전환 완료 |
 | RoBERTa | 9 | embeddings, dense ablation, encoder entry, pooler와 task head input |
 | GPT-2 | 6 | model entry, MLP, 세 residual path |
-| 합계 | 19 | 남은 위치가 inference batch의 extrema에 의존 |
+| 합계 | 15 | 남은 위치가 inference batch의 extrema에 의존 |
 
 ### Transform operator
 
@@ -382,14 +382,14 @@ Image processor가 channel별 $x_c=(r_c-\mu_c)/\sigma_c$, $r_c\in[0,1]$을 사�
 
 ### BERT
 
-BERT에는 4개의 activation-derived call site가 있고 attention/output residual은 interval addition을 사용한다.
+BERT의 activation-derived call site는 모두 제거되었다. Embedding table range를 freeze해 합산하고, LayerNorm output range를 encoder와 first-token pooler까지 전달하며, intermediate activation은 fixed affine range에서 계산한다.
 
 | 함수 | 수 | 현재 동작 | 교체 |
 |---|---:|---|---|
-| [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertEmbeddings#forward]] | 1 | word, token type, position embedding 합의 extrema를 LayerNorm input range로 사용 | 세 embedding table의 fixed parameter range 합 또는 embedding-output calibration |
-| [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertIntermediate#forward]] | 1 | non-spiking activation output extrema 사용 | ReLU/Tanh analytic range; GELU calibration 또는 composed operator range |
-| [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertEncoder#forward]] | 1 | normalized embedding을 다시 측정 | embedding LayerNorm이 반환한 fixed range 전달 |
-| [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertPooler#forward]] | 1 | first token을 다시 측정 | final hidden-state range를 slice와 함께 전달 |
+| [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertEmbeddings#forward]] | 0 | 세 embedding table의 frozen interval을 합산하고 LayerNorm output `Potential`을 내부 encoder에 전달 | 완료; custom tensor는 word-table envelope 검증, explicit `Potential` 지원 |
+| [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertIntermediate#forward]] | 0 | operator GELU range를 전달하고 dense GELU/ReLU는 fixed affine endpoint에서 analytic range 계산 | 완료 |
+| [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertEncoder#forward]] | 0 | upstream `Potential` range 또는 fixed $[-\theta,\theta]$ standalone fallback을 사용하고 optional calibration entry를 지원 | 완료 |
+| [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertPooler#forward]] | 0 | final encoder `Potential`을 first-token slice와 함께 전달 | 완료 |
 
 ReLU branch는 현재 pre-activation range를 그대로 유지해 negative lower bound도 포함한다. 안전하지만 불필요하게 넓으므로 $[\max(0,l),\max(0,u)]$로 줄일 수 있다.
 
@@ -546,4 +546,4 @@ Migration 완료는 numerical output뿐 아니라 declared potential range의 �
 
 Audit 자체는 완료되었지만 구현은 아직 fixed potential range contract를 만족하지 않는다.
 
-Transform algebra와 time window는 이미 static하고 attention range 전달, 모든 LayerNorm range propagation, affine parameter range freezing, ViT layer-wise calibration도 완료되었다. 남은 작업은 BERT, RoBERTa, GPT-2 adapter의 19개 activation-derived range를 제거하고 같은 artifact lifecycle을 연결하는 것이다.
+Transform algebra와 time window는 이미 static하고 attention range 전달, 모든 LayerNorm range propagation, affine와 BERT embedding parameter range freezing, ViT layer-wise calibration도 완료되었다. 남은 작업은 RoBERTa와 GPT-2 adapter의 총 15개 activation-derived range를 제거하는 것이다.

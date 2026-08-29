@@ -1056,6 +1056,124 @@ def verify_vit_fixed_activation_ranges() -> None:
         assert first.domain.min <= 0.0 <= first.domain.max
 
 
+# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#BERT Fixed Range Flow]]
+def verify_bert_fixed_range_flow() -> None:
+    """Verify BERT embedding, activation, encoder, and pooler range propagation."""
+    from utils.transforms.noise import set_gaussian_time_noise
+    from utils.transformers.models.spiking_bert.configuration_bert import BertConfig
+    from utils.transformers.models.spiking_bert.modeling_spiking_bert import (
+        BertEmbeddings,
+        BertEncoder,
+        BertIntermediate,
+        BertPooler,
+    )
+
+    def make_config(*, use_spiking_mlp: bool) -> BertConfig:
+        """Construct one small deterministic BERT range-flow configuration."""
+        config = BertConfig(
+            vocab_size=16,
+            hidden_size=4,
+            intermediate_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            max_position_embeddings=8,
+            type_vocab_size=2,
+            hidden_dropout_prob=0.0,
+            attention_probs_dropout_prob=0.0,
+            use_spiking_layernorm=False,
+            use_spiking_mlp=use_spiking_mlp,
+            hidden_act="gelu",
+            theta=4.0,
+        )
+        config._attn_implementation = "eager"
+        return config
+
+    # Different token batches use the same table-derived normalized range. Public
+    # embedding calls remain tensors, while the internal opt-in carries Potential.
+    set_gaussian_time_noise(enabled=False)
+    torch.manual_seed(1900)
+    embeddings = BertEmbeddings(make_config(use_spiking_mlp=True)).eval()
+    first_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+    second_ids = torch.tensor([[4, 3, 2, 1]], dtype=torch.long)
+    public_output = embeddings(input_ids=first_ids)
+    first_output = embeddings(input_ids=first_ids, return_potential=True)
+    second_output = embeddings(input_ids=second_ids, return_potential=True)
+    assert isinstance(public_output, torch.Tensor)
+    assert isinstance(first_output, Potential)
+    assert isinstance(second_output, Potential)
+    assert first_output.domain == second_output.domain
+
+    # Frozen table intervals are immutable cache results. A standard parameter update
+    # invalidates them until an explicit refresh establishes a new parameter regime.
+    first_bounds = embeddings.freeze_parameter_bounds()
+    assert embeddings.freeze_parameter_bounds() is first_bounds
+    with torch.no_grad():
+        embeddings.word_embeddings.weight.add_(0.01)
+    _expect_raises(
+        RuntimeError,
+        embeddings.freeze_parameter_bounds,
+        "changed after bounds were frozen",
+    )
+    refreshed_bounds = embeddings.freeze_parameter_bounds(refresh=True)
+    assert refreshed_bounds != first_bounds
+
+    # A plain custom tensor may reuse the word-table rail only while it stays inside
+    # that rail. An explicit Potential supplies a separately established fixed range.
+    word_bounds = refreshed_bounds[0]
+    compatible_custom = torch.full(
+        (1, 4, 4),
+        (float(word_bounds.min) + float(word_bounds.max)) / 2.0,
+    )
+    compatible = embeddings(
+        inputs_embeds=compatible_custom,
+        return_potential=True,
+    )
+    assert isinstance(compatible, Potential)
+    explicit = embeddings(
+        inputs_embeds=Potential(
+            torch.zeros_like(compatible_custom),
+            PotentialBounds(-1.0, 1.0),
+        ),
+        return_potential=True,
+    )
+    assert isinstance(explicit, Potential)
+    _expect_raises(
+        ValueError,
+        lambda: embeddings(
+            inputs_embeds=torch.full_like(
+                compatible_custom,
+                float(word_bounds.max) + 1.0,
+            ),
+            return_potential=True,
+        ),
+        "escaped its declared fixed range",
+    )
+
+    # Encoder entry, direct activation, and first-token pooling all retain declared
+    # ranges across different tensor values instead of measuring either batch.
+    input_domain = PotentialBounds(-2.0, 2.0)
+    first_value = torch.tensor(
+        [[[-1.5, -0.5, 0.5, 1.5], [0.25, -0.25, 0.75, -0.75]]],
+        dtype=torch.float32,
+    )
+    second_value = -first_value
+    for index, use_spiking_mlp in enumerate((False, True)):
+        torch.manual_seed(1910 + index)
+        config = make_config(use_spiking_mlp=use_spiking_mlp)
+        encoder = BertEncoder(config).eval()
+        intermediate = BertIntermediate(config).eval()
+        pooler = BertPooler(config).eval()
+        first_potential = Potential(first_value, input_domain)
+        second_potential = Potential(second_value, input_domain)
+        encoded_first = encoder(first_potential)
+        encoded_second = encoder(second_potential)
+        assert encoded_first.domain == encoded_second.domain
+        activated_first = intermediate(first_potential)
+        activated_second = intermediate(second_potential)
+        assert activated_first.domain == activated_second.domain
+        assert pooler(encoded_first).shape == pooler(encoded_second).shape == (1, 4)
+
+
 # @lat: [[calibration#Layer-wise Calibration#Frozen Execution#ViT Residual Range Reset]]
 def verify_vit_residual_range_reset() -> None:
     """Verify ViT block residuals collect raw values and consume frozen ranges."""
@@ -1308,6 +1426,7 @@ def main() -> None:
         verify_deterministic_training_subset,
         verify_vit_evaluator_artifact_lifecycle,
         verify_vit_fixed_activation_ranges,
+        verify_bert_fixed_range_flow,
         verify_vit_residual_range_reset,
         verify_canonical_table_round_trip,
     )

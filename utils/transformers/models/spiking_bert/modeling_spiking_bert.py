@@ -16,6 +16,7 @@
 """PyTorch Spiking BERT model."""
 
 from collections.abc import Callable
+import math
 from typing import Optional, Union
 
 import torch
@@ -45,6 +46,10 @@ from .configuration_bert import BertConfig
 
 from utils.transforms.functions import gelu_approximation, tanh
 from utils.transforms.types import Potential, PotentialBounds
+from utils.transformers.calibration import (
+    calibrated_potential,
+    model_calibration_is_bound,
+)
 from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear, _apply_norm
 
@@ -75,19 +80,177 @@ class BertEmbeddings(nn.Module):
             self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
+    def freeze_parameter_bounds(
+        self,
+        *,
+        refresh: bool = False,
+    ) -> tuple[PotentialBounds, PotentialBounds, PotentialBounds]:
+        """Freeze global ranges of the three pretrained embedding tables.
+
+        A token embedding, token-type embedding, and position embedding are selected
+        by integer lookup, so the full finite parameter tables provide conservative
+        input-independent intervals for every supported sequence. The ranges are
+        cached after checkpoint loading and rejected if a standard parameter update
+        changes any table without an explicit refresh.
+
+        Args:
+            refresh: Recompute ranges after an intentional table mutation.
+
+        Returns:
+            Frozen word, token-type, and position embedding ranges.
+
+        Raises:
+            RuntimeError: If a table changed after freezing or during recomputation.
+            ValueError: If an embedding table contains a non-finite value.
+
+        Notes:
+            PyTorch version counters detect checkpoint loads and ordinary in-place
+            updates, but cannot detect unsupported direct ``parameter.data`` writes.
+        """
+        # Version counters form the cache identity. Shape need not be stored
+        # separately because supported parameter replacement or resize operations
+        # also change the owning Parameter or its version before reuse.
+        identity = (
+            self.word_embeddings.weight._version,
+            self.token_type_embeddings.weight._version,
+            self.position_embeddings.weight._version,
+        )
+        cached = self.__dict__.get("_frozen_embedding_bounds")
+        if cached is not None and not refresh:
+            cached_identity, cached_bounds = cached
+            if identity != cached_identity:
+                raise RuntimeError(
+                    "BERT embedding parameters changed after bounds were frozen; "
+                    "call freeze_parameter_bounds(refresh=True) before inference"
+                )
+            return cached_bounds
+
+        # Scan each complete table once in float64 so low-precision checkpoints do
+        # not round a true endpoint inward while establishing the scalar envelope.
+        tables = (
+            self.word_embeddings.weight.detach().to(dtype=torch.float64),
+            self.token_type_embeddings.weight.detach().to(dtype=torch.float64),
+            self.position_embeddings.weight.detach().to(dtype=torch.float64),
+        )
+        if not all(bool(torch.isfinite(table).all()) for table in tables):
+            raise ValueError("BERT embedding parameters must be finite")
+        frozen_bounds = tuple(
+            PotentialBounds(table.min().item(), table.max().item())
+            for table in tables
+        )
+
+        # Recheck versions after reductions to prevent a concurrent update from
+        # publishing endpoints assembled from different parameter revisions.
+        final_identity = (
+            self.word_embeddings.weight._version,
+            self.token_type_embeddings.weight._version,
+            self.position_embeddings.weight._version,
+        )
+        if final_identity != identity:
+            raise RuntimeError(
+                "BERT embedding parameters changed while bounds were being frozen"
+            )
+
+        # Derived bounds stay outside state_dict so pretrained checkpoint keys and
+        # serialization remain unchanged. Repeated forwards reuse immutable objects.
+        self.__dict__["_frozen_embedding_bounds"] = (
+            final_identity,
+            frozen_bounds,
+        )
+        return frozen_bounds
+
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
         token_type_ids: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
+        inputs_embeds: Optional[Potential | torch.FloatTensor] = None,
         past_key_values_length: int = 0,
-    ) -> torch.Tensor:
+        *,
+        return_potential: bool = False,
+    ) -> Potential | torch.Tensor:
+        """Construct BERT embeddings with parameter-derived fixed bounds.
+
+        Integer token lookup uses the frozen word-table range. A caller-provided
+        embedding may carry its own :class:`Potential`; an ordinary tensor is
+        accepted only when it fits the same frozen word-table envelope. Position and
+        token-type ranges are then added analytically before LayerNorm and dropout.
+
+        Args:
+            input_ids: Token indices, mutually exclusive with ``inputs_embeds``.
+            token_type_ids: Optional segment indices, defaulting to zero.
+            position_ids: Optional absolute position indices.
+            inputs_embeds: Precomputed token embeddings with an explicit or compatible
+                fixed word-embedding range.
+            past_key_values_length: Position offset retained for API compatibility.
+            return_potential: Return internal fixed-range metadata when true; the
+                default preserves the Hugging Face tensor API.
+
+        Returns:
+            Embedding tensor, or the same tensor paired with its fixed normalized
+            range for the local spiking model.
+
+        Raises:
+            TypeError: If inputs or the return flag have invalid types.
+            ValueError: If token sources are ambiguous, a custom embedding escapes
+                its declared range, or dropout probability is invalid.
+        """
+        # Exactly one token source is required. This also ensures input shape and
+        # device are derived from the tensor whose range enters the embedding sum.
+        if (input_ids is None) == (inputs_embeds is None):
+            raise ValueError("provide exactly one of input_ids or inputs_embeds")
+        if not isinstance(return_potential, bool):
+            raise TypeError("return_potential must be a bool")
+        word_bounds, token_type_bounds, position_bounds = (
+            self.freeze_parameter_bounds()
+        )
+
+        # Integer lookup is covered by the complete word-table interval. Custom
+        # tensors either carry an explicit Potential range or must fit the same table
+        # envelope; validation reads extrema but never uses them to create a bound.
         if input_ids is not None:
             input_shape = input_ids.size()
+            token_embeddings = self.word_embeddings(input_ids)
+            token_bounds = word_bounds
+            validate_token_values = False
+        elif isinstance(inputs_embeds, Potential):
+            token_embeddings = inputs_embeds.value
+            token_bounds = inputs_embeds.domain
+            input_shape = token_embeddings.size()[:-1]
+            validate_token_values = True
         else:
-            input_shape = inputs_embeds.size()[:-1]
+            if not isinstance(inputs_embeds, torch.Tensor):
+                raise TypeError("inputs_embeds must be Potential or torch.Tensor")
+            token_embeddings = inputs_embeds
+            token_bounds = word_bounds
+            input_shape = token_embeddings.size()[:-1]
+            validate_token_values = True
 
+        if not token_embeddings.is_floating_point() or token_embeddings.is_complex():
+            raise TypeError("inputs_embeds must be a real floating-point tensor")
+        if token_embeddings.numel() == 0:
+            raise ValueError("inputs_embeds must not be empty")
+        if not isinstance(token_bounds, PotentialBounds):
+            raise TypeError("inputs_embeds domain must be PotentialBounds")
+        token_lower = float(token_bounds.min)
+        token_upper = float(token_bounds.max)
+        if (
+            not math.isfinite(token_lower)
+            or not math.isfinite(token_upper)
+            or token_lower > token_upper
+        ):
+            raise ValueError("inputs_embeds fixed range must be finite and ordered")
+        if validate_token_values:
+            token_min, token_max = torch.aminmax(token_embeddings.detach())
+            if (
+                not bool(torch.isfinite(token_min) and torch.isfinite(token_max))
+                or token_min.item() < token_lower
+                or token_max.item() > token_upper
+            ):
+                raise ValueError("inputs_embeds escaped its declared fixed range")
+
+        # Position and token-type defaults are deterministic functions of the input
+        # shape. Their lookup values remain inside the two frozen table envelopes.
         seq_length = input_shape[1]
 
         if position_ids is None:
@@ -95,28 +258,66 @@ class BertEmbeddings(nn.Module):
                 past_key_values_length,
                 seq_length + past_key_values_length,
                 dtype=torch.long,
-                device=inputs_embeds.device if inputs_embeds is not None else input_ids.device,
+                device=token_embeddings.device,
             ).unsqueeze(0).expand(input_shape[0], -1)
 
         if token_type_ids is None:
             token_type_ids = torch.zeros(
                 input_shape,
                 dtype=torch.long,
-                device=inputs_embeds.device if inputs_embeds is not None else input_ids.device,
+                device=token_embeddings.device,
             )
 
-        if inputs_embeds is None:
-            inputs_embeds = self.word_embeddings(input_ids)
-
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
-
-        embeddings = inputs_embeds + token_type_embeddings
-
         position_embeddings = self.position_embeddings(position_ids)
-        embeddings = embeddings + position_embeddings
-        embeddings = _apply_norm(self.LayerNorm, Potential(embeddings, PotentialBounds(embeddings.min().item(), embeddings.max().item()))).value
-        embeddings = self.dropout(embeddings)
-        return embeddings
+
+        # Addition uses exact interval arithmetic over the three fixed scalar
+        # envelopes. LayerNorm then supplies its own configuration/parameter-derived
+        # output range without inspecting the normalized activation.
+        raw_embeddings = (
+            token_embeddings + token_type_embeddings + position_embeddings
+        )
+        raw_domain = PotentialBounds(
+            float(token_bounds.min)
+            + float(token_type_bounds.min)
+            + float(position_bounds.min),
+            float(token_bounds.max)
+            + float(token_type_bounds.max)
+            + float(position_bounds.max),
+        )
+        normalized = _apply_norm(
+            self.LayerNorm,
+            Potential(raw_embeddings, raw_domain),
+        )
+
+        # Evaluation dropout is identity. In training, include zero and the standard
+        # inverse-keep-probability scale in the analytic range without observing the
+        # sampled mask. This adapter is evaluated rather than trained, but retaining
+        # the formula keeps its declared contract complete.
+        dropped = self.dropout(normalized.value)
+        dropout_probability = float(self.dropout.p)
+        if not math.isfinite(dropout_probability) or not 0.0 <= dropout_probability <= 1.0:
+            raise ValueError("BERT embedding dropout probability must lie in [0, 1]")
+        output_domain = normalized.domain
+        if self.training and dropout_probability > 0.0:
+            if dropout_probability >= 1.0:
+                output_domain = PotentialBounds(0.0, 0.0)
+            else:
+                scale = 1.0 / (1.0 - dropout_probability)
+                candidates = (
+                    0.0,
+                    float(output_domain.min) * scale,
+                    float(output_domain.max) * scale,
+                )
+                output_domain = PotentialBounds(
+                    min(candidates),
+                    max(candidates),
+                )
+
+        # Only the local BertModel requests Potential. Direct embedding-module users
+        # retain the established tensor result unless they opt into metadata.
+        result = Potential(dropped, output_domain)
+        return result if return_potential else result.value
 
 
 def eager_attention_forward(
@@ -282,16 +483,62 @@ class BertIntermediate(nn.Module):
             self.intermediate_act_fn = config.hidden_act
 
     def forward(self, pot: Potential) -> Potential:
+        """Apply the BERT feed-forward activation on a fixed analytic range.
+
+        The spiking GELU composition already returns its propagated interval. ReLU
+        maps the affine endpoints monotonically, while dense GELU remains between
+        its input and zero because it multiplies the input by a gate in ``[0, 1]``.
+        No branch may derive physical metadata from the current output tensor.
+
+        Args:
+            pot: Normalized hidden states paired with a fixed input range.
+
+        Returns:
+            The activated intermediate tensor and its input-derived fixed range.
+
+        Raises:
+            ValueError: If the configured activation has no maintained analytic rule.
+        """
+        # The affine adapter freezes an exact output interval for the declared input
+        # range. All activation branches below consume only those fixed endpoints.
         pot_z = self.dense(pot)
+
+        # The operator-backed GELU propagates the intervals of its multiplication,
+        # Tanh, and addition stages directly, so no additional envelope is needed.
         if self._use_spiking_mlp:
             if isinstance(self.intermediate_act_fn, GELUActivation):
                 return Potential(*gelu_approximation(*pot_z))
             if isinstance(self.intermediate_act_fn, nn.ReLU):
-                # ReLU approximation: output is max(0, x), so the domain is [max(0, min), max(0, max)]
-                out, domain = pot_z
-                return Potential(out.relu(), domain)
+                # ReLU is monotone and clips negative inputs to the fixed zero rail.
+                return Potential(
+                    pot_z.value.relu(),
+                    PotentialBounds(
+                        max(0.0, float(pot_z.domain.min)),
+                        max(0.0, float(pot_z.domain.max)),
+                    ),
+                )
+
+        # Dense execution still needs the same physical range contract. Standard
+        # GELU is x times a normal-CDF gate, so its output lies between x and zero;
+        # dense ReLU uses the same monotone endpoint mapping as the spiking branch.
         out = self.intermediate_act_fn(pot_z.value)
-        return Potential(out, PotentialBounds(out.min().item(), out.max().item()))
+        if isinstance(self.intermediate_act_fn, GELUActivation):
+            output_domain = PotentialBounds(
+                min(float(pot_z.domain.min), 0.0),
+                max(float(pot_z.domain.max), 0.0),
+            )
+        elif isinstance(self.intermediate_act_fn, nn.ReLU):
+            output_domain = PotentialBounds(
+                max(0.0, float(pot_z.domain.min)),
+                max(0.0, float(pot_z.domain.max)),
+            )
+        else:
+            # An unknown activation needs an explicit mathematical or calibrated
+            # envelope; silently observing this batch would restore the removed bug.
+            raise ValueError(
+                "BERT intermediate activation requires a maintained analytic range rule"
+            )
+        return Potential(out, output_domain)
 
 
 class BertOutput(nn.Module):
@@ -342,13 +589,67 @@ class BertEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self._theta = float(getattr(config, "theta", 10.0))
         self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
 
-    def forward(self, hidden_states: torch.Tensor, attention_mask=None) -> Potential:
-        pot = Potential(
-            hidden_states,
-            PotentialBounds(hidden_states.min().item(), hidden_states.max().item()),
-        )
+    def forward(
+        self,
+        hidden_states: Potential | torch.Tensor,
+        attention_mask=None,
+    ) -> Potential:
+        """Enter the BERT stack through an upstream or fixed calibrated range.
+
+        Normal model execution may carry the embedding LayerNorm range as a
+        :class:`Potential`. A direct tensor call has no upstream metadata, so it uses
+        the configured symmetric ``theta`` rail. An installed calibration binding
+        observes or clamps the same encoder-entry tensor without consulting its live
+        extrema.
+
+        Args:
+            hidden_states: Embedding output with optional declared potential bounds.
+            attention_mask: Broadcast attention suppression tensor for every block.
+
+        Returns:
+            Final BERT encoder activation with fixed propagated bounds.
+
+        Raises:
+            ValueError: If the configured fallback threshold is not finite and
+                positive.
+        """
+        # Preserve a range already established by the embedding LayerNorm. Standalone
+        # tensor callers instead receive the same configuration-derived physical rail
+        # for every batch, independent of its values or ordering.
+        if isinstance(hidden_states, Potential):
+            entry_value = hidden_states.value
+            entry_bounds = hidden_states.domain
+        else:
+            if not isinstance(hidden_states, torch.Tensor):
+                raise TypeError("hidden_states must be Potential or torch.Tensor")
+            if not math.isfinite(self._theta) or self._theta <= 0.0:
+                raise ValueError("BERT encoder theta must be finite and positive")
+            entry_value = hidden_states
+            entry_bounds = PotentialBounds(-self._theta, self._theta)
+
+        # Collection observes raw values on the fixed upstream safety interval;
+        # frozen phases attach their persisted range. Without a binding, only direct
+        # tensor calls need clamping because a Potential is already synchronized.
+        if model_calibration_is_bound(self):
+            pot = calibrated_potential(
+                self,
+                "input",
+                entry_value,
+                collection_bounds=entry_bounds,
+            )
+        elif isinstance(hidden_states, Potential):
+            pot = hidden_states
+        else:
+            pot = Potential(
+                entry_bounds.clamp(entry_value, name="bert_encoder_input"),
+                entry_bounds,
+            )
+
+        # Every layer consumes and returns Potential, so the entry range remains part
+        # of the operator graph instead of being reconstructed from a later tensor.
         for layer_module in self.layer:
             pot, _ = layer_module(pot, attention_mask)
         return pot
@@ -365,17 +666,60 @@ class BertPooler(nn.Module):
             self.dense = nn.Linear(config.hidden_size, config.hidden_size)
             self.activation = nn.Tanh()
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        first_token_tensor = hidden_states[:, 0]
+    def forward(self, hidden_states: Potential | torch.Tensor) -> torch.Tensor:
+        """Pool the first BERT token without rebuilding its potential range.
+
+        The first-token slice is a view of the final encoder activation and therefore
+        retains the encoder's declared range. Direct tensor calls use the configured
+        fixed ``theta`` rail for compatibility, while the dense pooler remains an
+        ordinary PyTorch path that does not encode a temporal event.
+
+        Args:
+            hidden_states: Final sequence activation with optional fixed bounds.
+
+        Returns:
+            Dense or spiking Tanh-pooled first-token representation.
+
+        Raises:
+            TypeError: If ``hidden_states`` is neither Potential nor Tensor.
+        """
+        # Slicing the token dimension cannot enlarge the declared scalar envelope.
+        # Preserve the same PotentialBounds object when the encoder supplied one.
+        if isinstance(hidden_states, Potential):
+            first_token_tensor = hidden_states.value[:, 0]
+            first_token_domain = hidden_states.domain
+        elif isinstance(hidden_states, torch.Tensor):
+            first_token_tensor = hidden_states[:, 0]
+            first_token_domain = None
+        else:
+            raise TypeError("hidden_states must be Potential or torch.Tensor")
+
+        # The spiking projection consumes the inherited range directly. Tanh owns
+        # its structural [-1, 1] output rail, so only its tensor result crosses the
+        # Hugging Face-compatible pooler API boundary.
         if self.use_spiking_mlp:
-            pot_in = Potential(first_token_tensor, PotentialBounds(first_token_tensor.min().item(), first_token_tensor.max().item()))
-            pot_dense = self.dense(pot_in)
+            if first_token_domain is None:
+                theta = float(self.dense.theta)
+                if not math.isfinite(theta) or theta <= 0.0:
+                    raise ValueError("BERT pooler theta must be finite and positive")
+                first_token_domain = PotentialBounds(-theta, theta)
+                first_token_tensor = first_token_domain.clamp(
+                    first_token_tensor,
+                    name="bert_pooler_input",
+                )
+            first_token_potential = Potential(
+                first_token_tensor,
+                first_token_domain,
+            )
+            pot_dense = self.dense(first_token_potential)
             pooled_output, _ = tanh(pot_dense.value, pot_dense.domain, tau_s=self.tau_s, theta=self.dense.theta)
             return pooled_output
-        else:
-            pooled_output = self.dense(first_token_tensor)
-            pooled_output = self.activation(pooled_output)
-            return pooled_output
+
+        # Dense execution intentionally ignores range metadata after selecting the
+        # first-token tensor because neither Linear nor Tanh emits a spike here.
+        pooled_output = self.dense(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
 
 
 @auto_docstring
@@ -426,19 +770,24 @@ class BertModel(BertPreTrainedModel):
             position_ids=position_ids,
             token_type_ids=token_type_ids,
             inputs_embeds=inputs_embeds,
+            return_potential=True,
         )
+        if not isinstance(embedding_output, Potential):
+            raise RuntimeError("BERT internal embeddings must return Potential")
         if attention_mask is not None:
             if attention_mask.dim() == 2:
                 extended_attention_mask = attention_mask[:, None, None, :]
             else:
                 extended_attention_mask = attention_mask
-            extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(embedding_output.dtype).min
+            extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(embedding_output.value.dtype).min
         else:
             extended_attention_mask = None
 
         pot = self.encoder(embedding_output, extended_attention_mask)
         sequence_output = pot.value
-        pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
+        # The pooler slices the first token from the final Potential so its spiking
+        # projection consumes the encoder's fixed range without measuring the slice.
+        pooled_output = self.pooler(pot) if self.pooler is not None else None
 
         return BaseModelOutputWithPoolingAndCrossAttentions(
             last_hidden_state=sequence_output,
