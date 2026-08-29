@@ -1,6 +1,7 @@
 """Bind layer-wise calibration state to explicit Transformer activation sites."""
 
 import math
+from typing import Any
 
 import torch
 from torch import Tensor, nn
@@ -20,6 +21,78 @@ from utils.transforms.types import Potential, PotentialBounds
 
 _CALIBRATION_STATE_ATTRIBUTE = "_delayed_temporal_calibration_state"
 _CALIBRATION_NAME_ATTRIBUTE = "_delayed_temporal_calibration_module_name"
+
+
+def select_calibration_subset(
+    dataset: Any,
+    *,
+    sample_count: int,
+    seed: int,
+) -> Any:
+    """Select a reproducible prefix from a seeded training-split permutation.
+
+    Hugging Face datasets derive a new fingerprint from both the source revision and
+    selection indices. Returning that selected dataset lets metadata persist its
+    resulting fingerprint, while two collection passes can iterate the same object
+    with ``shuffle=False`` and therefore replay exactly the same sample population.
+
+    Args:
+        dataset: Loaded training split supporting ``len``, ``shuffle``, and ``select``.
+        sample_count: Exact positive number of calibration examples to retain.
+        seed: Non-negative permutation seed.
+
+    Returns:
+        Dataset subset whose length is exactly ``sample_count`` and whose
+        ``_fingerprint`` is a non-empty string.
+
+    Raises:
+        TypeError: If controls or the dataset protocol are invalid.
+        ValueError: If the split is too small or the selected dataset has no stable
+            fingerprint or exact length.
+    """
+    # Validate controls before touching dataset state. Reject bool aliases and never
+    # silently reduce the requested count, because artifact metadata must identify an
+    # exact population rather than a dataset-dependent ``min`` result.
+    for name, value in (("sample_count", sample_count), ("seed", seed)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{name} must be an integer")
+    if sample_count <= 0:
+        raise ValueError("sample_count must be positive")
+    if seed < 0:
+        raise ValueError("seed must be non-negative")
+    if not hasattr(dataset, "shuffle") or not callable(dataset.shuffle):
+        raise TypeError("dataset must provide shuffle(seed=...)")
+    if not hasattr(dataset, "select") or not hasattr(dataset, "__len__"):
+        raise TypeError("dataset must provide select(indices) and len(dataset)")
+
+    # Resolve split capacity before permutation so an impossible request fails without
+    # constructing a new indices mapping or misleading subset fingerprint.
+    try:
+        dataset_size = len(dataset)
+    except TypeError as error:
+        raise TypeError("dataset must provide len(dataset)") from error
+    if sample_count > dataset_size:
+        raise ValueError(
+            f"calibration sample_count {sample_count} exceeds split size {dataset_size}"
+        )
+
+    # A single seeded permutation followed by a deterministic prefix defines the
+    # selected examples. The returned order is retained for both calibration passes;
+    # no DataLoader-level shuffle is permitted later.
+    shuffled = dataset.shuffle(seed=seed)
+    if not hasattr(shuffled, "select") or not callable(shuffled.select):
+        raise TypeError("shuffled dataset must provide select(indices)")
+    subset = shuffled.select(range(sample_count))
+    if len(subset) != sample_count:
+        raise ValueError("selected calibration dataset has an unexpected length")
+
+    # Hugging Face fingerprints incorporate the source table and transform indices.
+    # Requiring one prevents an unrelated local dataset revision from reusing a table
+    # merely because it has the same name, seed, and number of examples.
+    fingerprint = getattr(subset, "_fingerprint", None)
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise ValueError("selected calibration dataset must have a stable fingerprint")
+    return subset
 
 
 def _calibration_site_keys(

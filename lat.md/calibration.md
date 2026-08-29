@@ -104,6 +104,14 @@ GPT-2 freezes token and position table ranges, derives MLP activation ranges ana
 
 Unbound execution retains exact interval sums. Collection uses those sums as safety rails, while frozen execution resets attention and MLP residual streams to persisted ranges so depth cannot recursively widen them.
 
+### GPT-2 Evaluator Artifact Lifecycle
+
+The GPT-2 evaluator collects or consumes immutable model-entry and per-block residual ranges without using evaluation texts to select those ranges.
+
+Collection removes empty WikiText rows, selects a fixed prefix of a seeded training-split permutation, tokenizes to one padded maximum length, and replays the same sequential loader for min-max and histogram passes with cache, loss, timing noise, and `DataParallel` disabled.
+
+The artifact identity includes the filtered selected-dataset fingerprint, tokenizer ID and padding controls, sequence capacity, checkpoint, dataset configuration, TTFS constants, attention implementation, activation, LayerNorm stages, MLP path, and dropout configuration. Frozen runs require exact metadata equality and report strict clipping without widening a range.
+
 ## Persistence
 
 Calibration artifacts use a versioned immutable schema with complete model, data, numerical, capacity, and ablation metadata.

@@ -4,7 +4,7 @@
 
 ## 결론
 
-현재 maintained model adapter에는 live activation으로 `PotentialBounds`를 만드는 production 위치가 없다. GPT-2 residual은 analytic sum과 optional frozen calibration을 사용하며 evaluator artifact lifecycle 연결은 별도 후속 단계다.
+현재 maintained model adapter에는 live activation으로 `PotentialBounds`를 만드는 production 위치가 없다. GPT-2 residual은 analytic sum과 optional frozen calibration을 사용하며 evaluator artifact lifecycle도 연결되었다.
 
 Transform operator의 time window는 고정되어 있다. 최초 감사의 32곳 중 GPT-2 attention의 2곳, Gaussian 및 deterministic LayerNorm의 각 3곳, ordinary LayerNorm helper의 1곳은 fixed/analytic range로 교체되었다.
 
@@ -418,8 +418,8 @@ GPT-2의 최초 8개 activation-derived call site는 모두 제거되었다. MLP
 |---|---:|---|---|
 | [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Attention#forward]] | 0 | backend별 fixed range를 `c_proj`에 전달하고 projection/dropout range를 analytic propagation | 완료 |
 | [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2MLP#forward]] | 0 | dense/spiking Conv1D frozen interval, analytic activation, dropout interval 사용 | 완료 |
-| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Block#forward]] | 0 | residual endpoint addition과 optional `attention_residual`/`output` frozen calibration 사용 | adapter 완료; evaluator lifecycle 연결 필요 |
-| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Model#forward]] | 0 | frozen token/position table interval과 optional model-entry calibration 사용 | adapter 완료; evaluator lifecycle 연결 필요 |
+| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Block#forward]] | 0 | residual endpoint addition과 optional `attention_residual`/`output` frozen calibration 사용 | 완료 |
+| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Model#forward]] | 0 | frozen token/position table interval과 optional model-entry calibration 사용 | 완료 |
 | [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#SpikingConv1D#forward]] | 0 | transposed output-column absolute-sum rail을 freeze하며 forward-time parameter scan 없음 | 완료 |
 
 GPT-2 MLP activation은 dense/spiking projection 모두 `ACT2FN` 값을 유지한다. GELU-family와 SiLU는 $[\min(l,0),\max(u,0)]$, ReLU와 Tanh는 endpoint mapping을 사용한다. Cross-attention은 constructor에서 지원하지 않지만 남은 compatibility branch도 endpoint addition만 사용한다.
@@ -441,16 +441,16 @@ Variable sequence length에서는 current $S$로 range를 바꾸면 같은 modul
 
 ### Evaluation과 calibration
 
-기존 네 evaluator의 quantile 수집은 진단용이며 fixed potential range calibration contract를 충족하지 않는다. ViT evaluator에는 이 경로와 분리된 layer-wise artifact lifecycle이 추가되었다.
+기존 네 evaluator의 quantile 수집은 진단용이며 fixed potential range calibration contract를 충족하지 않는다. ViT와 GPT-2 evaluator에는 이 경로와 분리된 layer-wise artifact lifecycle이 추가되었다.
 
 | 위치 | 현재 동작 | 부족한 정보 |
 |---|---|---|
 | [[scripts/evaluation/error_analysis_vit.py#evaluate_vit_model]] | clean training subset을 두 번 순차 replay해 stable module/site별 immutable artifact를 저장하거나 frozen artifact를 검증·적용 | 완료; legacy absolute-quantile hook은 별도 진단 경로 |
 | [[scripts/evaluation/error_analysis_bert.py#evaluate_bert_model]] | 같은 global maximum 방식 | dataset/task별 module range |
 | [[scripts/evaluation/error_analysis_roberta.py#evaluate_roberta_model]] | 같은 global maximum 방식 | dataset/task별 module range |
-| [[scripts/evaluation/error_analysis_gpt2.py#evaluate_gpt2_model]] | 같은 global maximum 방식 | sequence length, cache state, activation branch별 range |
+| [[scripts/evaluation/error_analysis_gpt2.py#evaluate_gpt2_model]] | 빈 문장을 제거한 clean WikiText training subset을 두 번 순차 replay하고 tokenizer, sequence capacity, model path를 고정한 artifact를 저장·검증·적용 | 완료; cache를 끈 fixed-length calibration이며 legacy absolute-quantile hook은 별도 진단 경로 |
 
-Calibration은 Gaussian timing noise를 반드시 disable하고 `model.eval()`에서 수행해야 한다. ViT collection mode는 timing noise, mismatch, weight perturbation, bias perturbation, `DataParallel`을 거부한다. Frozen validation과 inference는 clean artifact를 검증한 뒤 robustness axis를 독립적으로 적용한다.
+Calibration은 Gaussian timing noise를 반드시 disable하고 `model.eval()`에서 수행해야 한다. ViT collection은 timing noise, mismatch, parameter perturbation, `DataParallel`을 거부하고 GPT-2 collection은 현재 존재하는 timing-noise axis와 `DataParallel`을 거부한다. Frozen validation과 inference는 clean artifact를 검증한 뒤 robustness axis를 독립적으로 적용한다.
 
 Calibration 측정은 deterministic한 두 collection pass로 분리하고 그 뒤 frozen validation을 수행한다. 첫 pass는 clamp 전 activation의 signed min/max를 기록하고, 두 번째 pass는 같은 dataset을 다시 실행하여 첫 pass의 endpoint로 고정한 bin에 histogram을 누적한다. Histogram과 margin으로 immutable range table을 만든 뒤 validation은 inference와 동일하게 excursion을 먼저 집계하고 clamp하며, 실행 중 range를 넓히지 않는다.
 
@@ -506,13 +506,13 @@ Observed extrema를 쓰는 경우 calibration set 밖의 입력을 보장하지 
 Dependency 순서대로 fixed range를 도입하면 각 단계에서 current tensor extrema를 하나의 원인과 함께 제거할 수 있다.
 
 1. Immutable calibration entry와 histogram, min/max 및 fixed-bin collection accumulator, frozen lookup, pre-clamp excursion counter를 공통 기반으로 추가한다. Stable module binding과 collection/runtime `Potential` 경계까지 완료되었다.
-2. 네 evaluator에 collection-only run, frozen validation, metadata validation, missing-entry failure를 추가한다. ViT는 완료되었고 나머지 세 evaluator가 남아 있다. Collection forward는 live extrema 대신 analytic safety rail을 전달해야 한다.
+2. 네 evaluator에 collection-only run, frozen validation, metadata validation, missing-entry failure를 추가한다. ViT와 GPT-2는 완료되었고 BERT와 RoBERTa evaluator가 남아 있다. Collection forward는 live extrema 대신 analytic safety rail을 전달해야 한다.
 3. Pretrained parameter와 embedding table의 range를 checkpoint loading, dtype/device conversion, static perturbation 뒤 한 번 고정한다.
 4. `SpikingLinear`, `SpikingConv2d`, `SpikingConv1D`가 forward에서 parameter extrema를 읽지 않고 frozen output-specific affine range를 사용하게 한다. 완료되었다.
 5. `SpikingLayerNorm`이 $\psi_{\mathrm{ED}}$와 $f_{\mathrm{Mul}}$의 returned range를 전달하게 하고, dense branch에는 analytic 또는 calibrated pre-affine range를 사용한다. Analytic $|z_i|\leq\sqrt{d-1}$ 적용은 완료되었다.
 6. Attention이 tensor와 fixed output range를 함께 전달하게 하고 mask suppression을 score upper bound와 일치시킨다.
-7. ViT와 GPT-2의 pre-norm post-add residual을 block별 calibration range로 clamp하고, BERT/RoBERTa post-norm 경계에도 frozen site range를 연결한다. ViT의 두 block 경계와 evaluator lifecycle은 완료되었다.
-8. ViT, BERT, RoBERTa, GPT-2 model entry를 embedding interval arithmetic 또는 calibration range로 교체한다. ViT encoder entry는 완료되었다.
+7. ViT와 GPT-2의 pre-norm post-add residual을 block별 calibration range로 clamp하고, BERT/RoBERTa post-norm 경계에도 frozen site range를 연결한다. 두 pre-norm model family의 block 경계와 evaluator lifecycle은 완료되었다.
+8. ViT, BERT, RoBERTa, GPT-2 model entry를 embedding interval arithmetic 또는 calibration range로 교체한다. 네 model family의 live extrema 제거는 완료되었고 ViT와 GPT-2는 frozen entry calibration도 지원한다.
 9. Direct GELU, `gelu_new`, SiLU와 dense ablation path에 activation별 fixed range를 적용한다. ViT의 bounded activation 경로는 analytic range로 완료되었다.
 10. Pooler와 task head가 final hidden-state range를 slice와 함께 전달하도록 한다.
 11. Source audit와 batch-order, batch-size, Gaussian-seed invariance verification을 permanent verification에 추가한다.
@@ -546,4 +546,4 @@ Migration 완료는 numerical output뿐 아니라 declared potential range의 �
 
 Audit 자체는 완료되었지만 구현은 아직 fixed potential range contract를 만족하지 않는다.
 
-Transform algebra, time window, attention, LayerNorm, affine, embedding, activation, residual의 maintained forward range는 모두 static하다. 남은 작업은 GPT-2 residual artifact lifecycle과 최종 source-audit 자동 검증을 evaluator에 연결하는 것이다.
+Transform algebra, time window, attention, LayerNorm, affine, embedding, activation, residual의 maintained forward range는 모두 static하며 ViT와 GPT-2 artifact lifecycle이 연결되었다. 남은 작업은 최종 source-audit 자동 검증과 post-norm model family의 선택적 range tightening이다.

@@ -16,8 +16,26 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from datasets import load_dataset
 from transformers import AttentionInterface, AutoModelForCausalLM, AutoTokenizer
+from utils.transforms.calibration import (
+    CalibrationMode,
+    create_calibration_collector,
+    create_calibration_runtime,
+    get_calibration_clipping_report,
+    load_calibration_table,
+    save_calibration_table,
+)
 from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import GPT2LMHeadModel, SpikingConv1D
 from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
+from utils.transformers.models.spiking_gpt2.calibration import (
+    build_gpt2_calibration_metadata,
+    collect_gpt2_calibration_table,
+    gpt2_calibration_specs,
+)
+from utils.transformers.calibration import (
+    bind_model_calibration,
+    clear_model_calibration,
+    select_calibration_subset,
+)
 from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear
 from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
 from utils.transforms.types import Potential
@@ -35,6 +53,7 @@ DATASET_PRESETS = {
         "dataset_name": "wikitext",
         "dataset_config_name": "wikitext-2-raw-v1",
         "dataset_split": "test",
+        "calibration_split": "train",
         "text_column": "text",
         "model_id": "neulab/gpt2-finetuned-wikitext103",
     },
@@ -42,6 +61,7 @@ DATASET_PRESETS = {
         "dataset_name": "wikitext",
         "dataset_config_name": "wikitext-103-raw-v1",
         "dataset_split": "test",
+        "calibration_split": "train",
         "text_column": "text",
         "model_id": "neulab/gpt2-finetuned-wikitext103",
     },
@@ -79,6 +99,17 @@ class Arguments:
     activation: str
     theta: float
     tau_s: float
+
+    # Layer-wise calibration uses a deterministic training subset for collection and
+    # immutable artifact ranges for validation or inference.
+    calibration_mode: Literal["none", "collect", "validate", "inference"]
+    calibration_path: str
+    calibration_samples: int
+    calibration_seed: int
+    calibration_bins: int
+    calibration_lower_quantile: float
+    calibration_upper_quantile: float
+    calibration_margin_fraction: float
 
     # These four fields match ViT, BERT, and RoBERTa exactly; distribution choice
     # and a separate evaluation-mode switch are intentionally absent.
@@ -144,6 +175,57 @@ def parse_arguments() -> Arguments:
     parser.add_argument("--tau-s", type=float, default=1.0,
                         help="Spike-time constant tau_s used by SpikingLayerNorm.")
 
+    # Collection and frozen execution are separate lifecycle phases. The artifact
+    # path remains explicit so an experiment cannot silently reuse a stale default.
+    parser.add_argument(
+        "--calibration-mode",
+        choices=("none", "collect", "validate", "inference"),
+        default="none",
+        help="Create or consume a layer-wise calibration artifact.",
+    )
+    parser.add_argument(
+        "--calibration-path",
+        type=str,
+        default="",
+        help="Calibration JSON path; required unless calibration mode is none.",
+    )
+    parser.add_argument(
+        "--calibration-samples",
+        type=int,
+        default=1024,
+        help="Fixed number of training texts replayed in both collection passes.",
+    )
+    parser.add_argument(
+        "--calibration-seed",
+        type=int,
+        default=0,
+        help="Seed defining the deterministic training-subset permutation.",
+    )
+    parser.add_argument(
+        "--calibration-bins",
+        type=int,
+        default=2048,
+        help="Number of fixed histogram bins per calibrated residual site.",
+    )
+    parser.add_argument(
+        "--calibration-lower-quantile",
+        type=float,
+        default=0.001,
+        help="Lower signed residual quantile retained during calibration.",
+    )
+    parser.add_argument(
+        "--calibration-upper-quantile",
+        type=float,
+        default=0.999,
+        help="Upper signed residual quantile retained during calibration.",
+    )
+    parser.add_argument(
+        "--calibration-margin-fraction",
+        type=float,
+        default=0.05,
+        help="Per-side residual range expansion after quantile selection.",
+    )
+
     # These options match the other model evaluators so one experiment convention
     # can configure every supported architecture.
     parser.add_argument(
@@ -203,12 +285,100 @@ def parse_arguments() -> Arguments:
         activation=args.activation,
         theta=args.theta,
         tau_s=args.tau_s,
+        calibration_mode=args.calibration_mode,
+        calibration_path=args.calibration_path,
+        calibration_samples=args.calibration_samples,
+        calibration_seed=args.calibration_seed,
+        calibration_bins=args.calibration_bins,
+        calibration_lower_quantile=args.calibration_lower_quantile,
+        calibration_upper_quantile=args.calibration_upper_quantile,
+        calibration_margin_fraction=args.calibration_margin_fraction,
         gaussian_time_noise=args.gaussian_time_noise,
         time_noise_std_frac=args.time_noise_std_frac,
         time_noise_mean=args.time_noise_mean,
         time_noise_seed=args.time_noise_seed,
         collect_quantiles=args.collect_quantiles,
     )
+
+
+def validate_gpt2_calibration_arguments(
+    args: Arguments,
+) -> CalibrationMode | None:
+    """Validate GPT-2 calibration controls before loading external resources.
+
+    ``none`` preserves analytic fixed ranges. Collection is restricted to a clean
+    deterministic spiking model, while validation and inference may combine the
+    already frozen table with independently configured Gaussian timing noise.
+
+    Args:
+        args: Parsed GPT-2 evaluator configuration.
+
+    Returns:
+        Internal calibration mode, or ``None`` when calibration is disabled.
+
+    Raises:
+        TypeError: If calibration fields have incompatible scalar types.
+        ValueError: If paths, counts, quantiles, margins, or backend/noise combinations
+            are invalid for the selected lifecycle phase.
+    """
+    # Translate the user-facing disabled state separately because CalibrationMode
+    # contains only active phases shared by collectors and frozen runtimes.
+    if not isinstance(args.calibration_mode, str):
+        raise TypeError("calibration_mode must be a string")
+    if args.calibration_mode == "none":
+        return None
+    try:
+        mode = CalibrationMode(args.calibration_mode)
+    except ValueError as error:
+        raise ValueError("unsupported calibration_mode") from error
+    if args.model_backend != "spiking":
+        raise ValueError("layer-wise calibration requires model_backend=spiking")
+    if not isinstance(args.calibration_path, str):
+        raise TypeError("calibration_path must be a string")
+    if not args.calibration_path.strip():
+        raise ValueError("calibration_path is required for active calibration")
+
+    # Counts determine the exact training population and histogram representation.
+    # Reject Boolean aliases before any dataset or checkpoint download can begin.
+    for name, value in (
+        ("calibration_samples", args.calibration_samples),
+        ("calibration_seed", args.calibration_seed),
+        ("calibration_bins", args.calibration_bins),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{name} must be an integer")
+    if args.calibration_samples <= 0:
+        raise ValueError("calibration_samples must be positive")
+    if args.calibration_seed < 0:
+        raise ValueError("calibration_seed must be non-negative")
+    if args.calibration_bins < 2:
+        raise ValueError("calibration_bins must be at least two")
+
+    # GPT-2 residual sites are signed-symmetric, so both probability cutoffs must be
+    # ordered and the per-side expansion must remain finite and non-negative.
+    for name, value in (
+        ("calibration_lower_quantile", args.calibration_lower_quantile),
+        ("calibration_upper_quantile", args.calibration_upper_quantile),
+        ("calibration_margin_fraction", args.calibration_margin_fraction),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{name} must be a real number")
+        if not math.isfinite(float(value)):
+            raise ValueError(f"{name} must be finite")
+    if not 0.0 <= args.calibration_lower_quantile <= 1.0:
+        raise ValueError("calibration_lower_quantile must lie in [0, 1]")
+    if not 0.0 <= args.calibration_upper_quantile <= 1.0:
+        raise ValueError("calibration_upper_quantile must lie in [0, 1]")
+    if args.calibration_lower_quantile > args.calibration_upper_quantile:
+        raise ValueError("calibration quantiles must be ordered")
+    if args.calibration_margin_fraction < 0.0:
+        raise ValueError("calibration_margin_fraction must be non-negative")
+
+    # Collection measures only the clean deterministic residual distribution. Frozen
+    # phases may add timing noise after exact artifact metadata compatibility succeeds.
+    if mode is CalibrationMode.COLLECT and args.gaussian_time_noise:
+        raise ValueError("calibration collection requires Gaussian timing noise off")
+    return mode
 
 def infer_text_column(column_names: list[str], preferred: str | None = None) -> str:
     if preferred is not None and preferred in column_names:
@@ -248,6 +418,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
     device_str = args.device
 
     torch_device = torch.device(device_str)
+    calibration_mode = validate_gpt2_calibration_arguments(args)
 
     # Convert the common user-facing fraction exactly once. tau_s does not rescale
     # this value; every encoder receives the same absolute sigma based on 2*theta.
@@ -300,17 +471,86 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             f"act:{args.activation}, theta:{args.theta}, tau_s:{args.tau_s}"
         )
 
-    print(f"Loading dataset: {dataset_name}/{dataset_config_name} ({dataset_split})...")
+    # Evaluation and calibration use disjoint splits. Collection never loads test
+    # examples, while frozen phases reconstruct the exact training-subset identity
+    # before evaluating the untouched requested split.
     assert dataset_name is not None
-    if dataset_config_name is None:
-        dataset = load_dataset(dataset_name, split=dataset_split, cache_dir="/data/nas/datasets/")
-    else:
-        dataset = load_dataset(dataset_name, dataset_config_name, split=dataset_split, cache_dir="/data/nas/datasets/")
-
-    dataset = dataset.filter(lambda x: len(x["text"].strip()) > 0)
-
+    calibration_split = cast(
+        str,
+        DATASET_PRESETS.get(args.task, {}).get("calibration_split", "train"),
+    )
     preferred_text_column = DATASET_PRESETS.get(args.task, {}).get("text_column")
-    text_column = infer_text_column(dataset.column_names, preferred=preferred_text_column)
+
+    def load_requested_split(split: str) -> Any:
+        """Load one evaluator split under the resolved dataset configuration."""
+        # A missing dataset configuration is a supported Hugging Face dataset form;
+        # avoid passing an explicit None as a positional builder configuration.
+        if dataset_config_name is None:
+            return load_dataset(
+                dataset_name,
+                split=split,
+                cache_dir="/data/nas/datasets/",
+            )
+
+        # Calibration and evaluation must share the same named configuration so the
+        # artifact identity differs only by its explicitly recorded split.
+        return load_dataset(
+            dataset_name,
+            dataset_config_name,
+            split=split,
+            cache_dir="/data/nas/datasets/",
+        )
+
+    dataset = None
+    if calibration_mode is not CalibrationMode.COLLECT:
+        print(
+            f"Loading evaluation dataset: {dataset_name}/{dataset_config_name} "
+            f"({dataset_split})..."
+        )
+        dataset = load_requested_split(dataset_split)
+
+    calibration_dataset = None
+    if calibration_mode is not None:
+        print(
+            f"Loading calibration dataset: {dataset_name}/{dataset_config_name} "
+            f"({calibration_split})..."
+        )
+        training_dataset = load_requested_split(calibration_split)
+
+        # Empty WikiText rows carry no language-model tokens beyond padding and would
+        # make subset identity depend on non-examples. Filter before permutation so
+        # the selected fingerprint describes the actual calibration population.
+        calibration_text_column = infer_text_column(
+            training_dataset.column_names,
+            preferred=preferred_text_column,
+        )
+        training_dataset = training_dataset.filter(
+            lambda example: len(example[calibration_text_column].strip()) > 0
+        )
+        calibration_dataset = select_calibration_subset(
+            training_dataset,
+            sample_count=args.calibration_samples,
+            seed=args.calibration_seed,
+        )
+
+    # Evaluation preserves its existing empty-line removal independently. Frozen
+    # setup does not select or mutate validation examples to match calibration.
+    text_column = None
+    if dataset is not None:
+        text_column = infer_text_column(
+            dataset.column_names,
+            preferred=preferred_text_column,
+        )
+        dataset = dataset.filter(
+            lambda example: len(example[text_column].strip()) > 0
+        )
+    elif calibration_dataset is not None:
+        text_column = infer_text_column(
+            calibration_dataset.column_names,
+            preferred=preferred_text_column,
+        )
+    if text_column is None:
+        raise RuntimeError("no GPT-2 dataset was loaded")
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     if tokenizer.pad_token is None:
@@ -333,13 +573,46 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         tokenized["labels"] = labels
         return tokenized
 
-    processed_dataset = dataset.map(tokenize_batch, batched=True, remove_columns=dataset.column_names)
-    processed_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+    # Tokenize both phases with one tokenizer instance and fixed padded capacity.
+    # Labels remain available only because the normal evaluator computes task loss;
+    # the collection helper deliberately ignores them.
+    dataloader = None
+    if dataset is not None:
+        processed_dataset = dataset.map(
+            tokenize_batch,
+            batched=True,
+            remove_columns=dataset.column_names,
+        )
+        processed_dataset.set_format(
+            type="torch",
+            columns=["input_ids", "attention_mask", "labels"],
+        )
+        dataloader = DataLoader(
+            cast(Any, processed_dataset),
+            batch_size=batch_size,
+            shuffle=False,
+        )
 
-    dataloader = DataLoader(cast(Any, processed_dataset), batch_size=batch_size, shuffle=False)
+    calibration_dataloader = None
+    if calibration_dataset is not None:
+        processed_calibration_dataset = calibration_dataset.map(
+            tokenize_batch,
+            batched=True,
+            remove_columns=calibration_dataset.column_names,
+        )
+        processed_calibration_dataset.set_format(
+            type="torch",
+            columns=["input_ids", "attention_mask", "labels"],
+        )
+        calibration_dataloader = DataLoader(
+            cast(Any, processed_calibration_dataset),
+            batch_size=batch_size,
+            shuffle=False,
+        )
 
     print(f"Loading model: {model_id}...")
     model: nn.Module
+    config: Any
     if model_backend == "hf":
         model = AutoModelForCausalLM.from_pretrained(model_id)
     else:
@@ -361,12 +634,91 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             "Gaussian spike-time noise does not support DataParallel; "
             "run one evaluation process per GPU"
         )
+    if calibration_mode is not None and isinstance(model, nn.DataParallel):
+        raise RuntimeError(
+            "layer-wise calibration does not support DataParallel; "
+            "run one evaluation process per GPU"
+        )
 
     if torch_device.type == "cuda":
         model = nn.Module.cuda(model)
     else:
         model = nn.Module.cpu(model)
     model.eval()
+
+    # Construct the clean artifact identity before collection or frozen binding. The
+    # filtered-and-selected training fingerprint is required even in frozen phases so
+    # a changed WikiText revision or tokenization setup fails at load time.
+    calibration_metadata = None
+    if calibration_mode is not None:
+        if calibration_dataset is None:
+            raise RuntimeError("active calibration requires a selected training subset")
+        dataset_identity = (
+            dataset_name
+            if dataset_config_name is None
+            else f"{dataset_name}:{dataset_config_name}"
+        )
+        calibration_metadata = build_gpt2_calibration_metadata(
+            model_id=model_id,
+            dataset_id=dataset_identity,
+            calibration_split=calibration_split,
+            calibration_dataset_fingerprint=calibration_dataset._fingerprint,
+            calibration_samples=args.calibration_samples,
+            calibration_seed=args.calibration_seed,
+            tokenizer=tokenizer,
+            config=config,
+            max_length=max_length,
+            attention_implementation=effective_attn_impl,
+        )
+
+    # Collection writes the immutable artifact and exits without constructing loss,
+    # perplexity, validation clipping, TensorBoard, or quantile diagnostics.
+    if calibration_mode is CalibrationMode.COLLECT:
+        if calibration_dataloader is None or calibration_metadata is None:
+            raise RuntimeError("calibration collection setup is incomplete")
+        specs = gpt2_calibration_specs(
+            model,
+            lower_quantile=args.calibration_lower_quantile,
+            upper_quantile=args.calibration_upper_quantile,
+            margin_fraction=args.calibration_margin_fraction,
+        )
+        collector = create_calibration_collector(
+            calibration_metadata,
+            specs,
+            bin_count=args.calibration_bins,
+        )
+        table = collect_gpt2_calibration_table(
+            model,
+            calibration_dataloader,
+            collector,
+            device=torch_device,
+            expected_samples=args.calibration_samples,
+        )
+        save_calibration_table(table, args.calibration_path)
+        print(
+            f"Saved calibration artifact with {len(table.layers)} layer ranges "
+            f"to {args.calibration_path}"
+        )
+        wandb.log({"Calibration/layer_ranges": len(table.layers)})
+        wandb.finish()
+        return
+
+    # Validation and inference install only a table whose full clean identity matches
+    # the reconstructed model, subset, tokenizer, numerical, and ablation metadata.
+    calibration_state = None
+    if calibration_mode in (CalibrationMode.VALIDATE, CalibrationMode.INFERENCE):
+        if calibration_metadata is None:
+            raise RuntimeError("frozen calibration setup is incomplete")
+        table = load_calibration_table(args.calibration_path)
+        calibration_state = create_calibration_runtime(
+            calibration_mode,
+            table,
+            expected_metadata=calibration_metadata,
+        )
+        bind_model_calibration(model, calibration_state)
+
+    if dataloader is None:
+        raise RuntimeError("GPT-2 evaluation requires an evaluation DataLoader")
 
     tb_writer = SummaryWriter(log_dir=f"runs/{args.experiment_name}")
     log_step = [0]
@@ -507,6 +859,28 @@ def evaluate_gpt2_model(args: Arguments) -> None:
                 f"Gaussian/{site}/output_overflows": counts["output_overflows"],
                 f"Gaussian/{site}/output_overflow_rate": overflow_rate,
             })
+
+    # Frozen calibration counts raw element excursions before every declared clamp.
+    # Report underflow and overflow separately, then remove only the model binding;
+    # the completed runtime state remains available to this reporting code unchanged.
+    if calibration_state is not None:
+        for item in get_calibration_clipping_report(calibration_state):
+            site = f"{item.module_name}/{item.tensor_name}"
+            print(
+                f"Calibration[{site}] values={item.num_values}, "
+                f"underflows={item.underflows} "
+                f"(rate={item.underflow_rate:.6g}), "
+                f"overflows={item.overflows} "
+                f"(rate={item.overflow_rate:.6g})"
+            )
+            wandb.log({
+                f"Calibration/{site}/values": item.num_values,
+                f"Calibration/{site}/underflows": item.underflows,
+                f"Calibration/{site}/underflow_rate": item.underflow_rate,
+                f"Calibration/{site}/overflows": item.overflows,
+                f"Calibration/{site}/overflow_rate": item.overflow_rate,
+            })
+        clear_model_calibration(model, expected_state=calibration_state)
 
     print("-" * 30)
     wandb.finish()

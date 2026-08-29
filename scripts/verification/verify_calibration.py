@@ -63,16 +63,18 @@ from utils.transformers.calibration import (  # noqa: E402
     calibrated_potential,
     clear_model_calibration,
     model_calibration_is_bound,
+    select_calibration_subset,
 )
 from utils.transformers.models.spiking_vit.calibration import (  # noqa: E402
     build_vit_calibration_metadata,
     collect_vit_calibration_table,
     image_processor_pixel_bounds,
-    select_calibration_subset,
     vit_calibration_specs,
     vit_residual_calibration_specs,
 )
 from utils.transformers.models.spiking_gpt2.calibration import (  # noqa: E402
+    build_gpt2_calibration_metadata,
+    collect_gpt2_calibration_table,
     gpt2_calibration_specs,
 )
 
@@ -1271,6 +1273,157 @@ def verify_roberta_fixed_range_flow() -> None:
         assert predicted.logits.shape == (2, 4, 32)
 
 
+# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#GPT-2 Evaluator Artifact Lifecycle]]
+def verify_gpt2_evaluator_artifact_lifecycle() -> None:
+    """Verify GPT-2 CLI controls, metadata identity, and two-pass token replay."""
+    from unittest.mock import patch
+
+    from torch.utils.data import DataLoader, Dataset
+
+    from scripts.evaluation.error_analysis_gpt2 import (
+        parse_arguments,
+        validate_gpt2_calibration_arguments,
+    )
+    from utils.transforms.noise import set_gaussian_time_noise
+    from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
+    from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import GPT2Model
+
+    # The CLI exposes collection identity and histogram controls independently from
+    # the older diagnostic quantile hook. Validation runs before datasets or model
+    # checkpoints are loaded and restricts collection to a clean spiking backend.
+    with patch(
+        "sys.argv",
+        [
+            "error_analysis_gpt2.py",
+            "--model_backend",
+            "spiking",
+            "--calibration-mode",
+            "collect",
+            "--calibration-path",
+            "artifacts/calibration/gpt2-smoke.json",
+            "--calibration-samples",
+            "4",
+            "--calibration-seed",
+            "19",
+            "--calibration-bins",
+            "16",
+            "--calibration-lower-quantile",
+            "0.01",
+            "--calibration-upper-quantile",
+            "0.99",
+            "--calibration-margin-fraction",
+            "0.1",
+        ],
+    ):
+        args = parse_arguments()
+    assert validate_gpt2_calibration_arguments(args) is CalibrationMode.COLLECT
+    assert args.calibration_samples == 4
+    assert args.calibration_seed == 19
+    assert args.calibration_bins == 16
+    _expect_raises(
+        ValueError,
+        lambda: validate_gpt2_calibration_arguments(
+            replace(args, gaussian_time_noise=True)
+        ),
+        "timing noise off",
+    )
+    assert validate_gpt2_calibration_arguments(
+        replace(
+            args,
+            calibration_mode="validate",
+            gaussian_time_noise=True,
+        )
+    ) is CalibrationMode.VALIDATE
+
+    # Metadata includes the selected text fingerprint, tokenizer ID mapping controls,
+    # padded length, model path, and TTFS configuration. Robustness noise is omitted
+    # so the clean table can be reused after exact compatibility validation.
+    config = GPT2Config(
+        vocab_size=32,
+        n_positions=8,
+        n_embd=8,
+        n_layer=1,
+        n_head=2,
+        use_spiking_mlp=True,
+        use_spiking_layernorm=False,
+        activation_function="gelu_new",
+        theta=8.0,
+        tau_s=1.0,
+        resid_pdrop=0.0,
+        attn_pdrop=0.0,
+        embd_pdrop=0.0,
+        use_cache=False,
+    )
+    config._attn_implementation = "eager"
+    tokenizer = SimpleNamespace(
+        name_or_path="tiny-tokenizer",
+        vocab_size=32,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=2,
+        padding_side="right",
+        truncation_side="right",
+    )
+    metadata = build_gpt2_calibration_metadata(
+        model_id="tiny-gpt2",
+        dataset_id="wikitext:wikitext-2-raw-v1",
+        calibration_split="train",
+        calibration_dataset_fingerprint="filtered-selected-v1",
+        calibration_samples=4,
+        calibration_seed=19,
+        tokenizer=tokenizer,
+        config=config,
+        max_length=4,
+        attention_implementation="eager",
+    )
+    assert metadata.model_family == "gpt2"
+    assert metadata.max_sequence_length == 4
+    assert "filtered-selected-v1" in metadata.preprocessing
+    assert metadata.input_shape == (4,)
+
+    class TokenDataset(Dataset):
+        """Return fixed padded token batches through default dictionary collation."""
+
+        def __len__(self) -> int:
+            return 4
+
+        def __getitem__(self, index: int):
+            tokens = torch.tensor(
+                [1, 3 + index, 4 + index, 2],
+                dtype=torch.long,
+            )
+            return {
+                "input_ids": tokens,
+                "attention_mask": torch.ones_like(tokens),
+                "labels": tokens.clone(),
+            }
+
+    # The production driver binds one collector across two sequential passes, ignores
+    # labels, disables cache, finalizes all entry/residual records, and unbinds state.
+    torch.manual_seed(2120)
+    model = GPT2Model(config).eval()
+    specs = gpt2_calibration_specs(
+        model,
+        lower_quantile=0.0,
+        upper_quantile=1.0,
+        margin_fraction=0.0,
+    )
+    collector = create_calibration_collector(metadata, specs, bin_count=16)
+    loader = DataLoader(TokenDataset(), batch_size=2, shuffle=False)
+    set_gaussian_time_noise(enabled=False)
+    table = collect_gpt2_calibration_table(
+        model,
+        loader,
+        collector,
+        device=torch.device("cpu"),
+        expected_samples=4,
+    )
+    assert len(table.layers) == 3
+    assert all(layer.num_values > 0 for layer in table.layers)
+    assert not model_calibration_is_bound(model)
+    assert not model_calibration_is_bound(model.h[0])
+
+
 # @lat: [[calibration#Layer-wise Calibration#Frozen Execution#GPT-2 Fixed Range Flow]]
 def verify_gpt2_fixed_range_flow() -> None:
     """Verify GPT-2 embedding, MLP, and pre-norm residual fixed-range flow."""
@@ -1648,6 +1801,7 @@ def main() -> None:
         verify_vit_fixed_activation_ranges,
         verify_bert_fixed_range_flow,
         verify_roberta_fixed_range_flow,
+        verify_gpt2_evaluator_artifact_lifecycle,
         verify_gpt2_fixed_range_flow,
         verify_vit_residual_range_reset,
         verify_canonical_table_round_trip,

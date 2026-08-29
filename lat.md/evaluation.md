@@ -29,15 +29,15 @@ ViT, BERT, and RoBERTa report classification accuracy. GPT-2 masks padding label
 
 Quick tests and `max_eval_batches` are smoke-test controls, not final evaluation protocols. Final comparisons should keep dataset split, preprocessing, batch limit, precision, checkpoint, and random seed fixed across backends.
 
-## ViT Calibration Workflow
+## ViT and GPT-2 Calibration Workflow
 
-The ViT runner separates clean range collection from frozen validation and inference so validation examples never influence a physical range.
+The ViT and GPT-2 runners separate clean range collection from frozen validation and inference so validation examples never influence a physical range.
 
 `--calibration-mode collect` selects a fixed-size prefix of a seeded training-split permutation, replays it sequentially for min-max and fixed-bin histogram passes, writes one JSON artifact, and exits without loading validation metrics. Timing noise, mismatch, parameter perturbation, and `DataParallel` are rejected in this mode.
 
-`--calibration-mode validate` and `--calibration-mode inference` reconstruct the same training-subset and model metadata, require an exact artifact match, bind frozen encoder-entry and per-block residual ranges, and report strict layer underflow and overflow after the run. Robustness noise may be enabled only after the clean artifact identity is checked.
+`--calibration-mode validate` and `--calibration-mode inference` reconstruct the same training-subset and model metadata, require an exact artifact match, bind frozen model-entry and per-block residual ranges, and report strict layer underflow and overflow after the run. Robustness noise may be enabled only after the clean artifact identity is checked.
 
-The artifact path is explicit through `--calibration-path`. Its identity includes the training split, seeded-subset fingerprint, sample count, seed, processor configuration, input geometry, precision, threshold and time constants, attention implementation, and active ViT ablation path.
+The artifact path is explicit through `--calibration-path`. ViT records image processing and geometry; GPT-2 records empty-text filtering, tokenizer controls, padded sequence length, and dataset configuration. Both record the seeded training subset, checkpoint, TTFS constants, attention path, and active ablations.
 
 ## Diagnostics and Instrumentation
 
