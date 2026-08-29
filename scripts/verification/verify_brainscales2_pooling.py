@@ -539,6 +539,8 @@ def verify_notebook_is_valid_json() -> None:
     assert "SMOKE_CALIBRATION_PATH.name" in source
     assert "folder=str(SMOKE_CALIBRATION_PATH.parent)" in source
     assert '"--calibration", SMOKE_CALIBRATION_PATH' in source
+    assert "else SMOKE_CALIBRATION_PATH.resolve()" in source
+    assert "Set CALIBRATION_PATH to an explicit .pbin" not in source
     assert "spiking_cocolist.pbin" in source
     assert '"--pool-sizes", 1, 2, 4, 8, 16' in source
     assert '"--phase", "diagnose-cadc"' in source
