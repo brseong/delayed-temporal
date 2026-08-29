@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 import torch
+from torch import nn
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -54,6 +55,12 @@ from utils.transforms.calibration import (  # noqa: E402
     update_histogram_observer,
     update_min_max_observer,
     validate_calibration_metadata,
+)
+from utils.transforms.types import PotentialBounds  # noqa: E402
+from utils.transformers.calibration import (  # noqa: E402
+    bind_model_calibration,
+    calibrated_potential,
+    clear_model_calibration,
 )
 
 
@@ -529,6 +536,131 @@ def verify_collection_and_runtime_phase_separation() -> None:
     assert report[1].underflow_rate == report[1].overflow_rate == 0.0
 
 
+# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#Model Binding and Potential Boundary]]
+def verify_model_binding_and_potential_boundary() -> None:
+    """Check explicit module binding, analytic collection rails, and frozen clamps."""
+
+    class CalibrationModel(nn.Module):
+        """Expose one stable named module for calibration integration checks."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.block = nn.Identity()
+
+    metadata = _make_metadata()
+    spec = LayerCalibrationSpec(
+        module_name="block",
+        tensor_name="output",
+        range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
+        lower_quantile=0.0,
+        upper_quantile=1.0,
+        margin_fraction=0.0,
+    )
+    collector = create_calibration_collector(metadata, (spec,), bin_count=4)
+    model = CalibrationModel()
+
+    # Binding resolves every declared name before mutation and rejects replicated or
+    # already-bound models rather than sharing mutable counters ambiguously.
+    assert bind_model_calibration(model, collector) == 1
+    _expect_raises(
+        ValueError,
+        lambda: bind_model_calibration(model, collector),
+        "already has calibration state",
+    )
+    _expect_raises(
+        RuntimeError,
+        lambda: bind_model_calibration(nn.DataParallel(CalibrationModel()), collector),
+        "DataParallel",
+    )
+
+    # Collection retains raw tensors on a static analytic safety rail. An escaped
+    # value fails before observer mutation, and undeclared tensor names cannot appear.
+    safety_bounds = PotentialBounds(-3.0, 3.0)
+    raw = torch.tensor([-2.0, 0.0, 2.0])
+    potential = calibrated_potential(
+        model.block,
+        "output",
+        raw,
+        collection_bounds=safety_bounds,
+    )
+    assert potential.value is raw and potential.domain is safety_bounds
+    observer_snapshot = copy.deepcopy(collector.min_max_states[("block", "output")])
+    _expect_raises(
+        ValueError,
+        lambda: calibrated_potential(
+            model.block,
+            "output",
+            torch.tensor([4.0]),
+            collection_bounds=safety_bounds,
+        ),
+        "escaped",
+    )
+    assert collector.min_max_states[("block", "output")] == observer_snapshot
+    _expect_raises(
+        ValueError,
+        lambda: calibrated_potential(
+            model.block,
+            "unknown",
+            torch.tensor([0.0]),
+            collection_bounds=safety_bounds,
+        ),
+        "not a declared calibration site",
+    )
+
+    # Replay the same raw population against fixed histogram bins, finalize the table,
+    # and remove only adapter attributes while retaining the completed collector data.
+    start_histogram_calibration_pass(collector)
+    calibrated_potential(
+        model.block,
+        "output",
+        raw.flip(0),
+        collection_bounds=safety_bounds,
+    )
+    table = finalize_calibration_collection(collector)
+    assert clear_model_calibration(model, expected_state=collector) == 1
+    _expect_raises(
+        RuntimeError,
+        lambda: calibrated_potential(model.block, "output", raw),
+        "no complete calibration binding",
+    )
+
+    # Frozen validation ignores the collection safety rail, clamps against persisted
+    # bounds, and attaches those exact endpoints to the returned Potential metadata.
+    runtime = create_calibration_runtime(
+        CalibrationMode.VALIDATE,
+        table,
+        expected_metadata=metadata,
+    )
+    assert bind_model_calibration(model, runtime) == 1
+    evaluated = calibrated_potential(
+        model.block,
+        "output",
+        torch.tensor([-4.0, 0.0, 4.0]),
+    )
+    assert torch.equal(evaluated.value, torch.tensor([-2.0, 0.0, 2.0]))
+    assert evaluated.domain == PotentialBounds(-2.0, 2.0)
+    report = get_calibration_clipping_report(runtime)
+    assert (report[0].num_values, report[0].underflows, report[0].overflows) == (
+        3,
+        1,
+        1,
+    )
+
+    # Cleanup uses an optional identity guard and does not erase the runtime report.
+    wrong_state = create_calibration_runtime(
+        CalibrationMode.INFERENCE,
+        table,
+        expected_metadata=metadata,
+    )
+    _expect_raises(
+        ValueError,
+        lambda: clear_model_calibration(model, expected_state=wrong_state),
+        "does not match expected_state",
+    )
+    assert clear_model_calibration(model, expected_state=runtime) == 1
+    assert get_calibration_clipping_report(runtime) == report
+
+
 # @lat: [[calibration#Layer-wise Calibration#Persistence#Canonical Table Round Trip]]
 def verify_canonical_table_round_trip() -> None:
     """Check canonical ordering, identity validation, strict schema, and atomic I/O."""
@@ -615,6 +747,7 @@ def main() -> None:
         verify_quantile_and_margin_policy,
         verify_layer_record_and_clipping,
         verify_collection_and_runtime_phase_separation,
+        verify_model_binding_and_potential_boundary,
         verify_canonical_table_round_trip,
     )
     for check in checks:

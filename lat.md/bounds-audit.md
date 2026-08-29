@@ -503,8 +503,8 @@ Observed extrema를 쓰는 경우 calibration set 밖의 입력을 보장하지 
 
 Dependency 순서대로 fixed range를 도입하면 각 단계에서 current tensor extrema를 하나의 원인과 함께 제거할 수 있다.
 
-1. Immutable calibration entry와 histogram, min/max 및 fixed-bin collection accumulator, frozen lookup, pre-clamp excursion counter를 공통 기반으로 추가한다.
-2. 네 evaluator에 collection-only run, frozen validation, metadata validation, missing-entry failure를 추가한다.
+1. Immutable calibration entry와 histogram, min/max 및 fixed-bin collection accumulator, frozen lookup, pre-clamp excursion counter를 공통 기반으로 추가한다. Stable module binding과 collection/runtime `Potential` 경계까지 완료되었다.
+2. 네 evaluator에 collection-only run, frozen validation, metadata validation, missing-entry failure를 추가한다. Collection forward는 live extrema 대신 analytic safety rail을 전달해야 한다.
 3. Pretrained parameter와 embedding table의 range를 checkpoint loading, dtype/device conversion, static perturbation 뒤 한 번 고정한다.
 4. `SpikingLinear`, `SpikingConv2d`, `SpikingConv1D`가 forward에서 parameter extrema를 읽지 않고 frozen output-specific affine range를 사용하게 한다. 완료되었다.
 5. `SpikingLayerNorm`이 $\psi_{\mathrm{ED}}$와 $f_{\mathrm{Mul}}$의 returned range를 전달하게 하고, dense branch에는 analytic 또는 calibrated pre-affine range를 사용한다. Analytic $|z_i|\leq\sqrt{d-1}$ 적용은 완료되었다.

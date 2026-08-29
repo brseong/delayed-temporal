@@ -40,6 +40,12 @@ A layer record requires identical first- and second-pass populations with zero r
 
 An explicit collector accepts only predeclared calibration sites, transitions once from min-max measurement to fixed-bin replay, and closes after finalization; frozen execution rejects missing sites and never creates a range from runtime output.
 
+### Model Binding and Potential Boundary
+
+Calibration state binds to stable module names without entering checkpoints. Collection uses analytic safety rails; frozen execution clamps raw activations to persisted ranges before creating `Potential`.
+
+Binding rejects missing modules, undeclared tensor boundaries, repeated installation, and `DataParallel`. Phase cleanup removes only adapter attributes and preserves the completed table, observers, and clipping report.
+
 ## Persistence
 
 Calibration artifacts use a versioned immutable schema with complete model, data, numerical, capacity, and ablation metadata.
