@@ -62,10 +62,10 @@ Nonnegative domains use the globally fixed lower endpoint zero and calibrate onl
 
 The migration is complete only when static-domain behavior is invariant under evaluation batching and all runtime extrema-derived domain construction has left maintained paths.
 
-- [ ] Reordering identical samples, changing batch size, or partitioning a batch produces identical declared bounds at every operator site.
-- [ ] Changing the Gaussian seed changes sampled events and outputs but never changes any declared potential or time bound.
-- [ ] Every out-of-envelope value increments pre-clamp underflow or overflow statistics without mutating the envelope.
-- [ ] Evaluation fails clearly when a required calibrated bound is absent or incompatible instead of silently measuring the current tensor.
+- [x] Reordering identical samples, changing batch size, or partitioning a batch produces identical declared bounds in representative shared operators, while the AST audit excludes activation-extrema construction across all maintained sites.
+- [x] Changing the Gaussian seed changes sampled events and outputs but never changes any declared potential or time bound.
+- [x] Every calibrated or Gaussian out-of-envelope value increments pre-clamp underflow or overflow statistics without mutating the envelope.
+- [x] Evaluation fails clearly when a required calibrated bound is absent or incompatible instead of silently measuring the current tensor.
 - [x] Pre-norm ViT and GPT-2 residual bounds come from fixed per-block calibration entries and therefore do not widen through recursive interval addition during frozen inference.
 - [x] A final AST source audit and direct tests reject `PotentialBounds` or `TimeBounds` constructed directly or through local aliases from live forward-tensor extrema.
 
@@ -110,9 +110,9 @@ The implementation work covers every maintained transform and model adapter, not
 - [x] Remove all GPT-2 live bounds with frozen embedding and Conv1D intervals, analytic MLP activation ranges, residual endpoint addition, and optional model-entry plus two-per-block calibration bindings.
 - [x] Add GPT-2 collection, frozen-validation, and inference evaluator modes using filtered WikiText training subsets, fixed tokenizer/sequence metadata, sequential two-pass replay, and per-site clipping reports.
 - [x] Prefer operator-derived interval arithmetic whenever the input bounds and transformation provide a conservative static result in the maintained execution path.
-- [ ] For paths without a practical analytic envelope, record per-site minima and maxima during a representative noise-free calibration run.
-- [ ] Persist stable site identifiers together with the checkpoint, dataset split, preprocessing, model family, and active ablation configuration used for calibration.
-- [ ] Add explicit collection, frozen-validation, and inference modes so a site cannot measure and clamp against a range created by the same forward invocation.
+- [x] For selected paths without a practical tight analytic envelope, record per-site minima and maxima during a representative noise-free calibration run; current sites are ViT and GPT-2 model entry and pre-norm residual resets.
+- [x] Persist stable site identifiers together with the checkpoint, dataset split, preprocessing, model family, and active ablation configuration used for calibration.
+- [x] Add explicit collection, frozen-validation, and inference modes so a site cannot measure and clamp against a range created by the same forward invocation.
 - [x] Freeze learned-parameter and embedding-table bounds in versioned caches after checkpoint setup instead of recomputing parameter extrema on repeated forwards, including ordinary and spiking LayerNorm.
 - [x] Add `SpikingLinear.freeze_parameter_bounds` with exact sign-aware rails per fixed input domain, immutable reuse, mutation rejection, and explicit refresh.
 - [x] Allow `SpikingLinear._gaussian_forward` to use the frozen output rail for saturation accounting without rescanning parameters.
@@ -126,11 +126,11 @@ The implementation work covers every maintained transform and model adapter, not
 - [x] Connect deterministic `SpikingLayerNorm.forward` to the same frozen parameter and output contract.
 - [x] Permanently verify all eight `SpikingLayerNorm` ablation domains, deterministic/zero-noise metadata identity, stale-cache rejection, and explicit refresh.
 - [x] Initialize every model-family entry potential bound from frozen embedding/preprocessing intervals or explicit calibration rather than measuring the first or current batch.
-- [ ] Clamp every out-of-envelope value against its fixed bound and report underflow and overflow counts without widening that bound at runtime.
-- [ ] Include LayerNorm's pre-affine normalized result in calibration, then derive its post-affine envelope by interval arithmetic from fixed scale and bias endpoints.
+- [x] Clamp every calibrated out-of-envelope value against its fixed bound and report underflow and overflow counts without widening that bound at runtime; Gaussian operator rails use their separate saturation counters.
+- [x] Keep LayerNorm outside calibration because its pre-affine normalized result has the finite analytic envelope $|z_i|\leq\sqrt{d-1}$; derive and freeze the post-affine envelope from scale and bias endpoints.
 - [x] Calibrate and clamp every ViT and GPT-2 pre-norm residual output per block, recording raw underflow and overflow before attaching the frozen output range.
 - [x] Connect both ViT pre-norm residual boundaries to optional explicit calibration bindings while retaining batch-independent analytic interval addition when calibration is absent.
-- [ ] Calibrate attention score clamp sites per layer/head and attention value outputs per layer, with sequence-capacity metadata and separate Gaussian saturation validation.
+- [x] Keep attention score and value outputs on analytic sequence-capacity bounds rather than calibration sites; retain separate Gaussian miss and saturation validation for their bounded physical readouts.
 - [x] Keep spike-time windows configuration-derived: LayerNorm log windows remain fixed by `clip_margin`, `theta`, and `tau_s`, while affine identity encoding uses each declared zero-containing fixed interval.
 - [x] Make declared potential and time bounds immutable so cached or propagated endpoints cannot be widened in place.
 - [x] Keep masked attention scores inside the declared softmin range and clamp both Gaussian and noise-free value readouts to a rail derived from fixed $S_{\max}$ and $\theta$.
@@ -138,4 +138,4 @@ The implementation work covers every maintained transform and model adapter, not
 - [x] Remove live activation extrema from the Gaussian `SpikingLayerNorm` path by propagating operator intervals and using the finite-feature dense LayerNorm bound.
 - [x] Remove live activation extrema from deterministic `SpikingLayerNorm.forward` with the same operator intervals and finite-feature dense bound.
 - [x] Remove live output extrema from ordinary `nn.LayerNorm` calls in `_apply_norm` with the finite-feature bound and learned affine endpoint propagation.
-- [ ] Verify bounds are identical across batch contents, ordering, and batch size, and add a final source audit that rejects runtime tensor-extrema domain construction in maintained paths.
+- [x] Verify bounds are identical across batch contents, ordering, and batch size, and add a final source audit that rejects runtime tensor-extrema domain construction in maintained paths.

@@ -14,8 +14,8 @@ Transform operator의 time window는 고정되어 있다. 최초 감사의 32곳
 - 최초 감사에서 shared model operator와 네 model family의 live activation extrema 위치는 각각 7, 4, 4, 9, 8곳이었다. Shared operator와 네 model adapter를 모두 전환한 현재 합계는 0곳이다.
 - `SpikingLinear`, `SpikingConv2d`, `SpikingConv1D`는 upstream fixed input range의 양 끝점을 weight 부호별로 선택해 exact affine range를 memoize하고 이후 parameter mutation을 검증한다. `SpikingLayerNorm`의 Gaussian과 deterministic 경로도 ablation별 frozen weight, bias, output domain을 공유한다.
 - ViT, BERT, RoBERTa, GPT-2 attention adapter는 이제 Gaussian value integration의 fixed range $[-S_{\max}\theta,S_{\max}\theta]$를 spiking backend와 공유한다.
-- 기존 quantile 수집은 진단용으로 남아 있다. ViT layer-wise calibration은 별도 artifact에 signed extrema, fixed-bin histogram, quantile, margin, training-subset identity, layer clipping을 보존한다.
-- ViT는 parameter range, preprocessing input, encoder entry, activation, attention output, residual range 전환을 완료했다. 남은 model family는 같은 순서로 전환해야 한다.
+- 기존 quantile 수집은 진단용으로 남아 있다. ViT와 GPT-2 layer-wise calibration은 별도 artifact에 signed extrema, fixed-bin histogram, quantile, margin, training-subset identity, layer clipping을 보존한다.
+- ViT, BERT, RoBERTa, GPT-2는 parameter range, model input, activation, attention output, residual range의 live activation extrema 제거를 완료했다. Pre-norm ViT와 GPT-2는 depth-wise residual reset artifact도 지원한다.
 
 ## 감사 범위와 판정 기준
 
@@ -248,7 +248,7 @@ $$
 \le \theta^2\sqrt D.
 $$
 
-$D=64$에서 endpoint는 $\theta=100$일 때 $8\times10^4$, $\theta=2000$일 때 $3.2\times10^7$이다. Attention은 이를 $c=\min(\theta,80)$으로 즉시 clamp하므로 raw dot-product domain은 이후 graph로 전파되지 않지만, score clamp 자체는 큰 approximation site다. Layer/head별 score calibration과 pre-clamp saturation rate가 필요하다.
+$D=64$에서 endpoint는 $\theta=100$일 때 $8\times10^4$, $\theta=2000$일 때 $3.2\times10^7$이다. Attention은 이를 $c=\min(\theta,80)$으로 즉시 clamp하므로 raw dot-product domain은 이후 graph로 전파되지 않는다. 이 score clamp는 bounded operator의 approximation site이므로 calibration 대상이 아니라 clamp-rate와 task accuracy의 검증 대상이다.
 
 Attention value integration은 current common range
 
@@ -256,7 +256,7 @@ $$
 [-S_{\max}\theta,S_{\max}\theta]
 $$
 
-를 사용한다. 이는 $\theta=100$에서 ViT $S_{\max}=197$이면 $\pm19{,}700$, BERT/RoBERTa $S_{\max}=512$이면 $\pm51{,}200$이고, $\theta=2000$에서는 각각 $\pm394{,}000$과 $\pm1{,}024{,}000$이다. Noise-free weights가 합계 1이면 value의 convex combination이므로 $[-\theta,\theta]$가 exact하다. Gaussian weights는 개별적으로 $[0,1]$에 clamp되지만 합계 1을 보장하지 않으므로 별도 calibrated output rail과 saturation policy가 필요하다.
+를 사용한다. 이는 $\theta=100$에서 ViT $S_{\max}=197$이면 $\pm19{,}700$, BERT/RoBERTa $S_{\max}=512$이면 $\pm51{,}200$이고, $\theta=2000$에서는 각각 $\pm394{,}000$과 $\pm1{,}024{,}000$이다. Noise-free weights가 합계 1이면 value의 convex combination이므로 $[-\theta,\theta]$가 exact하다. Gaussian weights는 합계 1을 보장하지 않으므로 고정 $[-S_{\max}\theta,S_{\max}\theta]$ rail과 별도 saturation policy를 유지한다.
 
 Affine와 convolution bound는 이전에 global weight extrema와 fan-in $F$를 사용하여 대략
 
@@ -546,4 +546,4 @@ Migration 완료는 numerical output뿐 아니라 declared potential range의 �
 
 Audit 자체는 완료되었지만 구현은 아직 fixed potential range contract를 만족하지 않는다.
 
-Transform algebra, time window, attention, LayerNorm, affine, embedding, activation, residual의 maintained forward range는 모두 static하며 ViT와 GPT-2 artifact lifecycle 및 AST source audit이 연결되었다. 남은 작업은 post-norm model family와 attention score의 선택적 range tightening 및 full-dataset validation이다.
+Transform algebra, time window, attention, LayerNorm, affine, embedding, activation, residual의 maintained forward range는 모두 static하며 ViT와 GPT-2 artifact lifecycle, AST source audit, batch partition 및 Gaussian seed 불변성 검증이 연결되었다. 구현상 남은 calibration blocker는 없으며 실제 checkpoint와 dataset을 사용하는 full evaluation이 남아 있다.

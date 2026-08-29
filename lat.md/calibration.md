@@ -120,6 +120,12 @@ The AST check distinguishes tensor methods such as `.min()`, `.max()`, `.amin()`
 
 Ordinary PyTorch LayerNorm uses a versioned analytic output-range cache, so its learned scale and bias are reduced once during bound setup and never during repeated `_apply_norm` execution. Parameter, dtype, or configuration mutation requires explicit refresh.
 
+### Static Bound Invariance
+
+Fixed domains remain identical when one activation population is reordered or partitioned into different batch sizes, while Gaussian replica seeds may change sampled values but never potential or time endpoints.
+
+The permanent runtime check covers shared linear, convolution, GPT-2 Conv1D, LayerNorm, and multiplication paths. Model-family integration checks additionally vary activation and token content while requiring the same preprocessing-, parameter-, analytic-, or calibration-derived ranges.
+
 ## Persistence
 
 Calibration artifacts use a versioned immutable schema with complete model, data, numerical, capacity, and ablation metadata.

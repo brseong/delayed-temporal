@@ -1992,6 +1992,103 @@ def verify_no_live_tensor_extrema_bounds() -> None:
     )
 
 
+# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#Static Bound Invariance]]
+def verify_static_bounds_across_batching() -> None:
+    """Verify representative maintained bounds ignore batch content and partitioning.
+
+    The AST audit proves that current tensors cannot directly define a bound. This
+    runtime complement executes shared affine, convolution, normalization, and
+    multiplication paths on one population as a full batch, a permutation, and
+    unequal chunks, requiring identical immutable output-domain metadata throughout.
+    """
+    from utils.transforms.functions import multiplication_operator
+    from utils.transforms.noise import set_gaussian_time_noise
+    from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import (
+        SpikingConv1D,
+    )
+    from utils.transformers.models.spiking_ops import (
+        SpikingConv2d,
+        SpikingLayerNorm,
+        SpikingLinear,
+    )
+
+    # Use one declared rail for every representation of the same population. Batch
+    # reordering and slicing alter current tensor extrema in individual chunks, so
+    # any hidden activation-derived domain would produce a different endpoint.
+    set_gaussian_time_noise(enabled=False)
+    torch.manual_seed(2300)
+    domain = PotentialBounds(-2.0, 2.0)
+    values = torch.tensor(
+        [
+            [-1.8, -0.6, 0.4, 1.1],
+            [1.7, 0.8, -0.3, -1.2],
+            [-0.9, 1.5, -1.4, 0.2],
+            [0.1, -0.2, 0.3, -0.4],
+        ],
+        dtype=torch.float32,
+    )
+    variants = (
+        values,
+        values[torch.tensor([2, 0, 3, 1])],
+        values[:1],
+        values[1:],
+    )
+
+    # Linear and GPT-2 Conv1D use different learned-weight layouts, but both memoize
+    # exact sign-aware intervals by the immutable input domain and parameter version.
+    linear = SpikingLinear(4, 3, theta=2.0).eval()
+    conv1d = SpikingConv1D(3, 4, theta=2.0).eval()
+    linear_domains = tuple(linear(Potential(value, domain)).domain for value in variants)
+    conv1d_domains = tuple(conv1d(Potential(value, domain)).domain for value in variants)
+    assert all(item is linear_domains[0] for item in linear_domains)
+    assert all(item is conv1d_domains[0] for item in conv1d_domains)
+
+    # LayerNorm's analytic finite-feature range and frozen affine propagation likewise
+    # depend only on normalized shape and parameters. Full, reordered, and chunked
+    # batches therefore reuse exactly one cached range object.
+    layer_norm = SpikingLayerNorm(
+        4,
+        theta=4.0,
+        use_spiking_mul=False,
+        use_spiking_log=False,
+        use_spiking_expdiff=False,
+    ).eval()
+    norm_domains = tuple(
+        layer_norm(Potential(value, domain)).domain for value in variants
+    )
+    assert all(item is norm_domains[0] for item in norm_domains)
+
+    # Grouped spatial convolution exercises a different reduction geometry. Changing
+    # only the batch population must retain the same channel/kernel-derived rail.
+    images = values.reshape(4, 1, 2, 2)
+    image_variants = (
+        images,
+        images[torch.tensor([2, 0, 3, 1])],
+        images[:1],
+        images[1:],
+    )
+    conv2d = SpikingConv2d(1, 2, kernel_size=2, theta=2.0).eval()
+    conv2d_domains = tuple(
+        conv2d(Potential(value, domain)).domain for value in image_variants
+    )
+    assert all(item is conv2d_domains[0] for item in conv2d_domains)
+
+    # The composed multiplication operator derives its product endpoints only from
+    # the two declared input rails. It returns equal bounds even though chunk extrema
+    # and execution order differ and no module cache participates.
+    multiplication_domains = tuple(
+        multiplication_operator(
+            value,
+            domain,
+            value.flip(-1),
+            domain,
+            theta=2.0,
+        )[1]
+        for value in variants
+    )
+    assert all(item == multiplication_domains[0] for item in multiplication_domains)
+
+
 def main() -> None:
     """Run every permanent calibration contract check."""
     checks = (
@@ -2011,6 +2108,7 @@ def main() -> None:
         verify_vit_residual_range_reset,
         verify_canonical_table_round_trip,
         verify_no_live_tensor_extrema_bounds,
+        verify_static_bounds_across_batching,
     )
     for check in checks:
         check()

@@ -97,6 +97,35 @@ def verify_immutable_memoized_bounds() -> None:
     assert first == PotentialBounds(-10.0, 10.0)
     assert distinct == PotentialBounds(-12.0, 12.0)
 
+    # Gaussian seed selects only the sampled physical event stream. Run the same
+    # multiplication under two replicas with enough events to make an identical
+    # random output negligibly likely, while retaining one caller-derived fixed rail.
+    drive = torch.linspace(-1.5, 1.5, 128)
+    encoded = torch.linspace(1.5, -1.5, 128)
+    operand_domain = PotentialBounds(-2.0, 2.0)
+    set_gaussian_time_noise(enabled=True, time_std=0.5, seed=41)
+    first_output, first_domain = multiplication_operator(
+        drive,
+        operand_domain,
+        encoded,
+        operand_domain,
+        theta=2.0,
+    )
+    set_gaussian_time_noise(enabled=True, time_std=0.5, seed=42)
+    second_output, second_domain = multiplication_operator(
+        drive,
+        operand_domain,
+        encoded,
+        operand_domain,
+        theta=2.0,
+    )
+
+    # Different samples must not affect any metadata endpoint. Disable shared noise
+    # after the check so following groups start from their own explicit replica state.
+    assert not torch.equal(first_output, second_output)
+    assert first_domain == second_domain == PotentialBounds(-4.0, 4.0)
+    set_gaussian_time_noise(enabled=False)
+
 
 # @lat: [[evaluation#Evaluation and Verification#Gaussian Spike-Time Verification]]
 def verify_broadcast_gaussian_time_inputs() -> None:
