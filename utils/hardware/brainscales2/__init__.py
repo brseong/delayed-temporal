@@ -14,6 +14,22 @@ from .backend import (
     calibration_sha256,
     resolve_physical_neuron_indices,
 )
+from .toy import (
+    ARCHITECTURES,
+    ConvertedToyModel,
+    ToyMLP,
+    convert_float_model,
+    load_dataset_bundle,
+)
+from .toy_pooling import (
+    GroupedHardwarePoolBackend,
+    MockToyPoolBackend,
+    ReplayToyPoolBackend,
+    ToyPoolConfig,
+    ToyPoolResult,
+    resolve_grouped_physical_coordinates,
+)
+from .hagen import HagenConfig, HagenPWMBackend
 
 __all__ = [
     "BrainScaleS2PoolConfig",
@@ -26,4 +42,17 @@ __all__ = [
     "PoolBackend",
     "calibration_sha256",
     "resolve_physical_neuron_indices",
+    "ARCHITECTURES",
+    "ConvertedToyModel",
+    "ToyMLP",
+    "convert_float_model",
+    "load_dataset_bundle",
+    "GroupedHardwarePoolBackend",
+    "MockToyPoolBackend",
+    "ReplayToyPoolBackend",
+    "ToyPoolConfig",
+    "ToyPoolResult",
+    "resolve_grouped_physical_coordinates",
+    "HagenConfig",
+    "HagenPWMBackend",
 ]
