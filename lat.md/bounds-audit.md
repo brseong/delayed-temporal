@@ -361,7 +361,7 @@ Shared operator의 activation-derived call site는 모두 제거되었고 forwar
 |---|---:|---|---|
 | [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#_gaussian_forward]] | 0 | sampling 전에 ablation별 weight/bias/output domain을 freeze하고 동일 immutable output domain을 재사용함 | 완료 |
 | [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#forward]] | 0 | Gaussian 경로와 동일한 ablation별 immutable weight/bias/output domain을 재사용함 | 완료 |
-| [[utils/transformers/models/spiking_ops.py#_apply_norm]] | 0 | ordinary `nn.LayerNorm`에 $|z_i|\leq\sqrt{d-1}$와 $\gamma,\beta$ interval 적용 | 완료; calibration으로 더 좁힐 수 있음 |
+| [[utils/transformers/models/spiking_ops.py#_apply_norm]] | 0 | ordinary `nn.LayerNorm`에 $|z_i|\leq\sqrt{d-1}$와 versioned frozen $\gamma,\beta$ interval 적용 | 완료; calibration으로 더 좁힐 수 있음 |
 | [[utils/transformers/models/spiking_ops.py#SpikingLinear#forward]] | 0 | deterministic/Gaussian output이 frozen absolute-sum rail을 공유하며 forward-time parameter scan 없음 | 완료 |
 | [[utils/transformers/models/spiking_ops.py#SpikingConv2d#forward]] | 0 | grouped output-channel absolute-sum rail을 freeze하며 forward-time parameter scan 없음 | 완료 |
 
@@ -515,7 +515,7 @@ Dependency 순서대로 fixed range를 도입하면 각 단계에서 current ten
 8. ViT, BERT, RoBERTa, GPT-2 model entry를 embedding interval arithmetic 또는 calibration range로 교체한다. 네 model family의 live extrema 제거는 완료되었고 ViT와 GPT-2는 frozen entry calibration도 지원한다.
 9. Direct GELU, `gelu_new`, SiLU와 dense ablation path에 activation별 fixed range를 적용한다. ViT의 bounded activation 경로는 analytic range로 완료되었다.
 10. Pooler와 task head가 final hidden-state range를 slice와 함께 전달하도록 한다.
-11. Source audit와 batch-order, batch-size, Gaussian-seed invariance verification을 permanent verification에 추가한다.
+11. Source audit와 batch-order, batch-size, Gaussian-seed invariance verification을 permanent verification에 추가한다. Direct 및 local-alias tensor extrema source audit은 완료되었고 model-wide batch partition invariance 확장이 남아 있다.
 
 ## 검증 기준
 
@@ -546,4 +546,4 @@ Migration 완료는 numerical output뿐 아니라 declared potential range의 �
 
 Audit 자체는 완료되었지만 구현은 아직 fixed potential range contract를 만족하지 않는다.
 
-Transform algebra, time window, attention, LayerNorm, affine, embedding, activation, residual의 maintained forward range는 모두 static하며 ViT와 GPT-2 artifact lifecycle이 연결되었다. 남은 작업은 최종 source-audit 자동 검증과 post-norm model family의 선택적 range tightening이다.
+Transform algebra, time window, attention, LayerNorm, affine, embedding, activation, residual의 maintained forward range는 모두 static하며 ViT와 GPT-2 artifact lifecycle 및 AST source audit이 연결되었다. 남은 작업은 post-norm model family와 attention score의 선택적 range tightening 및 full-dataset validation이다.

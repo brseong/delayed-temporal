@@ -142,7 +142,7 @@ def multiplication_operator(
     # Multiplication always uses the symmetric identity-code window physically. Keep
     # that encoder interval separate from the narrower mathematical factor contract
     # so fixed coefficients and bounded gates do not inherit a spurious theta factor.
-    th_val = float(theta) if isinstance(theta, (int, float)) else float(theta.max())
+    th_val = float(theta)
     encoder_domain_B = PotentialBounds(-th_val, th_val)
 
     # Clamping is monotone, so clamping both declared endpoints gives the complete

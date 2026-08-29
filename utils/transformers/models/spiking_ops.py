@@ -1284,6 +1284,121 @@ class SpikingConv2d(nn.Conv2d):
         return Potential(y, output_domain)
 
 
+def freeze_dense_layer_norm_bounds(
+    norm: nn.LayerNorm,
+    *,
+    refresh: bool = False,
+) -> PotentialBounds:
+    """Freeze the analytic output range of an ordinary PyTorch LayerNorm.
+
+    Population normalization over ``d`` features satisfies
+    ``abs(z_i) <= sqrt(d - 1)``. This setup function propagates that fixed interval
+    through the learned featurewise scale and bias once, then stores one scalar
+    module-wide range outside the state dict for all later forward calls.
+
+    Args:
+        norm: Ordinary ``torch.nn.LayerNorm`` whose parameters are already loaded and
+            placed at their inference dtype.
+        refresh: Recompute after an intentional parameter, dtype, or configuration
+            change. The default rejects a stale cache.
+
+    Returns:
+        Immutable analytic output bounds for the current parameter version.
+
+    Raises:
+        TypeError: If ``norm`` is not an ordinary PyTorch LayerNorm or ``refresh`` is
+            not Boolean.
+        RuntimeError: If cached parameters or configuration changed without refresh,
+            or parameters change while the new range is being reduced.
+        ValueError: If epsilon, parameters, or derived endpoints are non-finite.
+    """
+    # Keep this setup path distinct from SpikingLayerNorm, which has its own ablation-
+    # aware parameter-bound cache. Boolean validation prevents truthy numeric aliases
+    # from accidentally discarding a valid cache.
+    if not isinstance(norm, nn.LayerNorm) or isinstance(norm, SpikingLayerNorm):
+        raise TypeError("norm must be an ordinary torch.nn.LayerNorm")
+    if not isinstance(refresh, bool):
+        raise TypeError("refresh must be a bool")
+    if not math.isfinite(float(norm.eps)) or float(norm.eps) < 0.0:
+        raise ValueError("LayerNorm epsilon must be finite and non-negative")
+
+    # Parameter object identity, version, dtype, and analytic configuration define
+    # the cache. Dtype is explicit because an in-place model precision conversion may
+    # round endpoints even if a framework version counter does not expose that write.
+    weight = norm.weight
+    bias = norm.bias
+    identity = (
+        tuple(norm.normalized_shape),
+        float(norm.eps),
+        bool(norm.elementwise_affine),
+        id(weight) if weight is not None else None,
+        weight._version if weight is not None else None,
+        weight.dtype if weight is not None else None,
+        id(bias) if bias is not None else None,
+        bias._version if bias is not None else None,
+        bias.dtype if bias is not None else None,
+    )
+    cached = norm.__dict__.get("_delayed_temporal_frozen_output_bounds")
+    if cached is not None and not refresh:
+        cached_identity, cached_bounds = cached
+        if cached_identity != identity:
+            raise RuntimeError(
+                "LayerNorm parameters or configuration changed after bounds were "
+                "frozen; call freeze_dense_layer_norm_bounds(refresh=True)"
+            )
+        return cached_bounds
+
+    # The no-affine path needs no parameter reduction. For the affine path, float64
+    # setup arithmetic prevents a low-precision checkpoint from rounding a true
+    # endpoint inward while scale signs select opposite normalized endpoints.
+    feature_count = math.prod(norm.normalized_shape)
+    normalized_limit = math.sqrt(max(feature_count - 1, 0))
+    if not norm.elementwise_affine:
+        output_domain = PotentialBounds(-normalized_limit, normalized_limit)
+    else:
+        if weight is None:
+            raise RuntimeError("affine LayerNorm must define a weight parameter")
+        frozen_weight = weight.detach().to(dtype=torch.float64)
+        frozen_bias: torch.Tensor | float = (
+            bias.detach().to(dtype=torch.float64) if bias is not None else 0.0
+        )
+        if not bool(torch.isfinite(frozen_weight).all()):
+            raise ValueError("LayerNorm weight must be finite")
+        if isinstance(frozen_bias, torch.Tensor) and not bool(
+            torch.isfinite(frozen_bias).all()
+        ):
+            raise ValueError("LayerNorm bias must be finite")
+        lower_candidate = frozen_weight * -normalized_limit + frozen_bias
+        upper_candidate = frozen_weight * normalized_limit + frozen_bias
+        lower = torch.minimum(lower_candidate, upper_candidate).min().item()
+        upper = torch.maximum(lower_candidate, upper_candidate).max().item()
+        if not math.isfinite(lower) or not math.isfinite(upper):
+            raise ValueError("LayerNorm parameter-derived bounds must be finite")
+        output_domain = PotentialBounds(lower, upper)
+
+    # Rebuild the identity after reduction so a concurrent parameter mutation cannot
+    # publish an interval assembled from mixed versions. Store ordinary attributes to
+    # keep checkpoints and pretrained state-dict keys unchanged.
+    final_identity = (
+        tuple(norm.normalized_shape),
+        float(norm.eps),
+        bool(norm.elementwise_affine),
+        id(norm.weight) if norm.weight is not None else None,
+        norm.weight._version if norm.weight is not None else None,
+        norm.weight.dtype if norm.weight is not None else None,
+        id(norm.bias) if norm.bias is not None else None,
+        norm.bias._version if norm.bias is not None else None,
+        norm.bias.dtype if norm.bias is not None else None,
+    )
+    if final_identity != identity:
+        raise RuntimeError("LayerNorm parameters changed while bounds were frozen")
+    norm.__dict__["_delayed_temporal_frozen_output_bounds"] = (
+        final_identity,
+        output_domain,
+    )
+    return output_domain
+
+
 def _apply_norm(norm: nn.Module, pot: Potential) -> Potential:
     """Apply a supported LayerNorm while preserving a static potential domain.
 
@@ -1316,37 +1431,14 @@ def _apply_norm(norm: nn.Module, pot: Potential) -> Potential:
             "_apply_norm supports only SpikingLayerNorm or torch.nn.LayerNorm"
         )
 
-    # Compute the ordinary LayerNorm value without changing PyTorch semantics.
-    # Population normalization over d elements satisfies |z_i| <= sqrt(d-1), and
-    # non-negative epsilon can only contract this conservative endpoint interval.
+    # Compute the ordinary LayerNorm value without changing PyTorch semantics. Its
+    # analytic and parameter-derived output rail is established by the explicit cache
+    # function and reused without a parameter reduction on subsequent forwards.
     out = norm(pot.value)
-    feature_count = math.prod(norm.normalized_shape)
-    normalized_limit = math.sqrt(max(feature_count - 1, 0))
+    output_domain = freeze_dense_layer_norm_bounds(norm)
 
-    # LayerNorm without an affine stage returns the normalized value directly. Its
-    # symmetric analytic envelope is independent of input ordering and batch size.
-    if not norm.elementwise_affine:
-        return Potential(
-            out,
-            PotentialBounds(-normalized_limit, normalized_limit),
-        )
-
-    # Apply each learned scale and optional bias to both endpoints. Featurewise
-    # minima and maxima handle negative gamma, while the final reduction produces
-    # the scalar module-wide domain expected by Potential.
-    weight = norm.weight.detach()
-    bias: torch.Tensor | float = (
-        norm.bias.detach() if norm.bias is not None else 0.0
-    )
-    lower_candidate = weight * -normalized_limit + bias
-    upper_candidate = weight * normalized_limit + bias
-    output_domain = PotentialBounds(
-        torch.minimum(lower_candidate, upper_candidate).min().item(),
-        torch.maximum(lower_candidate, upper_candidate).max().item(),
-    )
-
-    # Return the unchanged dense result with a predeclared analytic envelope; no
-    # extrema from ``out`` participate in the physical domain contract.
+    # Return the unchanged dense result with the frozen analytic envelope. Neither
+    # current activations nor learned parameters are reduced in this forward helper.
     return Potential(out, output_domain)
 
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import math
 import sys
@@ -1787,6 +1788,210 @@ def verify_canonical_table_round_trip() -> None:
         )
 
 
+# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#Live Tensor Extrema Source Audit]]
+def verify_no_live_tensor_extrema_bounds() -> None:
+    """Reject tensor-reduction-derived bounds in maintained execution functions.
+
+    The audit parses maintained transform and Transformer Python sources and detects
+    both direct construction such as ``PotentialBounds(x.min(), x.max())`` and simple
+    local data flow where a reduction is assigned before entering a bound constructor.
+    Built-in scalar ``min`` and ``max`` remain valid interval arithmetic.
+
+    Learned-parameter and embedding-table reductions are allowed only inside the
+    explicitly named freeze methods that establish immutable cache entries. Module
+    demonstration code is outside every function and therefore outside production
+    execution scope.
+    """
+    bound_constructor_names = {"OpenBounds", "PotentialBounds", "TimeBounds"}
+    tensor_reduction_names = {"min", "max", "amin", "amax", "nanmin", "nanmax"}
+    allowed_freeze_functions = {
+        "freeze_parameter_bounds",
+        "freeze_embedding_bounds",
+        "freeze_dense_layer_norm_bounds",
+    }
+
+    def call_name(node: ast.Call) -> str | None:
+        """Return the terminal callable name without resolving imported aliases."""
+        # Bounds are imported by their canonical class names throughout maintained
+        # code. Supporting a qualified attribute also catches a future module alias.
+        if isinstance(node.func, ast.Name):
+            return node.func.id
+        if isinstance(node.func, ast.Attribute):
+            return node.func.attr
+        return None
+
+    def contains_tensor_reduction(node: ast.AST) -> bool:
+        """Return whether an expression contains a tensor-style extrema call."""
+        # Method reductions and torch/numpy qualified reductions both appear as an
+        # Attribute call. A plain Name call such as built-in min/max is deliberately
+        # excluded because it combines already fixed scalar interval endpoints.
+        return any(
+            isinstance(candidate, ast.Call)
+            and isinstance(candidate.func, ast.Attribute)
+            and candidate.func.attr in tensor_reduction_names
+            for candidate in ast.walk(node)
+        )
+
+    def assigned_names(target: ast.AST) -> set[str]:
+        """Collect local names written by one ordinary or unpacking assignment."""
+        # Tuple/list unpacking is included so splitting a reduced tensor cannot evade
+        # the simple local data-flow check. Attribute writes are intentionally not
+        # treated as local immutable scalar setup.
+        return {
+            candidate.id
+            for candidate in ast.walk(target)
+            if isinstance(candidate, ast.Name)
+        }
+
+    def expression_uses_names(node: ast.AST, names: set[str]) -> bool:
+        """Return whether an expression reads any locally tainted scalar name."""
+        return any(
+            isinstance(candidate, ast.Name) and candidate.id in names
+            for candidate in ast.walk(node)
+        )
+
+    def function_violations(
+        function: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> tuple[int, ...]:
+        """Find bound constructors reached by direct or local extrema reductions."""
+        if function.name in allowed_freeze_functions:
+            return ()
+
+        # Build a conservative local taint set. Repeating to a fixed point handles
+        # aliases such as ``lo = x.min(); bound_lo = float(lo)`` without attempting
+        # whole-program type inference or following calls across function boundaries.
+        assignments: list[tuple[set[str], ast.AST]] = []
+        for candidate in ast.walk(function):
+            if isinstance(candidate, ast.Assign):
+                targets = set().union(
+                    *(assigned_names(target) for target in candidate.targets)
+                )
+                assignments.append((targets, candidate.value))
+            elif isinstance(candidate, ast.AnnAssign):
+                if candidate.value is not None:
+                    assignments.append(
+                        (assigned_names(candidate.target), candidate.value)
+                    )
+        tainted_names: set[str] = set()
+        changed = True
+        while changed:
+            changed = False
+            for targets, value in assignments:
+                if contains_tensor_reduction(value) or expression_uses_names(
+                    value,
+                    tainted_names,
+                ):
+                    new_names = targets - tainted_names
+                    if new_names:
+                        tainted_names.update(new_names)
+                        changed = True
+
+        # A violation is tied to the constructor line for a precise repair location.
+        # Keyword arguments are included even though current bounds use positional
+        # endpoints, preventing a future named-endpoint form from escaping the audit.
+        violation_lines: list[int] = []
+        for candidate in ast.walk(function):
+            if not isinstance(candidate, ast.Call):
+                continue
+            if call_name(candidate) not in bound_constructor_names:
+                continue
+            expressions = (*candidate.args, *(item.value for item in candidate.keywords))
+            if any(
+                contains_tensor_reduction(expression)
+                or expression_uses_names(expression, tainted_names)
+                for expression in expressions
+            ):
+                violation_lines.append(candidate.lineno)
+        return tuple(sorted(set(violation_lines)))
+
+    def audit_source(source: str, filename: str) -> tuple[str, ...]:
+        """Parse one source string and return stable function/line diagnostics."""
+        tree = ast.parse(source, filename=filename)
+        diagnostics: list[str] = []
+        for candidate in ast.walk(tree):
+            if not isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for line in function_violations(candidate):
+                diagnostics.append(f"{filename}:{line}:{candidate.name}")
+        return tuple(sorted(set(diagnostics)))
+
+    # Verify the verifier first: direct and aliased tensor reductions must fail, while
+    # built-in min/max over fixed endpoints must remain accepted interval arithmetic.
+    assert len(
+        audit_source(
+            "def forward(x):\n"
+            "    return PotentialBounds(x.min().item(), x.max().item())\n",
+            "direct.py",
+        )
+    ) == 1
+    assert len(
+        audit_source(
+            "def helper(x):\n"
+            "    lo = x.amin().item()\n"
+            "    alias = float(lo)\n"
+            "    return TimeBounds(alias, 1.0)\n",
+            "indirect.py",
+        )
+    ) == 1
+    assert audit_source(
+        "def helper(domain_a, domain_b):\n"
+        "    return PotentialBounds(min(domain_a.min, domain_b.min), "
+        "max(domain_a.max, domain_b.max))\n",
+        "interval.py",
+    ) == ()
+
+    # Ordinary LayerNorm now follows the same immutable parameter-cache contract as
+    # the spiking and affine adapters. Different activation batches reuse one domain;
+    # parameter mutation fails until setup explicitly refreshes the cached envelope.
+    from utils.transformers.models.spiking_ops import (
+        _apply_norm,
+        freeze_dense_layer_norm_bounds,
+    )
+
+    dense_norm = nn.LayerNorm(4).eval()
+    input_domain = PotentialBounds(-2.0, 2.0)
+    first_output = _apply_norm(
+        dense_norm,
+        Potential(torch.tensor([[-1.0, -0.5, 0.5, 1.0]]), input_domain),
+    )
+    second_output = _apply_norm(
+        dense_norm,
+        Potential(torch.tensor([[1.5, 0.25, -0.25, -1.5]]), input_domain),
+    )
+    assert first_output.domain is second_output.domain
+    with torch.no_grad():
+        dense_norm.weight.mul_(2.0)
+    _expect_raises(
+        RuntimeError,
+        lambda: _apply_norm(
+            dense_norm,
+            Potential(torch.zeros(1, 4), input_domain),
+        ),
+        "refresh=True",
+    )
+    refreshed_domain = freeze_dense_layer_norm_bounds(dense_norm, refresh=True)
+    assert refreshed_domain != first_output.domain
+
+    # Scan only maintained operator and model-adapter sources. Calibration observers
+    # are included; their extrema may update statistics but cannot flow into a bound
+    # constructor in the same collection invocation.
+    source_roots = (
+        REPOSITORY_ROOT / "utils" / "transforms",
+        REPOSITORY_ROOT / "utils" / "transformers",
+    )
+    violations: list[str] = []
+    for source_root in source_roots:
+        for path in sorted(source_root.rglob("*.py")):
+            relative_path = path.relative_to(REPOSITORY_ROOT).as_posix()
+            violations.extend(
+                audit_source(path.read_text(encoding="utf-8"), relative_path)
+            )
+    assert not violations, (
+        "live tensor extrema reached bound constructors outside explicit parameter "
+        f"freeze methods: {violations!r}"
+    )
+
+
 def main() -> None:
     """Run every permanent calibration contract check."""
     checks = (
@@ -1805,6 +2010,7 @@ def main() -> None:
         verify_gpt2_fixed_range_flow,
         verify_vit_residual_range_reset,
         verify_canonical_table_round_trip,
+        verify_no_live_tensor_extrema_bounds,
     )
     for check in checks:
         check()

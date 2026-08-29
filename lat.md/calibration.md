@@ -112,6 +112,14 @@ Collection removes empty WikiText rows, selects a fixed prefix of a seeded train
 
 The artifact identity includes the filtered selected-dataset fingerprint, tokenizer ID and padding controls, sequence capacity, checkpoint, dataset configuration, TTFS constants, attention implementation, activation, LayerNorm stages, MLP path, and dropout configuration. Frozen runs require exact metadata equality and report strict clipping without widening a range.
 
+### Live Tensor Extrema Source Audit
+
+The permanent source audit rejects maintained execution functions that feed tensor extrema directly or through local aliases into potential or time bound constructors.
+
+The AST check distinguishes tensor methods such as `.min()`, `.max()`, `.amin()`, and `.amax()` from Python built-in `min` and `max` over already fixed scalar endpoints. Learned-parameter and embedding-table reductions are allowed only in named freeze functions that publish immutable versioned caches.
+
+Ordinary PyTorch LayerNorm uses a versioned analytic output-range cache, so its learned scale and bias are reduced once during bound setup and never during repeated `_apply_norm` execution. Parameter, dtype, or configuration mutation requires explicit refresh.
+
 ## Persistence
 
 Calibration artifacts use a versioned immutable schema with complete model, data, numerical, capacity, and ablation metadata.
