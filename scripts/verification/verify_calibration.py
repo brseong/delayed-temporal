@@ -1174,6 +1174,100 @@ def verify_bert_fixed_range_flow() -> None:
         assert pooler(encoded_first).shape == pooler(encoded_second).shape == (1, 4)
 
 
+# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#RoBERTa Fixed Range Flow]]
+def verify_roberta_fixed_range_flow() -> None:
+    """Verify RoBERTa fixed ranges through dense/spiking blocks and task heads."""
+    from utils.transforms.noise import set_gaussian_time_noise
+    from utils.transformers.models.spiking_roberta.configuration_roberta import (
+        RobertaConfig,
+    )
+    from utils.transformers.models.spiking_roberta.modeling_spiking_roberta import (
+        RobertaForMaskedLM,
+        RobertaForSequenceClassification,
+        RobertaModel,
+    )
+
+    def make_config(*, use_spiking_mlp: bool) -> RobertaConfig:
+        """Construct a small evaluation-only RoBERTa configuration."""
+        config = RobertaConfig(
+            vocab_size=32,
+            hidden_size=8,
+            intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            max_position_embeddings=16,
+            type_vocab_size=1,
+            hidden_dropout_prob=0.0,
+            attention_probs_dropout_prob=0.0,
+            use_spiking_layernorm=False,
+            use_spiking_mlp=use_spiking_mlp,
+            hidden_act="gelu",
+            theta=8.0,
+            num_labels=2,
+            pad_token_id=1,
+        )
+        config._attn_implementation = "eager"
+        return config
+
+    # Two token populations with the same shapes must retain identical embedding and
+    # final encoder domains for both dense and spiking MLP implementations. Public
+    # model calls retain Hugging Face outputs; only local wrappers request Potential.
+    set_gaussian_time_noise(enabled=False)
+    first_ids = torch.tensor([[0, 4, 5, 2], [0, 7, 8, 2]])
+    second_ids = torch.tensor([[0, 9, 10, 2], [0, 11, 12, 2]])
+    attention_mask = torch.ones_like(first_ids)
+    for index, use_spiking_mlp in enumerate((False, True)):
+        torch.manual_seed(2000 + index)
+        config = make_config(use_spiking_mlp=use_spiking_mlp)
+        model = RobertaModel(config).eval()
+        public_embeddings = model.embeddings(input_ids=first_ids)
+        first_embeddings = model.embeddings(
+            input_ids=first_ids,
+            return_potential=True,
+        )
+        second_embeddings = model.embeddings(
+            input_ids=second_ids,
+            return_potential=True,
+        )
+        assert isinstance(public_embeddings, torch.Tensor)
+        assert isinstance(first_embeddings, Potential)
+        assert isinstance(second_embeddings, Potential)
+        assert first_embeddings.domain == second_embeddings.domain
+
+        public_output = model(
+            input_ids=first_ids,
+            attention_mask=attention_mask,
+        )
+        internal_output, first_potential = model(
+            input_ids=first_ids,
+            attention_mask=attention_mask,
+            return_potential=True,
+        )
+        _, second_potential = model(
+            input_ids=second_ids,
+            attention_mask=attention_mask,
+            return_potential=True,
+        )
+        assert public_output.last_hidden_state.shape == (2, 4, 8)
+        assert internal_output.last_hidden_state.shape == (2, 4, 8)
+        assert first_potential.domain == second_potential.domain
+
+        # Local wrappers consume the private Potential path but retain their standard
+        # task output classes and shapes at the external API boundary.
+        classifier = RobertaForSequenceClassification(config).eval()
+        classified = classifier(
+            input_ids=first_ids,
+            attention_mask=attention_mask,
+        )
+        assert classified.logits.shape == (2, 2)
+        masked_lm = RobertaForMaskedLM(config).eval()
+        predicted = masked_lm(
+            input_ids=first_ids,
+            attention_mask=attention_mask,
+        )
+        assert predicted.logits.shape == (2, 4, 32)
+
+
 # @lat: [[calibration#Layer-wise Calibration#Frozen Execution#ViT Residual Range Reset]]
 def verify_vit_residual_range_reset() -> None:
     """Verify ViT block residuals collect raw values and consume frozen ranges."""
@@ -1427,6 +1521,7 @@ def main() -> None:
         verify_vit_evaluator_artifact_lifecycle,
         verify_vit_fixed_activation_ranges,
         verify_bert_fixed_range_flow,
+        verify_roberta_fixed_range_flow,
         verify_vit_residual_range_reset,
         verify_canonical_table_round_trip,
     )

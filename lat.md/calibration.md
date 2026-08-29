@@ -90,6 +90,12 @@ BERT freezes its three embedding-table ranges, propagates the normalized `Potent
 
 The public embedding call still returns a tensor by default. The internal model requests `Potential`; custom embedding tensors must fit the frozen word-table range, while an explicit `Potential` may declare a separately established fixed range.
 
+### RoBERTa Fixed Range Flow
+
+RoBERTa freezes embedding and affine parameter ranges, propagates `Potential` across every operator-backed adapter, and preserves the public Hugging Face model-output types.
+
+Dense ablations keep functional PyTorch values but reuse frozen affine intervals. Local language-model and sequence-classification wrappers request the final encoder `Potential` privately so their spiking heads never reconstruct a range from a tensor.
+
 ## Persistence
 
 Calibration artifacts use a versioned immutable schema with complete model, data, numerical, capacity, and ablation metadata.
