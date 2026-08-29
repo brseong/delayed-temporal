@@ -130,7 +130,7 @@ Network artifacts join float, ideal-converted, and physical predictions with com
 
 [[scripts/evaluation/brainscales2_toy_hil.py#main]] separates train, convert, local evaluation, Hagen probe, hardware smoke, and full hardware phases. MNIST hardware evaluation defaults to a 128-sample runtime benchmark until the caller explicitly sets a formal sample count.
 
-The EBRAINS notebook keeps all run flags disabled by default, requires distinct explicit Hagen and spiking calibration paths, configures the shared client from a writable `/tmp` demo checkout, and delegates every experiment to the CLI.
+The EBRAINS notebook keeps all run flags disabled by default, configures the shared client from a writable `/tmp` demo checkout, and delegates every experiment to the CLI. After chip allocation it downloads distinct nightly Hagen and spiking calibrations into the run directory when explicit override paths are absent, then passes both checksum-addressable files to every hardware phase.
 
 ## Toy ANN2SNN Verification
 

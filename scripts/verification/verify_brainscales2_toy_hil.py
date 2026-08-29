@@ -295,6 +295,11 @@ def verify_python311_and_notebook_contract() -> None:
     assert "RUN_YINYANG_FULL = False" in source
     assert "brainscales2_toy_hil.py" in source
     assert "--max-test-samples" in source
+    assert "save_nightly_calibration" in source
+    assert "hagen_cocolist.pbin" in source
+    assert "spiking_cocolist.pbin" in source
+    assert "HAGEN_CALIBRATION_PATH is None" in source
+    assert "SPIKING_CALIBRATION_PATH is None" in source
 
 
 def main() -> None:
