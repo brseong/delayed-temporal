@@ -40,6 +40,7 @@ from utils.hardware.brainscales2.toy_pooling import (
     ReplayToyPoolBackend,
     TimingCalibration,
     ToyPoolConfig,
+    concatenate_toy_pool_results,
     decode_pool_observations,
     resolve_grouped_physical_coordinates,
 )
@@ -193,6 +194,41 @@ def verify_mock_and_all_miss_policy() -> None:
     )
     assert bool(decoded.all_miss.all())
     assert int(decoded.decoded_uint5.sum()) == 0
+
+
+def verify_chunked_pool_aggregation() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Chunked pool aggregation]]
+    spiking = BrainScaleS2PoolConfig(
+        trials=4,
+        pool_sizes=(2,),
+        placements=("same-quadrant",),
+        routings=("broadcast",),
+    )
+    config = ToyPoolConfig(
+        pool_size=2,
+        logical_neurons=2,
+        inference_trials=2,
+        calibration_trials=4,
+        seed=29,
+        miss_probability=0.0,
+    )
+    backend = MockToyPoolBackend()
+    first = backend.run_uint5(
+        torch.tensor([[0, 31]], dtype=torch.int32), config, spiking
+    )
+    second = backend.run_uint5(
+        torch.tensor([[7, 19]], dtype=torch.int32), config, spiking
+    )
+    joined = concatenate_toy_pool_results([first, second])
+    assert joined.first_spike_s.shape == (2, 2, 2, 2)
+    assert joined.decoded_uint5.shape == (2, 2, 2)
+    torch.testing.assert_close(
+        joined.nominal_input_s,
+        torch.cat((first.nominal_input_s, second.nominal_input_s), dim=0),
+    )
+    assert joined.metadata["chunked"] is True
+    assert joined.metadata["sample_chunk_count"] == 2
+    assert joined.metadata["calibration_strategy"] == "per-sample-chunk"
 
 
 def verify_replay_split_and_reproducibility() -> None:
@@ -351,6 +387,8 @@ def verify_python311_and_notebook_contract() -> None:
     assert "SMOKE_MAX_MULTI_SPIKE_RATE" in source
     assert "SPIKING_INPUT_FAN_IN = 4" in source
     assert "'--input-fan-in', SPIKING_INPUT_FAN_IN" in source
+    assert "POOL_SAMPLE_CHUNK_SIZE = 64" in source
+    assert "'--pool-sample-chunk-size', POOL_SAMPLE_CHUNK_SIZE" in source
     assert source.index("'--phase', 'train'") < source.index(
         "setup_hardware_client()"
     )
@@ -365,6 +403,7 @@ def main() -> None:
     verify_grouped_placement()
     verify_grouped_broadcast_fan_in()
     verify_mock_and_all_miss_policy()
+    verify_chunked_pool_aggregation()
     verify_replay_split_and_reproducibility()
     verify_hagen_host_tiling()
     verify_metrics_and_artifact_schema()

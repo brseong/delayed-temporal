@@ -106,6 +106,68 @@ class ToyPoolResult:
             raise ValueError("physical coordinate grid has an invalid shape")
 
 
+def concatenate_toy_pool_results(
+    results: list[ToyPoolResult],
+) -> ToyPoolResult:
+    """Concatenate sample chunks while preserving raw events and provenance."""
+    if not results:
+        raise ValueError("at least one pool result is required")
+    reference = results[0]
+    sample_chunks: list[dict[str, Any]] = []
+    sample_start = 0
+    for result in results:
+        if (
+            result.pool_size != reference.pool_size
+            or result.placement != reference.placement
+            or result.mapping != reference.mapping
+            or result.first_spike_s.shape[0] != reference.first_spike_s.shape[0]
+            or result.first_spike_s.shape[2:] != reference.first_spike_s.shape[2:]
+            or not torch.equal(
+                result.physical_coordinates, reference.physical_coordinates
+            )
+        ):
+            raise ValueError("pool result chunks do not share one condition")
+        sample_stop = sample_start + result.first_spike_s.shape[1]
+        sample_chunks.append(
+            {
+                "sample_start": sample_start,
+                "sample_stop": sample_stop,
+                "metadata": result.metadata,
+            }
+        )
+        sample_start = sample_stop
+    metadata = dict(reference.metadata)
+    metadata.pop("response_delay_s", None)
+    metadata.update(
+        {
+            "chunked": len(results) > 1,
+            "sample_chunk_count": len(results),
+            "calibration_strategy": "per-sample-chunk",
+            "sample_chunks": sample_chunks,
+        }
+    )
+    return ToyPoolResult(
+        first_spike_s=torch.cat([result.first_spike_s for result in results], dim=1),
+        fired=torch.cat([result.fired for result in results], dim=1),
+        spike_count=torch.cat([result.spike_count for result in results], dim=1),
+        nominal_input_s=torch.cat(
+            [result.nominal_input_s for result in results], dim=0
+        ),
+        pooled_first_spike_s=torch.cat(
+            [result.pooled_first_spike_s for result in results], dim=1
+        ),
+        decoded_uint5=torch.cat(
+            [result.decoded_uint5 for result in results], dim=1
+        ),
+        all_miss=torch.cat([result.all_miss for result in results], dim=1),
+        physical_coordinates=reference.physical_coordinates,
+        pool_size=reference.pool_size,
+        placement=reference.placement,
+        mapping=reference.mapping,
+        metadata=metadata,
+    )
+
+
 class ToyTemporalPoolBackend(Protocol):
     """Common hidden-activation pooling boundary."""
 

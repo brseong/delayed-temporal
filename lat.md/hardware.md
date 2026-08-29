@@ -114,6 +114,8 @@ At `M=16`, dedicated placement uses 480 of 512 neuron circuits. The 128-hidden-u
 
 [[utils/hardware/brainscales2/toy_pooling.py#GroupedHardwarePoolBackend]] constructs one grouped-broadcast `Synapse -> LIF` graph for dedicated mapping. Each logical source expands into the operating point's simultaneous fan-in lanes, which project only to that source's replica block; the network path never substitutes the primitive experiment's unreliable independent-input routing condition.
 
+Full hardware evaluation bounds hxtorch memory by slicing only the sample axis before constructing each grouped graph. Each sample chunk performs label-free timing calibration and inference, then [[utils/hardware/brainscales2/toy_pooling.py#concatenate_toy_pool_results]] restores the original sample order while retaining per-chunk calibration metadata; trials, logical units, replicas, coordinates, and miss masks are not merged or averaged away.
+
 ### Local mock and replay evidence
 
 Synthetic and artifact-replay backends validate accuracy propagation before hardware use but are not promoted to new physical evidence.
@@ -147,6 +149,10 @@ Dedicated 30-by-16 placements must contain 480 unique in-range coordinates with 
 ### Grouped broadcast fan-in
 
 Each logical hidden source must occupy its own simultaneous fan-in lane block and connect every lane only to that logical unit's physical replicas.
+
+### Chunked pool aggregation
+
+Hardware sample chunks must concatenate along the sample axis without altering trial, logical-neuron, replica, coordinate, or miss-mask semantics, and each chunk's calibration provenance must remain explicit.
 
 ### Miss-aware temporal decoding
 

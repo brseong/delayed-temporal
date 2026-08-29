@@ -46,6 +46,7 @@ from utils.hardware.brainscales2.toy_pooling import (
     MockToyPoolBackend,
     ReplayToyPoolBackend,
     ToyPoolConfig,
+    concatenate_toy_pool_results,
 )
 
 
@@ -106,6 +107,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pool-sizes", type=int, nargs="+", default=[1, 2, 4, 8, 16])
     parser.add_argument("--pool-trials", type=int, default=8)
     parser.add_argument("--pool-calibration-trials", type=int, default=32)
+    parser.add_argument("--pool-sample-chunk-size", type=int, default=64)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--train-seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--epochs", type=int)
@@ -193,6 +195,8 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def _validate_architecture(args: argparse.Namespace) -> None:
     architecture = ARCHITECTURES[args.architecture]
+    if args.pool_sample_chunk_size <= 0:
+        raise ValueError("pool_sample_chunk_size must be positive")
     if architecture.task != args.task:
         raise ValueError(
             f"architecture {architecture.name} belongs to {architecture.task}, not {args.task}"
@@ -380,6 +384,35 @@ def _pool_backend(args: argparse.Namespace) -> Any:
     return GroupedHardwarePoolBackend()
 
 
+def _run_temporal_pool(
+    args: argparse.Namespace,
+    temporal_backend: Any,
+    hidden_uint5: torch.Tensor,
+    pool_config: ToyPoolConfig,
+    spiking_config: BrainScaleS2PoolConfig,
+) -> Any:
+    if (
+        args.pool_backend != "hardware"
+        or hidden_uint5.shape[0] <= args.pool_sample_chunk_size
+    ):
+        return temporal_backend.run_uint5(hidden_uint5, pool_config, spiking_config)
+    results = []
+    for start in range(0, hidden_uint5.shape[0], args.pool_sample_chunk_size):
+        stop = min(start + args.pool_sample_chunk_size, hidden_uint5.shape[0])
+        print(
+            f"  pool sample chunk [{start}:{stop}) / {hidden_uint5.shape[0]}",
+            flush=True,
+        )
+        results.append(
+            temporal_backend.run_uint5(
+                hidden_uint5[start:stop],
+                pool_config,
+                spiking_config,
+            )
+        )
+    return concatenate_toy_pool_results(results)
+
+
 def _select_test_data(args: argparse.Namespace, dataset: Any) -> tuple[torch.Tensor, torch.Tensor]:
     limit = args.max_test_samples
     if args.phase == "hardware-smoke":
@@ -454,7 +487,9 @@ def evaluation_phase(args: argparse.Namespace) -> None:
                 flush=True,
             )
             started = perf_counter()
-            pool_result = temporal_backend.run_uint5(
+            pool_result = _run_temporal_pool(
+                args,
+                temporal_backend,
                 first_hidden,
                 pool_config,
                 spiking_config,
@@ -519,6 +554,7 @@ def evaluation_phase(args: argparse.Namespace) -> None:
         "pool_backend": args.pool_backend,
         "pooling_domain": args.pooling_domain,
         "pool_mapping": args.pool_mapping,
+        "pool_sample_chunk_size": args.pool_sample_chunk_size,
         "pool_sizes": pool_sizes,
         "placements": placements,
         "conversion": converted.manifest.to_dict(),
