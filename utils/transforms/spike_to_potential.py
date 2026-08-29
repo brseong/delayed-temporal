@@ -5,7 +5,7 @@ from numbers import Real
 
 from .noise import clamp_gaussian_output, get_gaussian_time_noise
 from .potential_to_spike import neg_identity_transform
-from .types import OpenBounds, PotentialBounds, SpikeSample, TimeBounds, check_domain
+from .types import ClosedBounds, PotentialBounds, SpikeSample, TimeBounds, check_domain
 from .primitive import signed_pulse_width_modulation_operator
 
 @check_domain

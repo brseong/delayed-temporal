@@ -79,6 +79,7 @@ class Arguments:
     spiking_ln_expdiff: bool
     spiking_mlp: bool
     spiking_mlp_exact_gelu: bool
+    spiking_mlp_exact_gelu_layers: tuple[int, ...]
     activation: Literal["relu", "gelu"]
     theta: float
 
@@ -156,7 +157,17 @@ def parse_arguments() -> Arguments:
     parser.add_argument("--spiking-mlp", action=argparse.BooleanOptionalAction, default=True,
                         help="Use φ_NL clip activation in MLP (vs GELU). Implements ψ_L via PWM.")
     parser.add_argument("--spiking-mlp-exact-gelu", action=argparse.BooleanOptionalAction, default=False,
-                        help="If --spiking-mlp is set, bypass approx GELU and use exact PyTorch GELU instead.")
+                        help="Replace every temporal GELU with the same tanh formula evaluated densely.")
+    parser.add_argument(
+        "--spiking-mlp-exact-gelu-layers",
+        type=int,
+        nargs="*",
+        default=(),
+        help=(
+            "Zero-based ViT encoder layers whose temporal GELU is replaced by "
+            "the same tanh formula evaluated densely."
+        ),
+    )
     parser.add_argument("--activation", type=str, choices=["relu", "gelu"], default="gelu",
                         help="Activation function to use when --no-spiking-mlp is set (default: gelu).")
     parser.add_argument("--theta", type=float, default=100.0,
@@ -275,6 +286,7 @@ def parse_arguments() -> Arguments:
         spiking_ln_expdiff=args.spiking_ln_expdiff,
         spiking_mlp=args.spiking_mlp,
         spiking_mlp_exact_gelu=args.spiking_mlp_exact_gelu,
+        spiking_mlp_exact_gelu_layers=tuple(args.spiking_mlp_exact_gelu_layers),
         activation=args.activation,
         theta=args.theta,
         calibration_mode=args.calibration_mode,
@@ -404,6 +416,75 @@ DATASET_CONFIGS = {
     },
 }
 
+def configure_vit_exact_gelu_layers(
+    model: nn.Module,
+    layer_indices: tuple[int, ...],
+) -> None:
+    """Select ViT blocks that evaluate the maintained GELU formula densely.
+
+    The ablation preserves both MLP affine layers and the tanh-approximation
+    formula. It changes only whether the nonlinear formula is assembled from
+    temporal operators, allowing an accuracy difference to be attributed to the
+    selected block's temporal GELU implementation rather than to a different
+    mathematical activation.
+
+    Args:
+        model: A local spiking ViT image-classification model.
+        layer_indices: Unique zero-based encoder-block indices to bypass.
+
+    Raises:
+        ValueError: If an index is duplicated or outside the encoder depth.
+        RuntimeError: If the supplied model does not expose the expected local
+            spiking ViT encoder/intermediate topology.
+    """
+    # An empty selection is the normal production path. Returning before topology
+    # inspection keeps the option harmless for dense backends and ordinary runs.
+    if not layer_indices:
+        return
+
+    # Repeating an index usually indicates a malformed sweep condition. Reject it
+    # instead of silently collapsing the experiment identity to a set.
+    if len(set(layer_indices)) != len(layer_indices):
+        raise ValueError(
+            "spiking_mlp_exact_gelu_layers must contain unique layer indices"
+        )
+
+    # Resolve the local adapter's explicit block list once. A clear topology error
+    # is preferable to partially mutating a model from an incompatible backend.
+    try:
+        encoder_layers = model.vit.encoder.layer
+    except AttributeError as exc:
+        raise RuntimeError(
+            "per-layer exact-GELU ablation requires the local spiking ViT topology"
+        ) from exc
+
+    # Validate the complete selection before changing any module so an invalid
+    # later index cannot leave the model in a partially configured state.
+    depth = len(encoder_layers)
+    invalid = tuple(index for index in layer_indices if index < 0 or index >= depth)
+    if invalid:
+        raise ValueError(
+            f"exact-GELU layer indices {invalid} are outside [0, {depth})"
+        )
+
+    # Resolve and validate every target before mutation. This preserves the same
+    # all-or-nothing behavior when a custom model exposes only part of the adapter.
+    intermediates = tuple(encoder_layers[index].intermediate for index in layer_indices)
+    for index, intermediate in zip(layer_indices, intermediates, strict=True):
+        if not hasattr(intermediate, "_spiking_mlp_exact_gelu"):
+            raise RuntimeError(
+                f"ViT encoder layer {index} has no selectable temporal GELU"
+            )
+
+    # Toggle only the nonlinear branch inside each selected intermediate module.
+    # All unselected blocks retain the temporal GELU and share the same noise run.
+    for intermediate in intermediates:
+        intermediate._spiking_mlp_exact_gelu = True
+
+    print(
+        "Dense-formula GELU ablation layers: "
+        + ", ".join(str(index) for index in layer_indices)
+    )
 
 def apply_parameter_noise(model: nn.Module, weight_std: float, bias_std: float):
     if weight_std <= 0 and bias_std <= 0:
@@ -485,6 +566,21 @@ def evaluate_vit_model(args: Arguments) -> None:
         model_backend == "spiking" and args.gaussian_time_noise
     )
 
+    # Per-layer selection has meaning only inside the temporal MLP path. Reject
+    # combinations that would otherwise record a requested but inactive ablation.
+    if args.spiking_mlp_exact_gelu_layers and model_backend != "spiking":
+        raise ValueError(
+            "per-layer exact-GELU ablation requires --model_backend spiking"
+        )
+    if args.spiking_mlp_exact_gelu_layers and not args.spiking_mlp:
+        raise ValueError(
+            "per-layer exact-GELU ablation requires --spiking-mlp"
+        )
+    if args.spiking_mlp_exact_gelu_layers and args.spiking_mlp_exact_gelu:
+        raise ValueError(
+            "choose either all-layer or per-layer exact-GELU ablation, not both"
+        )
+
     # A process-wide generator cannot represent independent per-device replica
     # streams under DataParallel, so reject that topology before external setup.
     use_data_parallel = device.type == "cuda" and torch.cuda.device_count() > 1
@@ -542,6 +638,10 @@ def evaluate_vit_model(args: Arguments) -> None:
         if args.spiking_layernorm:
             print(f"  LN stages — mul: {args.spiking_ln_mul}, log: {args.spiking_ln_log}, expdiff: {args.spiking_ln_expdiff}")
         print(f"Spiking MLP: {args.spiking_mlp}")
+        print(
+            "Per-layer dense-formula GELU: "
+            f"{args.spiking_mlp_exact_gelu_layers or 'none'}"
+        )
 
     # ---------------------------------------------------------
     # 2. 데이터셋 및 전처리 도구 로드
@@ -652,6 +752,11 @@ def evaluate_vit_model(args: Arguments) -> None:
         config.pixel_value_min = pixel_domain.min
         config.pixel_value_max = pixel_domain.max
         model = ViTForImageClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl, torch_dtype=dtype)
+
+        configure_vit_exact_gelu_layers(
+            model,
+            args.spiking_mlp_exact_gelu_layers,
+        )
     
     # Build the clean artifact identity before applying any robustness perturbation.
     # The selected dataset fingerprint includes the training data revision and exact

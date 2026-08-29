@@ -2,7 +2,7 @@ import torch
 from jaxtyping import Float, Int
 from math import log, exp, isfinite
 from numbers import Real
-from .types import OpenBounds, PotentialBounds, SpikeSample, TimeBounds, check_domain
+from .types import ClosedBounds, PotentialBounds, SpikeSample, TimeBounds, check_domain
 
 
 @check_domain

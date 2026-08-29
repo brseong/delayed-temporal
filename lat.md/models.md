@@ -38,7 +38,7 @@ BERT and RoBERTa preserve their post-norm encoder structure while replacing proj
 
 [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertModel]] and [[utils/transformers/models/spiking_roberta/modeling_spiking_roberta.py#RobertaModel]] initialize bounded potentials after embeddings and return standard sequence-classification outputs through their task wrappers.
 
-Their self-attention adapters use `max_position_embeddings` as fixed $S_{\max}$ for the spiking output rail. Eager evaluation retains the projected-value range, while training dropout expands it analytically by $1/(1-p)$ and includes zero.
+Their self-attention adapters use `max_position_embeddings` as fixed $S_{\max}$ for the spiking output rail. The eager path retains the projected-value range in evaluation and expands it analytically by $1/(1-p)$ during training. The spiking path is fixed for evaluation; nonzero training dropout remains outside the paper scope.
 
 Both adapters support accuracy experiments on SST-2, AG News, and IMDB through parallel runners. Their model configs expose stage-level LayerNorm switches, attention backend selection, MLP selection, `theta`, and `tau_s`.
 
@@ -48,7 +48,7 @@ GPT-2 adapts causal self-attention, cache-aware decoding, pre-norm blocks, and t
 
 [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Model]] wraps token-plus-position embeddings, propagates a bounded potential through causal blocks, and returns standard cache-aware outputs. [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2LMHeadModel]] retains the tied conventional language-model head.
 
-[[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Attention#forward]] uses `max_position_embeddings` for the spiking attention rail, preserves the combined projection range for dense attention, and propagates attention and residual dropout ranges analytically without runtime extrema.
+[[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Attention#forward]] uses `max_position_embeddings` for the spiking attention rail and preserves the combined projection range for dense attention. Eager attention and residual dropout propagate analytic ranges without runtime extrema; nonzero spiking attention training dropout remains outside the paper scope.
 
 The adapter does not support cross-attention in its spiking `GPT2Attention`. Its current MLP uses spiking projections when enabled but evaluates the configured activation directly, so model-family claims must record which nonlinear path is actually operator-composed.
 
@@ -56,7 +56,7 @@ The adapter does not support cross-attention in its spiking `GPT2Attention`. Its
 
 Attention is registered as a Hugging Face backend named `spiking_sdpa` and selected through each model’s configuration.
 
-Evaluation runners choose `spiking_sdpa` only for the spiking backend on non-CPU devices; otherwise they use eager tensor attention. Model self-attention classes pass `theta` and `tau_s` into [[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_sdpa_attention_forward]].
+Evaluation runners choose `spiking_sdpa` only for the spiking backend on non-CPU devices; otherwise they use eager tensor attention. Model adapters derive one attention `tau` from model-wide `tau_s` and pass `theta`, `tau`, and fixed `source_length_max` to [[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_sdpa_attention_forward]], whose module binding supplies score calibration.
 
 This backend boundary keeps Q/K/V projection ownership in each model while centralizing score normalization and value accumulation. It also allows attention to be disabled independently during ablations.
 

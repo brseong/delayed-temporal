@@ -70,7 +70,7 @@ In maintained event-aware execution, division passes both decorated log events i
 
 The attention normalization path represents a negated score followed by exponential normalization as softmin.
 
-[[utils/transforms/functions.py#exponential_function]] composes affine encoding and an exponential temporal operator. [[utils/transforms/functions.py#softmin_function]] exponentiates scores, reduces the denominator, and invokes division to normalize along the last dimension. Its public output domain is always the structural normalized-weight interval $[0,1]$; Gaussian observation-time excursions are counted at `softmin.output` before the returned tensor is clamped to those rails.
+[[utils/transforms/functions.py#exponential_function]] composes affine encoding and an exponential temporal operator. [[utils/transforms/functions.py#softmin_function]] exponentiates scores, reduces the denominator, and invokes division to normalize along the last dimension. It exposes one `tau` scale and maps that value to the generic exponential and logarithmic sub-operators. Its public output domain is always the structural normalized-weight interval $[0,1]$; Gaussian observation-time excursions are counted at `softmin.output` before the returned tensor is clamped to those rails.
 
 Scaled dot product is implemented by [[utils/transforms/functions.py#scaled_dot_product_function]], which sums pairwise products and negates the usual attention logits. Applying softmin to those negated scores recovers the conventional softmax direction.
 
@@ -92,7 +92,7 @@ Dense and convolutional layers retain pretrained parameters but express multiply
 
 These classes subclass PyTorch’s corresponding modules so parameter names and shapes remain checkpoint-compatible. In the noise-free tensor simulation they are intended to be numerically equivalent subject to clamping and floating-point arithmetic.
 
-The three affine adapters freeze parameter-derived safety rails after checkpoint loading and static perturbation. [[utils/transformers/models/spiking_ops.py#SpikingLinear#freeze_parameter_bounds]] and [[utils/transformers/models/spiking_ops.py#SpikingConv2d#freeze_parameter_bounds]] reduce each output row or grouped kernel, while [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#SpikingConv1D#freeze_parameter_bounds]] reduces the transposed weight's input dimension. Each uses $r_j=\theta\sum_i|W_{ji}|$ with optional bias, reuses an immutable result, and rejects later standard in-place parameter or threshold changes unless explicitly refreshed.
+The three affine adapters freeze parameter-derived safety rails after checkpoint loading and static perturbation. [[utils/transformers/models/spiking_ops.py#SpikingLinear#freeze_parameter_bounds]] and [[utils/transformers/models/spiking_ops.py#SpikingConv2d#freeze_parameter_bounds]] reduce each output row or grouped kernel, while [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#SpikingConv1D#freeze_parameter_bounds]] reduces the transposed weight's input dimension. For an upstream interval $[l,u]$, each weight selects the smaller and larger of $W_{ji}l$ and $W_{ji}u$ before reduction and optional bias addition. The symmetric formula $r_j=\theta\sum_i|W_{ji}|$ is only the special case $[l,u]=[-\theta,\theta]$. Each adapter reuses the resulting immutable interval and rejects later standard in-place parameter changes unless explicitly refreshed.
 
 [[utils/transformers/models/spiking_ops.py#SpikingLinear#forward]], [[utils/transformers/models/spiking_ops.py#SpikingConv2d#forward]], and [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#SpikingConv1D#forward]] attach the same frozen rail to deterministic and Gaussian outputs, so changing noise configuration does not change metadata. Their Gaussian helpers use it directly for saturation accounting and clamping without rescanning weight or bias bounds.
 
@@ -134,7 +134,7 @@ In noise-free execution, the scalar zero-reference time cancels algebraically an
 
 Every operator has domain conditions that are part of its contract rather than optional implementation details.
 
-- Affine TTFS multiplication assumes the encoded operand lies inside the calibrated symmetric range.
+- The generic multiplication operator encodes its factor on the symmetric $[-\theta,\theta]$ rail, while affine adapters require their upstream fixed input interval to be finite, ordered, and contain zero.
 - Log encoders require strictly positive inputs and synchronized domains when offsets must cancel.
 - Division assumes the numerator does not exceed the denominator in its current contract.
 - Exponential paths require a bounded input range to avoid overflow or underflow.

@@ -284,8 +284,9 @@ def build_gpt2_calibration_metadata(
         )
     )
 
-    # GPT-2 evaluator execution is float32 today. tau_m follows the attention and
-    # LayerNorm implementation, which use tau_s as the configured membrane constant.
+    # GPT-2 evaluator execution is float32 today. The common metadata schema still
+    # has a tau_m slot, so it stores the same value as tau_s rather than a second
+    # attention scale.
     theta = float(getattr(config, "theta"))
     tau_s = float(getattr(config, "tau_s"))
     return CalibrationMetadata(

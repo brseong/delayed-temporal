@@ -142,15 +142,15 @@ The permanent runtime check covers shared linear, convolution, GPT-2 Conv1D, Lay
 
 Each spiking attention layer covered by the ViT or GPT-2 artifact lifecycle freezes one symmetric softmin score range from a noise-free pre-clamp score distribution, while an analytic representability ceiling prevents exponential underflow.
 
-For layer $\ell$, let $q_\ell=Q_p(|s_\ell|)$. Because the configured per-side margin $m$ is a fraction of the full symmetric width $2q_\ell$, calibration selects $c_{\ell,\mathrm{cal}}=q_\ell+2mq_\ell=(1+2m)q_\ell$. With dtype minimum normal $f_{\min}$, temporal scale $\tau_s$, source capacity $S_{\max}$, and log safety margin $\eta$, the representable radius is
+For layer $\ell$, let $q_\ell=Q_p(|s_\ell|)$. Because the configured per-side margin $m$ is a fraction of the full symmetric width $2q_\ell$, calibration selects $c_{\ell,\mathrm{cal}}=q_\ell+2mq_\ell=(1+2m)q_\ell$. With dtype minimum normal $f_{\min}$, temporal scale $\tau$, source capacity $S_{\max}$, and log safety margin $\eta$, the representable radius is
 
 $$
-c_{\mathrm{repr}}=\frac{\tau_s}{2}\left(-\log f_{\min}-\log S_{\max}-\eta\right).
+c_{\mathrm{repr}}=\frac{\tau}{2}\left(-\log f_{\min}-\log S_{\max}-\eta\right).
 $$
 
 The frozen layer radius is $c_\ell=\min(c_{\ell,\mathrm{cal}},c_{\mathrm{repr}},\theta)$. Collection observes raw scores but executes softmin on the representable safety rail; validation and inference clamp directly to $[-c_\ell,c_\ell]$ and count strict excursions without updating it.
 
-Masked positions are overwritten with $+c_\ell$ after score clamping in the negated-score convention. The artifact persists the quantiles, margin, symmetric analytic ceiling, dtype, $\tau_s$, and $S_{\max}$, so a precision or capacity change invalidates reuse.
+Masked positions are overwritten with $+c_\ell$ after score clamping in the negated-score convention. The artifact persists the quantiles, margin, symmetric analytic ceiling, dtype, model-wide `tau_s`, and $S_{\max}$; attention uses $\tau=\tau_s$, and the common metadata schema mirrors that value in its `tau_m` slot. A precision, scale, or capacity change invalidates reuse.
 
 The maintained scalar bound contract supports one calibrated radius per attention layer. Per-head calibration would require vector-valued domain metadata and is outside this lifecycle.
 

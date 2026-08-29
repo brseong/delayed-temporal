@@ -24,7 +24,7 @@ from typing import Callable, TypedDict
 import torch
 from torch import Tensor
 
-from .types import OpenBounds, Potential, SpikeSample, TimeBounds
+from .types import ClosedBounds, Potential, SpikeSample, TimeBounds
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +155,7 @@ def _stats_for(site: str) -> GaussianNoiseCounts:
 
 def clamp_gaussian_output(
     value: Tensor,
-    domain: OpenBounds,
+    domain: ClosedBounds,
     *,
     site: str,
     name: str,
@@ -501,7 +501,7 @@ def _sample_gaussian_spike_time(
 # Gaussian encoder injection boundary
 # ---------------------------------------------------------------------------
 
-def inject_spike_time_noise[**P, OutT: OpenBounds](
+def inject_spike_time_noise[**P, OutT: ClosedBounds](
     func: Callable[P, tuple[Tensor, OutT]],
 ) -> Callable[P, tuple[Tensor, OutT] | SpikeSample]:
     """Decorate a deterministic encoder with event-aware Gaussian time noise.

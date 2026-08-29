@@ -556,8 +556,10 @@ def build_vit_calibration_metadata(
         )
     )
 
+    # Attention exposes one tau derived from the model-wide tau_s. The common
+    # metadata schema still has a tau_m slot, so store the same value rather than
+    # creating a second attention scale that execution does not consume.
     # CalibrationMetadata validation remains centralized in collector/runtime setup.
-    # Conversion here uses only ordinary immutable scalars and tuples.
     return CalibrationMetadata(
         model_family="vit",
         model_id=model_id,
@@ -567,7 +569,7 @@ def build_vit_calibration_metadata(
         dtype=dtype,
         theta=float(getattr(config, "theta")),
         tau_s=float(getattr(config, "tau_s")),
-        tau_m=float(getattr(config, "tau_m")),
+        tau_m=float(getattr(config, "tau_s")),
         clip_margin=float(getattr(config, "clip_margin", 1.0e-5)),
         max_sequence_length=None,
         input_shape=(num_channels, image_hw[0], image_hw[1]),

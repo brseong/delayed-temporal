@@ -6,7 +6,7 @@ The project models analog values, TTFS spike times, and their valid ranges as ex
 
 A `Potential` is a tensor paired with a declared `PotentialBounds` envelope, not a simulated membrane-neuron object.
 
-[[utils/transforms/types.py#Potential]] is the carrier used by Transformer layers. [[utils/transforms/types.py#OpenBounds]] is an immutable range with a clamping operation, while `PotentialBounds` and `TimeBounds` distinguish voltage-like and time-like quantities at the type level. Derived ranges require new objects rather than endpoint mutation.
+[[utils/transforms/types.py#Potential]] is the carrier used by Transformer layers. [[utils/transforms/types.py#ClosedBounds]] is an immutable range with a clamping operation, while `PotentialBounds` and `TimeBounds` distinguish voltage-like and time-like quantities at the type level. Derived ranges require new objects rather than endpoint mutation.
 
 Bounds serve three roles:
 
@@ -14,7 +14,7 @@ Bounds serve three roles:
 - They support interval arithmetic for composed output ranges.
 - They provide explicit locations for clipping diagnostics.
 
-Although `OpenBounds` is named as an open interval, its runtime clamp includes numeric endpoints. Documentation and proofs should therefore distinguish the intended mathematical domain from the representable clamped envelope.
+`ClosedBounds` denotes the inclusive representable envelope used by clamping, domain membership, and deadline classification. Whether endpoint values are finite and ordered is a separate constructor-validation contract.
 
 ## Domain Propagation
 
@@ -22,7 +22,7 @@ The intended model-wide policy combines tight, depth-independent interval arithm
 
 For example, spiking linear layers derive local output bounds from fixed input and weight intervals. Pre-norm residual streams do not recursively add those intervals across all blocks; each post-add block output instead uses a frozen calibrated range and records excursions before clamping.
 
-Some fallback and nonlinear paths still construct bounds from observed output minima and maxima. Those paths are useful for simulation but are data-dependent and should not be presented as fixed hardware calibration without an explicit calibration protocol.
+Maintained paths no longer construct bounds from observed forward-output extrema. Analytic intervals and frozen calibration records now define every production envelope; some remain intentionally conservative and require empirical clipping and accuracy validation.
 
 The planned removal of runtime-derived bounds across all maintained operators and model adapters is tracked in [[todo#Static Bounds for All Operators]]. The completed inventory and replacement formulas are [[bounds-audit]].
 
@@ -46,7 +46,7 @@ Time-to-potential operators turn latency differences into exponential analog val
 
 [[utils/transforms/spike_to_potential.py#normalized_exp_operator]] evaluates `exp(t/tau_m)` and transforms its declared endpoints in the input tensor’s dtype. It rejects invalid time constants plus endpoint overflow or positive-domain underflow before decoding the payload.
 
-The Gaussian direct exponential applies the same offset-adjusted `t/tau_m` slope and validates delivered endpoints before sampling. Misses still return reset zero rather than decoding their stored deadline carrier.
+Both deterministic and Gaussian direct exponentials cancel the identity encoder's fixed offset inside the exponent before evaluation, avoiding an overflowing intermediate that a later gain would only cancel algebraically. Misses still return reset zero rather than decoding their stored deadline carrier.
 
 The event-aware exponential-difference path evolves and clamps its integration state, re-encodes it, then evaluates `exp(delta/tau_s)` with dtype-safe endpoint checks. An internal event miss returns exp-temporal reset zero rather than decoding its stored deadline carrier.
 
@@ -72,11 +72,11 @@ Operations with positive-only logarithmic encoding represent a signed centered v
 
 ## Scale Parameters
 
-`theta`, `tau_s`, and finite domain endpoints jointly determine representable magnitude, latency, clipping, and numerical conditioning.
+`theta`, the applicable temporal scale, and finite domain endpoints jointly determine representable magnitude, latency, clipping, and numerical conditioning.
 
 - `theta` remains the default symmetric calibration scale and the basis of the global absolute Gaussian time-noise standard deviation. Affine adapters themselves consume the upstream fixed potential interval and derive the zero-reference time from that interval.
 - `tau_s` controls log-encoding and exponential-difference scale.
-- `tau_m` appears in exponential operator interfaces, but not every stabilized implementation currently uses it consistently.
+- `tau_m` remains the generic exponential-operator parameter. Softmin and attention expose one `tau`, derived from the model-wide `tau_s`, and have no separate `tau_m` or `tau_s` keyword.
 - `clip_margin` keeps LayerNorm logarithmic rails away from zero and below `theta`, while `eps` independently stabilizes its variance denominator.
 
 These quantities are configuration and calibration assumptions, not learned circuit characteristics. Their trade-offs are discussed in [[decisions#Explicit Finite Domains and Clamping]].

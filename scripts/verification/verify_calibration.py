@@ -404,18 +404,18 @@ def verify_attention_score_range_calibration() -> None:
     # equation independently and require source capacity and dtype to affect the
     # result while theta remains the outer physical cap.
     theta = 80.0
-    tau_s = 1.0
+    tau = 1.0
     source_length_max = 512
     float32_bounds = attention_score_representability_bounds(
         theta,
-        tau_s,
+        tau,
         source_length_max,
         torch.float32,
     )
     expected_radius = min(
         theta,
         0.5
-        * tau_s
+        * tau
         * (
             -math.log(torch.finfo(torch.float32).tiny)
             - math.log(source_length_max)
@@ -426,7 +426,7 @@ def verify_attention_score_range_calibration() -> None:
     assert float32_bounds.min == -float32_bounds.max
     assert attention_score_representability_bounds(
         theta,
-        tau_s,
+        tau,
         source_length_max,
         torch.float16,
     ).max < float32_bounds.max
@@ -463,7 +463,7 @@ def verify_attention_score_range_calibration() -> None:
             query,
             key,
             value,
-            tau_m=1.0,
+            tau=1.0,
             theta=8.0,
             source_length_max=2,
             score_calibration_module=owner,
@@ -2105,7 +2105,7 @@ def verify_no_live_tensor_extrema_bounds() -> None:
     demonstration code is outside every function and therefore outside production
     execution scope.
     """
-    bound_constructor_names = {"OpenBounds", "PotentialBounds", "TimeBounds"}
+    bound_constructor_names = {"ClosedBounds", "PotentialBounds", "TimeBounds"}
     tensor_reduction_names = {"min", "max", "amin", "amax", "nanmin", "nanmax"}
     allowed_freeze_functions = {
         "freeze_parameter_bounds",

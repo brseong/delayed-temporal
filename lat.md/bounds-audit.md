@@ -4,18 +4,19 @@
 
 ## 결론
 
-현재 maintained model adapter에는 live activation으로 `PotentialBounds`를 만드는 production 위치가 없다. GPT-2 residual은 analytic sum과 optional frozen calibration을 사용하며 evaluator artifact lifecycle도 연결되었다.
+2026-08-29 재검토 기준으로 maintained model adapter에는 live activation으로 `PotentialBounds`를 만드는 production 위치가 없다. 병합된 calibration 구현은 ViT와 GPT-2의 model entry, residual, GELU pre-activation, attention score를 frozen artifact로 고정한다.
 
 Transform operator의 time window는 고정되어 있다. 최초 감사의 32곳 중 GPT-2 attention의 2곳, Gaussian 및 deterministic LayerNorm의 각 3곳, ordinary LayerNorm helper의 1곳은 fixed/analytic range로 교체되었다.
 
 핵심 결과는 다음과 같다.
 
-- `utils/transforms/`의 production operator는 입력 range, threshold $\theta$, time constant $\tau_s,\tau_m$, tensor shape에 대한 interval arithmetic으로 output range를 계산한다. `TimeBounds`를 live activation extrema로 만드는 위치는 없다.
+- `utils/transforms/`의 production operator는 입력 range, threshold $\theta$, applicable time constant $\tau,\tau_s,\tau_m$, tensor shape에 대한 interval arithmetic으로 output range를 계산한다. `TimeBounds`를 live activation extrema로 만드는 위치는 없다.
 - 최초 감사에서 shared model operator와 네 model family의 live activation extrema 위치는 각각 7, 4, 4, 9, 8곳이었다. Shared operator와 네 model adapter를 모두 전환한 현재 합계는 0곳이다.
 - `SpikingLinear`, `SpikingConv2d`, `SpikingConv1D`는 upstream fixed input range의 양 끝점을 weight 부호별로 선택해 exact affine range를 memoize하고 이후 parameter mutation을 검증한다. `SpikingLayerNorm`의 Gaussian과 deterministic 경로도 ablation별 frozen weight, bias, output domain을 공유한다.
-- ViT, BERT, RoBERTa, GPT-2 attention adapter는 이제 Gaussian value integration의 fixed range $[-S_{\max}\theta,S_{\max}\theta]$를 spiking backend와 공유한다.
+- ViT, BERT, RoBERTa, GPT-2 attention adapter는 Gaussian value integration의 fixed ideal rail $[-S_{\max}\theta,S_{\max}\theta]$를 spiking backend와 공유하고, noisy raw excursion을 saturation으로 기록한 뒤 같은 rail에 clamp한다.
 - 기존 quantile 수집은 진단용으로 남아 있다. ViT와 GPT-2 layer-wise calibration은 별도 artifact에 signed extrema, fixed-bin histogram, quantile, margin, training-subset identity, layer clipping을 보존한다.
 - ViT, BERT, RoBERTa, GPT-2는 parameter range, model input, activation, attention output, residual range의 live activation extrema 제거를 완료했다. Pre-norm ViT와 GPT-2는 depth-wise residual reset artifact도 지원한다.
+- 남은 문제는 live-bound 제거가 아니라 central endpoint validation 방식과 정적이지만 지나치게 넓은 LayerNorm·attention·affine rail의 empirical clipping 및 accuracy 검증이다.
 
 ## 감사 범위와 판정 기준
 
@@ -133,7 +134,7 @@ $$
 
 로 계산할 수 있다. 두 $\psi_{\mathrm{ED}}$ 출력이 non-negative dual rail이면 $U=\max(u_+,u_-)$에 대한 완화된 대칭 range $[-U,U]$도 유효하다. 구현은 이 직관적인 대칭 range를 learned $\gamma$와 곱하고 $\beta$를 더해 observed result 없이 final output range를 정한다.
 
-Dense LayerNorm 분기는 pre-affine normalized value $z_k$를 noise-free calibration으로 측정한 뒤, fixed $z_k\in[l_z,u_z]$와 pretrained $\gamma_k,\beta_k$에 대해
+Dense LayerNorm 분기는 normalized feature 수가 $d$일 때 analytic envelope $|z_k|\le\sqrt{d-1}$을 사용한다. 이 fixed interval과 pretrained $\gamma_k,\beta_k$에 대해
 
 $$
 l_k=\min(\gamma_kl_z,\gamma_ku_z)+\beta_k,
@@ -141,7 +142,7 @@ l_k=\min(\gamma_kl_z,\gamma_ku_z)+\beta_k,
 u_k=\max(\gamma_kl_z,\gamma_ku_z)+\beta_k
 $$
 
-를 적용한다. Calibration을 사용하지 않는 보수적 대안은 normalized feature 수를 $d$라 할 때 $|z_k|\le\sqrt{d-1}$을 사용하는 것이다.
+를 적용한다. 더 tight한 module-output calibration은 empirical validation 뒤에 추가할 수 있지만 현재 maintained Dense LayerNorm range의 출처는 이 analytic envelope이다.
 
 ### Activation
 
@@ -173,9 +174,17 @@ $$
 \theta^2\sqrt D.
 $$
 
-현재 score는 $c=\min(\theta,80)$으로 clipping하므로 softmin input range는 $[-c,c]$이다. Masked score도 같은 upper bound $c$를 사용해야 한다. 현재처럼 $80$을 대입하면 $\theta<80$에서 declared range를 벗어난다.
+현재 softmin score radius는 dtype의 minimum normal number $f_{\min}$, temporal scale $\tau$, configured source capacity $S_{\max}$, fixed safety margin $m_s=2$에서 먼저 representability ceiling을 계산한다.
 
-Softmin weight가 $w_{ij}\in[0,1]$이고 source length의 fixed maximum이 $S_{\max}$이면 Gaussian value integration을 포함하는 공통 output range는
+$$
+c_{\mathrm{repr}}
+=\frac{\tau}{2}
+\left(-\log f_{\min}-\log S_{\max}-m_s\right).
+$$
+
+Execution radius는 $\theta$, $c_{\mathrm{repr}}$, analytic score interval의 symmetric radius 중 최솟값이다. Frozen score calibration이 있으면 persisted radius도 이 ceiling을 넘지 않아야 한다. Masked score는 별도 상수 80이 아니라 최종 execution upper bound $c$로 overwrite되므로 declared softmin range $[-c,c]$ 안에 남는다.
+
+Softmin weight가 $w_{ij}\in[0,1]$이고 source length의 fixed maximum이 $S_{\max}$이면 deterministic과 Gaussian execution이 공유하는 fixed ideal output rail은
 
 $$
 V_{\mathrm{attn}}
@@ -197,9 +206,9 @@ $$
 
 Static이라는 사실만으로 range가 유용해지는 것은 아니며, 현재 일부 interval은 feature 수, source length, threshold, 또는 exponential window에 따라 실제 activation보다 훨씬 빠르게 증가한다.
 
-### 즉시 수정해야 하는 operator contract
+### 완료된 operator contract 수정
 
-Calibration으로 가리기 전에 수식상 더 tight한 불변식을 적용해야 하는 operator가 있다.
+Calibration으로 가리지 않고 수식상 더 tight한 불변식을 적용한 operator 결과를 정리한다.
 
 `multiplication_operator`는 이전에 두 번째 operand의 declared range 대신 full encoder rail $[-\theta,\theta]$를 output interval에 사용했다. 따라서 $V\in[-\theta,\theta]$와 fixed coefficient $a=0.044715$의 곱도 intended range $[-|a|\theta,|a|\theta]$가 아니라 $[-\theta^2,\theta^2]$를 반환했다. $\theta=100$에서 실제 endpoint 약 $4.47$ 대신 $10^4$, $\theta=2000$에서 약 $89.43$ 대신 $4\times10^6$이었다.
 
@@ -219,21 +228,21 @@ $$
 
 이다. Softmin은 이 구조를 더 강하게 사용하므로 ideal weight range를 $[0,1]$로 고정하고 Gaussian raw output이 이를 벗어나면 saturation으로 처리해야 한다.
 
-Score range가 $[-c,c]$, source length가 $N$, temporal scale이 $\tau_s$이면 current softmin joint domain은
+Score range가 $[-c,c]$, source length가 $N$, temporal scale이 $\tau$이면 current softmin joint domain은
 
 $$
-a=e^{-c/\tau_s},
+a=e^{-c/\tau},
 \qquad
-b=Ne^{c/\tau_s},
+b=Ne^{c/\tau},
 $$
 
 이고 generic division upper bound는
 
 $$
-\frac{b}{a}=Ne^{2c/\tau_s}
+\frac{b}{a}=Ne^{2c/\tau}
 $$
 
-까지 증가한다. $c=80$, $\tau_s=1$, $N=197$이면 약 $10^{71.78}$이고 $N=512$이면 약 $10^{72.20}$이다. 이는 float32 maximum 약 $10^{38.53}$을 넘는다. 실제로 float32 zero-score tensor, $N=197$, `PotentialBounds(-80, 80)`의 deterministic softmin direct check는 `normalized_exp_operator`에서 finite-bound `ValueError`를 발생시킨다.
+까지 증가한다. $c=80$, $\tau=1$, $N=197$이면 약 $10^{71.78}$이고 $N=512$이면 약 $10^{72.20}$이다. 이는 float32 maximum 약 $10^{38.53}$을 넘는다. 실제로 float32 zero-score tensor, $N=197$, `PotentialBounds(-80, 80)`의 deterministic softmin direct check는 `normalized_exp_operator`에서 finite-bound `ValueError`를 발생시킨다.
 
 Tanh와 sigmoid-like gate도 각각 $[-1,1]$과 $[0,1]$이라는 structural output range를 사용해야 한다. Generic division과 multiplication의 넓은 intermediate range를 그대로 반환하면 bounded activation이라는 수학적 성질을 잃고 downstream interval만 확대한다.
 
@@ -248,7 +257,7 @@ $$
 \le \theta^2\sqrt D.
 $$
 
-$D=64$에서 endpoint는 $\theta=100$일 때 $8\times10^4$, $\theta=2000$일 때 $3.2\times10^7$이다. Raw dot-product domain은 analytic safety bound로만 유지하고, 실제 softmin score cap은 noise-free layer-wise calibration quantile과 dtype/$\tau_s$/$S_{\max}$ representability ceiling 중 작은 값으로 고정한다.
+$D=64$에서 endpoint는 $\theta=100$일 때 $8\times10^4$, $\theta=2000$일 때 $3.2\times10^7$이다. Raw dot-product domain은 analytic safety bound로만 유지하고, 실제 softmin score cap은 noise-free layer-wise calibration quantile과 dtype/$\tau$/$S_{\max}$ representability ceiling 중 작은 값으로 고정한다.
 
 Attention value integration은 current common range
 
@@ -272,7 +281,7 @@ Y_j\in
       b_j+\theta\sum_i|W_{ji}|\right]
 $$
 
-이며 convolution도 output channel별 kernel absolute sum을 사용할 수 있다. 세 maintained affine adapter는 현재 weight layout에 맞춰 이 식을 적용하고 결과를 freeze한다. 이 식도 pretrained activation distribution보다 넓을 수 있으므로 parameter-derived rail은 safety bound로 두고 layer output calibration을 별도로 적용한다. Patch projection과 MLP의 큰 fan-in이 우선 측정 대상이다.
+이며 convolution도 output channel별 kernel absolute sum을 사용할 수 있다. 세 maintained affine adapter는 현재 weight layout에 맞춰 이 식을 적용하고 결과를 freeze한다. 이 식도 pretrained activation distribution보다 넓을 수 있으므로 parameter-derived rail은 static safety bound로 유지하고 checkpoint별 clipping rate와 task accuracy를 먼저 측정한다. Module-output calibration은 그 검증에서 rail이 지나치게 넓다고 확인될 때만 별도 확장한다.
 
 ### LayerNorm과 residual depth
 
@@ -284,7 +293,7 @@ $$
 
 Exponential-difference rail은 대략 $[R^{-1},R]$이고 signed dual-rail relaxation은 $[-R,R]$이다. Learned-scale multiplication은 이제 actual gamma endpoints를 사용하므로 이전의 추가 full-$\theta$ factor는 제거되었다. 그러나 default $m=10^{-5}$에서 $\theta=100$이면 여전히 $R\approx10^7$, $\theta=2000$이면 $R\approx2\times10^8$이다. Zero input direct check에서도 actual output은 0이지만 declared range는 약 $\pm9.999999\times10^6$이었다.
 
-Fully dense LayerNorm의 $|z_i|\le\sqrt{d-1}$ bound는 $d=768$에서 약 $27.7$로 depth-independent하지만 typical activation보다 넓을 수 있다. Spiking/mixed LayerNorm은 `clip_margin` ratio 때문에 훨씬 심각하므로 final module output을 우선 calibration하고, analytic range는 physical safety 또는 missing-calibration failure 진단에만 사용해야 한다.
+Fully dense LayerNorm의 $|z_i|\le\sqrt{d-1}$ bound는 $d=768$에서 약 $27.7$로 depth-independent하지만 typical activation보다 넓을 수 있다. Spiking/mixed LayerNorm의 `clip_margin` 기반 analytic rail은 더 넓으므로 clipping rate와 task accuracy를 먼저 검증하며, module-output calibration은 그 rail이 실용적이지 않을 때 도입하는 optional extension이다.
 
 Pre-norm residual은 block마다
 
@@ -295,7 +304,7 @@ $$
 +[l_{F,\ell},u_{F,\ell}]
 $$
 
-를 반복하여 width가 depth에 따라 누적된다. ViT와 GPT-2는 post-add block output을 calibration site로 고정해야 하며, analytic residual sum은 collection 중 safety/diagnostic range로만 유지한다. BERT와 RoBERTa의 post-norm 경계는 LayerNorm이 depth-independent range를 다시 제공하지만 calibrated LayerNorm output을 쓰면 더 tight하게 유지할 수 있다.
+를 반복하여 width가 depth에 따라 누적된다. ViT와 GPT-2는 post-add block output을 calibration site로 고정했으며, analytic residual sum은 collection 중 safety/diagnostic range로만 유지한다. BERT와 RoBERTa의 post-norm 경계는 LayerNorm이 depth-independent range를 다시 제공하지만 calibrated LayerNorm output을 쓰면 더 tight하게 유지할 수 있다.
 
 ### 우선순위 판정
 
@@ -308,14 +317,22 @@ Bound 증폭은 operator contract 오류와 calibration 대상이 섞여 있으�
 | Complete | tanh | bounded activation 대신 transformed generic division range를 반환했음 | public $[-1,1]$ rail 적용과 Gaussian saturation 기록 완료 |
 | Complete | sigmoid-like gates | GELU와 SwiGLU gate가 generic division range를 downstream product에 전달했음 | public $[0,1]$ gate와 Gaussian saturation 기록 완료 |
 | Complete | division | 알려진 operand ordering을 generic exponential ratio가 버렸음 | constrained wrapper에 public $[0,1]$ rail과 Gaussian saturation 적용; LayerNorm의 unrestricted exponential difference는 유지 |
-| Critical | spiking/mixed LayerNorm | `clip_margin` ratio만으로도 $10^7$–$10^8$ rail 생성 | module-output calibration과 clamp |
-| High | scaled dot product | $\theta^2\sqrt D$ 뒤 score cap으로 큰 clipping 가능 | layer/head score calibration과 clamp rate 기록 |
-| High | attention value integration | $S_{\max}\theta$가 sequence capacity와 함께 증가 | noise-free invariant를 참고해 공통 calibrated rail을 정하고 Gaussian saturation을 별도 검증 |
-| High | affine, convolution, MLP projection | output별 parameter absolute-sum safety bound는 완료됐지만 activation distribution보다 넓을 수 있음 | module-output calibration |
-| High | ViT/GPT-2 residual | interval width가 block depth와 함께 누적 | block별 post-add calibration과 clamp |
-| Medium | dense LayerNorm, embeddings, task heads | finite하지만 model width 또는 parameter table extrema에 비해 넓음 | calibration으로 tighten하고 fixed metadata 전달 |
+| Open validation | spiking/mixed LayerNorm | `clip_margin` ratio만으로도 $10^7$–$10^8$ analytic rail 생성 | static correctness는 완료; clipping rate와 task accuracy로 rail의 유용성을 검증하고 필요하면 별도 output calibration 도입 |
+| Complete | scaled dot product | $\theta^2\sqrt D$ analytic safety bound가 넓음 | dtype/$\tau$/$S_{\max}$ ceiling과 optional layer score calibration 적용 완료 |
+| Open validation | attention value integration | fixed ideal rail $S_{\max}\theta$가 sequence capacity와 함께 증가하고 one-sided miss는 raw positive excursion을 만들 수 있음 | saturation rate와 task accuracy 검증; inference 중 rail 변경은 금지 |
+| Open validation | affine, convolution, MLP projection | exact parameter-derived safety bound는 static하지만 activation distribution보다 넓을 수 있음 | correctness 변경 없이 checkpoint별 clipping과 accuracy 측정 |
+| Complete | ViT/GPT-2 residual | interval width가 block depth와 함께 누적됨 | block별 post-add frozen calibration과 clamp 완료 |
+| Open extension | BERT/RoBERTa residual and LayerNorm | post-norm analytic rail이 depth-independent하므로 static contract는 만족 | tighter artifact lifecycle이 필요하면 evaluator별 calibration을 별도 추가 |
+| Open validation | dense LayerNorm, embeddings, task heads | finite하고 static하지만 model width 또는 parameter table extrema에 비해 넓을 수 있음 | 실제 checkpoint와 dataset에서 clipping 및 accuracy 측정 |
 
 Constrained division은 $X\leq Y$를 public $[0,1]$ rail에 반영하고 Gaussian event-order inversion과 one-sided miss의 raw overflow를 clamp 전에 기록한다. Generic exponential-difference primitive에는 이 ordering을 적용하지 않으므로 LayerNorm의 두 positive rail은 1보다 큰 magnitude를 계속 표현할 수 있다.
+
+### 재검토에서 남은 비-calibration 계약
+
+Live activation extrema 제거는 완료되었다. Inclusive endpoint 의미는 `ClosedBounds` 이름으로 확정했고, nonzero spiking attention training dropout은 paper scope 밖의 Hugging Face compatibility branch로만 남긴다. 다음 항목은 calibration artifact를 추가해도 해결되지 않는다.
+
+- `ClosedBounds` 자체는 finite, ordered endpoints를 생성 시점에 검증하지 않고 `check_domain`은 Python `assert`에 의존한다. 개별 operator validation과 별개로, optimized execution에서도 사라지지 않는 explicit exception과 central bound invariant가 필요하다.
+- AST와 direct verification은 representative batching과 seeded Gaussian invariance를 통과했지만, 실제 checkpoint와 dataset의 per-site clipping, saturation, deadline miss, task accuracy는 아직 full evaluation으로 확인해야 한다.
 
 ## 전수 검색 결과
 
@@ -342,7 +359,7 @@ Maintained transform operator의 output range는 configuration, input range, end
 | [[utils/transforms/spike_to_potential.py#exp_operator]] | transformed time endpoints | fixed |
 | [[utils/transforms/spike_to_potential.py#normalized_exp_operator]] | transformed time endpoints | fixed |
 | [[utils/transforms/spike_to_potential.py#exponential_difference_operator]] | interval arithmetic과 exponential endpoints | fixed |
-| [[utils/transforms/functions.py#multiplication_operator]] | potential/time endpoint products | fixed; tensor `theta` 지원은 제거하고 scalar $\theta$만 허용해야 함 |
+| [[utils/transforms/functions.py#multiplication_operator]] | potential/time endpoint products with scalar $\theta$ | fixed; caller factor endpoints define the ideal product rail |
 | [[utils/transforms/functions.py#scaled_dot_product_function]] | product range와 head dimension | fixed |
 | [[utils/transforms/functions.py#softmin_function]] | structural normalized-weight range $[0,1]$ | fixed; Gaussian excursion은 clamp 전 기록 |
 | [[utils/transforms/functions.py#division_function]] | constrained public range $[0,1]$ | fixed; Gaussian overflow는 clamp 전 기록하고 unrestricted exponential difference는 별도 유지 |
@@ -351,11 +368,11 @@ Maintained transform operator의 output range는 configuration, input range, end
 | [[utils/transforms/functions.py#tanh]] | structural activation range $[-1,1]$ | fixed; Gaussian excursion은 clamp 전 기록 |
 | [[utils/transforms/functions.py#swiglu_function]] | input ranges와 structural gate $[0,1]$의 composed products | fixed; Gaussian gate excursion은 clamp 전 기록 |
 
-`check_domain`의 tensor `min/max`는 declared range membership 검사이며 range 생성이 아니다. `functions.py`에서 scalar로 선언된 `theta`에 tensor가 들어오면 `theta.max()`를 사용하는 분기는 현재 model call에서 사용되지 않으며, static mismatch는 module input offset으로 이미 분리되어 있으므로 제거하는 편이 명확하다.
+`check_domain`의 tensor `min/max`는 declared range membership 검사이며 range 생성이 아니다. `multiplication_operator`는 scalar $\theta$만 허용하고 static mismatch는 module input offset으로 분리되어 있다.
 
 ### Shared operator
 
-Shared operator의 activation-derived call site는 모두 제거되었고 forward-time parameter extrema 계산만 남아 있다.
+Shared operator의 activation-derived call site는 모두 제거되었다. Learned parameter extrema는 immutable input range의 첫 cache miss에서 `freeze_parameter_bounds`가 읽고, 이후 forward는 version validation과 memoized interval만 사용한다.
 
 | 함수 | 수 | 현재 동작 | 교체 |
 |---|---:|---|---|
@@ -391,7 +408,7 @@ BERT의 activation-derived call site는 모두 제거되었다. Embedding table 
 | [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertEncoder#forward]] | 0 | upstream `Potential` range 또는 fixed $[-\theta,\theta]$ standalone fallback을 사용하고 optional calibration entry를 지원 | 완료 |
 | [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertPooler#forward]] | 0 | final encoder `Potential`을 first-token slice와 함께 전달 | 완료 |
 
-ReLU branch는 현재 pre-activation range를 그대로 유지해 negative lower bound도 포함한다. 안전하지만 불필요하게 넓으므로 $[\max(0,l),\max(0,u)]$로 줄일 수 있다.
+BERT의 GELU와 ReLU branch는 모두 fixed affine pre-activation range에서 analytic output interval을 계산하며 ReLU lower endpoint도 $\max(0,l)$로 tighten되어 있다.
 
 ### RoBERTa
 
@@ -416,7 +433,7 @@ GPT-2의 최초 8개 activation-derived call site는 모두 제거되었다. MLP
 
 | 함수 | 수 | 현재 동작 | 교체 |
 |---|---:|---|---|
-| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Attention#forward]] | 0 | backend별 fixed range를 `c_proj`에 전달하고 projection/dropout range를 analytic propagation | 완료 |
+| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Attention#forward]] | 0 | backend별 fixed range를 `c_proj`에 전달하고 eager projection/dropout range를 analytic propagation | live-extrema 제거와 inference 완료; spiking training dropout은 paper scope 밖 |
 | [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2MLP#forward]] | 0 | dense/spiking Conv1D frozen interval, analytic activation, dropout interval 사용 | 완료 |
 | [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Block#forward]] | 0 | residual endpoint addition과 optional `attention_residual`/`output` frozen calibration 사용 | 완료 |
 | [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Model#forward]] | 0 | frozen token/position table interval과 optional model-entry calibration 사용 | 완료 |
@@ -426,35 +443,35 @@ GPT-2 MLP activation은 dense/spiking projection 모두 `ACT2FN` 값을 유지�
 
 ### Attention backend
 
-Attention에는 live extrema 외에도 declared range와 실제 clamped output이 달라질 수 있는 두 문제가 있다.
+Attention에서 최초 감사가 확인한 masked score와 value-output range 불일치는 모두 해결되었다. Score는 final execution cap을 사용하고 value readout은 fixed ideal rail에 clamp한다.
 
-| 위치 | 판정 | 필요한 변경 |
+| 위치 | 판정 | 현재 처리 |
 |---|---|---|
 | [[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_scaled_dot_product_attention]] | Q/K/V와 score range는 fixed; masked score도 declared upper score bound $c$ 사용 | 완료 |
 | [[utils/transformers/integrations/spiking_sdpa_attention.py#_gaussian_attention_value_readout]] | [[utils/transformers/integrations/spiking_sdpa_attention.py#attention_output_bounds]]가 정한 $[-S_{\max}\theta,S_{\max}\theta]$를 사용하고 adapter가 memoized range를 재사용 | 완료 |
 | [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTSelfAttention#forward]] | spiking backend는 patch-grid $S_{\max}$의 memoized output range를 부착하고 eager backend는 `pot_v.domain` 유지 | 완료 |
 | [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertSelfAttention#forward]] | `max_position_embeddings` 기반 memoized spiking output range 부착 | 완료 |
 | [[utils/transformers/models/spiking_roberta/modeling_spiking_roberta.py#RobertaSelfAttention#forward]] | `max_position_embeddings` 기반 memoized spiking output range 부착 | 완료 |
-| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Attention#forward]] | spiking/eager attention, projection, dropout range를 fixed/analytic propagation | 완료 |
+| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Attention#forward]] | spiking inference rail은 fixed이고 eager projection/dropout range는 analytic propagation | live-extrema 제거 완료; spiking training dropout은 paper scope 밖 |
 
-Variable sequence length에서는 current $S$로 range를 바꾸면 같은 module의 range가 request마다 달라진다. BERT/RoBERTa evaluator의 `max_length`, ViT patch count, GPT-2 `max_position_embeddings`를 $S_{\max}$로 사용해야 한다. Cache-aware generation도 같은 $S_{\max}$를 유지해야 한다.
+Variable sequence length에서는 current $S$로 range를 바꾸면 같은 module의 range가 request마다 달라진다. BERT, RoBERTa, GPT-2의 `max_position_embeddings`와 ViT의 configured patch count를 $S_{\max}$로 사용해야 한다. Cache-aware generation도 같은 $S_{\max}$를 유지해야 한다.
 
 ### Evaluation과 calibration
 
 기존 네 evaluator의 quantile 수집은 진단용이며 fixed potential range calibration contract를 충족하지 않는다. ViT와 GPT-2 evaluator에는 이 경로와 분리된 layer-wise artifact lifecycle이 추가되었다.
 
-| 위치 | 현재 동작 | 부족한 정보 |
+| 위치 | 현재 동작 | 판정 및 남은 범위 |
 |---|---|---|
-| [[scripts/evaluation/error_analysis_vit.py#evaluate_vit_model]] | clean training subset을 두 번 순차 replay해 stable module/site별 immutable artifact를 저장하거나 frozen artifact를 검증·적용 | 완료; legacy absolute-quantile hook은 별도 진단 경로 |
-| [[scripts/evaluation/error_analysis_bert.py#evaluate_bert_model]] | 같은 global maximum 방식 | dataset/task별 module range |
-| [[scripts/evaluation/error_analysis_roberta.py#evaluate_roberta_model]] | 같은 global maximum 방식 | dataset/task별 module range |
-| [[scripts/evaluation/error_analysis_gpt2.py#evaluate_gpt2_model]] | 빈 문장을 제거한 clean WikiText training subset을 두 번 순차 replay하고 tokenizer, sequence capacity, model path를 고정한 artifact를 저장·검증·적용 | 완료; cache를 끈 fixed-length calibration이며 legacy absolute-quantile hook은 별도 진단 경로 |
+| [[scripts/evaluation/error_analysis_vit.py#evaluate_vit_model]] | clean training subset을 두 번 순차 replay해 stable module/site별 immutable artifact를 저장하거나 frozen artifact를 검증·적용 | 완료; absolute-quantile hook은 별도 진단 경로 |
+| [[scripts/evaluation/error_analysis_bert.py#evaluate_bert_model]] | configuration- 및 analytic-derived fixed range와 global diagnostic quantile을 사용 | static contract 완료; tighter task-specific artifact는 optional extension |
+| [[scripts/evaluation/error_analysis_roberta.py#evaluate_roberta_model]] | configuration- 및 analytic-derived fixed range와 global diagnostic quantile을 사용 | static contract 완료; tighter task-specific artifact는 optional extension |
+| [[scripts/evaluation/error_analysis_gpt2.py#evaluate_gpt2_model]] | 빈 문장을 제거한 clean WikiText training subset을 두 번 순차 replay하고 tokenizer, sequence capacity, model path를 고정한 artifact를 저장·검증·적용 | 완료; cache를 끈 fixed-length calibration이며 absolute-quantile hook은 별도 진단 경로 |
 
 Calibration은 Gaussian timing noise를 반드시 disable하고 `model.eval()`에서 수행해야 한다. ViT collection은 timing noise, mismatch, parameter perturbation, `DataParallel`을 거부하고 GPT-2 collection은 현재 존재하는 timing-noise axis와 `DataParallel`을 거부한다. Frozen validation과 inference는 clean artifact를 검증한 뒤 robustness axis를 독립적으로 적용한다.
 
 Calibration 측정은 deterministic한 두 collection pass로 분리하고 그 뒤 frozen validation을 수행한다. 첫 pass는 clamp 전 activation의 signed min/max를 기록하고, 두 번째 pass는 같은 dataset을 다시 실행하여 첫 pass의 endpoint로 고정한 bin에 histogram을 누적한다. Histogram과 margin으로 immutable range table을 만든 뒤 validation은 inference와 동일하게 excursion을 먼저 집계하고 clamp하며, 실행 중 range를 넓히지 않는다.
 
-Pre-norm ViT와 GPT-2의 residual stream은 단순 interval addition을 block마다 반복하면 실제 activation보다 range가 계속 넓어진다. 이 위치는 post-add raw value를 block별 site로 측정하고 고정 range로 clamp해야 한다. BERT와 RoBERTa의 post-norm 출력은 LayerNorm의 fixed output range가 다음 block 경계를 다시 정하지만, calibration을 사용한다면 동일한 frozen-site 규칙을 따른다.
+Pre-norm ViT와 GPT-2의 residual stream은 post-add raw value를 block별 site로 측정하고 frozen range로 clamp한다. BERT와 RoBERTa의 post-norm 출력은 analytic LayerNorm range로 다음 block 경계를 다시 정하며, 더 tight한 artifact가 필요하면 같은 frozen-site 규칙을 확장할 수 있다.
 
 ViT의 [[scripts/evaluation/error_analysis_vit.py#apply_parameter_noise]]는 static weight/bias perturbation을 model loading 뒤에 적용한다. 따라서 affine parameter range는 `from_pretrained`, dtype/device conversion, static parameter perturbation이 끝난 뒤 고정해야 한다. Static threshold mismatch는 input potential을 shift하지만 encoder range $[-\theta,\theta]$는 유지하고 clipping 통계로 관측한다.
 
@@ -464,11 +481,11 @@ Fixed range는 backend, noise, ablation, shape가 달라지는 모든 실행 경
 
 | 경우 | 처리 |
 |---|---|
-| Gaussian off/on 또는 seed 변경 | 같은 fixed potential range 사용; output range는 Gaussian miss를 포함하는 합집합 사용 |
-| LayerNorm stage ablation | flag 조합별 calibration identity를 분리하거나 모든 조합을 포함하는 보수적 range 사용 |
+| Gaussian off/on 또는 seed 변경 | 같은 fixed ideal potential range 사용; Gaussian miss excursion은 합집합으로 rail을 넓히지 않고 saturation으로 기록한 뒤 clamp |
+| LayerNorm stage ablation | flag 조합별 analytic/frozen parameter-output range 사용; calibration artifact를 도입하면 identity에 flag 조합 포함 |
 | Spiking attention/eager attention | backend별 fixed range를 저장; 한 run에서는 선택한 backend의 range만 사용 |
 | Evaluation dropout | `model.eval()`에서 identity이므로 input range 유지 |
-| Training dropout | $1/(1-p)$ scaling과 zero를 포함한 range 사용; 지원하지 않으면 fixed-range inference에서 명시적으로 거부 |
+| Training dropout | nonzero spiking attention dropout은 paper scope 밖이며 compatibility branch의 동작은 fixed-range 결과 주장에 포함하지 않음 |
 | Variable sequence length | current length가 아니라 configured $S_{\max}$ 사용 |
 | GPT-2 cache generation | `max_position_embeddings`까지 같은 range 유지; cache length로 range를 다시 만들지 않음 |
 | Custom `inputs_embeds` | embedding-table 식을 사용할 수 없으므로 별도 calibrated input range 요구 |
@@ -494,10 +511,10 @@ Calibration은 module별 signed lower/upper potential range를 보존하고, 같
 - range policy와 optional analytic endpoint; symmetric signed range는 양쪽 tail을, one-sided range는 unbounded 방향만 calibration
 - checkpoint와 model family
 - dataset split과 preprocessing
-- `theta`, `tau_s`, `tau_m`, `clip_margin`, dtype
+- `theta`, model-wide `tau_s`, derived attention `tau`, `clip_margin`, dtype; the common schema stores the same shared value in its `tau_m` slot
 - LayerNorm, attention, MLP ablation flags와 activation 이름
 - sequence length 또는 image/patch shape의 fixed maximum
-- static weight/bias perturbation과 static threshold mismatch 설정
+- robustness axis와 독립적인 clean-model identity; static weight/bias perturbation과 static threshold mismatch는 artifact metadata에서 제외하고 frozen range에 대한 clipping 및 output 통계로 측정
 
 Observed extrema를 쓰는 경우 calibration set 밖의 입력을 보장하지 못한다. Quantile을 쓰는 경우 clipping을 의도적으로 허용하므로 quantile과 inference clipping rate를 함께 보고해야 한다. 어떤 경우에도 inference output으로 $V_{lb},V_{ub}$를 갱신하면 안 된다.
 
@@ -505,17 +522,13 @@ Observed extrema를 쓰는 경우 calibration set 밖의 입력을 보장하지 
 
 Dependency 순서대로 fixed range를 도입하면 각 단계에서 current tensor extrema를 하나의 원인과 함께 제거할 수 있다.
 
-1. Immutable calibration entry와 histogram, min/max 및 fixed-bin collection accumulator, frozen lookup, pre-clamp excursion counter를 공통 기반으로 추가한다. Stable module binding과 collection/runtime `Potential` 경계까지 완료되었다.
-2. 네 evaluator에 collection-only run, frozen validation, metadata validation, missing-entry failure를 추가한다. ViT와 GPT-2는 완료되었고 BERT와 RoBERTa evaluator가 남아 있다. Collection forward는 live extrema 대신 analytic safety rail을 전달해야 한다.
-3. Pretrained parameter와 embedding table의 range를 checkpoint loading, dtype/device conversion, static perturbation 뒤 한 번 고정한다.
-4. `SpikingLinear`, `SpikingConv2d`, `SpikingConv1D`가 forward에서 parameter extrema를 읽지 않고 frozen output-specific affine range를 사용하게 한다. 완료되었다.
-5. `SpikingLayerNorm`이 $\psi_{\mathrm{ED}}$와 $f_{\mathrm{Mul}}$의 returned range를 전달하게 하고, dense branch에는 analytic 또는 calibrated pre-affine range를 사용한다. Analytic $|z_i|\leq\sqrt{d-1}$ 적용은 완료되었다.
-6. Attention이 tensor와 fixed output range를 함께 전달하게 하고 mask suppression을 score upper bound와 일치시킨다.
-7. ViT와 GPT-2의 pre-norm post-add residual을 block별 calibration range로 clamp하고, BERT/RoBERTa post-norm 경계에도 frozen site range를 연결한다. 두 pre-norm model family의 block 경계와 evaluator lifecycle은 완료되었다.
-8. ViT, BERT, RoBERTa, GPT-2 model entry를 embedding interval arithmetic 또는 calibration range로 교체한다. 네 model family의 live extrema 제거는 완료되었고 ViT와 GPT-2는 frozen entry calibration도 지원한다.
-9. Direct GELU, `gelu_new`, SiLU와 dense ablation path에 activation별 fixed range를 적용한다. ViT의 bounded activation 경로는 analytic range로 완료되었다.
-10. Pooler와 task head가 final hidden-state range를 slice와 함께 전달하도록 한다.
-11. Source audit와 batch-order, batch-size, Gaussian-seed invariance verification을 permanent verification에 추가한다. Direct 및 local-alias tensor extrema source audit은 완료되었고 model-wide batch partition invariance 확장이 남아 있다.
+1. Common immutable calibration table, two-pass observers, frozen lookup, pre-clamp excursion counter, strict artifact validation은 완료되었다.
+2. ViT와 GPT-2 evaluator의 collection, frozen validation, inference lifecycle은 완료되었다. BERT와 RoBERTa는 static analytic contract를 만족하며 layer-wise artifact lifecycle은 optional tightening extension이다.
+3. Learned parameter와 embedding-table interval은 versioned freeze/cache 경로로 전환되었다. Linear, Conv2d, Conv1D와 ordinary/spiking LayerNorm은 repeated forward에서 parameter extrema를 다시 읽지 않는다.
+4. Attention score representability ceiling, frozen score calibration, mask cap, fixed value-output rail, four-family adapter propagation은 완료되었다.
+5. ViT/GPT-2 model entry와 residual reset, ViT GELU pre-activation calibration은 완료되었다. BERT/RoBERTa entry, activation, pooler, task head는 analytic/frozen interval을 전달한다.
+6. Direct/local-alias live-extrema AST audit, representative batch order/partition invariance, Gaussian seed 및 noise-mode bound invariance verification은 permanent suite에 연결되었다.
+7. 남은 작업은 위 비-calibration contract 정리와 real checkpoint/dataset full evaluation이다.
 
 ## 검증 기준
 
@@ -529,7 +542,7 @@ Migration 완료는 numerical output뿐 아니라 declared potential range의 �
 - Calibration range 밖의 raw output이 range를 넓히지 않고 underflow/overflow count를 증가시키는지 확인한다.
 - Checkpoint, preprocessing, dtype, ablation, sequence maximum이 다르면 calibration load가 실패하는지 확인한다.
 - `PotentialBounds(current.min(), current.max())`와 같은 source pattern이 maintained forward에 남지 않았는지 확인한다.
-- Weight와 bias `.min()/.max()`가 maintained forward에 남지 않고 initialization/calibration 단계에만 존재하는지 확인한다.
+- Weight와 bias `.min()/.max()`가 repeated maintained forward에 남지 않고 explicit freeze/cache-fill 단계에만 존재하는지 확인한다.
 - Masked attention에서 score가 declared range 안에 있고 BERT/RoBERTa/GPT-2 causal mask smoke test가 통과하는지 확인한다.
 - `verify_gaussian_time_noise.py`의 operator parity, miss, saturation 검증과 `verify_sop.py`를 다시 실행한다.
 
@@ -542,8 +555,18 @@ Migration 완료는 numerical output뿐 아니라 declared potential range의 �
 - LayerNorm의 “configured dynamically with $V_{lb}=0$”도 current batch가 아니라 operator configuration이라는 뜻으로 명확히 해야 한다.
 - “matching $\theta$ to the actual activation range via per-layer calibration”은 model-entry와 activation calibration의 근거가 된다. Calibration split과 clipping rate를 함께 보고해야 한다.
 
+## 재검토 검증 결과
+
+병합된 working tree에서 permanent verification을 다시 실행해 static-bound source audit와 주요 operator contract를 확인했다.
+
+- `verify_calibration.py`: observer, artifact lifecycle, four-family fixed-range flow, attention score calibration, live-extrema AST audit, representative batching 등 18개 group 통과
+- `verify_gaussian_time_noise.py`: noise-mode bound identity, seeded sampling, deadline miss, saturation 및 operator parity 통과
+- `verify_sop.py`: manuscript operation-count 산술 24개 check 통과
+- Hugging Face auto-docstring diagnostic은 출력되지만 세 verification process의 exit status는 모두 0이다.
+
+
 ## 최종 판정
 
-Audit 자체는 완료되었지만 구현은 아직 fixed potential range contract를 만족하지 않는다.
+재검토 결과 maintained inference 구현은 fixed potential range contract의 핵심 조건인 live activation extrema 비의존성과 noise-independent declared bounds를 만족한다.
 
 Transform algebra, time window, attention, LayerNorm, affine, embedding, activation, residual의 maintained forward range는 모두 static하며 ViT와 GPT-2 artifact lifecycle, AST source audit, batch partition 및 Gaussian seed 불변성 검증이 연결되었다. 구현상 남은 calibration blocker는 없으며 실제 checkpoint와 dataset을 사용하는 full evaluation이 남아 있다.

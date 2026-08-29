@@ -48,7 +48,7 @@ This range reset is necessary even when every individual operation has a finite 
 
 The required order is: load or calibrate static input envelopes, derive conservative operator outputs, evaluate the raw tensor, record excursions against the fixed output rail, clamp, and pass the unchanged declared envelope downstream. Neither clean nor noisy execution may widen a bound.
 
-Calibration runs with timing noise disabled and is identified by stable operator sites. A checkpoint change, static parameter perturbation, preprocessing change, model-family change, or ablation-path change invalidates the affected calibration and requires rebuilding it before evaluation.
+Calibration runs with timing noise disabled and is identified by stable operator sites. A checkpoint change, preprocessing change, model-family change, or ablation-path change invalidates the affected calibration and requires rebuilding it before evaluation. Static parameter perturbation and threshold mismatch are robustness axes applied only after clean-artifact compatibility succeeds; they do not become calibration-table identities. Parameter-derived affine safety rails are frozen or refreshed after any static parameter perturbation.
 
 Calibration uncertainty is an engineering tolerance rather than a reason to restore runtime extrema. Each site should store signed lower and upper bounds obtained from representative extrema or quantiles, enlarge them by a documented margin, and report calibration-set and evaluation-set clipping rates. The margin may cover moderate distribution variation, but it must not conceal a domain-propagation error, an invalid operator condition, an attention-mask value outside its declared range, or a Gaussian deadline-miss case. Those cases require analytic interval bounds or a direct implementation fix, and inference must never widen a calibrated bound after observing an activation.
 
@@ -68,6 +68,15 @@ The migration is complete only when static-domain behavior is invariant under ev
 - [x] Evaluation fails clearly when a required calibrated bound is absent or incompatible instead of silently measuring the current tensor.
 - [x] Pre-norm ViT and GPT-2 residual bounds come from fixed per-block calibration entries and therefore do not widen through recursive interval addition during frozen inference.
 - [x] A final AST source audit and direct tests reject `PotentialBounds` or `TimeBounds` constructed directly or through local aliases from live forward-tensor extrema.
+
+### Follow-up After Bound Re-Audit
+
+The merged calibration work closes every known live-extrema violation; the remaining work concerns central validation and empirical evaluation rather than runtime calibration.
+
+- [x] Rename the inclusive base interval to `ClosedBounds`; clamping, membership, and deadline equality all include both endpoints.
+- [ ] Enforce finite, ordered bound endpoints centrally and replace `check_domain` assertions with explicit exceptions that remain active under optimized Python.
+- [x] Keep nonzero spiking attention training dropout outside the paper scope; the compatibility branch is documented, and maintained fixed-range claims apply only to evaluation with dropout disabled.
+- [ ] Run real-checkpoint, real-dataset evaluations and report per-site clipping, Gaussian saturation, deadline misses, and task accuracy for conservative LayerNorm, attention, affine, embedding, and task-head rails.
 
 ### Implementation Checklist
 
@@ -131,6 +140,7 @@ The implementation work covers every maintained transform and model adapter, not
 - [x] Calibrate and clamp every ViT and GPT-2 pre-norm residual output per block, recording raw underflow and overflow before attaching the frozen output range.
 - [x] Connect both ViT pre-norm residual boundaries to optional explicit calibration bindings while retaining batch-independent analytic interval addition when calibration is absent.
 - [x] Calibrate one symmetric pre-clamp softmin score range per ViT and GPT-2 attention layer, constrain it by the dtype-, temporal-scale-, and sequence-capacity-derived representability ceiling, and retain separate Gaussian value-readout saturation validation.
+- [x] Replace the attention-specific `tau_m` and `tau_s` names with one `tau`; model adapters derive it from their shared `tau_s` configuration, and the ViT-only `tau_m` field is removed.
 - [x] Calibrate each operator-composed ViT GELU affine pre-activation per layer, retain an analytic final activation interval, and remove avoidable deterministic exponential intermediate overflow without changing the operator equation.
 - [x] Keep spike-time windows configuration-derived: LayerNorm log windows remain fixed by `clip_margin`, `theta`, and `tau_s`, while affine identity encoding uses each declared zero-containing fixed interval.
 - [x] Make declared potential and time bounds immutable so cached or propagated endpoints cannot be widened in place.

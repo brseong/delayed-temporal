@@ -102,7 +102,6 @@ class ViTConfig(PreTrainedConfig):
         encoder_stride=16,
         pooler_output_size=None,
         pooler_act="tanh",
-        tau_m=1.0,
         tau_s=1.0,
         theta=400.0,
         use_spiking_layernorm=True,
@@ -128,8 +127,7 @@ class ViTConfig(PreTrainedConfig):
             num_hidden_layers: Number of Transformer encoder blocks.
             num_attention_heads: Number of attention heads per block.
             intermediate_size: Width of the feed-forward hidden layer.
-            tau_m: Temporal scale used by exponential attention compositions.
-            tau_s: Synaptic temporal scale used by logarithmic compositions.
+            tau_s: Model-wide temporal scale used by logarithmic compositions and supplied to attention as its unified tau.
             theta: Fixed symmetric potential rail for spiking operators.
             use_spiking_layernorm: Replace dense LayerNorm with its spiking form.
             spiking_ln_mul: Use spiking variance multiplication in LayerNorm.
@@ -141,6 +139,13 @@ class ViTConfig(PreTrainedConfig):
             pixel_value_max: Fixed upper endpoint produced by image preprocessing.
             **kwargs: Standard ``PreTrainedConfig`` metadata and output controls.
         """
+        # Reject the removed attention-only scale before PreTrainedConfig can turn
+        # arbitrary serialized keyword arguments back into persistent attributes.
+        if "tau_m" in kwargs:
+            raise TypeError(
+                "ViTConfig accepts only tau_s; attention derives its unified tau from it"
+            )
+
         # Let the upstream configuration base consume serialization metadata and
         # standard Transformer flags before local architecture fields are stored.
         super().__init__(**kwargs)
@@ -166,7 +171,6 @@ class ViTConfig(PreTrainedConfig):
 
         # Spiking fields are deterministic operator construction parameters. Direct
         # Gaussian timing configuration deliberately remains process-wide elsewhere.
-        self.tau_m = tau_m
         self.tau_s = tau_s
         self.theta = theta
         self.use_spiking_layernorm = use_spiking_layernorm

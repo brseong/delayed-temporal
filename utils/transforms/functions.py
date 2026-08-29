@@ -462,7 +462,7 @@ def _gaussian_softmin_function(
     input_value: torch.Tensor,
     domain: PotentialBounds,
     *,
-    tau_s: float,
+    tau: float,
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Evaluate softmin through event-aware exponential and division operators.
 
@@ -476,7 +476,7 @@ def _gaussian_softmin_function(
     Args:
         input_value: Bounded score tensor normalized along its final dimension.
         domain: Declared score interval used by the exponential encoder.
-        tau_s: Shared exponential and logarithmic temporal scale.
+        tau: Shared exponential and logarithmic temporal scale.
 
     Returns:
         The finite event-aware softmin weights and their propagated ratio rails.
@@ -499,7 +499,7 @@ def _gaussian_softmin_function(
     exp_value, exp_domain = exponential_function(
         input_value,
         domain,
-        tau_m=tau_s,
+        tau_m=tau,
         normalized=False,
     )
 
@@ -509,7 +509,7 @@ def _gaussian_softmin_function(
 
     # The Gaussian exponential domain includes reset zero, which cannot enter a log
     # encoder. Recover the ideal delivered minimum and keep it above dtype underflow.
-    ideal_exp_min = exp(-float(domain.range) / (2.0 * tau_s))
+    ideal_exp_min = exp(-float(domain.range) / (2.0 * tau))
     dtype_floor = float(torch.finfo(input_value.dtype).tiny)
     positive_floor = max(ideal_exp_min, dtype_floor)
     if not torch.isfinite(input_value.new_tensor(positive_floor)):
@@ -529,7 +529,7 @@ def _gaussian_softmin_function(
         X=exp_value,
         Y=sum_exp_value,
         joint_domain=joint_domain,
-        tau_s=tau_s,
+        tau_s=tau,
     )
 
 
@@ -538,8 +538,7 @@ def softmin_function(
     input_value: Float[torch.Tensor, "*batch dims"],
     domain: PotentialBounds,
     *,
-    tau_s: float = 1.0,
-    **_
+    tau: float = 1.0,
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Normalize scores into a fixed structural weight interval.
 
@@ -554,7 +553,7 @@ def softmin_function(
     Args:
         input_value: Bounded score tensor normalized along its final dimension.
         domain: Declared score interval.
-        tau_s: Shared exponential and logarithmic temporal scale.
+        tau: Shared exponential and logarithmic temporal scale.
 
     Returns:
         Rail-clamped softmin weights and the fixed ``[0, 1]`` potential bounds.
@@ -576,7 +575,7 @@ def softmin_function(
         weight, _ = _gaussian_softmin_function(
             input_value,
             domain,
-            tau_s=tau_s,
+            tau=tau,
         )
 
         # Missed numerator, denominator, or internal exponential events can violate
@@ -592,15 +591,15 @@ def softmin_function(
             weight_domain,
         )
 
-    # 1. Exponential potential transformation: exp_v = exp(-s_ij / tau_s)
+    # 1. Exponential potential transformation: exp_v = exp(-s_ij / tau)
     exp_v, exp_domain = exponential_function(
         input_value,
         domain,
-        tau_m=tau_s,
+        tau_m=tau,
         normalized=False,
     )
 
-    # 2. Sum of exponentiated scores: sum_k exp(s_ik / tau_s)
+    # 2. Sum of exponentiated scores: sum_k exp(s_ik / tau)
     sumexp_v = exp_v.sum(dim=-1, keepdim=True)
     N = input_value.size(-1)
 
@@ -620,7 +619,7 @@ def softmin_function(
         X=exp_v,
         Y=sumexp_v,
         joint_domain=sumexp_domain,
-        tau_s=tau_s,
+        tau_s=tau,
     )
 
     # Enforce the same rail with noise disabled so metadata is invariant under the
@@ -1351,7 +1350,7 @@ if __name__ == "__main__":
         print(f"Expected: {expected_div}, Got: {div_out}")
 
     # 3. Test Softmin Function
-    softmin_out, _ = softmin_function(x.unsqueeze(0), domain, tau_s=tau_s)
+    softmin_out, _ = softmin_function(x.unsqueeze(0), domain, tau=tau_s)
     expected_softmin = torch.softmax(-x / tau_s, dim=-1)
     is_softmin_valid = torch.allclose(softmin_out, expected_softmin.unsqueeze(0), atol=1e-5)
     print(f"Softmin Function Accurate: {is_softmin_valid}")

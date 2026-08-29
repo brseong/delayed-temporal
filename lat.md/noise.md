@@ -1,6 +1,6 @@
 # Noise Model
 
-The maintained dynamic model adds Gaussian error directly to TTFS spike times and derives deadline misses from the same sampled event.
+The maintained noise model adds Gaussian error directly to TTFS spike times and derives deadline misses from the same sampled event.
 
 ## Configuration
 
@@ -31,7 +31,7 @@ $$
 
 Early events are stored at the operation start. A late event stores the deadline only as a finite carrier value and sets `fired=False`; consumers must inspect the mask instead of substituting that placeholder into ordinary spike-time arithmetic. The model also defines the matching analytic tail probability.
 
-Jitter and deadline miss are therefore not independent random channels. No escape-rate ODE, first-passage solver, or separately sampled dropout is part of this maintained model.
+The same Gaussian draw determines both the stored event time and whether the event misses its deadline; no independent event-dropout channel is sampled.
 
 ## Fixed Observation Deadline
 
@@ -44,6 +44,16 @@ T_{\mathrm{obs}}=T_{\mathrm{code}}.
 $$
 
 Any sampled event later than this shared endpoint is a deadline miss. The model does not extend the observation window beyond the nominal latest codeword.
+
+## Numerical Precision and Endpoint Caveat
+
+Timing-noise results are interpretable only when the sampling dtype resolves the requested perturbation and nominal codewords are assessed for endpoint placement.
+
+[[utils/transforms/noise.py#_sample_gaussian_spike_time]] samples in the nominal time tensor's dtype. If $\sigma_t$ is smaller than that dtype's spacing near a codeword, rounding can map most nonzero draws back to the nominal value and make empirical misses disagree with the continuous Gaussian probability.
+
+An event nominally at $T_{\mathrm{obs}}$ has miss probability $0.5$ under any zero-mean continuous Gaussian with $\sigma_t>0$, because every positive perturbation is late. Float32 can conceal this endpoint behavior when $\sigma_t$ is below one ULP; that concealment is numerical quantization, not physical robustness.
+
+Experiments must therefore record the payload dtype, compare $\sigma_t$ with time-value spacing over every exercised code interval, and report whether nominal events occupy the deadline. Sub-ULP sweeps and endpoint-heavy encodings are diagnostic only until empirical sampling agrees with [[utils/transforms/noise.py#gaussian_deadline_miss_probability]].
 
 ## Observation-Time Potential Invariant
 
@@ -120,11 +130,11 @@ It models independent Gaussian event-time errors, deadline misses, layer- or ope
 
 Experiments must report $\mu_t$, $\sigma_t$, seed or repeats, injection coverage, and observed miss rate. Deterministic conversion accuracy and static parameter perturbation remain separate evidence axes.
 
-## Current Coverage and Resume Order
+## Coverage and Experimental Order
 
-The event-aware migration proceeds from the shared sampler and encoder boundary through composed operators, model adapters, evaluation entry points, and seeded verification.
+The event-aware migration is complete across the shared sampler and encoder boundary, composed operators, model adapters, evaluation entry points, and seeded verification.
 
-Coverage is complete only when affine, multiplication, exponential, exponential-difference/division, activation, softmin, and attention value paths use decorated events and retain noise-off parity references. Verification must exercise opening, closing/reference, and internal exp-temporal cases.
+Affine, multiplication, exponential, exponential-difference/division, activation, softmin, and attention value paths use decorated events and retain noise-off parity references. Verification exercises opening, closing/reference, and internal exp-temporal cases.
 
 The next experimental order is:
 

@@ -19,7 +19,7 @@ The installed Hugging Face Transformers and SpikingJelly packages are dependenci
 
 The main stack separates numeric domains, operator algebra, model integration, and experimental orchestration so each layer can be reasoned about independently.
 
-1. `OpenBounds`, `PotentialBounds`, `TimeBounds`, and `Potential` define the values carried between operations; see [[utils/transforms/types.py#Potential]].
+1. `ClosedBounds`, `PotentialBounds`, `TimeBounds`, and `Potential` define the values carried between operations; see [[utils/transforms/types.py#Potential]].
 2. Potential-to-time and time-to-potential transforms define TTFS encoders and decoders; see [[domain#TTFS Encoding]].
 3. A small temporal integration primitive is composed into multiplication, division, softmin, and nonlinear functions; see [[operators#Composed Functions]].
 4. Shared spiking layers replace dense Transformer operations while preserving parameter shapes; see [[utils/transformers/models/spiking_ops.py#SpikingLinear]].

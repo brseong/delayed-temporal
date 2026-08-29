@@ -95,20 +95,20 @@ def attention_output_bounds(
 @cache
 def attention_score_representability_bounds(
     theta: float,
-    tau_s: float,
+    tau: float,
     source_length_max: int,
     dtype: torch.dtype,
 ) -> PotentialBounds:
     """Return the largest symmetric softmin score rail representable by a dtype.
 
     A score rail ``[-c, c]`` can produce a smallest normalized exponential weight
-    near ``exp(-2c / tau_s) / source_length_max``. Requiring that value to stay above
+    near ``exp(-2c / tau) / source_length_max``. Requiring that value to stay above
     the dtype's minimum normal number, with a fixed logarithmic safety margin, gives
     a configuration-derived ceiling for calibration and fallback execution.
 
     Args:
         theta: Positive physical score cap before numerical representability.
-        tau_s: Positive temporal scale used by exponential normalization.
+        tau: Positive temporal scale used by exponential normalization.
         source_length_max: Configured maximum denominator population.
         dtype: Floating payload dtype used by the softmin implementation.
 
@@ -125,11 +125,11 @@ def attention_score_representability_bounds(
     # source length is used instead of the current request so one attention layer
     # retains the same cap for short and full-capacity sequences.
     theta_value = float(theta)
-    tau_value = float(tau_s)
+    tau_value = float(tau)
     if not math.isfinite(theta_value) or theta_value <= 0.0:
         raise ValueError("attention score theta must be finite and positive")
     if not math.isfinite(tau_value) or tau_value <= 0.0:
-        raise ValueError("attention score tau_s must be finite and positive")
+        raise ValueError("attention score tau must be finite and positive")
     if isinstance(source_length_max, bool) or not isinstance(source_length_max, int):
         raise TypeError("attention score source_length_max must be an integer")
     if source_length_max <= 0:
@@ -275,7 +275,7 @@ def spiking_scaled_dot_product_attention(
     dropout_p: float = 0.0,
     is_causal: bool = False,
     enable_gqa: bool = False,
-    tau_m: float = 1.0,
+    tau: float = 1.0,
     theta: float = 10.0,
     training: bool = False,
     source_length_max: int | None = None,
@@ -297,7 +297,7 @@ def spiking_scaled_dot_product_attention(
         dropout_p: Dropout probability applied to the normalized weights.
         is_causal: Whether to suppress source positions after each target index.
         enable_gqa: Request grouped-query attention, which is not implemented here.
-        tau_m: Temporal scale used by the softmin composition.
+        tau: Temporal scale used by the softmin composition.
         theta: Symmetric potential rail used by affine TTFS encoders.
         training: Training-state flag forwarded to deterministic value encoding.
         source_length_max: Configured source-position maximum used to derive one
@@ -371,7 +371,7 @@ def spiking_scaled_dot_product_attention(
     # normalized exponential from underflowing even before an artifact is installed.
     representability_ceiling = attention_score_representability_bounds(
         float(theta),
-        float(tau_m),
+        float(tau),
         source_length_max,
         attn_score.dtype,
     )
@@ -417,16 +417,18 @@ def spiking_scaled_dot_product_attention(
     if masked_pos is not None:
         attn_score = torch.where(masked_pos, softmin_cap, attn_score)
 
-    # softmin(f_SDP, τ_m) = softmax(dot(q,k)/(τ_m·√d_k))
-    attn_weight, _ = softmin_function(attn_score, score_bound, tau_s=tau_m, domain_shift=softmin_cap)
+    # softmin(f_SDP, τ) = softmax(dot(q,k)/(τ·√d_k))
+    attn_weight, _ = softmin_function(attn_score, score_bound, tau=tau)
 
     # # Debug: Compare weights with torch.softmax
     # torch_logits_clamped = torch_logits.clamp(-softmin_cap, softmin_cap)
     # # attn_bias is positive for masked tokens in softmin convention
-    # torch_weights = torch.nn.functional.softmax((torch_logits_clamped - attn_bias) / tau_m, dim=-1)
+    # torch_weights = torch.nn.functional.softmax((torch_logits_clamped - attn_bias) / tau, dim=-1)
     # weight_error = (attn_weight - torch_weights).abs().max().item()
     # print(f"[DEBUG] Attn weight vs torch.softmax max diff: {weight_error:.6f}")
 
+    # Training-time attention dropout is retained only for Hugging Face API compatibility.
+    # The paper and maintained evaluator make fixed-range claims only with dropout disabled.
     if dropout_p > 0.0:
         attn_weight = torch.nn.functional.dropout(attn_weight, p=dropout_p)
 
@@ -514,6 +516,11 @@ def spiking_sdpa_attention_forward(
     # Note: L2Net을 훈련하기 위해 사용하던 불필요한 로깅 제거 및 dropout 처리 정규화
     dropout_prob = dropout if module.training else 0.0
 
+    # Reject the removed attention-specific names instead of silently ignoring them
+    # through this permissive Hugging Face wrapper. Attention exposes only `tau`.
+    if "tau_m" in kwargs or "tau_s" in kwargs:
+        raise TypeError("spiking attention accepts only the unified tau keyword")
+
     # Prefer an evaluator-supplied fixed maximum. Standard text models otherwise
     # use their configured position capacity, which remains request-independent.
     source_length_max = kwargs.get("source_length_max")
@@ -550,7 +557,7 @@ def spiking_sdpa_attention_forward(
         attn_mask=attention_mask,
         dropout_p=dropout_prob,
         is_causal=is_causal_flag,
-        tau_m=kwargs.get("tau_m", 1.0),
+        tau=kwargs.get("tau", 1.0),
         theta=kwargs.get("theta", 10.0),
         training=module.training,
         source_length_max=source_length_max,

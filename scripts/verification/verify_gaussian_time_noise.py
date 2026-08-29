@@ -72,7 +72,7 @@ def verify_immutable_memoized_bounds() -> None:
             incorrectly aliased.
     """
     # PotentialBounds and TimeBounds inherit the frozen endpoint contract from
-    # OpenBounds. Attempt both endpoint names so either generated setter regressing
+    # ClosedBounds. Attempt both endpoint names so either generated setter regressing
     # to a mutable dataclass is detected immediately.
     potential_domain = PotentialBounds(-2.0, 2.0)
     time_domain = TimeBounds(0.0, 4.0)
@@ -85,7 +85,7 @@ def verify_immutable_memoized_bounds() -> None:
         except FrozenInstanceError:
             pass
         else:
-            raise AssertionError("OpenBounds endpoints must be immutable")
+            raise AssertionError("ClosedBounds endpoints must be immutable")
 
     # Repeated calls with one normalized configuration must return the exact cached
     # object. A different maximum source length must retain a separate physical rail.
@@ -686,6 +686,27 @@ def verify_exponential_time_constant_scaling() -> None:
                 rel_tol=1e-12,
             )
 
+        # Offset cancellation must occur before exponentiation. The final float32
+        # response exp(-x) is representable on [-80, 80], while the obsolete
+        # intermediate exp(t) would evaluate exp(160) and overflow before scaling.
+        cancellation_input = torch.tensor([-80.0, 0.0, 80.0], dtype=torch.float32)
+        cancellation_domain = PotentialBounds(-80.0, 80.0)
+        set_gaussian_time_noise(enabled=False)
+        cancellation_result, cancellation_bounds = exponential_function(
+            cancellation_input,
+            cancellation_domain,
+            tau_m=1.0,
+            normalized=True,
+        )
+        assert torch.isfinite(cancellation_result).all()
+        assert torch.equal(cancellation_result, torch.exp(-cancellation_input))
+        assert cancellation_bounds.min == torch.exp(
+            torch.tensor(-80.0, dtype=torch.float32)
+        ).item()
+        assert cancellation_bounds.max == torch.exp(
+            torch.tensor(80.0, dtype=torch.float32)
+        ).item()
+
         # A direct time difference must decode as exp((t_B-t_A)/tau_s) in both
         # execution modes. This is the exact stage that previously omitted division
         # by tau_s after its internal negative-identity re-encoding.
@@ -748,13 +769,13 @@ def verify_exponential_time_constant_scaling() -> None:
         deterministic_softmin, _ = softmin_function(
             scores,
             score_domain,
-            tau_s=tau_s,
+            tau=tau_s,
         )
         set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1705)
         gaussian_softmin, _ = softmin_function(
             scores,
             score_domain,
-            tau_s=tau_s,
+            tau=tau_s,
         )
         assert torch.allclose(deterministic_softmin, expected_softmin)
         assert torch.allclose(gaussian_softmin, expected_softmin)
@@ -3168,7 +3189,7 @@ def verify_gaussian_spiking_attention() -> None:
             key,
             value,
             theta=2.0,
-            tau_m=1.0,
+            tau=1.0,
             source_length_max=source_length_max,
         )
         dense_weight = torch.softmax(
@@ -3191,7 +3212,7 @@ def verify_gaussian_spiking_attention() -> None:
             value,
             attn_mask=keep_mask,
             theta=2.0,
-            tau_m=1.0,
+            tau=1.0,
             source_length_max=source_length_max,
         )
         assert torch.isfinite(masked).all()
@@ -3205,7 +3226,7 @@ def verify_gaussian_spiking_attention() -> None:
             key,
             value,
             theta=2.0,
-            tau_m=1.0,
+            tau=1.0,
             source_length_max=source_length_max,
         )
         zero_stats = get_gaussian_noise_stats()
@@ -3214,6 +3235,35 @@ def verify_gaussian_spiking_attention() -> None:
         assert zero_stats["attention.value_reference"]["events"] == 1
         assert zero_stats["attention.value"]["misses"] == 0
         assert zero_stats["attention.value_reference"]["misses"] == 0
+
+        # Drive one score to each finite suppression rail in float32. The shared
+        # softmin division domain then spans exp(-2*cap) times the source reduction;
+        # both deterministic and event-aware paths must retain a positive carrier
+        # instead of underflowing during exponential-difference validation.
+        cap_query = torch.tensor([[[[2000.0]]]], dtype=torch.float32)
+        cap_key = torch.tensor([[[[2000.0], [-2000.0]]]], dtype=torch.float32)
+        cap_value = torch.tensor([[[[1.0], [-1.0]]]], dtype=torch.float32)
+        set_gaussian_time_noise(enabled=False)
+        deterministic_cap = spiking_scaled_dot_product_attention(
+            cap_query,
+            cap_key,
+            cap_value,
+            theta=2000.0,
+            tau=1.0,
+            source_length_max=2,
+        )
+        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1404)
+        gaussian_cap = spiking_scaled_dot_product_attention(
+            cap_query,
+            cap_key,
+            cap_value,
+            theta=2000.0,
+            tau=1.0,
+            source_length_max=2,
+        )
+        assert torch.isfinite(deterministic_cap).all()
+        assert torch.isfinite(gaussian_cap).all()
+        assert torch.allclose(gaussian_cap, deterministic_cap, atol=1e-6, rtol=1e-6)
 
         # Fix attention weights explicitly so a lower-rail value shift can isolate
         # data misses. Every value rail stays at reset, while the delivered reference

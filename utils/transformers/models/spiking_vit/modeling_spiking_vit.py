@@ -320,7 +320,9 @@ class ViTSelfAttention(nn.Module):
         if self.config._attn_implementation == "spiking_sdpa":
             theta = float(getattr(self.config, "theta", 10.0))
             kwargs["theta"] = theta
-            kwargs["tau_m"] = getattr(self.config, "tau_s", 1.0) # Use tau_s as default fallback for tau_m
+            # The model-wide logarithmic scale supplies attention's single tau;
+            # attention itself exposes no tau_s or tau_m distinction.
+            kwargs["tau"] = getattr(self.config, "tau_s", 1.0)
 
             # ViT's fixed source maximum is the configured patch grid plus one class
             # token. Runtime image interpolation beyond this capacity is rejected by

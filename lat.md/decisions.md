@@ -36,7 +36,7 @@ The model passes numerical bounds beside tensors so finite TTFS windows and inte
 
 The wrapper avoids repeatedly inferring calibration ranges from each tensor and lets residual and projection operations propagate conservative domains. It also provides named clamp sites for diagnostics.
 
-Some current paths still derive ranges from observed minima and maxima. Those are simulation conveniences, not proof that deployment-time bounds are known; see [[domain#Domain Propagation]].
+Maintained production paths no longer derive ranges from observed activation minima and maxima. Analytic intervals and frozen calibration records define the carried domains; see [[domain#Domain Propagation]].
 
 ## Preserve Pretrained Parameters
 
@@ -60,7 +60,7 @@ Attention masks are converted to boolean suppression positions and overwritten w
 
 This avoids allowing masked locations to regain probability through later transformations. It also unifies causal masks and Hugging Face additive or boolean masks at the operator normalization boundary.
 
-The suppressing value is finite, so it is a numerical approximation to negative-infinite conventional logits. Its magnitude and the softmin cap must remain coordinated.
+The suppressing value is finite, so it is a numerical approximation to negative-infinite conventional logits. Its magnitude is the final per-layer score cap, constrained by the analytic score interval, the configured threshold, and the dtype-, temporal-scale-, and source-capacity-derived representability ceiling.
 
 ## Stage-Level Ablations
 
@@ -76,7 +76,7 @@ Temporal noise is attached to the two potential-to-spike transforms so every com
 
 This provides one implementation point for direct Gaussian timing and its deadline-miss mask. Event-aware operators must request and consume that mask; they must not introduce a second encoder-specific sampler. Static mismatch remains module-local because it represents frozen variation rather than a per-encoding event.
 
-Tensor-only operators retain the historical interface until they implement the fixed observation-time readout rule. A miss never creates an invalid downstream value; [[noise#Observation-Time Potential Invariant]] defines the common semantics and [[noise#Current Coverage and Resume Order]] defines the migration order.
+Maintained noisy operators consume event records and implement the fixed observation-time readout rule. Tensor-only branches remain as noise-off parity references rather than incomplete noise paths. A miss never creates an invalid downstream value; [[noise#Observation-Time Potential Invariant]] defines the common semantics and [[noise#Coverage and Experimental Order]] summarizes the completed coverage.
 
 ## Separate Deterministic Fidelity from Noise
 

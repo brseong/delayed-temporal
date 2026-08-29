@@ -60,9 +60,75 @@ Each spiking runner prints per-site Gaussian rates and logs them under `Gaussian
 
 Shell scripts under `scripts/experiments` run isolated sweeps for Gaussian spike-time noise, static mismatch, activation variants, and module-level conversion ablations.
 
-`scripts/experiments/noise_analysis_vit.sh` and `noise_scan_vit.sh` sweep Gaussian timing scale for ViT. The same directory contains model-family timing and theta sweeps, static-bias experiments, quantile collection, and GELU comparisons.
+`scripts/experiments/noise_analysis_vit.sh` and `scripts/experiments/noise_scan_vit.sh` sweep Gaussian timing scale for ViT. The fine scan preserves already-completed outputs, schedules one process per GPU, records its expected-run manifest, and resumes only incomplete tagged logs.
+
+The fine-scan defaults reproduce the canonical ViT-S run. `MODEL_ID` and `BATCH_SIZE` may select a follow-up architecture, while distinct `SCAN_TAG`, `SCAN_FIGURE_PREFIX`, and `SCAN_MODEL_LABEL` values keep that model's artifacts and plotted identity separate from ViT-S.
+
+`TIME_NOISE_STD_FRACS` may replace the default Gaussian grid, and an explicitly empty `MISMATCH_THETA_STDS` omits that independent axis. Gaussian-only refinement manifests remain fully validated and render as one-panel figures rather than fabricating mismatch results.
 
 The scripts pass a dimensionless `time_noise_std_frac`. Each evaluator converts it to one absolute standard deviation using $\sigma_t=r_t(2\theta)$, applies that value at every encoder boundary, and records both values with the seed.
+
+Sweep interpretation is also conditioned on [[noise#Numerical Precision and Endpoint Caveat]]. A float32 result at sub-ULP $\sigma_t$ is a precision-limited implementation diagnostic, not a continuous-Gaussian robustness measurement; float64 reference runs expose endpoint behavior before a range is treated as canonical.
+
+The maintained fine scan evaluates each Gaussian magnitude with timing seeds 0, 1, and 2 while holding the model, 5,000-image subset, and loader seed fixed. Baseline and static threshold mismatch remain single fixed-seed measurements.
+
+[[scripts/analysis/summarize_noise_scan.py#summarize_noise_scan]] rejects missing, failed, or parameter-inconsistent logs before publishing raw and aggregate CSV files. Gaussian accuracy uses a 95% Student-t interval across timing seeds; event-miss and saturation rates pool raw denominators across sites and replicas.
+
+[[scripts/verification/verify_noise_scan_summary.py#verify_noise_scan_summary]] validates manifest constraints, evaluator-log parsing, pooled physical counts, the Student-t interval, artifact rendering, and rejection of Gaussian logs without mechanism statistics using dataset-independent fixtures.
+
+### Per-Layer ViT GELU Attribution
+
+The ViT GELU layer scan isolates where temporal activation errors become task-critical without changing the activation's mathematical formula.
+
+[[scripts/evaluation/error_analysis_vit.py#configure_vit_exact_gelu_layers]] selects zero-based encoder blocks whose MLP GELU uses the maintained cubic-tanh formula in dense arithmetic. Both affine layers remain unchanged, and every unselected block retains the temporal composite.
+
+`scripts/experiments/ablation_gelu_layers_vit.sh` selects exactly one block per condition and compares its noisy accuracy with the corresponding noise-off accuracy. It schedules one process per GPU, resumes complete logs, and permits seed and layer subsets through environment variables.
+
+Recovery relative to the fully temporal noisy run estimates that block's timing-error contribution; it is not an architecture or activation-function comparison. The default seed-zero scan ranks all blocks before additional seeds are assigned to the most influential conditions.
+
+The original float32 layer scan at $r_t=3.162\times10^{-10}$ is precision-limited: its absolute $\sigma_t=1.2648\times10^{-6}$ is below float32 spacing near the GELU log-division deadline. Its block ranking is exploratory and must be repeated under a numerically resolved timing representation before supporting a mechanism claim.
+
+`scripts/experiments/diagnose_gaussian_endpoint_vit.sh` reruns the same 5,000-image condition in float64 using baseline, full Gaussian, block-10 GELU bypass, all-GELU bypass, and all-GELU-plus-LayerNorm-log bypass. These controls determine whether a layer ranking remains identifiable after continuous endpoint behavior is numerically resolved.
+
+The float64 diagnostic places full Gaussian, block-10 bypass, and all-GELU bypass at classification floor, while bypassing both temporal GELU and LayerNorm log restores baseline accuracy. The prior block ranking is therefore not identifiable under resolved continuous endpoint sampling; the endpoint-heavy encodings must be corrected before another layer sweep.
+
+[[scripts/verification/verify_vit_gelu_layer_ablation.py#verify_vit_gelu_layer_ablation]] checks sparse selection, empty-selection behavior, invalid indices, duplicate rejection, and all-or-nothing failure when the expected local ViT topology is absent.
+
+### GELU-Internal Operator Attribution
+
+The GELU operator scan attributes task-level timing sensitivity among multiplication, exponential, and division without changing the production deadline or margin contract.
+
+[[scripts/analysis/gelu_operator_ablation_vit.py#gelu_operator_ablation]] reproduces the maintained cubic-tanh composition while allowing selected GELU-local atomic operators to use their nominal, noise-free temporal carriers. Every unselected GELU operator and every non-GELU use of the same primitive remains on the run-wide Gaussian path.
+
+The `multiplication` unit covers all seven products in one GELU call, including polynomial coefficients and the final input-gate product. The `exponential` unit is tanh's $\exp(-2z)$ stage. The `division` unit includes both negative-log operand encoders and their internal exponential-difference stage because those events jointly implement one ratio.
+
+The eight-condition matrix contains the fully noisy composition, three leave-one-operator-dense conditions, three only-one-operator-noisy conditions, and the all-dense control. Comparing both directions distinguishes an operator whose removal is sufficient for recovery from one whose isolated noise is sufficient for failure.
+
+The dense helpers retain the noise-off temporal arithmetic order, including float32 carrier rounding, and preserve Gaussian-compatible downstream rails. Direct mathematical products or ratios are not used because they would also remove nominal time-code quantization and confound attribution.
+
+The dense helpers also apply the production analytic endpoint clamps after the cubic inner sum and the one-plus-tanh gate, so a selected operator changes event delivery without changing fixed-domain containment.
+
+Selected operators shadow-consume the same Gaussian draws in the same tensor/scalar order but do not apply or count those events. This common-random-number coupling keeps every later GELU and non-GELU event aligned across variants, reducing paired seed variance without representing shadow draws as physical activity.
+
+`scripts/experiments/ablation_gelu_operators_vit.sh` runs one condition per process and GPU, holds model, 5,000-image subset, absolute timing scale, and seed fixed, and resumes only complete logs. [[scripts/analysis/gelu_operator_ablation_vit.py#install_gelu_operator_ablation]] patches only the local ViT GELU symbol, leaving production implementations and other model families unchanged.
+
+This scan deliberately leaves endpoint placement and calibration unchanged. At the existing float32 transition point it is an implementation-level attribution conditioned on [[noise#Numerical Precision and Endpoint Caveat]], not a calibrated continuous-noise robustness result; the matrix must be repeated after a separately reviewed margin calibration becomes canonical.
+
+[[scripts/verification/verify_gelu_operator_ablation.py#verify_gelu_operator_ablation]] checks all eight noise-off subsets for value parity, rejects unknown operator labels, and verifies that installation changes only the local ViT adapter symbol. [[scripts/verification/verify_gelu_operator_ablation.py#verify_gelu_operator_event_selection]] checks physical event topology and equal post-GELU generator state across all dense selections.
+
+#### Observed ViT-S Result
+
+At the existing float32 transition point, GELU division accounts for essentially the entire task-level loss attributed to the temporal GELU composition.
+
+The run uses ViT-S, the first 5,000 ImageNet-1k validation images, `theta=2000`, batch size 32, $r_t=3.162\times10^{-10}$, and therefore $\sigma_t=1.2648\times10^{-6}$. Seed zero evaluates all eight operator combinations; the full, dense-division, only-division-noisy, and all-dense controls are repeated with timing seeds 1 and 2.
+
+Across the three seeds, mean accuracy is 56.353% for fully noisy GELU, 56.360% when division alone remains noisy, 78.773% when division alone is dense, and 78.753% when all GELU-local operators are dense. Division removal recovers 22.420 percentage points, while division-only noise reproduces a 22.393-point loss.
+
+In the complete seed-zero matrix, removing multiplication or exponential alone changes no classifications relative to fully noisy GELU. Leaving only multiplication noisy matches the all-dense accuracy, while leaving only exponential noisy differs from the dense-division control by no classifications. The remaining three-seed dense-division versus all-dense mean difference is only 0.020 percentage points.
+
+The GELU-local division numerator contributes 18,155,520,000 events per 5,000-image run. It misses 23,254,914, 23,250,225, and 23,249,362 times across seeds 0, 1, and 2, respectively, for a mean miss rate of 0.12807%. A numerator opening miss resets the ratio to zero, drives the tanh output to -1, and closes the GELU gate, explaining why sparse misses erase activations and compound through the model.
+
+These measurements identify the division numerator deadline boundary—not continuous multiplication or exponential perturbation—as the dominant implementation-level GELU failure in this configuration. Because $\sigma_t$ is sub-ULP near relevant float32 deadlines, this mechanism statement remains conditional on the current endpoint representation and must be rechecked after margin calibration.
 
 ## Gaussian Spike-Time Verification
 
@@ -92,8 +158,6 @@ The maintained Gaussian model requires a seeded decorator-level regression check
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_exponential_difference_operator]] checks zero-noise parity, opening-reset and closing-deadline readouts, internal-event reset, extended rails, and per-stage statistics.
 
-[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_division_function]] checks ratio parity and tracks numerator, denominator, and internal exponential misses through shared-domain log encoding to finite output rails.
-
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_tanh_function]] checks deterministic and zero-noise tanh parity on the common $[-1,1]$ domain, nested event topology, forced structural saturation, and finite final clamping.
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_sigmoid_gelu_function]] checks the sigmoid approximation against $x\,\sigma(1.702x)$, reconstructs its output domain from the fixed $[0,1]$ gate, and forces gate saturation without widening the final product rails.
@@ -118,7 +182,7 @@ The regression check covers the sampled distribution and deadline behavior plus 
 
 The verification intentionally enters through decorated encoders. It does not define or test a separate Gaussian multiplication API.
 
-As each operator is migrated, its regression must force opening and closing/reference misses independently and verify the readout equations in [[noise#Observation-Time Potential Invariant]]. A test expecting an invalid output conflicts with the maintained model.
+Regression for every migrated operator must force opening and closing/reference misses independently and verify the readout equations in [[noise#Observation-Time Potential Invariant]]. A test expecting an invalid output conflicts with the maintained model.
 
 ## Targeted Analysis Programs
 

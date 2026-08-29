@@ -394,7 +394,7 @@ class BertSelfAttention(nn.Module):
             theta = float(getattr(self.config, "theta", 10.0))
             source_length_max = int(self.config.max_position_embeddings)
             kwargs["theta"] = theta
-            kwargs["tau_m"] = getattr(self.config, "tau_s", 1.0)
+            kwargs["tau"] = getattr(self.config, "tau_s", 1.0)
             kwargs["source_length_max"] = source_length_max
             context_domain = attention_output_bounds(theta, source_length_max)
 

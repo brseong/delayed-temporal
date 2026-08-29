@@ -8,32 +8,32 @@ from torch import Tensor
 from torch.types import Number
 
 @dataclass(frozen=True)
-class OpenBounds:
-    """Immutable declaration of an open interval with exclusive endpoints.
+class ClosedBounds:
+    """Immutable declaration of a closed interval with inclusive endpoints.
 
     Bounds are physical and mathematical contracts carried through the operator
     graph. Freezing their endpoints prevents calibration, memoization, or a later
     forward pass from silently widening an interval after it has been declared.
     Derived intervals must always be represented by newly constructed objects.
     """
-    min: Number # infimum of the domain, exclusive
-    max: Number # supremum of the domain, exclusive
+    min: Number  # Inclusive lower endpoint of the domain.
+    max: Number  # Inclusive upper endpoint of the domain.
 
     @property
     def range(self) -> Number:
         return self.max - self.min
 
     def clamp(self, value: Tensor, name: str | None = None) -> Tensor:
-        """Clamp the input tensor to be within the valid range defined by the bounds."""
+        """Clamp the input tensor to the inclusive closed interval."""
         clamped = value.clamp(self.min, self.max)
         if _CLAMP_LOG_ENABLED and _CURRENT_MODULE_NAME is not None:
             _record_clamp_stats(_CURRENT_MODULE_NAME, name, value, clamped, self.min, self.max)
         return clamped
 
 
-class PotentialBounds(OpenBounds): pass
+class PotentialBounds(ClosedBounds): pass
 
-class TimeBounds(OpenBounds): pass
+class TimeBounds(ClosedBounds): pass
 
 
 class SpikeSample(NamedTuple):
@@ -52,7 +52,7 @@ class SpikeSample(NamedTuple):
     fired: Tensor  # Boolean tensor distinguishing delivered events from deadline misses.
 
 
-OutBoundsT = TypeVar("OutBoundsT", bound=OpenBounds)
+OutBoundsT = TypeVar("OutBoundsT", bound=ClosedBounds)
 
 _CLAMP_LOG_ENABLED = False
 _CURRENT_MODULE_NAME = None
@@ -86,7 +86,7 @@ def _record_clamp_stats(module_name: str, clamp_name: str | None, original: Tens
     _CLAMP_STATS[tag]["overflow"] += overflow
     _CLAMP_STATS[tag]["total"] += total
 
-class NeuralTransform[InT: OpenBounds, OutT: OpenBounds](Protocol):
+class NeuralTransform[InT: ClosedBounds, OutT: ClosedBounds](Protocol):
     def __call__(self, input_value: Tensor, domain: InT, **kwargs) -> tuple[Tensor, OutT]: ...
 
 
@@ -113,7 +113,7 @@ def check_domain[**P, R](func: Callable[P, R]) -> Callable[P, R]:
 
         # Identify tensor-domain pairs
         tensors = {k: v for k, v in bound_args.arguments.items() if isinstance(v, torch.Tensor)}
-        domains = {k: v for k, v in bound_args.arguments.items() if isinstance(v, OpenBounds)}
+        domains = {k: v for k, v in bound_args.arguments.items() if isinstance(v, ClosedBounds)}
 
         for name, tensor in tensors.items():
             domain = None
