@@ -3,6 +3,12 @@
 import math
 from typing import Any
 
+from torch import nn
+
+from utils.transforms.calibration import (
+    CalibrationRangePolicy,
+    LayerCalibrationSpec,
+)
 from utils.transforms.types import PotentialBounds
 
 
@@ -115,3 +121,75 @@ def image_processor_pixel_bounds(
         min(0.0, *channel_lowers),
         max(0.0, *channel_uppers),
     )
+
+
+def vit_residual_calibration_specs(
+    model: nn.Module,
+    *,
+    lower_quantile: float,
+    upper_quantile: float,
+    margin_fraction: float,
+) -> tuple[LayerCalibrationSpec, ...]:
+    """Declare both signed residual calibration sites for every ViT block.
+
+    Stable names are taken from ``model.named_modules()`` after the complete wrapper
+    has been constructed, so the same function supports a bare ``ViTModel`` and task
+    wrappers such as ``ViTForImageClassification`` without guessing a name prefix.
+
+    Args:
+        model: Unwrapped ViT model or task wrapper containing ``ViTLayer`` modules.
+        lower_quantile: Lower signed histogram cutoff used at every residual site.
+        upper_quantile: Upper signed histogram cutoff used at every residual site.
+        margin_fraction: Per-side expansion applied after symmetric range selection.
+
+    Returns:
+        Deterministically ordered layer specifications, two per ViT block.
+
+    Raises:
+        TypeError: If the model is not an unwrapped PyTorch module.
+        ValueError: If no ViT blocks are found. Quantile and margin validation remains
+            centralized in calibration collector construction.
+        RuntimeError: If ``DataParallel`` would add unstable replica name prefixes.
+    """
+    # Import locally to avoid making processor-only range derivation initialize the
+    # full Hugging Face model adapter. The class identity still provides an exact,
+    # architecture-aware selection rather than matching informal class-name strings.
+    from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTLayer
+
+    if not isinstance(model, nn.Module):
+        raise TypeError("model must be a torch.nn.Module")
+    if isinstance(model, nn.DataParallel):
+        raise RuntimeError(
+            "ViT calibration specifications require an unwrapped model"
+        )
+
+    # ``named_modules`` follows registered module order, which is checkpoint-stable
+    # for the fixed architecture. Sort names explicitly so persistence never depends
+    # on incidental traversal changes in an outer task wrapper.
+    layer_names = tuple(
+        sorted(
+            name
+            for name, module in model.named_modules()
+            if isinstance(module, ViTLayer)
+        )
+    )
+    if not layer_names:
+        raise ValueError("model contains no ViTLayer modules")
+
+    # Both post-add tensors cross zero and serve as affine inputs later in the block
+    # stack. One signed-symmetric policy therefore calibrates both tails and guarantees
+    # a zero-containing PWM rail at every depth reset.
+    specs: list[LayerCalibrationSpec] = []
+    for module_name in layer_names:
+        for tensor_name in ("attention_residual", "output"):
+            specs.append(
+                LayerCalibrationSpec(
+                    module_name=module_name,
+                    tensor_name=tensor_name,
+                    range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
+                    lower_quantile=lower_quantile,
+                    upper_quantile=upper_quantile,
+                    margin_fraction=margin_fraction,
+                )
+            )
+    return tuple(specs)

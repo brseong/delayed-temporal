@@ -64,6 +64,8 @@ Each ViT block calibrates its attention residual and final MLP residual as separ
 
 Collection retains each exact interval sum as a safety rail and observes the raw residual. Frozen validation or inference counts strict excursions, clamps to the persisted layer range, and propagates that range into the next normalization and block.
 
+Residual specifications discover `ViTLayer` instances from the complete unwrapped model and persist their actual `named_modules()` paths, so bare models and task wrappers do not rely on guessed prefixes.
+
 ## Persistence
 
 Calibration artifacts use a versioned immutable schema with complete model, data, numerical, capacity, and ablation metadata.

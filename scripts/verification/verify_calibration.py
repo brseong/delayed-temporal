@@ -66,6 +66,7 @@ from utils.transformers.calibration import (  # noqa: E402
 )
 from utils.transformers.models.spiking_vit.calibration import (  # noqa: E402
     image_processor_pixel_bounds,
+    vit_residual_calibration_specs,
 )
 
 
@@ -789,25 +790,20 @@ def verify_vit_residual_range_reset() -> None:
             config._attn_implementation = "eager"
             self.block = ViTLayer(config)
 
+    torch.manual_seed(1701)
+    model = ResidualModel().eval()
+
     # Both residual boundaries use signed symmetric calibration because their dense
     # distributions cross zero and must provide valid zero-reference affine rails.
-    specs = (
-        LayerCalibrationSpec(
-            module_name="block",
-            tensor_name="attention_residual",
-            range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
-            lower_quantile=0.0,
-            upper_quantile=1.0,
-            margin_fraction=0.0,
-        ),
-        LayerCalibrationSpec(
-            module_name="block",
-            tensor_name="output",
-            range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
-            lower_quantile=0.0,
-            upper_quantile=1.0,
-            margin_fraction=0.0,
-        ),
+    specs = vit_residual_calibration_specs(
+        model,
+        lower_quantile=0.0,
+        upper_quantile=1.0,
+        margin_fraction=0.0,
+    )
+    assert tuple((spec.module_name, spec.tensor_name) for spec in specs) == (
+        ("block", "attention_residual"),
+        ("block", "output"),
     )
     metadata = replace(
         _make_metadata(),
@@ -815,8 +811,6 @@ def verify_vit_residual_range_reset() -> None:
         model_options=(("residual_test", True),),
     )
     collector = create_calibration_collector(metadata, specs, bin_count=8)
-    torch.manual_seed(1701)
-    model = ResidualModel().eval()
     set_gaussian_time_noise(enabled=False)
     calibration_input = Potential(
         torch.tensor(
