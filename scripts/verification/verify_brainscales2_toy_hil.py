@@ -34,6 +34,8 @@ from utils.hardware.brainscales2.toy_artifacts import (
     write_toy_artifacts,
 )
 from utils.hardware.brainscales2.toy_pooling import (
+    _configure_grouped_synapse_weights,
+    _grouped_input_channel_slice,
     MockToyPoolBackend,
     ReplayToyPoolBackend,
     TimingCalibration,
@@ -105,6 +107,49 @@ def verify_grouped_placement() -> None:
         assert "512" in str(error)
     else:
         raise AssertionError("oversized dedicated mapping was accepted")
+
+
+def verify_grouped_broadcast_fan_in() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Grouped broadcast fan-in]]
+    dedicated = ToyPoolConfig(
+        pool_size=2,
+        logical_neurons=2,
+        mapping="dedicated",
+        inference_trials=1,
+        calibration_trials=2,
+    )
+    assert _grouped_input_channel_slice(0, dedicated, 3) == slice(0, 3)
+    assert _grouped_input_channel_slice(1, dedicated, 3) == slice(3, 6)
+    weight = torch.full((4, 6), -1.0)
+    _configure_grouped_synapse_weights(
+        weight,
+        dedicated,
+        input_fan_in=3,
+        synaptic_weight=7.0,
+    )
+    expected = torch.tensor(
+        [
+            [7, 7, 7, 0, 0, 0],
+            [7, 7, 7, 0, 0, 0],
+            [0, 0, 0, 7, 7, 7],
+            [0, 0, 0, 7, 7, 7],
+        ],
+        dtype=torch.float32,
+    )
+    torch.testing.assert_close(weight, expected)
+
+    reused = ToyPoolConfig(
+        pool_size=2,
+        logical_neurons=2,
+        mapping="time-multiplexed",
+        inference_trials=1,
+        calibration_trials=2,
+    )
+    reused_weight = torch.zeros((2, 3))
+    _configure_grouped_synapse_weights(
+        reused_weight, reused, input_fan_in=3, synaptic_weight=5.0
+    )
+    torch.testing.assert_close(reused_weight, torch.full((2, 3), 5.0))
 
 
 def verify_mock_and_all_miss_policy() -> None:
@@ -304,6 +349,8 @@ def verify_python311_and_notebook_contract() -> None:
     assert "Using probe-selected HAGEN_HIDDEN_SHIFT" in source
     assert "formal stages require a passing same-run smoke gate" in source
     assert "SMOKE_MAX_MULTI_SPIKE_RATE" in source
+    assert "SPIKING_INPUT_FAN_IN = 4" in source
+    assert "'--input-fan-in', SPIKING_INPUT_FAN_IN" in source
     assert source.index("'--phase', 'train'") < source.index(
         "setup_hardware_client()"
     )
@@ -316,6 +363,7 @@ def main() -> None:
     verify_deterministic_yin_yang_splits()
     verify_frozen_integer_conversion()
     verify_grouped_placement()
+    verify_grouped_broadcast_fan_in()
     verify_mock_and_all_miss_policy()
     verify_replay_split_and_reproducibility()
     verify_hagen_host_tiling()

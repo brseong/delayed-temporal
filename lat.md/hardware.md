@@ -112,7 +112,7 @@ Dedicated mapping preserves persistent physical identity, while time-multiplexed
 
 At `M=16`, dedicated placement uses 480 of 512 neuron circuits. The 128-hidden-unit MNIST model therefore requires time multiplexing, and a local pool is repeated in the coordinate result to make reuse explicit.
 
-[[utils/hardware/brainscales2/toy_pooling.py#GroupedHardwarePoolBackend]] constructs one grouped-broadcast `Synapse -> LIF` graph for dedicated mapping. Every logical input source projects only to its own replica block; the network path never substitutes the primitive experiment's unreliable independent-input routing condition.
+[[utils/hardware/brainscales2/toy_pooling.py#GroupedHardwarePoolBackend]] constructs one grouped-broadcast `Synapse -> LIF` graph for dedicated mapping. Each logical source expands into the operating point's simultaneous fan-in lanes, which project only to that source's replica block; the network path never substitutes the primitive experiment's unreliable independent-input routing condition.
 
 ### Local mock and replay evidence
 
@@ -143,6 +143,10 @@ Yin-Yang splits must reproduce from their registered seeds, converted ranges mus
 ### Physical pool allocation
 
 Dedicated 30-by-16 placements must contain 480 unique in-range coordinates with the requested quadrant topology, while oversized dedicated mappings must fail.
+
+### Grouped broadcast fan-in
+
+Each logical hidden source must occupy its own simultaneous fan-in lane block and connect every lane only to that logical unit's physical replicas.
 
 ### Miss-aware temporal decoding
 

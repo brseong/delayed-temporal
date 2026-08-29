@@ -175,6 +175,59 @@ def resolve_grouped_physical_coordinates(
     return result
 
 
+def _grouped_input_channel_slice(
+    logical: int,
+    config: ToyPoolConfig,
+    input_fan_in: int,
+) -> slice:
+    """Return the simultaneous source lanes driving one logical pool."""
+    if not 0 <= logical < config.logical_neurons:
+        raise ValueError("logical input index is out of range")
+    if input_fan_in <= 0:
+        raise ValueError("input_fan_in must be positive")
+    if config.mapping == "dedicated":
+        start = logical * input_fan_in
+        return slice(start, start + input_fan_in)
+    return slice(0, input_fan_in)
+
+
+def _configure_grouped_synapse_weights(
+    weight: torch.Tensor,
+    config: ToyPoolConfig,
+    *,
+    input_fan_in: int,
+    synaptic_weight: float,
+) -> None:
+    """Connect every logical source lane only to its physical replica block."""
+    expected_inputs = (
+        config.logical_neurons * input_fan_in
+        if config.mapping == "dedicated"
+        else input_fan_in
+    )
+    expected_outputs = (
+        config.logical_neurons * config.pool_size
+        if config.mapping == "dedicated"
+        else config.pool_size
+    )
+    if tuple(weight.shape) != (expected_outputs, expected_inputs):
+        raise ValueError(
+            "grouped synapse weight shape does not match mapping and fan-in"
+        )
+    weight.zero_()
+    if config.mapping == "dedicated":
+        for logical in range(config.logical_neurons):
+            output_start = logical * config.pool_size
+            input_lanes = _grouped_input_channel_slice(
+                logical, config, input_fan_in
+            )
+            weight[
+                output_start : output_start + config.pool_size,
+                input_lanes,
+            ] = synaptic_weight
+    else:
+        weight[:, :input_fan_in] = synaptic_weight
+
+
 def _nanmean(value: torch.Tensor, dim: int | tuple[int, ...]) -> torch.Tensor:
     finite = torch.isfinite(value)
     count = finite.sum(dim=dim)
@@ -496,7 +549,11 @@ class GroupedHardwarePoolBackend:
             else coordinates[0]
         )
         output_neurons = unique_coordinates.numel()
-        input_channels = config.logical_neurons if config.mapping == "dedicated" else 1
+        input_channels = (
+            config.logical_neurons * spiking_config.input_fan_in
+            if config.mapping == "dedicated"
+            else spiking_config.input_fan_in
+        )
         code_values = torch.linspace(0.0, 31.0, 11)
         code_times = _nominal_uint5_times(code_values, spiking_config)
         nominal = _nominal_uint5_times(hidden_uint5, spiking_config)
@@ -524,14 +581,20 @@ class GroupedHardwarePoolBackend:
                 for sample in range(hidden_uint5.shape[0]):
                     for logical in range(config.logical_neurons):
                         step = int(round(float(nominal[sample, logical]) / spiking_config.dt_s))
-                        inputs[step, batch, logical] = 1.0
+                        input_lanes = _grouped_input_channel_slice(
+                            logical, config, spiking_config.input_fan_in
+                        )
+                        inputs[step, batch, input_lanes] = 1.0
                     batch += 1
         else:
             for _ in range(config.inference_trials):
                 for sample in range(hidden_uint5.shape[0]):
                     for logical in range(config.logical_neurons):
                         step = int(round(float(nominal[sample, logical]) / spiking_config.dt_s))
-                        inputs[step, batch, 0] = 1.0
+                        input_lanes = _grouped_input_channel_slice(
+                            logical, config, spiking_config.input_fan_in
+                        )
+                        inputs[step, batch, input_lanes] = 1.0
                         batch += 1
         if batch != total_batches:
             raise RuntimeError("grouped input construction lost batch entries")
@@ -554,15 +617,12 @@ class GroupedHardwarePoolBackend:
                 out_features=output_neurons,
                 experiment=experiment,
             )
-            synapse.weight.data.zero_()
-            if config.mapping == "dedicated":
-                for logical in range(config.logical_neurons):
-                    start = logical * config.pool_size
-                    synapse.weight.data[start : start + config.pool_size, logical] = (
-                        spiking_config.synaptic_weight
-                    )
-            else:
-                synapse.weight.data[:, 0] = spiking_config.synaptic_weight
+            _configure_grouped_synapse_weights(
+                synapse.weight.data,
+                config,
+                input_fan_in=spiking_config.input_fan_in,
+                synaptic_weight=spiking_config.synaptic_weight,
+            )
             lif = hxsnn.LIF(
                 size=output_neurons,
                 experiment=experiment,
@@ -650,6 +710,7 @@ class GroupedHardwarePoolBackend:
                     "calibration_sha256": calibration_sha256(
                         spiking_config.calibration_path
                     ),
+                    "input_fan_in": spiking_config.input_fan_in,
                     "raw_spike_api": raw_api,
                     "grouped_broadcast": True,
                 },

@@ -142,11 +142,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tau-syn-s", type=float, default=1.0e-6)
     parser.add_argument("--leak", type=float, default=80.0)
     parser.add_argument("--reset", type=float, default=80.0)
-    parser.add_argument("--threshold", type=float, default=85.0)
+    parser.add_argument("--threshold", type=float, default=125.0)
     parser.add_argument("--refractory-time-s", type=float, default=1.0e-6)
     parser.add_argument("--i-synin-gm", type=float, default=500.0)
     parser.add_argument("--synapse-dac-bias", type=float, default=600.0)
     parser.add_argument("--synaptic-weight", type=float, default=63.0)
+    parser.add_argument("--input-fan-in", type=int, default=4)
     parser.add_argument("--raw-time-scale-s", type=float)
     return parser.parse_args()
 
@@ -340,6 +341,7 @@ def _spiking_config(args: argparse.Namespace) -> BrainScaleS2PoolConfig:
         i_synin_gm=args.i_synin_gm,
         synapse_dac_bias=args.synapse_dac_bias,
         synaptic_weight=args.synaptic_weight,
+        input_fan_in=args.input_fan_in,
         pool_sizes=tuple(args.pool_sizes),
         placements=("same-quadrant",),
         routings=("broadcast",),
