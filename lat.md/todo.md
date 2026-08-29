@@ -120,6 +120,7 @@ The implementation work covers every maintained transform and model adapter, not
 - [ ] Clamp every out-of-envelope value against its fixed bound and report underflow and overflow counts without widening that bound at runtime.
 - [ ] Include LayerNorm's pre-affine normalized result in calibration, then derive its post-affine envelope by interval arithmetic from fixed scale and bias endpoints.
 - [ ] Calibrate and clamp every pre-norm residual output per block, recording raw underflow and overflow before attaching the frozen output range.
+- [x] Connect both ViT pre-norm residual boundaries to optional explicit calibration bindings while retaining batch-independent analytic interval addition when calibration is absent.
 - [ ] Calibrate attention score clamp sites per layer/head and attention value outputs per layer, with sequence-capacity metadata and separate Gaussian saturation validation.
 - [ ] Keep spike-time windows configuration-derived: LayerNorm log windows remain fixed by `clip_margin`, `theta`, and `tau_s`, while affine identity encoding uses each declared zero-containing fixed interval.
 - [x] Make declared potential and time bounds immutable so cached or propagated endpoints cannot be widened in place.

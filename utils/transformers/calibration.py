@@ -131,6 +131,49 @@ def bind_model_calibration(
     return len(target_names)
 
 
+def model_calibration_is_bound(module: nn.Module) -> bool:
+    """Return whether a module owns one complete layer-wise calibration binding.
+
+    Model adapters use this query to retain an operator-derived analytic range when
+    calibration is not installed, while routing declared collection or runtime sites
+    through :func:`calibrated_potential` when a state is explicitly bound.
+
+    Args:
+        module: Transformer module that may own named calibration sites.
+
+    Returns:
+        ``True`` only when both binding attributes are present and structurally valid.
+
+    Raises:
+        TypeError: If ``module`` is not a PyTorch module or bound fields are malformed.
+        ValueError: If only one binding attribute is present.
+    """
+    # A partial binding indicates external corruption or an interrupted unsupported
+    # mutation. Treat it as an error rather than silently selecting analytic fallback.
+    if not isinstance(module, nn.Module):
+        raise TypeError("module must be a torch.nn.Module")
+    has_state = _CALIBRATION_STATE_ATTRIBUTE in module.__dict__
+    has_name = _CALIBRATION_NAME_ATTRIBUTE in module.__dict__
+    if has_state != has_name:
+        raise ValueError("module contains an incomplete calibration binding")
+    if not has_state:
+        return False
+
+    # Bound values are normally installed only by ``bind_model_calibration``. Validate
+    # them here as well so a manual replacement cannot steer a forward pass into
+    # collection or clipping under an invalid identity.
+    state = module.__dict__[_CALIBRATION_STATE_ATTRIBUTE]
+    module_name = module.__dict__[_CALIBRATION_NAME_ATTRIBUTE]
+    if not isinstance(
+        state,
+        (CalibrationCollectorState, CalibrationRuntimeState),
+    ):
+        raise TypeError("bound calibration state has an invalid type")
+    if not isinstance(module_name, str) or not module_name:
+        raise TypeError("bound calibration module name must be a non-empty string")
+    return True
+
+
 def clear_model_calibration(
     model: nn.Module,
     *,

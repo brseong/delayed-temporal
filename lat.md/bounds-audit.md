@@ -376,7 +376,7 @@ ViT에는 4개의 activation-derived call site가 있고 residual addition은 �
 | [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTPatchEmbeddings#forward]] | 1 | current `pixel_values` extrema를 Conv2d input range로 사용 | image processor의 fixed input range 또는 preprocessing별 calibration |
 | [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTIntermediate#forward]] | 2 | direct tanh-GELU와 configured dense activation output extrema 사용 | operator-composed GELU range 또는 activation별 calibration |
 | [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTEncoder#forward]] | 1 | embedding output extrema를 첫 range로 사용 | patch projection, class token, position embedding의 fixed range를 합산하거나 encoder-entry calibration |
-| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTLayer#forward]] | 0 | 두 residual range를 endpoint addition으로 계산 | 유지 |
+| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTLayer#forward]] | 0 | unbound 실행은 endpoint addition을 유지하고, bound collection/runtime은 attention residual과 block output에 각각 fixed layer-wise range를 적용 | 완료; evaluator phase 연결 필요 |
 
 Image processor가 channel별 $x_c=(r_c-\mu_c)/\sigma_c$, $r_c\in[0,1]$을 사용하면 pixel range는 preprocessing metadata에서 직접 계산할 수 있다. Custom preprocessing 또는 `inputs_embeds`는 별도 calibration identity가 필요하다.
 
@@ -511,7 +511,7 @@ Dependency 순서대로 fixed range를 도입하면 각 단계에서 current ten
 4. `SpikingLinear`, `SpikingConv2d`, `SpikingConv1D`가 forward에서 parameter extrema를 읽지 않고 frozen output-specific affine range를 사용하게 한다. 완료되었다.
 5. `SpikingLayerNorm`이 $\psi_{\mathrm{ED}}$와 $f_{\mathrm{Mul}}$의 returned range를 전달하게 하고, dense branch에는 analytic 또는 calibrated pre-affine range를 사용한다. Analytic $|z_i|\leq\sqrt{d-1}$ 적용은 완료되었다.
 6. Attention이 tensor와 fixed output range를 함께 전달하게 하고 mask suppression을 score upper bound와 일치시킨다.
-7. ViT와 GPT-2의 pre-norm post-add residual을 block별 calibration range로 clamp하고, BERT/RoBERTa post-norm 경계에도 frozen site range를 연결한다.
+7. ViT와 GPT-2의 pre-norm post-add residual을 block별 calibration range로 clamp하고, BERT/RoBERTa post-norm 경계에도 frozen site range를 연결한다. ViT block 내부 두 residual 경계의 adapter 연결은 완료되었다.
 8. ViT, BERT, RoBERTa, GPT-2 model entry를 embedding interval arithmetic 또는 calibration range로 교체한다.
 9. Direct GELU, `gelu_new`, SiLU와 dense ablation path에 activation별 fixed range를 적용한다.
 10. Pooler와 task head가 final hidden-state range를 slice와 함께 전달하도록 한다.

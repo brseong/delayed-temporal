@@ -57,11 +57,12 @@ from utils.transforms.calibration import (  # noqa: E402
     update_min_max_observer,
     validate_calibration_metadata,
 )
-from utils.transforms.types import PotentialBounds  # noqa: E402
+from utils.transforms.types import Potential, PotentialBounds  # noqa: E402
 from utils.transformers.calibration import (  # noqa: E402
     bind_model_calibration,
     calibrated_potential,
     clear_model_calibration,
+    model_calibration_is_bound,
 )
 from utils.transformers.models.spiking_vit.calibration import (  # noqa: E402
     image_processor_pixel_bounds,
@@ -562,10 +563,12 @@ def verify_model_binding_and_potential_boundary() -> None:
     )
     collector = create_calibration_collector(metadata, (spec,), bin_count=4)
     model = CalibrationModel()
+    assert not model_calibration_is_bound(model.block)
 
     # Binding resolves every declared name before mutation and rejects replicated or
     # already-bound models rather than sharing mutable counters ambiguously.
     assert bind_model_calibration(model, collector) == 1
+    assert model_calibration_is_bound(model.block)
     _expect_raises(
         ValueError,
         lambda: bind_model_calibration(model, collector),
@@ -622,6 +625,7 @@ def verify_model_binding_and_potential_boundary() -> None:
     )
     table = finalize_calibration_collection(collector)
     assert clear_model_calibration(model, expected_state=collector) == 1
+    assert not model_calibration_is_bound(model.block)
     _expect_raises(
         RuntimeError,
         lambda: calibrated_potential(model.block, "output", raw),
@@ -754,6 +758,125 @@ def verify_preprocessing_derived_image_range() -> None:
     )
 
 
+# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#ViT Residual Range Reset]]
+def verify_vit_residual_range_reset() -> None:
+    """Verify ViT block residuals collect raw values and consume frozen ranges."""
+    # Import the model adapter only for this integration group so the common observer
+    # checks remain independent of Hugging Face model registration side effects.
+    from utils.transforms.noise import set_gaussian_time_noise
+    from utils.transformers.models.spiking_vit.configuration_spiking_vit import (
+        ViTConfig,
+    )
+    from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTLayer
+
+    class ResidualModel(nn.Module):
+        """Expose one ViT block under the stable name used by calibration records."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            config = ViTConfig(
+                hidden_size=4,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                intermediate_size=8,
+                hidden_dropout_prob=0.0,
+                attention_probs_dropout_prob=0.0,
+                theta=4.0,
+                use_spiking_layernorm=False,
+                use_spiking_mlp=True,
+                spiking_mlp_exact_gelu=False,
+            )
+            config._attn_implementation = "eager"
+            self.block = ViTLayer(config)
+
+    # Both residual boundaries use signed symmetric calibration because their dense
+    # distributions cross zero and must provide valid zero-reference affine rails.
+    specs = (
+        LayerCalibrationSpec(
+            module_name="block",
+            tensor_name="attention_residual",
+            range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
+            lower_quantile=0.0,
+            upper_quantile=1.0,
+            margin_fraction=0.0,
+        ),
+        LayerCalibrationSpec(
+            module_name="block",
+            tensor_name="output",
+            range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
+            lower_quantile=0.0,
+            upper_quantile=1.0,
+            margin_fraction=0.0,
+        ),
+    )
+    metadata = replace(
+        _make_metadata(),
+        input_shape=(2, 4),
+        model_options=(("residual_test", True),),
+    )
+    collector = create_calibration_collector(metadata, specs, bin_count=8)
+    torch.manual_seed(1701)
+    model = ResidualModel().eval()
+    set_gaussian_time_noise(enabled=False)
+    calibration_input = Potential(
+        torch.tensor(
+            [[[-0.2, -0.1, 0.1, 0.2], [0.15, -0.05, 0.05, -0.15]]],
+            dtype=torch.float32,
+        ),
+        PotentialBounds(-2.0, 2.0),
+    )
+
+    # The two deterministic collection passes must return the same raw block output.
+    # Their analytic safety rails remain available while observers record each named
+    # residual distribution without clamping it against its own measurements.
+    assert bind_model_calibration(model, collector) == 1
+    first_pass = model.block(calibration_input)
+    start_histogram_calibration_pass(collector)
+    second_pass = model.block(calibration_input)
+    assert torch.equal(first_pass.value, second_pass.value)
+    table = finalize_calibration_collection(collector)
+    assert clear_model_calibration(model, expected_state=collector) == 1
+
+    # Calibration-free execution retains the wider analytic interval. Installing the
+    # frozen runtime replaces the second residual metadata with the persisted block
+    # range and keeps the same in-range activation numerically unchanged.
+    analytic = model.block(calibration_input)
+    runtime = create_calibration_runtime(
+        CalibrationMode.VALIDATE,
+        table,
+        expected_metadata=metadata,
+    )
+    assert bind_model_calibration(model, runtime) == 1
+    frozen = model.block(calibration_input)
+    frozen_record = get_layer_calibration(table, "block", "output")
+    assert frozen.domain == PotentialBounds(
+        frozen_record.bounds.min,
+        frozen_record.bounds.max,
+    )
+    assert frozen.domain != analytic.domain
+    assert torch.equal(frozen.value, analytic.value)
+
+    # A broader input still carries the same declared upstream safety rail, but its
+    # raw residuals exceed the narrow calibration population. Frozen execution must
+    # count and clamp those excursions without widening either persisted range.
+    evaluation_input = Potential(
+        torch.tensor(
+            [[[-1.8, -1.2, 1.2, 1.8], [1.5, -1.0, 1.0, -1.5]]],
+            dtype=torch.float32,
+        ),
+        calibration_input.domain,
+    )
+    evaluated = model.block(evaluation_input)
+    assert evaluated.domain == frozen.domain
+    report = get_calibration_clipping_report(runtime)
+    assert {item.tensor_name for item in report} == {
+        "attention_residual",
+        "output",
+    }
+    assert sum(item.underflows + item.overflows for item in report) > 0
+    assert clear_model_calibration(model, expected_state=runtime) == 1
+
+
 # @lat: [[calibration#Layer-wise Calibration#Persistence#Canonical Table Round Trip]]
 def verify_canonical_table_round_trip() -> None:
     """Check canonical ordering, identity validation, strict schema, and atomic I/O."""
@@ -842,6 +965,7 @@ def main() -> None:
         verify_collection_and_runtime_phase_separation,
         verify_model_binding_and_potential_boundary,
         verify_preprocessing_derived_image_range,
+        verify_vit_residual_range_reset,
         verify_canonical_table_round_trip,
     )
     for check in checks:

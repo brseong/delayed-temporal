@@ -42,6 +42,10 @@ from torch.profiler import profile, record_function, ProfilerActivity
 
 from utils.transforms.functions import gelu_approximation
 from utils.transforms.types import Potential, PotentialBounds
+from utils.transformers.calibration import (
+    calibrated_potential,
+    model_calibration_is_bound,
+)
 from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import SpikingConv2d, SpikingLayerNorm, SpikingLinear, _apply_norm
 
@@ -479,23 +483,57 @@ class ViTLayer(GradientCheckpointingLayer):
             self.layernorm_after = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(self, pot: Potential) -> Potential:
+        """Apply one pre-norm ViT block with optional frozen residual ranges.
+
+        Without layer-wise calibration, both residual outputs retain conservative
+        analytic interval addition. When this block is explicitly bound to a
+        collector or frozen runtime, those same analytic intervals are collection
+        safety rails and the persisted layer ranges reset propagation across depth.
+
+        Args:
+            pot: Incoming hidden state paired with its fixed potential range.
+
+        Returns:
+            Block output on its analytic or calibrated fixed residual range.
+        """
         # ─── Pre-norm + Attention ────────────────────────────────────────────
         pot_norm1: Potential = _apply_norm(self.layernorm_before, pot)
         pot_attn:  Potential = self.attention(pot_norm1)
 
-        # 잔차 1: 구간 산술로 도메인 합산
-        pot_res1 = Potential(
-            pot_attn.value + pot.value,
-            PotentialBounds(pot_attn.domain.min + pot.domain.min,
-                            pot_attn.domain.max + pot.domain.max),
+        # The first residual can widen recursively across blocks. Preserve its exact
+        # analytic sum for collection or calibration-free execution, but let a bound
+        # runtime clamp and replace it with the persisted per-layer range.
+        res1_value = pot_attn.value + pot.value
+        res1_analytic_bounds = PotentialBounds(
+            pot_attn.domain.min + pot.domain.min,
+            pot_attn.domain.max + pot.domain.max,
         )
+        if model_calibration_is_bound(self):
+            pot_res1 = calibrated_potential(
+                self,
+                "attention_residual",
+                res1_value,
+                collection_bounds=res1_analytic_bounds,
+            )
+        else:
+            pot_res1 = Potential(res1_value, res1_analytic_bounds)
 
         # ─── Post-norm + MLP ─────────────────────────────────────────────────
         pot_norm2: Potential = _apply_norm(self.layernorm_after, pot_res1)
         pot_inter: Potential = self.intermediate(pot_norm2)
 
-        # 잔차 2: ViTOutput 내부에서 처리
-        return self.output(pot_inter, pot_res1)
+        # ViTOutput performs the second exact residual addition. Collection observes
+        # the raw result, while validation and inference count excursions before
+        # clamping to the persisted block-output range.
+        pot_output = self.output(pot_inter, pot_res1)
+        if model_calibration_is_bound(self):
+            return calibrated_potential(
+                self,
+                "output",
+                pot_output.value,
+                collection_bounds=pot_output.domain,
+            )
+        return pot_output
 
 
 class ViTEncoder(nn.Module):

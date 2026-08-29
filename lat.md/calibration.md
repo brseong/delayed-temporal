@@ -44,7 +44,7 @@ An explicit collector accepts only predeclared calibration sites, transitions on
 
 Calibration state binds to stable module names without entering checkpoints. Collection uses analytic safety rails; frozen execution clamps raw activations to persisted ranges before creating `Potential`.
 
-Binding rejects missing modules, undeclared tensor boundaries, repeated installation, and `DataParallel`. Phase cleanup removes only adapter attributes and preserves the completed table, observers, and clipping report.
+Binding rejects missing modules, undeclared tensor boundaries, repeated installation, and `DataParallel`. Adapters retain analytic bounds when unbound and query complete bindings before entering collection or frozen clipping. Phase cleanup preserves the completed state.
 
 ### Affine Fixed-Domain Consumption
 
@@ -57,6 +57,12 @@ The input interval must be finite, ordered, and contain zero so data events and 
 ViT patch projection derives its fixed pixel range from image-processor rescaling and channel normalization metadata, not from an evaluation batch.
 
 The evaluator maps uint8 endpoints through each configured channel, reduces them to one scalar range, and includes zero when necessary for signed PWM. Invalid or missing metadata fails before the spiking patch projection encodes events.
+
+### ViT Residual Range Reset
+
+Each ViT block calibrates its attention residual and final MLP residual as separate signed-symmetric layer ranges, preventing analytic interval addition from widening recursively through depth.
+
+Collection retains each exact interval sum as a safety rail and observes the raw residual. Frozen validation or inference counts strict excursions, clamps to the persisted layer range, and propagates that range into the next normalization and block.
 
 ## Persistence
 
