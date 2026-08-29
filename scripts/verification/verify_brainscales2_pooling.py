@@ -534,6 +534,7 @@ def verify_notebook_is_valid_json() -> None:
     ):
         assert f"{run_flag} =" in source
         assert f"if {run_flag}:" in source
+    assert "RUN_FULL_EXPERIMENT = True" in source
     assert '"--allow-environment-calibration"' not in source
     assert "SMOKE_CALIBRATION_PATH.name" in source
     assert "folder=str(SMOKE_CALIBRATION_PATH.parent)" in source
