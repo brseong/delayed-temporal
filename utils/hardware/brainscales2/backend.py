@@ -128,6 +128,58 @@ def _configure_experiment_calibration(experiment: Any, path: Path) -> str:
     return loader
 
 
+def _configure_pool_synapse_weights(
+    weights: torch.Tensor,
+    *,
+    pool_size: int,
+    routing: RoutingMode,
+    input_fan_in: int,
+    synaptic_weight: float,
+) -> None:
+    """Connect shared or neuron-dedicated coincident fan-in lanes."""
+    input_channels = (
+        input_fan_in if routing == "broadcast" else pool_size * input_fan_in
+    )
+    expected_shape = (pool_size, input_channels)
+    if tuple(weights.shape) != expected_shape:
+        raise RuntimeError(
+            f"unexpected hxtorch synapse weight shape {tuple(weights.shape)}; "
+            f"expected {expected_shape}"
+        )
+    weights.zero_()
+    if routing == "broadcast":
+        weights.fill_(synaptic_weight)
+        return
+    for neuron in range(pool_size):
+        start = neuron * input_fan_in
+        weights[neuron, start : start + input_fan_in] = synaptic_weight
+
+
+def _analog_parameter_metadata(
+    config: BrainScaleS2PoolConfig,
+    calibration_loader: str | None,
+) -> dict[str, Any]:
+    """Describe whether requested analog values control the pinned chip state."""
+    legacy_pbin = (
+        calibration_loader == "hxtorch.spiking.ExecutionInstance.load_calib"
+    )
+    return {
+        "analog_parameter_control": (
+            "fixed-by-pinned-calibration" if legacy_pbin else "hxtorch-managed"
+        ),
+        "requested_analog_parameters_applied": False if legacy_pbin else None,
+        "requested_analog_parameters": {
+            "tau_mem_s": config.tau_mem_s,
+            "tau_syn_s": config.tau_syn_s,
+            "leak": config.leak,
+            "reset": config.reset,
+            "threshold": config.threshold,
+            "i_synin_gm": config.i_synin_gm,
+            "synapse_dac_bias": config.synapse_dac_bias,
+        },
+    }
+
+
 class MockPoolBackend:
     """Seeded synthetic backend with explicit static, shared, and local noise."""
 
@@ -559,19 +611,23 @@ class BrainScaleS2PoolBackend:
                     config.calibration_path,
                 )
 
-            input_channels = 1 if routing == "broadcast" else pool_size
+            input_channels = (
+                config.input_fan_in
+                if routing == "broadcast"
+                else pool_size * config.input_fan_in
+            )
             synapse = hxsnn.Synapse(
                 in_features=input_channels,
                 out_features=pool_size,
                 experiment=experiment,
             )
-            synapse.weight.data.zero_()
-            if routing == "broadcast":
-                synapse.weight.data.fill_(config.synaptic_weight)
-            else:
-                diagonal = min(synapse.weight.data.shape)
-                arange = torch.arange(diagonal)
-                synapse.weight.data[arange, arange] = config.synaptic_weight
+            _configure_pool_synapse_weights(
+                synapse.weight.data,
+                pool_size=pool_size,
+                routing=routing,
+                input_fan_in=config.input_fan_in,
+                synaptic_weight=config.synaptic_weight,
+            )
 
             lif = hxsnn.LIF(
                 size=pool_size,
@@ -637,6 +693,8 @@ class BrainScaleS2PoolBackend:
                     "calibration_sha256": calibration_sha256(config.calibration_path),
                     "raw_spike_api": raw_api,
                     "clamped_values": int(encoding.clamp_mask.sum().item()),
+                    "input_fan_in": config.input_fan_in,
+                    **_analog_parameter_metadata(config, calibration_loader),
                 },
             )
         finally:
@@ -650,6 +708,7 @@ def with_operating_point(
     threshold: float,
     synaptic_weight: float,
     i_synin_gm: float,
+    input_fan_in: int,
 ) -> BrainScaleS2PoolConfig:
     """Return a validated immutable config for one calibration candidate."""
     return replace(
@@ -657,4 +716,5 @@ def with_operating_point(
         threshold=threshold,
         synaptic_weight=synaptic_weight,
         i_synin_gm=i_synin_gm,
+        input_fan_in=input_fan_in,
     )

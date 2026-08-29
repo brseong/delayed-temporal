@@ -95,6 +95,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--i-synin-gm", type=float, default=500.0)
     parser.add_argument("--synapse-dac-bias", type=float, default=600.0)
     parser.add_argument("--synaptic-weight", type=float, default=63.0)
+    parser.add_argument("--input-fan-in", type=int, default=1)
 
     parser.add_argument("--calibration", type=Path)
     parser.add_argument("--allow-environment-calibration", action="store_true")
@@ -110,6 +111,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--calibration-weights", type=float, nargs="+", default=[31, 47, 63])
     parser.add_argument("--calibration-gains", type=float, nargs="+", default=[300, 500, 700])
+    parser.add_argument(
+        "--calibration-fan-ins",
+        type=int,
+        nargs="+",
+        default=[1],
+    )
     return parser.parse_args()
 
 
@@ -139,6 +146,7 @@ def make_config(args: argparse.Namespace) -> BrainScaleS2PoolConfig:
         i_synin_gm=args.i_synin_gm,
         synapse_dac_bias=args.synapse_dac_bias,
         synaptic_weight=args.synaptic_weight,
+        input_fan_in=args.input_fan_in,
         pool_sizes=pool_sizes,
         placements=placements,
         routings=routings,
@@ -156,6 +164,7 @@ def make_config(args: argparse.Namespace) -> BrainScaleS2PoolConfig:
             threshold=float(selected["threshold"]),
             synaptic_weight=float(selected["synaptic_weight"]),
             i_synin_gm=float(selected["i_synin_gm"]),
+            input_fan_in=int(selected.get("input_fan_in", config.input_fan_in)),
         )
     return config
 
@@ -331,29 +340,40 @@ def calibrate_operating_point(
     for threshold in args.calibration_thresholds:
         for weight in args.calibration_weights:
             for gain in args.calibration_gains:
-                candidate_config = with_operating_point(
-                    calibration_config,
-                    threshold=threshold,
-                    synaptic_weight=weight,
-                    i_synin_gm=gain,
-                )
-                result = backend.run(
-                    potential,
-                    candidate_config,
-                    pool_size=4,
-                    placement="same-quadrant",
-                    routing="broadcast",
-                )
-                score = score_operating_point(result)
-                candidates.append(
-                    {
-                        "threshold": threshold,
-                        "synaptic_weight": weight,
-                        "i_synin_gm": gain,
-                        **score,
-                    }
-                )
-                print(candidates[-1], flush=True)
+                for input_fan_in in args.calibration_fan_ins:
+                    candidate_config = with_operating_point(
+                        calibration_config,
+                        threshold=threshold,
+                        synaptic_weight=weight,
+                        i_synin_gm=gain,
+                        input_fan_in=input_fan_in,
+                    )
+                    result = backend.run(
+                        potential,
+                        candidate_config,
+                        pool_size=4,
+                        placement="same-quadrant",
+                        routing="broadcast",
+                    )
+                    score = score_operating_point(result)
+                    candidates.append(
+                        {
+                            "threshold": threshold,
+                            "synaptic_weight": weight,
+                            "i_synin_gm": gain,
+                            "input_fan_in": input_fan_in,
+                            "analog_parameter_control": result.metadata.get(
+                                "analog_parameter_control", "unknown"
+                            ),
+                            "requested_analog_parameters_applied": (
+                                result.metadata.get(
+                                    "requested_analog_parameters_applied"
+                                )
+                            ),
+                            **score,
+                        }
+                    )
+                    print(candidates[-1], flush=True)
     selected = min(candidates, key=lambda candidate: float(candidate["score"]))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     with (args.output_dir / "calibration_candidates.csv").open(

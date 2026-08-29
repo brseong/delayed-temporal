@@ -45,6 +45,7 @@ class BrainScaleS2PoolConfig:
     i_synin_gm: float = 500.0
     synapse_dac_bias: float = 600.0
     synaptic_weight: float = 63.0
+    input_fan_in: int = 1
 
     pool_sizes: tuple[int, ...] = (1, 2, 4, 8, 16)
     placements: tuple[PlacementMode, ...] = (
@@ -94,6 +95,12 @@ class BrainScaleS2PoolConfig:
             raise ValueError("trials must be at least two for calibration/evaluation splitting")
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise TypeError("seed must be an integer")
+        if (
+            isinstance(self.input_fan_in, bool)
+            or not isinstance(self.input_fan_in, int)
+            or not 1 <= self.input_fan_in <= 16
+        ):
+            raise ValueError("input_fan_in must be an integer in [1, 16]")
         if not self.pool_sizes or any(size <= 0 or size > 128 for size in self.pool_sizes):
             raise ValueError("pool_sizes must contain integers in [1, 128]")
         if len(set(self.pool_sizes)) != len(self.pool_sizes):
@@ -146,6 +153,7 @@ class TTFSHardwareEncoding:
     clamp_mask: torch.Tensor
     encoding: EncodingKind
     routing: RoutingMode
+    input_fan_in: int
 
     @property
     def sample_count(self) -> int:
@@ -214,4 +222,3 @@ class PoolRunResult:
             raise ValueError("nominal input count must match the sample dimension")
         if len(self.physical_coordinates) != self.pool_size:
             raise ValueError("one physical coordinate is required per neuron")
-

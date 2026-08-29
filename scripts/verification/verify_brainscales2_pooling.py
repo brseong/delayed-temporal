@@ -28,7 +28,9 @@ from utils.hardware.brainscales2.artifacts import (
 )
 from utils.hardware.brainscales2.backend import (
     MockPoolBackend,
+    _analog_parameter_metadata,
     _configure_experiment_calibration,
+    _configure_pool_synapse_weights,
     _find_raw_spikes,
     _fixture_calibration_from_file,
     _legacy_experiment_observables,
@@ -75,6 +77,67 @@ def verify_identity_encoding() -> None:
     )
     assert independent.dense_spikes.shape == (config.runtime_steps, 3, 4)
     assert int(independent.dense_spikes.sum()) == 12
+
+
+def verify_input_fan_in_encoding_and_weights() -> None:
+    config = BrainScaleS2PoolConfig(
+        trials=4,
+        pool_sizes=(4,),
+        input_fan_in=3,
+    )
+    potential = Potential(
+        torch.tensor([-1.0, 0.0, 1.0]),
+        PotentialBounds(-1.0, 1.0),
+    )
+    broadcast = encode_potential_for_brainscales2(
+        potential,
+        config,
+        pool_size=4,
+        routing="broadcast",
+    )
+    assert broadcast.dense_spikes.shape == (config.runtime_steps, 3, 3)
+    assert int(broadcast.dense_spikes.sum()) == 9
+    assert broadcast.input_fan_in == 3
+
+    independent = encode_potential_for_brainscales2(
+        potential,
+        config,
+        pool_size=4,
+        routing="independent",
+    )
+    assert independent.dense_spikes.shape == (config.runtime_steps, 3, 12)
+    assert int(independent.dense_spikes.sum()) == 36
+
+    broadcast_weights = torch.empty((4, 3))
+    _configure_pool_synapse_weights(
+        broadcast_weights,
+        pool_size=4,
+        routing="broadcast",
+        input_fan_in=3,
+        synaptic_weight=63.0,
+    )
+    assert bool((broadcast_weights == 63.0).all())
+
+    independent_weights = torch.empty((4, 12))
+    _configure_pool_synapse_weights(
+        independent_weights,
+        pool_size=4,
+        routing="independent",
+        input_fan_in=3,
+        synaptic_weight=63.0,
+    )
+    assert int((independent_weights != 0.0).sum()) == 12
+    for neuron in range(4):
+        expected = torch.zeros(12)
+        expected[3 * neuron : 3 * neuron + 3] = 63.0
+        torch.testing.assert_close(independent_weights[neuron], expected)
+
+    try:
+        BrainScaleS2PoolConfig(input_fan_in=0)
+    except ValueError as error:
+        assert "input_fan_in" in str(error)
+    else:
+        raise AssertionError("zero input fan-in was accepted")
 
 
 def verify_log_encoding_and_validation() -> None:
@@ -287,6 +350,16 @@ def verify_experiment_calibration_compatibility() -> None:
     assert modern.calibration is marker
     assert loader == "fixture-loader"
 
+    config = BrainScaleS2PoolConfig(trials=2, pool_sizes=(1,))
+    legacy_metadata = _analog_parameter_metadata(
+        config,
+        "hxtorch.spiking.ExecutionInstance.load_calib",
+    )
+    assert legacy_metadata["analog_parameter_control"] == (
+        "fixed-by-pinned-calibration"
+    )
+    assert legacy_metadata["requested_analog_parameters_applied"] is False
+
 
 def verify_mock_analysis_and_artifacts() -> None:
     config = BrainScaleS2PoolConfig(
@@ -469,11 +542,13 @@ def verify_notebook_is_valid_json() -> None:
     assert '"--pool-sizes", 1, 2, 4, 8, 16' in source
     assert '"--phase", "diagnose-cadc"' in source
     assert "recommended_operating_point.json" in source
-    assert '"--calibration-thresholds", 85, 90, 95, 100' in source
+    assert '"--calibration-thresholds", 125' in source
+    assert '"--calibration-fan-ins", 1, 2, 3, 4' in source
 
 
 def main() -> None:
     verify_identity_encoding()
+    verify_input_fan_in_encoding_and_weights()
     verify_log_encoding_and_validation()
     verify_software_noise_guard()
     verify_placement_and_raw_events()

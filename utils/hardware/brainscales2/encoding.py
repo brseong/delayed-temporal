@@ -79,16 +79,25 @@ def encode_potential_for_brainscales2(
     injected_time_s = bin_index.to(torch.float64) * config.dt_s
 
     samples = project_time.numel()
-    input_channels = 1 if routing == "broadcast" else pool_size
+    input_channels = (
+        config.input_fan_in
+        if routing == "broadcast"
+        else pool_size * config.input_fan_in
+    )
     dense = torch.zeros(
         (config.runtime_steps, samples, input_channels),
         dtype=torch.float32,
     )
     sample_index = torch.arange(samples, dtype=torch.long)
     if routing == "broadcast":
-        dense[bin_index.reshape(-1), sample_index, 0] = 1.0
+        channels = torch.arange(config.input_fan_in, dtype=torch.long)
+        dense[
+            bin_index.reshape(-1, 1),
+            sample_index.reshape(-1, 1),
+            channels.reshape(1, -1),
+        ] = 1.0
     else:
-        channels = torch.arange(pool_size, dtype=torch.long)
+        channels = torch.arange(input_channels, dtype=torch.long)
         dense[
             bin_index.reshape(-1, 1),
             sample_index.reshape(-1, 1),
@@ -110,5 +119,5 @@ def encode_potential_for_brainscales2(
         clamp_mask=clamp_mask,
         encoding=config.encoding,
         routing=routing,
+        input_fan_in=config.input_fan_in,
     )
-
