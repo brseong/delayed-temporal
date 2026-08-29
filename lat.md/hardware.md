@@ -130,7 +130,7 @@ Network artifacts join float, ideal-converted, and physical predictions with com
 
 [[scripts/evaluation/brainscales2_toy_hil.py#main]] separates train, convert, local evaluation, Hagen probe, hardware smoke, and full hardware phases. MNIST hardware evaluation defaults to a 128-sample runtime benchmark until the caller explicitly sets a formal sample count.
 
-The EBRAINS notebook keeps all run flags disabled by default, configures the shared client from a writable `/tmp` demo checkout, and delegates every experiment to the CLI. After chip allocation it downloads distinct nightly Hagen and spiking calibrations into the run directory when explicit override paths are absent, then passes both checksum-addressable files to every hardware phase.
+The EBRAINS notebook is a one-pass opt-in pipeline that trains and converts before requesting hardware, then configures the shared client from a writable `/tmp` demo checkout. It downloads distinct nightly Hagen and spiking calibrations when explicit overrides are absent, applies the probe-selected hidden shift, and invokes formal flags only after a same-run smoke gate passes. Any enabled-stage failure is recorded in `pipeline_status.json`, raised immediately, and prevents later CLI stages from running.
 
 ## Toy ANN2SNN Verification
 
@@ -163,3 +163,5 @@ Network evaluation must emit the stable manifest, runtime, metrics, predictions,
 ### EBRAINS launcher contract
 
 New source files must parse as Python 3.11, and the notebook must remain a thin opt-in launcher with explicit hardware flags and MNIST sample limits.
+
+Training must precede hardware allocation, the probe-selected shift must feed smoke, and formal stages must be gated by a passing same-run smoke artifact.

@@ -300,6 +300,16 @@ def verify_python311_and_notebook_contract() -> None:
     assert "spiking_cocolist.pbin" in source
     assert "HAGEN_CALIBRATION_PATH is None" in source
     assert "SPIKING_CALIBRATION_PATH is None" in source
+    assert "pipeline_status.json" in source
+    assert "Using probe-selected HAGEN_HIDDEN_SHIFT" in source
+    assert "formal stages require a passing same-run smoke gate" in source
+    assert "SMOKE_MAX_MULTI_SPIKE_RATE" in source
+    assert source.index("'--phase', 'train'") < source.index(
+        "setup_hardware_client()"
+    )
+    assert source.index("if RUN_HARDWARE_SMOKE:") < source.index(
+        "if RUN_YINYANG_FULL:"
+    )
 
 
 def main() -> None:
