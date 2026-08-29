@@ -89,11 +89,22 @@ def _fixture_calibration_from_file(path: Path) -> tuple[Any, str]:
     sta = import_module("dlens_vx_v3.sta")
     grenade = import_module("pygrenade_vx")
     abstract = import_module("pygrenade_vx.network.abstract")
+    fixture_type = getattr(abstract, "FixtureCalibration", None)
+    fixture_module = "pygrenade_vx.network.abstract"
+    if fixture_type is None:
+        private_abstract = import_module("_pygrenade_vx_network_abstract")
+        fixture_type = getattr(private_abstract, "FixtureCalibration", None)
+        fixture_module = "_pygrenade_vx_network_abstract"
+    if fixture_type is None:
+        raise RuntimeError(
+            "installed pygrenade_vx exposes neither the public nor private "
+            "FixtureCalibration binding"
+        )
 
     dumper = sta.DumperDone()
     sta.from_portablebinary(dumper, path.read_bytes())
     chip = sta.convert_to_chip(dumper)
-    calibration = abstract.FixtureCalibration()
+    calibration = fixture_type()
     calibration.chips = {
         grenade.common.ExecutionInstanceOnExecutor(
             grenade.common.ExecutionInstanceID(0),
@@ -102,7 +113,19 @@ def _fixture_calibration_from_file(path: Path) -> tuple[Any, str]:
             grenade.common.ChipOnConnection(): chip,
         },
     }
-    return calibration, "portable-binary-fixture-fallback"
+    return calibration, f"portable-binary-fixture-fallback:{fixture_module}"
+
+
+def _configure_experiment_calibration(experiment: Any, path: Path) -> str:
+    """Attach a pinned calibration using the installed hxtorch generation."""
+    execution_instance = getattr(experiment, "default_execution_instance", None)
+    legacy_loader = getattr(execution_instance, "load_calib", None)
+    if callable(legacy_loader):
+        legacy_loader(path)
+        return "hxtorch.spiking.ExecutionInstance.load_calib"
+
+    experiment.calibration, loader = _fixture_calibration_from_file(path)
+    return loader
 
 
 class MockPoolBackend:
@@ -401,8 +424,9 @@ class BrainScaleS2PoolBackend:
             )
             calibration_loader = None
             if config.calibration_path is not None:
-                experiment.calibration, calibration_loader = (
-                    _fixture_calibration_from_file(config.calibration_path)
+                calibration_loader = _configure_experiment_calibration(
+                    experiment,
+                    config.calibration_path,
                 )
 
             synapse = hxsnn.Synapse(
@@ -530,8 +554,9 @@ class BrainScaleS2PoolBackend:
             )
             calibration_loader = None
             if config.calibration_path is not None:
-                experiment.calibration, calibration_loader = (
-                    _fixture_calibration_from_file(config.calibration_path)
+                calibration_loader = _configure_experiment_calibration(
+                    experiment,
+                    config.calibration_path,
                 )
 
             input_channels = 1 if routing == "broadcast" else pool_size
@@ -633,4 +658,3 @@ def with_operating_point(
         synaptic_weight=synaptic_weight,
         i_synin_gm=i_synin_gm,
     )
-

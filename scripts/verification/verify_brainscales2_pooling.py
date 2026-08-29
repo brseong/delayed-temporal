@@ -28,6 +28,7 @@ from utils.hardware.brainscales2.artifacts import (
 )
 from utils.hardware.brainscales2.backend import (
     MockPoolBackend,
+    _configure_experiment_calibration,
     _find_raw_spikes,
     _fixture_calibration_from_file,
     _legacy_experiment_observables,
@@ -219,7 +220,8 @@ def verify_fixture_calibration_loader() -> None:
     fallback_modules = {
         "dlens_vx_v3.sta": FakeSTA,
         "pygrenade_vx": SimpleNamespace(common=common),
-        "pygrenade_vx.network.abstract": SimpleNamespace(
+        "pygrenade_vx.network.abstract": SimpleNamespace(),
+        "_pygrenade_vx_network_abstract": SimpleNamespace(
             FixtureCalibration=FixtureCalibration
         ),
     }
@@ -237,7 +239,9 @@ def verify_fixture_calibration_loader() -> None:
             side_effect=fallback_import,
         ):
             calibration, loader = _fixture_calibration_from_file(calibration_path)
-        assert loader == "portable-binary-fixture-fallback"
+        assert loader == (
+            "portable-binary-fixture-fallback:_pygrenade_vx_network_abstract"
+        )
         connections = next(iter(calibration.chips.values()))
         assert next(iter(connections.values())) == (
             "chip",
@@ -255,6 +259,33 @@ def verify_fixture_calibration_loader() -> None:
             modern, loader = _fixture_calibration_from_file(calibration_path)
         assert modern == (marker, str(calibration_path))
         assert loader.startswith("hxtorch.core.utils")
+
+
+def verify_experiment_calibration_compatibility() -> None:
+    loaded_paths = []
+    legacy = SimpleNamespace(
+        default_execution_instance=SimpleNamespace(
+            load_calib=lambda path: loaded_paths.append(path)
+        )
+    )
+    pinned_path = Path("spiking_cocolist.pbin")
+    with patch(
+        "utils.hardware.brainscales2.backend._fixture_calibration_from_file"
+    ) as fixture_loader:
+        loader = _configure_experiment_calibration(legacy, pinned_path)
+    fixture_loader.assert_not_called()
+    assert loaded_paths == [pinned_path]
+    assert loader == "hxtorch.spiking.ExecutionInstance.load_calib"
+
+    modern = SimpleNamespace()
+    marker = object()
+    with patch(
+        "utils.hardware.brainscales2.backend._fixture_calibration_from_file",
+        return_value=(marker, "fixture-loader"),
+    ):
+        loader = _configure_experiment_calibration(modern, pinned_path)
+    assert modern.calibration is marker
+    assert loader == "fixture-loader"
 
 
 def verify_mock_analysis_and_artifacts() -> None:
@@ -446,6 +477,7 @@ def main() -> None:
     verify_software_noise_guard()
     verify_placement_and_raw_events()
     verify_fixture_calibration_loader()
+    verify_experiment_calibration_compatibility()
     verify_mock_analysis_and_artifacts()
     verify_notebook_is_valid_json()
     verify_cadc_diagnostic_and_artifacts()
@@ -454,4 +486,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

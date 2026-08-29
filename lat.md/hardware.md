@@ -34,7 +34,7 @@ Physical and synthetic executions implement one pool-level interface while keepi
 
 [[utils/hardware/brainscales2/backend.py#BrainScaleS2PoolBackend]] lazy-loads hxtorch, constructs `Synapse -> LIF`, pins the requested logical neurons, reads the underlying sparse SpikeHandle data, converts FPGA ticks to seconds, and releases hardware in a `finally` block. Current releases expose raw observables on the LIF module; pre-13 EBRAINS releases retain them in the experiment's hardware-data extractor keyed by the LIF population descriptor.
 
-[[utils/hardware/brainscales2/backend.py#_fixture_calibration_from_file]] uses the packaged `hxtorch.core` loader when available. Older EBRAINS releases without that namespace decode the same portable-binary `.pbin` through `dlens_vx_v3.sta` and construct the grenade `FixtureCalibration` directly; result metadata records which path was used.
+[[utils/hardware/brainscales2/backend.py#_configure_experiment_calibration]] detects the hxtorch execution model. Legacy releases load a pinned `.pbin` through `default_execution_instance.load_calib`; modern releases use `hxtorch.core` or a public/private grenade `FixtureCalibration` binding. Result metadata records the selected path.
 
 Dense spike grids are not accepted as a fallback output because their configured `dt` can hide the jitter being measured. Integer FPGA timestamps use the grenade clock constant unless a release-specific scale is explicitly supplied. A configurable 50-microsecond inter-batch guard prevents residual membrane state from leaking between samples and trials.
 
