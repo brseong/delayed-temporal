@@ -2254,6 +2254,36 @@ def verify_gaussian_spiking_linear() -> None:
         )
         assert deterministic.domain == expected_domain
 
+        # A second fixed domain proves the affine adapter consumes upstream metadata
+        # instead of silently replacing it with [-theta, theta]. Exact interval
+        # arithmetic must retain the asymmetric endpoint selected by each weight sign.
+        asymmetric_domain = PotentialBounds(-1.0, 2.0)
+        asymmetric_value = value.clamp(
+            asymmetric_domain.min,
+            asymmetric_domain.max,
+        )
+        asymmetric = layer(Potential(asymmetric_value, asymmetric_domain))
+        assert torch.allclose(
+            asymmetric.value,
+            torch.nn.functional.linear(asymmetric_value, layer.weight, layer.bias),
+            atol=1e-12,
+            rtol=1e-12,
+        )
+        lower_terms = torch.minimum(
+            layer.weight.detach() * asymmetric_domain.min,
+            layer.weight.detach() * asymmetric_domain.max,
+        )
+        upper_terms = torch.maximum(
+            layer.weight.detach() * asymmetric_domain.min,
+            layer.weight.detach() * asymmetric_domain.max,
+        )
+        expected_asymmetric_domain = PotentialBounds(
+            (lower_terms.sum(dim=1) + layer.bias.detach()).min().item(),
+            (upper_terms.sum(dim=1) + layer.bias.detach()).max().item(),
+        )
+        assert asymmetric.domain == expected_asymmetric_domain
+        assert layer.freeze_parameter_bounds(asymmetric_domain) is asymmetric.domain
+
         # Zero scale enters the event-aware implementation without changing either
         # data or scalar reference times. Verify exact value/domain parity and that
         # the reference is sampled once rather than once per batch or feature.
@@ -2321,17 +2351,10 @@ def verify_gaussian_spiking_linear() -> None:
             pass
         else:
             raise AssertionError("SpikingLinear accepted stale frozen bounds")
-        assert layer.freeze_parameter_bounds(refresh=True) != expected_domain
-
-        # Threshold is also part of the frozen identity because it scales every
-        # output-row radius even when checkpoint parameters remain unchanged.
-        layer.theta = 3.0
-        try:
-            layer.freeze_parameter_bounds()
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError("SpikingLinear accepted a stale threshold bound")
+        assert (
+            layer.freeze_parameter_bounds(potential.domain, refresh=True)
+            != expected_domain
+        )
     finally:
         # Restore process-wide state before the convolutional adapter regression.
         set_gaussian_time_noise(enabled=False)
@@ -2400,6 +2423,45 @@ def verify_gaussian_spiking_conv2d() -> None:
             (layer.bias.detach() + conv_radius).max().item(),
         )
         assert deterministic.domain == expected_domain
+
+        # An asymmetric fixed rail exercises sign-aware interval arithmetic and
+        # proves convolution consumes upstream calibration metadata. Zero remains in
+        # the interval, so ordinary spatial padding retains its physical meaning.
+        asymmetric_domain = PotentialBounds(-1.0, 2.0)
+        asymmetric_value = value.clamp(
+            asymmetric_domain.min,
+            asymmetric_domain.max,
+        )
+        asymmetric = layer(Potential(asymmetric_value, asymmetric_domain))
+        expected_asymmetric = torch.nn.functional.conv2d(
+            asymmetric_value,
+            layer.weight,
+            layer.bias,
+            layer.stride,
+            layer.padding,
+            layer.dilation,
+            layer.groups,
+        )
+        assert torch.allclose(
+            asymmetric.value,
+            expected_asymmetric,
+            atol=1e-12,
+            rtol=1e-12,
+        )
+        lower_terms = torch.minimum(
+            layer.weight.detach() * asymmetric_domain.min,
+            layer.weight.detach() * asymmetric_domain.max,
+        )
+        upper_terms = torch.maximum(
+            layer.weight.detach() * asymmetric_domain.min,
+            layer.weight.detach() * asymmetric_domain.max,
+        )
+        expected_asymmetric_domain = PotentialBounds(
+            (lower_terms.sum(dim=(1, 2, 3)) + layer.bias.detach()).min().item(),
+            (upper_terms.sum(dim=(1, 2, 3)) + layer.bias.detach()).max().item(),
+        )
+        assert asymmetric.domain == expected_asymmetric_domain
+        assert layer.freeze_parameter_bounds(asymmetric_domain) is asymmetric.domain
 
         # Zero scale samples every spatial activation once and one reference once.
         # Its direct duration convolution must preserve both values and propagated
@@ -2476,7 +2538,10 @@ def verify_gaussian_spiking_conv2d() -> None:
             pass
         else:
             raise AssertionError("SpikingConv2d accepted stale frozen bounds")
-        assert layer.freeze_parameter_bounds(refresh=True) != expected_domain
+        assert (
+            layer.freeze_parameter_bounds(potential.domain, refresh=True)
+            != expected_domain
+        )
     finally:
         # Restore process-wide state before the GPT-2 projection regression.
         set_gaussian_time_noise(enabled=False)
@@ -2531,6 +2596,39 @@ def verify_gaussian_spiking_conv1d() -> None:
             (layer.bias.detach() + conv1d_radius).max().item(),
         )
         assert deterministic.domain == expected_domain
+
+        # A zero-containing asymmetric calibration rail must pass through the
+        # transposed projection without being replaced by ``[-theta, theta]``.
+        # Independent interval arithmetic verifies the output metadata as well.
+        asymmetric_domain = PotentialBounds(-1.0, 2.0)
+        asymmetric_value = value.clamp(
+            asymmetric_domain.min,
+            asymmetric_domain.max,
+        )
+        asymmetric = layer(Potential(asymmetric_value, asymmetric_domain))
+        expected_asymmetric = (
+            torch.matmul(asymmetric_value, layer.weight) + layer.bias
+        )
+        assert torch.allclose(
+            asymmetric.value,
+            expected_asymmetric,
+            atol=1e-12,
+            rtol=1e-12,
+        )
+        lower_terms = torch.minimum(
+            layer.weight.detach() * asymmetric_domain.min,
+            layer.weight.detach() * asymmetric_domain.max,
+        )
+        upper_terms = torch.maximum(
+            layer.weight.detach() * asymmetric_domain.min,
+            layer.weight.detach() * asymmetric_domain.max,
+        )
+        expected_asymmetric_domain = PotentialBounds(
+            (lower_terms.sum(dim=0) + layer.bias.detach()).min().item(),
+            (upper_terms.sum(dim=0) + layer.bias.detach()).max().item(),
+        )
+        assert asymmetric.domain == expected_asymmetric_domain
+        assert layer.freeze_parameter_bounds(asymmetric_domain) is asymmetric.domain
 
         # Zero scale enters addmm-based Gaussian execution. All data carriers remain
         # exact and the one scalar reference must not be replicated per token.
@@ -2596,10 +2694,35 @@ def verify_gaussian_spiking_conv1d() -> None:
             pass
         else:
             raise AssertionError("SpikingConv1D accepted stale frozen bounds")
-        assert layer.freeze_parameter_bounds(refresh=True) != expected_domain
+        assert (
+            layer.freeze_parameter_bounds(potential.domain, refresh=True)
+            != expected_domain
+        )
     finally:
         # Restore process-wide state before the LayerNorm regression.
         set_gaussian_time_noise(enabled=False)
+
+
+# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#Affine Fixed-Domain Consumption]]
+def verify_affine_fixed_domain_contracts() -> None:
+    """Run the fixed-input-domain regressions for every affine adapter.
+
+    The three detailed checks cover ordinary linear projection, spatial convolution,
+    and GPT-2's transposed projection. Together they verify asymmetric upstream rail
+    consumption, exact sign-aware interval arithmetic, immutable memoization, shared
+    zero-reference PWM parity, and explicit parameter-generation refresh.
+    """
+    # Linear is the canonical final-dimension affine layout used by ViT and BERT-like
+    # adapters; its regression also checks both one-sided Gaussian miss trajectories.
+    verify_gaussian_spiking_linear()
+
+    # Conv2d adds grouped receptive-field reduction and zero-potential spatial
+    # padding, both of which must preserve the same fixed-domain contract.
+    verify_gaussian_spiking_conv2d()
+
+    # GPT-2 Conv1D stores fan-in on dimension zero, so this final regression catches
+    # an accidental transpose while enforcing the identical cache and PWM semantics.
+    verify_gaussian_spiking_conv1d()
 
 
 def verify_gaussian_spiking_layernorm() -> None:
@@ -3146,9 +3269,7 @@ if __name__ == "__main__":
     verify_gaussian_sigmoid_gelu_function()
     verify_gaussian_softmin_function()
     verify_gaussian_swiglu_function()
-    verify_gaussian_spiking_linear()
-    verify_gaussian_spiking_conv2d()
-    verify_gaussian_spiking_conv1d()
+    verify_affine_fixed_domain_contracts()
     verify_gaussian_spiking_layernorm()
     verify_gaussian_spiking_attention()
     print("Gaussian verification passed.")

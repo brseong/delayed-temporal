@@ -12,7 +12,7 @@ Transform operator의 time window는 고정되어 있다. 최초 감사의 32곳
 
 - `utils/transforms/`의 production operator는 입력 range, threshold $\theta$, time constant $\tau_s,\tau_m$, tensor shape에 대한 interval arithmetic으로 output range를 계산한다. `TimeBounds`를 live activation extrema로 만드는 위치는 없다.
 - 최초 감사에서 shared model operator와 네 model family의 live activation extrema 위치는 각각 7, 4, 4, 9, 8곳이었다. Shared operator 7곳과 GPT-2 attention 2곳을 제거한 현재 합계는 23곳이다.
-- `SpikingLinear`, `SpikingConv2d`, `SpikingConv1D`는 output별 parameter absolute sum으로 safety rail을 첫 사용 시 고정하고 이후 mutation을 검증한다. `SpikingLayerNorm`의 Gaussian과 deterministic 경로도 ablation별 frozen weight, bias, output domain을 공유한다.
+- `SpikingLinear`, `SpikingConv2d`, `SpikingConv1D`는 upstream fixed input range의 양 끝점을 weight 부호별로 선택해 exact affine range를 memoize하고 이후 parameter mutation을 검증한다. `SpikingLayerNorm`의 Gaussian과 deterministic 경로도 ablation별 frozen weight, bias, output domain을 공유한다.
 - ViT, BERT, RoBERTa, GPT-2 attention adapter는 이제 Gaussian value integration의 fixed range $[-S_{\max}\theta,S_{\max}\theta]$를 spiking backend와 공유한다.
 - 현재 quantile 수집은 module별 signed minimum과 maximum을 보존하지 않고 모든 module의 $99.9\%$ absolute quantile 중 maximum 하나만 저장하므로 fixed range calibration 자료로 사용할 수 없다.
 - 따라서 migration은 parameter range 고정, model-entry calibration, LayerNorm range propagation, attention output range 전달, activation calibration, residual interval arithmetic 순서로 진행해야 한다.
@@ -99,7 +99,9 @@ $$
 u_j=\sum_i\left(w_{ji}^{+}u_x+w_{ji}^{-}l_x\right)+b_j.
 $$
 
-전체 scalar potential range가 필요하면 $V_{lb}=\min_j l_j$, $V_{ub}=\max_j u_j$를 사용한다. Linear, Conv2d, GPT-2 Conv1D 모두 같은 식을 feature 또는 kernel dimension에 적용할 수 있다. 현재처럼 global weight minimum과 maximum에 fan-in을 곱하는 방식도 fixed range이지만 훨씬 넓다.
+전체 scalar potential range는 $V_{lb}=\min_j l_j$, $V_{ub}=\max_j u_j$를 사용한다. Linear, Conv2d, GPT-2 Conv1D는 이 식을 feature 또는 kernel dimension에 적용하고, 같은 immutable input range에 대한 결과를 parameter version별로 memoize한다.
+
+Signed identity-code PWM은 $l_x\le0\le u_x$를 요구한다. $t(x)=u_x-x$, $t(0)=u_x$이므로 deterministic pulse width는 $t(0)-t(x)=x$이고, asymmetric calibrated range도 별도의 `theta` 기반 range로 교체하지 않는다.
 
 ### Layer Normalization
 

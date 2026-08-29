@@ -30,7 +30,9 @@ The planned removal of runtime-derived bounds across all maintained operators an
 
 Potential-to-spike transforms encode larger analog values as earlier events inside a declared time window.
 
-[[utils/transforms/potential_to_spike.py#neg_linear_transform]] maps a bounded potential to a negative-linear latency. It rejects invalid or dtype-unrepresentable potential widths and time windows. On `[-theta, theta]`, [[utils/transforms/potential_to_spike.py#neg_identity_transform]] reduces to `t = theta - V`.
+[[utils/transforms/potential_to_spike.py#neg_linear_transform]] maps a bounded potential to a negative-linear latency. It rejects invalid or dtype-unrepresentable potential widths and time windows. On $[l,u]$, [[utils/transforms/potential_to_spike.py#neg_identity_transform]] gives $t=u-V$ and deadline $u-l$.
+
+Affine PWM adapters require $l\le0\le u$ and encode one zero reference at $t_0=u$. Therefore $t_0-t(V)=V$ for symmetric or asymmetric fixed rails, and the same upstream range controls both input clipping and parameter-derived output interval arithmetic.
 
 [[utils/transforms/potential_to_spike.py#neg_log_transform]] maps a strictly positive potential to `tau_s log(V_max/V)`. It explicitly rejects invalid scales and non-positive domains; the declared endpoint ratio fixes its upper time bound.
 
@@ -72,7 +74,7 @@ Operations with positive-only logarithmic encoding represent a signed centered v
 
 `theta`, `tau_s`, and finite domain endpoints jointly determine representable magnitude, latency, clipping, and numerical conditioning.
 
-- `theta` is commonly both the symmetric potential clamp and the reference endpoint used by affine TTFS multiplication.
+- `theta` remains the default symmetric calibration scale and the basis of the global absolute Gaussian time-noise standard deviation. Affine adapters themselves consume the upstream fixed potential interval and derive the zero-reference time from that interval.
 - `tau_s` controls log-encoding and exponential-difference scale.
 - `tau_m` appears in exponential operator interfaces, but not every stabilized implementation currently uses it consistently.
 - `clip_margin` keeps LayerNorm logarithmic rails away from zero and below `theta`, while `eps` independently stabilizes its variance denominator.

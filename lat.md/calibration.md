@@ -46,6 +46,12 @@ Calibration state binds to stable module names without entering checkpoints. Col
 
 Binding rejects missing modules, undeclared tensor boundaries, repeated installation, and `DataParallel`. Phase cleanup removes only adapter attributes and preserves the completed table, observers, and clipping report.
 
+### Affine Fixed-Domain Consumption
+
+Every maintained affine adapter encodes and clamps with the upstream fixed `PotentialBounds`, then memoizes its exact parameter-derived output interval for those immutable endpoints.
+
+The input interval must be finite, ordered, and contain zero so data events and one scalar zero-reference event share a valid identity-code window. Linear, Conv2d, and GPT-2 Conv1D select each input endpoint by weight sign and never replace a calibrated rail with `[-theta, theta]`.
+
 ## Persistence
 
 Calibration artifacts use a versioned immutable schema with complete model, data, numerical, capacity, and ablation metadata.

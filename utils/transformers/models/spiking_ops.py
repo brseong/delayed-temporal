@@ -675,6 +675,43 @@ class SpikingLayerNorm(nn.Module):
         return Potential(out, output_domain)
 
 
+def _validate_pwm_input_domain(
+    domain: PotentialBounds,
+    *,
+    operator_name: str,
+) -> tuple[float, float]:
+    """Validate a fixed potential interval used by signed identity-code PWM.
+
+    Signed PWM reconstructs an activation by subtracting its data-event time from a
+    zero-reference-event time. The shared domain must therefore contain zero, and its
+    finite endpoints must be strictly ordered so the identity encoder has a positive
+    observation window.
+
+    Args:
+        domain: Upstream analytic or calibrated potential bounds.
+        operator_name: Stable name included in validation diagnostics.
+
+    Returns:
+        The lower and upper endpoints as ordinary Python floats.
+    """
+    # Require the immutable domain type rather than accepting a pair whose mutation
+    # could invalidate a memoized parameter-derived output rail.
+    if not isinstance(domain, PotentialBounds):
+        raise TypeError(f"{operator_name} input domain must be PotentialBounds")
+    lower = float(domain.min)
+    upper = float(domain.max)
+
+    # Finiteness and strict ordering define a nonzero identity-code window. Including
+    # zero guarantees that the physical reference event lies inside that same window.
+    if not math.isfinite(lower) or not math.isfinite(upper) or lower >= upper:
+        raise ValueError(
+            f"{operator_name} input domain must have finite ordered endpoints"
+        )
+    if lower > 0.0 or upper < 0.0:
+        raise ValueError(f"{operator_name} input domain must contain zero")
+    return lower, upper
+
+
 class SpikingLinear(nn.Linear):
     """Linear layer via ψ_PWM operator. Numerically identical to nn.Linear."""
 
@@ -685,30 +722,32 @@ class SpikingLinear(nn.Linear):
 
     def freeze_parameter_bounds(
         self,
+        input_domain: PotentialBounds,
         *,
         refresh: bool = False,
     ) -> PotentialBounds:
-        """Freeze the parameter-derived affine output domain for inference.
+        """Memoize the affine output domain for one fixed input interval.
 
-        The first call is intended to occur after checkpoint loading, dtype/device
-        conversion, and any static weight or bias perturbation. For the symmetric
-        input rail ``[-theta, theta]``, each output feature ``j`` has the exact
-        parameter-derived interval ``[b_j-r_j, b_j+r_j]``, where
-        ``r_j = theta * sum_i(abs(W_ji))``. Reducing those featurewise endpoints is
-        tighter than multiplying global weight extrema by the input fan-in.
+        For a scalar input interval ``[l, u]`` shared by every input feature, output
+        feature ``j`` has the exact interval obtained by summing
+        ``min(W_ji*l, W_ji*u)`` and ``max(W_ji*l, W_ji*u)`` before adding ``b_j``.
+        This supports symmetric calibrated rails and one-sided zero-containing rails
+        without rescanning parameters on repeated calls.
 
         Args:
+            input_domain: Immutable analytic or calibrated input rail containing zero.
             refresh: Recompute the frozen domain after an intentional parameter
-                update. The default rejects mutations made after the first freeze.
+                update and discard entries for prior input domains. The default
+                rejects parameter mutation after any bound has been memoized.
 
         Returns:
             The immutable module-wide affine output domain.
 
         Raises:
-            RuntimeError: If parameters or ``theta`` changed after freezing and
-                ``refresh`` is false, or change during recomputation.
-            ValueError: If ``theta`` or a derived endpoint is non-finite, or if
-                ``theta`` is not positive.
+            RuntimeError: If parameters changed after memoization and ``refresh`` is
+                false, or change during recomputation.
+            ValueError: If the input domain is invalid or a derived endpoint is not
+                finite.
 
         Notes:
             Mutation detection relies on PyTorch's parameter version counters.
@@ -716,72 +755,81 @@ class SpikingLinear(nn.Linear):
             ``parameter.data`` writes bypass autograd bookkeeping and must not be
             used by checkpoint conversion or perturbation code.
         """
-        # Validate and capture the configured symmetric input magnitude before cache
-        # lookup. Changing theta changes both identity-code rails and affine bounds,
-        # so it belongs to the same frozen configuration identity as parameters.
-        if isinstance(self.theta, bool):
-            raise ValueError("SpikingLinear theta must be finite and positive")
-        theta = float(self.theta)
-        if not math.isfinite(theta) or theta <= 0.0:
-            raise ValueError("SpikingLinear theta must be finite and positive")
+        # The fixed input interval is part of the memoization key. Zero containment is
+        # a physical requirement of the shared reference event, not a statistical
+        # property inferred from the activation reaching this invocation.
+        lower_input, upper_input = _validate_pwm_input_domain(
+            input_domain,
+            operator_name="SpikingLinear",
+        )
+        domain_key = (lower_input, upper_input)
 
-        # Parameter mutation counters let repeated forward calls reuse scalar bounds
-        # without rescanning tensors. Bias-less layers use a stable sentinel, and the
-        # validated theta token detects threshold changes after the initial freeze.
+        # Parameter mutation counters define one cache generation. Multiple immutable
+        # input domains may coexist within that generation without rescanning weights.
         versions = (
             self.weight._version,
             self.bias._version if self.bias is not None else None,
-            theta,
         )
         cached = self.__dict__.get("_frozen_parameter_bounds")
 
-        # A valid cache is returned verbatim. If checkpoint loading, perturbation, or
-        # optimization changed a parameter after freezing, fail instead of silently
-        # pairing new values with stale physical rails.
-        if cached is not None and not refresh:
-            cached_versions, cached_domain = cached
-            if versions != cached_versions:
+        # A parameter update invalidates every domain entry together. Explicit refresh
+        # begins a new coherent generation; otherwise stale physical rails are rejected.
+        memoized_domains: dict[tuple[float, float], PotentialBounds]
+        if cached is not None:
+            cached_versions, memoized_domains = cached
+            if versions != cached_versions and not refresh:
                 raise RuntimeError(
-                    "SpikingLinear parameters or theta changed after bounds were frozen; "
+                    "SpikingLinear parameters changed after bounds were frozen; "
                     "call freeze_parameter_bounds(refresh=True) before inference"
                 )
-            return cached_domain
+            if (
+                versions == cached_versions
+                and not refresh
+                and domain_key in memoized_domains
+            ):
+                return memoized_domains[domain_key]
+            if refresh:
+                memoized_domains = {}
+        else:
+            memoized_domains = {}
 
-        # Accumulate rounded checkpoint parameters in float64 once, avoiding both
-        # low-precision reduction overflow and the old global-extrema-times-fan-in
-        # relaxation. The operation stays on the parameter device and returns only
-        # two scalar endpoints to Python.
-        weight = self.weight.detach()
-        radius = weight.abs().sum(dim=1, dtype=torch.float64) * theta
+        # Evaluate interval arithmetic in float64 once for this domain. Positive and
+        # negative weights select opposite input endpoints, retaining bias exactly and
+        # avoiding the symmetric absolute-sum relaxation for one-sided rails.
+        weight = self.weight.detach().to(dtype=torch.float64)
+        lower_terms = torch.minimum(weight * lower_input, weight * upper_input)
+        upper_terms = torch.maximum(weight * lower_input, weight * upper_input)
         if self.bias is None:
-            bias = torch.zeros_like(radius)
+            bias = torch.zeros(
+                self.out_features,
+                dtype=torch.float64,
+                device=weight.device,
+            )
         else:
             bias = self.bias.detach().to(dtype=torch.float64)
-        lower = bias - radius
-        upper = bias + radius
+        lower = lower_terms.sum(dim=1) + bias
+        upper = upper_terms.sum(dim=1) + bias
         if not bool(torch.isfinite(lower).all() and torch.isfinite(upper).all()):
             raise ValueError("SpikingLinear parameter-derived bounds must be finite")
         output_domain = PotentialBounds(lower.min().item(), upper.max().item())
 
-        # Detect a concurrent write across the reduction boundary before publishing
-        # the cache. Intentional static perturbation can explicitly refresh afterward;
-        # an unnoticed race must never establish a mixed-version bound.
+        # Detect concurrent parameter writes before publishing this entry. The input
+        # domain is immutable, so parameter versions are the only mutable identity.
         final_versions = (
             self.weight._version,
             self.bias._version if self.bias is not None else None,
-            float(self.theta),
         )
         if final_versions != versions:
             raise RuntimeError(
                 "SpikingLinear parameters changed while bounds were being frozen"
             )
 
-        # Store an immutable PotentialBounds object outside the state dict. Checkpoint
-        # compatibility is unchanged, while every later inference call can reuse the
-        # same scalar rail until an explicit refresh authorizes new parameters.
+        # Publish a fresh dictionary copy outside the state dict. Existing entries stay
+        # immutable and checkpoint compatibility remains unchanged.
+        memoized_domains = {**memoized_domains, domain_key: output_domain}
         self.__dict__["_frozen_parameter_bounds"] = (
             final_versions,
-            output_domain,
+            memoized_domains,
         )
         return output_domain
 
@@ -794,7 +842,7 @@ class SpikingLinear(nn.Linear):
     ) -> Potential:
         """Evaluate the affine layer from sampled data and reference events.
 
-        ``encoded_x`` must already be clamped to the layer's symmetric identity-code
+        ``encoded_x`` must already be clamped to the layer's fixed identity-code
         domain. Every data element and one scalar zero-reference event supply the two
         causal rails of a signed PWM readout. Each missed event leaves its own rail at
         reset, while the delivered rail remains observable at the fixed deadline.
@@ -802,7 +850,7 @@ class SpikingLinear(nn.Linear):
         Args:
             x: Original input tensor used for dtype, device, and scalar allocation.
             encoded_x: Input tensor clamped to ``domain_x``.
-            domain_x: Symmetric input rails ``[-theta, theta]``.
+            domain_x: Fixed zero-containing analytic or calibrated input rails.
             output_domain: Pre-frozen affine output rail shared with deterministic
                 execution and already incorporating learned weight and bias bounds.
 
@@ -886,11 +934,11 @@ class SpikingLinear(nn.Linear):
     def forward(self, input: Potential) -> Potential:
         """Apply the affine PWM map against one frozen parameter-derived rail.
 
-        The symmetric identity-code domain is fixed by ``theta``. The affine output
-        domain is frozen on first use after checkpoint loading and static parameter
-        perturbation, then shared by deterministic and Gaussian execution. Gaussian
-        execution delegates sampled event readout to :meth:`_gaussian_forward`;
-        noise-free execution evaluates the same PWM-MAC with the optimized kernel.
+        The identity-code domain comes from the upstream analytic or calibrated
+        ``Potential``. An output-specific parameter interval is memoized for those
+        immutable endpoints and shared by deterministic and Gaussian execution.
+        Gaussian execution delegates sampled event readout to
+        :meth:`_gaussian_forward`; noise-free execution evaluates the same PWM-MAC.
 
         Args:
             input: Tensor value paired with its upstream potential bounds.
@@ -898,16 +946,17 @@ class SpikingLinear(nn.Linear):
         Returns:
             The affine output paired with conservative ideal potential rails.
         """
-        # The affine encoder uses this layer's calibrated symmetric rails rather than
-        # the upstream Potential domain, matching the existing pretrained conversion.
+        # The upstream Potential owns the physical input rail. Validate zero
+        # containment before clamping so both data and reference events can share it.
         x: torch.Tensor = input.value
-        domain_x = PotentialBounds(-self.theta, self.theta)
+        domain_x = input.domain
+        _validate_pwm_input_domain(domain_x, operator_name="SpikingLinear")
         encoded_x = domain_x.clamp(x, name="linear_x")
 
         # Freeze the output-specific absolute-sum rail on first use and validate the
         # parameter mutation counters thereafter. Both execution modes receive this
         # exact immutable object, so a noise toggle cannot alter declared bounds.
-        output_domain = self.freeze_parameter_bounds()
+        output_domain = self.freeze_parameter_bounds(domain_x)
 
         # Keep event sampling, shared-reference handling, and saturation statistics
         # isolated in the private Gaussian method. Passing only the frozen output
@@ -920,19 +969,20 @@ class SpikingLinear(nn.Linear):
                 output_domain,
             )
 
-        # Encode delivered data times and subtract them from the scalar zero-codeword
-        # time. This is the noise-free signed pulse width theta-t_A; no deadline-sized
-        # rail tensors or output-by-input synapse tensor need to be materialized.
+        # Encode delivered data and one scalar zero codeword on the same fixed window.
+        # Their time difference recovers the clamped activation for symmetric and
+        # one-sided domains alike without materializing per-synapse reference tensors.
         data_time, _ = neg_identity_transform(encoded_x, domain_x)
-        signed_pulse_width = self.theta - data_time
+        reference_time, _ = neg_identity_transform(x.new_zeros(()), domain_x)
+        signed_pulse_width = reference_time - data_time
 
         # The optimized kernel is algebraically identical to summing one explicit
         # signed PWM call per synapse:
         # pwm_ji, _ = signed_pulse_width_modulation_operator(
         #     data_time_i, data_time_domain,
-        #     theta, theta,
+        #     reference_time, data_time_domain,
         #     self.weight[j, i], weight_domain,
-        #     observation_deadline=2.0 * theta,
+        #     observation_deadline=float(data_time_domain.max),
         # )
         # y_j = sum_i(pwm_ji) + bias_j.
         y = nn.functional.linear(signed_pulse_width, self.weight, self.bias)
@@ -955,75 +1005,90 @@ class SpikingConv2d(nn.Conv2d):
 
     def freeze_parameter_bounds(
         self,
+        input_domain: PotentialBounds,
         *,
         refresh: bool = False,
     ) -> PotentialBounds:
-        """Freeze an output-specific convolution safety rail for inference.
+        """Memoize the convolution output domain for one fixed input interval.
 
-        For input values in ``[-theta, theta]``, output channel ``j`` has radius
-        ``theta * sum(abs(kernel_j))`` over its grouped receptive field. Optional
-        bias translates that channel interval before all channel endpoints are
-        reduced to the scalar domain carried by ``Potential``. The bound is frozen
-        after loading and static perturbation, not rebuilt from every forward pass.
+        For input values in ``[l, u]``, each kernel element contributes
+        ``min(w*l, w*u)`` to the lower endpoint and ``max(w*l, w*u)`` to the upper
+        endpoint. Summing those terms over each grouped receptive field and adding
+        bias gives an exact channel interval for the shared scalar input rail.
 
         Args:
-            refresh: Recompute after an intentional parameter update. Without this
-                flag, mutation after the first freeze is rejected.
+            input_domain: Immutable analytic or calibrated input rail containing zero.
+            refresh: Recompute after an intentional parameter update and discard
+                entries for prior input domains. Without this flag, parameter
+                mutation after the first memoization is rejected.
 
         Returns:
             The immutable module-wide convolution output domain.
 
         Raises:
-            RuntimeError: If parameters or ``theta`` changed after freezing without
-                refresh, or changed while the new domain was being calculated.
-            ValueError: If ``theta`` is invalid or the derived endpoints are not
-                finite.
+            RuntimeError: If parameters changed after memoization without refresh,
+                or changed while the new domain was being calculated.
+            ValueError: If the input domain or derived endpoints are invalid.
 
         Notes:
             PyTorch parameter version counters detect normal ``torch.no_grad()``
             in-place updates. Direct ``parameter.data`` writes bypass this mechanism
             and are unsupported in checkpoint and perturbation code.
         """
-        # Validate and capture theta before cache lookup. The convolution's symmetric
-        # input rail changes with theta even when its kernel stays byte-identical.
-        if isinstance(self.theta, bool):
-            raise ValueError("SpikingConv2d theta must be finite and positive")
-        theta = float(self.theta)
-        if not math.isfinite(theta) or theta <= 0.0:
-            raise ValueError("SpikingConv2d theta must be finite and positive")
+        # The upstream fixed interval is the encoder rail and cache key. Requiring
+        # zero containment also makes ordinary convolution padding a valid zero
+        # potential and keeps the scalar reference event inside the same window.
+        lower_input, upper_input = _validate_pwm_input_domain(
+            input_domain,
+            operator_name="SpikingConv2d",
+        )
+        domain_key = (lower_input, upper_input)
 
-        # Capture both parameter versions and the threshold configuration before
-        # reading tensor values. Bias-less convolutions retain a stable None sentinel.
+        # Parameter mutation establishes a new cache generation. Within a stable
+        # generation, distinct immutable calibration rails can coexist by endpoint.
         versions = (
             self.weight._version,
             self.bias._version if self.bias is not None else None,
-            theta,
         )
         cached = self.__dict__.get("_frozen_parameter_bounds")
 
-        # Reuse a valid immutable rail without scanning any kernel values. A changed
-        # version must fail clearly rather than combine perturbed weights with stale
-        # physical output bounds.
-        if cached is not None and not refresh:
-            cached_versions, cached_domain = cached
-            if versions != cached_versions:
+        # Reject an unapproved parameter transition instead of pairing new kernels
+        # with old physical rails. Explicit refresh clears every prior domain entry.
+        memoized_domains: dict[tuple[float, float], PotentialBounds]
+        if cached is not None:
+            cached_versions, memoized_domains = cached
+            if versions != cached_versions and not refresh:
                 raise RuntimeError(
-                    "SpikingConv2d parameters or theta changed after bounds were frozen; "
+                    "SpikingConv2d parameters changed after bounds were frozen; "
                     "call freeze_parameter_bounds(refresh=True) before inference"
                 )
-            return cached_domain
+            if (
+                versions == cached_versions
+                and not refresh
+                and domain_key in memoized_domains
+            ):
+                return memoized_domains[domain_key]
+            if refresh:
+                memoized_domains = {}
+        else:
+            memoized_domains = {}
 
-        # Sum each output channel's actual grouped kernel in float64. The stored
-        # kernel already contains only the input channels belonging to its group, so
-        # reducing dimensions 1-3 handles grouping without a separate fan-in factor.
-        weight = self.weight.detach()
-        radius = weight.abs().sum(dim=(1, 2, 3), dtype=torch.float64) * theta
+        # Evaluate interval arithmetic in float64. The stored kernel already contains
+        # only the input channels belonging to its group, so dimensions 1-3 are the
+        # complete receptive-field reduction and need no separate grouping factor.
+        weight = self.weight.detach().to(dtype=torch.float64)
+        lower_terms = torch.minimum(weight * lower_input, weight * upper_input)
+        upper_terms = torch.maximum(weight * lower_input, weight * upper_input)
         if self.bias is None:
-            bias = torch.zeros_like(radius)
+            bias = torch.zeros(
+                self.out_channels,
+                dtype=torch.float64,
+                device=weight.device,
+            )
         else:
             bias = self.bias.detach().to(dtype=torch.float64)
-        lower = bias - radius
-        upper = bias + radius
+        lower = lower_terms.sum(dim=(1, 2, 3)) + bias
+        upper = upper_terms.sum(dim=(1, 2, 3)) + bias
         if not bool(torch.isfinite(lower).all() and torch.isfinite(upper).all()):
             raise ValueError("SpikingConv2d parameter-derived bounds must be finite")
         output_domain = PotentialBounds(lower.min().item(), upper.max().item())
@@ -1033,18 +1098,18 @@ class SpikingConv2d(nn.Conv2d):
         final_versions = (
             self.weight._version,
             self.bias._version if self.bias is not None else None,
-            float(self.theta),
         )
         if final_versions != versions:
             raise RuntimeError(
                 "SpikingConv2d parameters changed while bounds were being frozen"
             )
 
-        # Keep the cache out of the state dict so checkpoint keys remain compatible.
-        # Repeated inference calls reuse this exact immutable PotentialBounds object.
+        # Publish a fresh dictionary outside the state dict. Existing immutable
+        # entries remain reusable and checkpoint parameter keys stay unchanged.
+        memoized_domains = {**memoized_domains, domain_key: output_domain}
         self.__dict__["_frozen_parameter_bounds"] = (
             final_versions,
-            output_domain,
+            memoized_domains,
         )
         return output_domain
 
@@ -1065,8 +1130,8 @@ class SpikingConv2d(nn.Conv2d):
 
         Args:
             x: Original input tensor used for metadata and scalar allocation.
-            encoded_x: Input clamped to the symmetric identity-code domain.
-            domain_x: Symmetric input rails ``[-theta, theta]``.
+            encoded_x: Input clamped to the fixed identity-code domain.
+            domain_x: Fixed zero-containing analytic or calibrated input rails.
             output_domain: Frozen parameter-derived convolution output rail.
 
         Returns:
@@ -1167,15 +1232,16 @@ class SpikingConv2d(nn.Conv2d):
         Returns:
             The convolution output paired with conservative ideal potential rails.
         """
-        # Convolution uses its own symmetric encoder calibration, matching the
-        # pretrained conversion path independently of the upstream Potential domain.
+        # The upstream Potential owns the fixed encoder rail. Zero containment also
+        # preserves the physical meaning of ordinary zero padding outside the image.
         x: torch.Tensor = input.value
-        domain_x = PotentialBounds(-self.theta, self.theta)
+        domain_x = input.domain
+        _validate_pwm_input_domain(domain_x, operator_name="SpikingConv2d")
         encoded_x = domain_x.clamp(x, name="conv2d_x")
 
         # Freeze grouped-kernel and bias bounds once after loading or perturbation.
         # Subsequent calls validate mutation counters and reuse this exact rail.
-        output_domain = self.freeze_parameter_bounds()
+        output_domain = self.freeze_parameter_bounds(domain_x)
 
         # Keep event sampling, shared-reference readout, and output saturation logging
         # isolated in the private Gaussian method.
@@ -1187,19 +1253,20 @@ class SpikingConv2d(nn.Conv2d):
                 output_domain,
             )
 
-        # Convert delivered identity-code times to signed pulse widths. Applying
-        # ordinary zero padding to these widths is equivalent to padding event times
-        # with theta, because theta-theta represents zero potential.
+        # Encode one scalar zero codeword on the same window as every data value.
+        # Subtracting times recovers the clamped potential for arbitrary zero-
+        # containing intervals, while ordinary convolution padding remains zero.
         data_time, _ = neg_identity_transform(encoded_x, domain_x)
-        signed_pulse_width = self.theta - data_time
+        reference_time, _ = neg_identity_transform(x.new_zeros(()), domain_x)
+        signed_pulse_width = reference_time - data_time
 
         # The optimized grouped convolution evaluates the sum of the conceptually
         # equivalent signed PWM call at every receptive-field synapse:
         # pwm_synapse, _ = signed_pulse_width_modulation_operator(
         #     data_time_synapse, data_time_domain,
-        #     theta, theta,
+        #     reference_time, data_time_domain,
         #     weight_synapse, weight_domain,
-        #     observation_deadline=2.0 * theta,
+        #     observation_deadline=float(data_time_domain.max),
         # )
         # Avoiding unfold also avoids the explicit output-channel-by-fan-in tensor.
         y = nn.functional.conv2d(
