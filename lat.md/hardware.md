@@ -66,7 +66,7 @@ Analysis separates calibration-only offsets from held-out pooling statistics and
 
 The CLI owns operating-point selection, condition orchestration, and reproducible output while the notebook remains a thin launcher.
 
-[[scripts/evaluation/brainscales2_pooling.py#main]] supports a CADC diagnostic phase, mock and hardware runs, quick smoke settings, a raw-spike operating-point calibration phase, fixed potential sweeps, all configured pooling conditions, and artifact generation. Calibration penalizes misses, multiple spikes, and spikes occurring before their nominal input.
+[[scripts/evaluation/brainscales2_pooling.py#main]] supports CADC diagnosis, mock and hardware runs, raw-spike calibration, fixed potential sweeps, and artifact generation. The default threshold grid spans 5--45 codes above the default leak; calibration penalizes misses, multiple spikes, and spikes before their nominal input.
 
 The launcher targets the EBRAINS experimental kernel's Python 3.11 runtime. [[utils/transforms/types.py#NeuralTransform]] and [[utils/transforms/noise.py#inject_spike_time_noise]] use legacy `TypeVar` and `ParamSpec` declarations so the reused project encoders import there. `scripts/notebooks/ebrains_brainscales2_pooling.ipynb` installs only `jaxtyping` and `matplotlib` with kernel-scoped `%pip`, invokes the CLI through `sys.executable`, and runs CADC diagnosis, a bounded raw-spike sweep, then the hardware smoke by default. It loads the official demo helpers from a writable `/tmp` checkout, saves the nightly `.pbin` in the run directory, and passes it explicitly to every smoke stage so hxtorch does not launch an implicit full-chip calibration.
 

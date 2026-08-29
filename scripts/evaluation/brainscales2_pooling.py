@@ -102,7 +102,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--operating-point-json", type=Path)
     parser.add_argument("--bootstrap-iterations", type=int, default=500)
 
-    parser.add_argument("--calibration-thresholds", type=float, nargs="+", default=[100, 125, 150])
+    parser.add_argument(
+        "--calibration-thresholds",
+        type=float,
+        nargs="+",
+        default=[85, 90, 95, 100, 110, 125],
+    )
     parser.add_argument("--calibration-weights", type=float, nargs="+", default=[31, 47, 63])
     parser.add_argument("--calibration-gains", type=float, nargs="+", default=[300, 500, 700])
     return parser.parse_args()
@@ -405,4 +410,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -469,6 +469,7 @@ def verify_notebook_is_valid_json() -> None:
     assert '"--pool-sizes", 1, 2, 4, 8, 16' in source
     assert '"--phase", "diagnose-cadc"' in source
     assert "recommended_operating_point.json" in source
+    assert '"--calibration-thresholds", 85, 90, 95, 100' in source
 
 
 def main() -> None:
