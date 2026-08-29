@@ -100,6 +100,9 @@ The implementation work covers every maintained transform and model adapter, not
 - [x] Separate two-pass collection from frozen validation and inference with explicit state, one-way phase transitions, missing-site failure, and immutable clipping-report snapshots.
 - [x] Declare calibration targets and range policy per layer: symmetric signed rails calibrate both tails, one-sided analytic rails calibrate only the unbounded direction, and fully bounded operators bypass calibration.
 - [x] Bind calibration state to stable model-module identities without checkpoint keys, use analytic safety rails during collection, and return persisted clamp rails as `PotentialBounds` during validation and inference.
+- [x] Select a fixed-size prefix of a seeded training-split permutation for ViT calibration, replay the exact subset sequentially in both passes, and persist its split, seed, sample count, fingerprint, preprocessing, dtype, and model-path identity.
+- [x] Add ViT collection, frozen-validation, and inference CLI modes with strict clean-collection constraints, exact metadata validation, missing-entry failure, and per-layer frozen clipping reports.
+- [x] Replace all ViT live activation-derived ranges with preprocessing-derived input bounds, analytic activation intervals, a calibrated encoder-entry range, and two calibrated residual boundaries per block.
 - [ ] Prefer operator-derived interval arithmetic whenever the input bounds and transformation provide a conservative static result.
 - [ ] For paths without a practical analytic envelope, record per-site minima and maxima during a representative noise-free calibration run.
 - [ ] Persist stable site identifiers together with the checkpoint, dataset split, preprocessing, model family, and active ablation configuration used for calibration.
@@ -116,10 +119,10 @@ The implementation work covers every maintained transform and model adapter, not
 - [x] Connect `SpikingLayerNorm._gaussian_forward` to frozen weight, bias, and final output domains before event sampling.
 - [x] Connect deterministic `SpikingLayerNorm.forward` to the same frozen parameter and output contract.
 - [x] Permanently verify all eight `SpikingLayerNorm` ablation domains, deterministic/zero-noise metadata identity, stale-cache rejection, and explicit refresh.
-- [ ] Initialize model-entry potential bounds from calibration rather than measuring the first or current batch.
+- [ ] Initialize every model-family entry potential bound from calibration rather than measuring the first or current batch; ViT is complete.
 - [ ] Clamp every out-of-envelope value against its fixed bound and report underflow and overflow counts without widening that bound at runtime.
 - [ ] Include LayerNorm's pre-affine normalized result in calibration, then derive its post-affine envelope by interval arithmetic from fixed scale and bias endpoints.
-- [ ] Calibrate and clamp every pre-norm residual output per block, recording raw underflow and overflow before attaching the frozen output range.
+- [ ] Calibrate and clamp every pre-norm residual output per block, recording raw underflow and overflow before attaching the frozen output range; ViT is complete and GPT-2 remains.
 - [x] Connect both ViT pre-norm residual boundaries to optional explicit calibration bindings while retaining batch-independent analytic interval addition when calibration is absent.
 - [ ] Calibrate attention score clamp sites per layer/head and attention value outputs per layer, with sequence-capacity metadata and separate Gaussian saturation validation.
 - [ ] Keep spike-time windows configuration-derived: LayerNorm log windows remain fixed by `clip_margin`, `theta`, and `tau_s`, while affine identity encoding uses each declared zero-containing fixed interval.

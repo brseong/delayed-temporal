@@ -4,18 +4,18 @@
 
 ## 결론
 
-현재 model adapter에는 live activation으로 `PotentialBounds`를 만드는 production 위치가 23곳 남아 있어 model-wide fixed range 조건을 만족하지 않는다.
+현재 model adapter에는 live activation으로 `PotentialBounds`를 만드는 production 위치가 19곳 남아 있어 model-wide fixed range 조건을 만족하지 않는다. ViT의 production 경로에서는 이 위반을 모두 제거했다.
 
 Transform operator의 time window는 고정되어 있다. 최초 감사의 32곳 중 GPT-2 attention의 2곳, Gaussian 및 deterministic LayerNorm의 각 3곳, ordinary LayerNorm helper의 1곳은 fixed/analytic range로 교체되었다.
 
 핵심 결과는 다음과 같다.
 
 - `utils/transforms/`의 production operator는 입력 range, threshold $\theta$, time constant $\tau_s,\tau_m$, tensor shape에 대한 interval arithmetic으로 output range를 계산한다. `TimeBounds`를 live activation extrema로 만드는 위치는 없다.
-- 최초 감사에서 shared model operator와 네 model family의 live activation extrema 위치는 각각 7, 4, 4, 9, 8곳이었다. Shared operator 7곳과 GPT-2 attention 2곳을 제거한 현재 합계는 23곳이다.
+- 최초 감사에서 shared model operator와 네 model family의 live activation extrema 위치는 각각 7, 4, 4, 9, 8곳이었다. Shared operator 7곳, ViT 4곳, GPT-2 attention 2곳을 제거한 현재 합계는 19곳이다.
 - `SpikingLinear`, `SpikingConv2d`, `SpikingConv1D`는 upstream fixed input range의 양 끝점을 weight 부호별로 선택해 exact affine range를 memoize하고 이후 parameter mutation을 검증한다. `SpikingLayerNorm`의 Gaussian과 deterministic 경로도 ablation별 frozen weight, bias, output domain을 공유한다.
 - ViT, BERT, RoBERTa, GPT-2 attention adapter는 이제 Gaussian value integration의 fixed range $[-S_{\max}\theta,S_{\max}\theta]$를 spiking backend와 공유한다.
-- 현재 quantile 수집은 module별 signed minimum과 maximum을 보존하지 않고 모든 module의 $99.9\%$ absolute quantile 중 maximum 하나만 저장하므로 fixed range calibration 자료로 사용할 수 없다.
-- 따라서 migration은 parameter range 고정, model-entry calibration, LayerNorm range propagation, attention output range 전달, activation calibration, residual interval arithmetic 순서로 진행해야 한다.
+- 기존 quantile 수집은 진단용으로 남아 있다. ViT layer-wise calibration은 별도 artifact에 signed extrema, fixed-bin histogram, quantile, margin, training-subset identity, layer clipping을 보존한다.
+- ViT는 parameter range, preprocessing input, encoder entry, activation, attention output, residual range 전환을 완료했다. 남은 model family는 같은 순서로 전환해야 한다.
 
 ## 감사 범위와 판정 기준
 
@@ -157,7 +157,7 @@ $$
 \subset[-1,1].
 $$
 
-논문의 tanh-based GELU approximation을 operator-composed path로 실행하면 각 $f_{\mathrm{Mul}}$, Tanh, addition의 range를 그대로 전달할 수 있다. Direct GELU, `gelu_new`, SiLU 분기는 module별 noise-free calibration을 사용해야 한다.
+논문의 tanh-based GELU approximation을 operator-composed path로 실행하면 각 $f_{\mathrm{Mul}}$, Tanh, addition의 range를 그대로 전달할 수 있다. Direct GELU, `gelu_new`, SiLU는 $x$와 $[0,1]$ gate의 곱이므로 fixed input interval $[l,u]$에서 보수적 output interval $[\min(l,0),\max(u,0)]$을 사용할 수 있다.
 
 ### Attention
 
@@ -319,16 +319,16 @@ Constrained division은 $X\leq Y$를 public $[0,1]$ rail에 반영하고 Gaussia
 
 ## 전수 검색 결과
 
-최초 source audit는 32곳을 확인했으며, attention adapter와 모든 shared LayerNorm 경로 전환 뒤 live activation extrema call site는 23곳 남아 있다.
+최초 source audit는 32곳을 확인했으며, attention adapter, 모든 shared LayerNorm 경로, ViT adapter 전환 뒤 live activation extrema call site는 19곳 남아 있다.
 
 | 구분 | live activation call site | 주요 원인 |
 |---|---:|---|
 | Shared operator | 0 | 모든 LayerNorm 경로가 analytic/operator range 사용 |
-| ViT | 4 | pixel input, exact/direct GELU, encoder entry |
+| ViT | 0 | preprocessing range, analytic activation range, calibrated encoder entry로 전환 완료 |
 | BERT | 4 | embeddings, direct activation, encoder entry, pooler input |
 | RoBERTa | 9 | embeddings, dense ablation, encoder entry, pooler와 task head input |
 | GPT-2 | 6 | model entry, MLP, 세 residual path |
-| 합계 | 23 | 남은 위치가 inference batch의 extrema에 의존 |
+| 합계 | 19 | 남은 위치가 inference batch의 extrema에 의존 |
 
 ### Transform operator
 
@@ -369,14 +369,14 @@ LayerNorm internal ranges $[m,\theta-m]$, $[m^2,(\theta-m)^2]$와 $T_0$는 confi
 
 ### ViT
 
-ViT에는 4개의 activation-derived call site가 있고 residual addition은 이미 interval arithmetic을 사용한다.
+ViT의 activation-derived call site는 모두 제거되었다. Fully bounded activation은 analytic interval을 사용하고 encoder entry와 두 residual 경계는 frozen layer-wise calibration으로 depth별 range를 reset한다.
 
 | 함수 | 수 | 현재 동작 | 교체 |
 |---|---:|---|---|
-| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTPatchEmbeddings#forward]] | 1 | current `pixel_values` extrema를 Conv2d input range로 사용 | image processor의 fixed input range 또는 preprocessing별 calibration |
-| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTIntermediate#forward]] | 2 | direct tanh-GELU와 configured dense activation output extrema 사용 | operator-composed GELU range 또는 activation별 calibration |
-| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTEncoder#forward]] | 1 | embedding output extrema를 첫 range로 사용 | patch projection, class token, position embedding의 fixed range를 합산하거나 encoder-entry calibration |
-| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTLayer#forward]] | 0 | unbound 실행은 endpoint addition을 유지하고, bound collection/runtime은 attention residual과 block output에 각각 fixed layer-wise range를 적용 | 완료; evaluator phase 연결 필요 |
+| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTPatchEmbeddings#forward]] | 0 | image processor metadata에서 channel normalization endpoint를 계산해 fixed Conv2d input range로 사용 | 완료 |
+| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTIntermediate#forward]] | 0 | ReLU/Tanh endpoint와 GELU/SiLU의 $[0,1]$ gate envelope를 fixed affine input range에서 계산 | 완료 |
+| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTEncoder#forward]] | 0 | collection은 fixed $[-\theta,\theta]$ safety rail, frozen phase는 persisted signed-symmetric entry range 사용 | 완료 |
+| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTLayer#forward]] | 0 | attention residual과 block output에 각각 frozen layer-wise range를 적용하고 strict excursion을 기록 | 완료 |
 
 Image processor가 channel별 $x_c=(r_c-\mu_c)/\sigma_c$, $r_c\in[0,1]$을 사용하면 pixel range는 preprocessing metadata에서 직접 계산할 수 있다. Custom preprocessing 또는 `inputs_embeds`는 별도 calibration identity가 필요하다.
 
@@ -441,16 +441,16 @@ Variable sequence length에서는 current $S$로 range를 바꾸면 같은 modul
 
 ### Evaluation과 calibration
 
-네 evaluator의 quantile 수집은 진단용이며 fixed potential range calibration contract를 충족하지 않는다.
+기존 네 evaluator의 quantile 수집은 진단용이며 fixed potential range calibration contract를 충족하지 않는다. ViT evaluator에는 이 경로와 분리된 layer-wise artifact lifecycle이 추가되었다.
 
 | 위치 | 현재 동작 | 부족한 정보 |
 |---|---|---|
-| [[scripts/evaluation/error_analysis_vit.py#evaluate_vit_model]] | module output의 absolute $99.9\%$ quantile을 list에 모은 뒤 global maximum 하나 저장 | module name, signed lower/upper bound, sample count, preprocessing, ablation identity |
+| [[scripts/evaluation/error_analysis_vit.py#evaluate_vit_model]] | clean training subset을 두 번 순차 replay해 stable module/site별 immutable artifact를 저장하거나 frozen artifact를 검증·적용 | 완료; legacy absolute-quantile hook은 별도 진단 경로 |
 | [[scripts/evaluation/error_analysis_bert.py#evaluate_bert_model]] | 같은 global maximum 방식 | dataset/task별 module range |
 | [[scripts/evaluation/error_analysis_roberta.py#evaluate_roberta_model]] | 같은 global maximum 방식 | dataset/task별 module range |
 | [[scripts/evaluation/error_analysis_gpt2.py#evaluate_gpt2_model]] | 같은 global maximum 방식 | sequence length, cache state, activation branch별 range |
 
-Calibration은 Gaussian timing noise를 반드시 disable하고 `model.eval()`에서 수행해야 한다. 현재 CLI는 `--collect-quantiles`와 Gaussian option을 동시에 허용하므로 calibration mode에서 이를 명시적으로 거부해야 한다.
+Calibration은 Gaussian timing noise를 반드시 disable하고 `model.eval()`에서 수행해야 한다. ViT collection mode는 timing noise, mismatch, weight perturbation, bias perturbation, `DataParallel`을 거부한다. Frozen validation과 inference는 clean artifact를 검증한 뒤 robustness axis를 독립적으로 적용한다.
 
 Calibration 측정은 deterministic한 두 collection pass로 분리하고 그 뒤 frozen validation을 수행한다. 첫 pass는 clamp 전 activation의 signed min/max를 기록하고, 두 번째 pass는 같은 dataset을 다시 실행하여 첫 pass의 endpoint로 고정한 bin에 histogram을 누적한다. Histogram과 margin으로 immutable range table을 만든 뒤 validation은 inference와 동일하게 excursion을 먼저 집계하고 clamp하며, 실행 중 range를 넓히지 않는다.
 
@@ -506,14 +506,14 @@ Observed extrema를 쓰는 경우 calibration set 밖의 입력을 보장하지 
 Dependency 순서대로 fixed range를 도입하면 각 단계에서 current tensor extrema를 하나의 원인과 함께 제거할 수 있다.
 
 1. Immutable calibration entry와 histogram, min/max 및 fixed-bin collection accumulator, frozen lookup, pre-clamp excursion counter를 공통 기반으로 추가한다. Stable module binding과 collection/runtime `Potential` 경계까지 완료되었다.
-2. 네 evaluator에 collection-only run, frozen validation, metadata validation, missing-entry failure를 추가한다. Collection forward는 live extrema 대신 analytic safety rail을 전달해야 한다.
+2. 네 evaluator에 collection-only run, frozen validation, metadata validation, missing-entry failure를 추가한다. ViT는 완료되었고 나머지 세 evaluator가 남아 있다. Collection forward는 live extrema 대신 analytic safety rail을 전달해야 한다.
 3. Pretrained parameter와 embedding table의 range를 checkpoint loading, dtype/device conversion, static perturbation 뒤 한 번 고정한다.
 4. `SpikingLinear`, `SpikingConv2d`, `SpikingConv1D`가 forward에서 parameter extrema를 읽지 않고 frozen output-specific affine range를 사용하게 한다. 완료되었다.
 5. `SpikingLayerNorm`이 $\psi_{\mathrm{ED}}$와 $f_{\mathrm{Mul}}$의 returned range를 전달하게 하고, dense branch에는 analytic 또는 calibrated pre-affine range를 사용한다. Analytic $|z_i|\leq\sqrt{d-1}$ 적용은 완료되었다.
 6. Attention이 tensor와 fixed output range를 함께 전달하게 하고 mask suppression을 score upper bound와 일치시킨다.
-7. ViT와 GPT-2의 pre-norm post-add residual을 block별 calibration range로 clamp하고, BERT/RoBERTa post-norm 경계에도 frozen site range를 연결한다. ViT block 내부 두 residual 경계의 adapter 연결은 완료되었다.
-8. ViT, BERT, RoBERTa, GPT-2 model entry를 embedding interval arithmetic 또는 calibration range로 교체한다.
-9. Direct GELU, `gelu_new`, SiLU와 dense ablation path에 activation별 fixed range를 적용한다.
+7. ViT와 GPT-2의 pre-norm post-add residual을 block별 calibration range로 clamp하고, BERT/RoBERTa post-norm 경계에도 frozen site range를 연결한다. ViT의 두 block 경계와 evaluator lifecycle은 완료되었다.
+8. ViT, BERT, RoBERTa, GPT-2 model entry를 embedding interval arithmetic 또는 calibration range로 교체한다. ViT encoder entry는 완료되었다.
+9. Direct GELU, `gelu_new`, SiLU와 dense ablation path에 activation별 fixed range를 적용한다. ViT의 bounded activation 경로는 analytic range로 완료되었다.
 10. Pooler와 task head가 final hidden-state range를 slice와 함께 전달하도록 한다.
 11. Source audit와 batch-order, batch-size, Gaussian-seed invariance verification을 permanent verification에 추가한다.
 
@@ -546,4 +546,4 @@ Migration 완료는 numerical output뿐 아니라 declared potential range의 �
 
 Audit 자체는 완료되었지만 구현은 아직 fixed potential range contract를 만족하지 않는다.
 
-Transform algebra와 time window는 이미 static하고 attention range 전달 및 모든 LayerNorm range propagation도 완료되었다. 남은 작업은 model adapter의 23개 activation-derived range, affine class의 forward-time parameter extrema, calibration persistence를 제거하거나 고정하는 것이다. 이 항목들이 끝나기 전에는 batch-independent physical dynamic range가 구현되었다고 볼 수 없다.
+Transform algebra와 time window는 이미 static하고 attention range 전달, 모든 LayerNorm range propagation, affine parameter range freezing, ViT layer-wise calibration도 완료되었다. 남은 작업은 BERT, RoBERTa, GPT-2 adapter의 19개 activation-derived range를 제거하고 같은 artifact lifecycle을 연결하는 것이다.

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import sys
 from typing import Literal
@@ -17,13 +18,28 @@ from transformers import AttentionInterface, AutoModelForImageClassification
 from transformers.models.vit import ViTImageProcessor
 from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTForImageClassification, SpikingLayerNorm
 from utils.transforms.types import Potential
+from utils.transforms.calibration import (
+    CalibrationMode,
+    create_calibration_collector,
+    create_calibration_runtime,
+    get_calibration_clipping_report,
+    load_calibration_table,
+    save_calibration_table,
+)
 from utils.transforms.noise import (
     get_gaussian_noise_stats,
     install_device_mismatch,
     set_gaussian_time_noise,
 )
 from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
-from utils.transformers.models.spiking_vit.calibration import image_processor_pixel_bounds
+from utils.transformers.calibration import bind_model_calibration, clear_model_calibration
+from utils.transformers.models.spiking_vit.calibration import (
+    build_vit_calibration_metadata,
+    collect_vit_calibration_table,
+    image_processor_pixel_bounds,
+    select_calibration_subset,
+    vit_calibration_specs,
+)
 from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
 import evaluate
 from tqdm import tqdm
@@ -65,6 +81,18 @@ class Arguments:
     spiking_mlp_exact_gelu: bool
     activation: Literal["relu", "gelu"]
     theta: float
+
+    # Layer-wise calibration is an explicit artifact lifecycle. Collection uses a
+    # deterministic subset of the training split; frozen phases only load and apply
+    # the resulting table while recording clipping statistics.
+    calibration_mode: Literal["none", "collect", "validate", "inference"]
+    calibration_path: str
+    calibration_samples: int
+    calibration_seed: int
+    calibration_bins: int
+    calibration_lower_quantile: float
+    calibration_upper_quantile: float
+    calibration_margin_fraction: float
 
     # Direct Gaussian timing noise uses one relative input scale, one absolute mean,
     # and one replica seed shared by every event-aware encoder.
@@ -134,6 +162,58 @@ def parse_arguments() -> Arguments:
     parser.add_argument("--theta", type=float, default=100.0,
                         help="Domain bound θ for SpikingLayerNorm clamping (default: 100.0).")
 
+    # Layer-wise calibration is intentionally separate from the old diagnostic
+    # quantile hook. Collection writes one reusable artifact from a deterministic
+    # training subset, while validate/inference only consume that frozen artifact.
+    parser.add_argument(
+        "--calibration-mode",
+        choices=("none", "collect", "validate", "inference"),
+        default="none",
+        help="Create or consume a layer-wise calibration artifact.",
+    )
+    parser.add_argument(
+        "--calibration-path",
+        type=str,
+        default="",
+        help="Calibration JSON path; required unless calibration mode is none.",
+    )
+    parser.add_argument(
+        "--calibration-samples",
+        type=int,
+        default=1024,
+        help="Fixed number of training samples selected for both collection passes.",
+    )
+    parser.add_argument(
+        "--calibration-seed",
+        type=int,
+        default=0,
+        help="Seed defining the deterministic training-subset permutation.",
+    )
+    parser.add_argument(
+        "--calibration-bins",
+        type=int,
+        default=2048,
+        help="Number of fixed histogram bins per calibrated layer output.",
+    )
+    parser.add_argument(
+        "--calibration-lower-quantile",
+        type=float,
+        default=0.001,
+        help="Lower signed residual quantile retained during calibration.",
+    )
+    parser.add_argument(
+        "--calibration-upper-quantile",
+        type=float,
+        default=0.999,
+        help="Upper signed residual quantile retained during calibration.",
+    )
+    parser.add_argument(
+        "--calibration-margin-fraction",
+        type=float,
+        default=0.05,
+        help="Per-side residual range expansion after quantile selection.",
+    )
+
     # Direct Gaussian spike-time noise uses the common four-option CLI shared by
     # every model family.
     parser.add_argument(
@@ -197,6 +277,14 @@ def parse_arguments() -> Arguments:
         spiking_mlp_exact_gelu=args.spiking_mlp_exact_gelu,
         activation=args.activation,
         theta=args.theta,
+        calibration_mode=args.calibration_mode,
+        calibration_path=args.calibration_path,
+        calibration_samples=args.calibration_samples,
+        calibration_seed=args.calibration_seed,
+        calibration_bins=args.calibration_bins,
+        calibration_lower_quantile=args.calibration_lower_quantile,
+        calibration_upper_quantile=args.calibration_upper_quantile,
+        calibration_margin_fraction=args.calibration_margin_fraction,
         gaussian_time_noise=args.gaussian_time_noise,
         time_noise_std_frac=args.time_noise_std_frac,
         time_noise_mean=args.time_noise_mean,
@@ -209,9 +297,111 @@ def parse_arguments() -> Arguments:
         quick_test=args.quick_test,
     )
 
+
+def validate_vit_calibration_arguments(
+    args: Arguments,
+) -> CalibrationMode | None:
+    """Validate the ViT calibration artifact lifecycle before external setup.
+
+    ``none`` preserves analytic fixed ranges without binding calibration state.
+    Collection must use a clean deterministic spiking model, while validation and
+    inference may reuse the frozen clean table under separately configured robustness
+    noise. All statistical controls remain explicit and are persisted in the table.
+
+    Args:
+        args: Parsed ViT evaluator configuration.
+
+    Returns:
+        The internal calibration mode, or ``None`` when calibration is disabled.
+
+    Raises:
+        TypeError: If calibration fields have invalid scalar types.
+        ValueError: If paths, counts, quantiles, margins, or backend combinations are
+            invalid for the selected lifecycle phase.
+    """
+    # Convert the user-facing disabled value separately because CalibrationMode has
+    # only the three active phases shared by collectors and frozen runtimes.
+    if not isinstance(args.calibration_mode, str):
+        raise TypeError("calibration_mode must be a string")
+    if args.calibration_mode == "none":
+        return None
+    try:
+        mode = CalibrationMode(args.calibration_mode)
+    except ValueError as error:
+        raise ValueError("unsupported calibration_mode") from error
+    if args.model_backend != "spiking":
+        raise ValueError("layer-wise calibration requires model_backend=spiking")
+    if not isinstance(args.calibration_path, str):
+        raise TypeError("calibration_path must be a string")
+    if not args.calibration_path.strip():
+        raise ValueError("calibration_path is required for active calibration")
+
+    # Counts and seed define the exact deterministic training subset and histogram
+    # layout. Reject Boolean aliases and invalid ranges before loading any dataset.
+    for name, value in (
+        ("calibration_samples", args.calibration_samples),
+        ("calibration_seed", args.calibration_seed),
+        ("calibration_bins", args.calibration_bins),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{name} must be an integer")
+    if args.calibration_samples <= 0:
+        raise ValueError("calibration_samples must be positive")
+    if args.calibration_seed < 0:
+        raise ValueError("calibration_seed must be non-negative")
+    if args.calibration_bins < 2:
+        raise ValueError("calibration_bins must be at least two")
+
+    # Signed residual calibration needs ordered probability cutoffs and a
+    # non-negative per-side margin. The collector performs the same validation, but
+    # checking here avoids expensive model and data initialization on bad CLI input.
+    for name, value in (
+        ("calibration_lower_quantile", args.calibration_lower_quantile),
+        ("calibration_upper_quantile", args.calibration_upper_quantile),
+        ("calibration_margin_fraction", args.calibration_margin_fraction),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{name} must be a real number")
+        if not math.isfinite(float(value)):
+            raise ValueError(f"{name} must be finite")
+    if not 0.0 <= args.calibration_lower_quantile <= 1.0:
+        raise ValueError("calibration_lower_quantile must lie in [0, 1]")
+    if not 0.0 <= args.calibration_upper_quantile <= 1.0:
+        raise ValueError("calibration_upper_quantile must lie in [0, 1]")
+    if args.calibration_lower_quantile > args.calibration_upper_quantile:
+        raise ValueError("calibration quantiles must be ordered")
+    if args.calibration_margin_fraction < 0.0:
+        raise ValueError("calibration_margin_fraction must be non-negative")
+
+    # Collection measures only the clean deterministic model. Frozen phases are
+    # allowed to add these independent robustness axes after metadata compatibility
+    # has been established against the clean table.
+    if mode is CalibrationMode.COLLECT and (
+        args.gaussian_time_noise
+        or args.mismatch_enabled
+        or args.mismatch_theta_std != 0.0
+        or args.weight_noise_std != 0.0
+        or args.bias_noise_std != 0.0
+    ):
+        raise ValueError(
+            "calibration collection requires timing noise, mismatch, and parameter "
+            "perturbations to be disabled"
+        )
+    return mode
+
 DATASET_CONFIGS = {
-    "cifar10": {"split": "test", "image_key": "img", "label_key": "label"},
-    "imagenet-1k": {"split": "validation", "image_key": "image", "label_key": "label"},
+    "cifar10": {
+        "split": "test",
+        "calibration_split": "train",
+        "image_key": "img",
+        "label_key": "label",
+    },
+    "imagenet-1k": {
+        "split": "validation",
+        "calibration_split": "train",
+        "image_key": "image",
+        "label_key": "label",
+    },
 }
 
 
@@ -250,6 +440,7 @@ def evaluate_vit_model(args: Arguments) -> None:
     # 0. 시드 설정
     # ---------------------------------------------------------
     torch.manual_seed(42)
+    calibration_mode = validate_vit_calibration_arguments(args)
     
     # Precision mapping
     dtype_map = {
@@ -269,8 +460,17 @@ def evaluate_vit_model(args: Arguments) -> None:
     batch_size = args.batch_size
     device_str = args.device
 
-    ds_config = DATASET_CONFIGS.get(dataset_id, {"split": "test", "image_key": "image", "label_key": "label"})
+    ds_config = DATASET_CONFIGS.get(
+        dataset_id,
+        {
+            "split": "test",
+            "calibration_split": "train",
+            "image_key": "image",
+            "label_key": "label",
+        },
+    )
     split = ds_config["split"]
+    calibration_split = ds_config["calibration_split"]
     image_key = ds_config["image_key"]
     label_key = ds_config["label_key"]
 
@@ -291,6 +491,11 @@ def evaluate_vit_model(args: Arguments) -> None:
     if gaussian_enabled and use_data_parallel:
         raise RuntimeError(
             "Gaussian spike-time noise does not support DataParallel; "
+            "run one evaluation process per GPU"
+        )
+    if calibration_mode is not None and use_data_parallel:
+        raise RuntimeError(
+            "layer-wise calibration does not support DataParallel; "
             "run one evaluation process per GPU"
         )
 
@@ -341,11 +546,36 @@ def evaluate_vit_model(args: Arguments) -> None:
     # ---------------------------------------------------------
     # 2. 데이터셋 및 전처리 도구 로드
     # ---------------------------------------------------------
-    # 데이터셋 로드
-    print(f"Loading dataset: {dataset_id}...")
-    dataset = load_dataset(dataset_id, split=split, cache_dir="/data/nas/datasets/")
-    if args.quick_test:
-        dataset = dataset.select(range(5000))  # Quick test with only 5000 samples
+    # Evaluation and calibration use disjoint dataset splits. Collection needs only
+    # the training subset, while validate/inference additionally load the untouched
+    # evaluation split used for task accuracy and clipping reports.
+    dataset = None
+    if calibration_mode is not CalibrationMode.COLLECT:
+        print(f"Loading evaluation dataset: {dataset_id} ({split})...")
+        dataset = load_dataset(
+            dataset_id,
+            split=split,
+            cache_dir="/data/nas/datasets/",
+        )
+        if args.quick_test:
+            dataset = dataset.select(range(min(5000, len(dataset))))
+
+    calibration_dataset = None
+    if calibration_mode is not None:
+        print(
+            f"Loading calibration dataset: {dataset_id} "
+            f"({calibration_split})..."
+        )
+        training_dataset = load_dataset(
+            dataset_id,
+            split=calibration_split,
+            cache_dir="/data/nas/datasets/",
+        )
+        calibration_dataset = select_calibration_subset(
+            training_dataset,
+            sample_count=args.calibration_samples,
+            seed=args.calibration_seed,
+        )
 
     # 모델에 맞는 Feature Extractor(Image Processor) 로드
     if model_id == "mpiorczynski/relu-vit-base-patch16-224":
@@ -353,9 +583,13 @@ def evaluate_vit_model(args: Arguments) -> None:
     else:
         processor = ViTImageProcessor.from_pretrained(model_id)
 
-    # 평가 지표(Metric) 로드 - 정확도(Accuracy)
-    metric_int = evaluate.load("accuracy")
-    metric_tot = evaluate.load("accuracy")
+    # Collection writes an artifact and exits without touching validation labels or
+    # metrics. Frozen and calibration-free evaluation retain the existing accuracy.
+    metric_int = None
+    metric_tot = None
+    if calibration_mode is not CalibrationMode.COLLECT:
+        metric_int = evaluate.load("accuracy")
+        metric_tot = evaluate.load("accuracy")
 
     # ---------------------------------------------------------
     # 3. 데이터 전처리 함수 정의
@@ -371,12 +605,25 @@ def evaluate_vit_model(args: Arguments) -> None:
         inputs["labels"] = examples[label_key]
         return inputs
 
-    # 데이터셋에 전처리 적용 (On-the-fly 방식)
-    # with_format("torch")를 사용하여 출력을 PyTorch 텐서로 설정
-    processed_dataset = dataset.with_transform(transform)
-
-    # DataLoader 생성
-    dataloader = DataLoader(processed_dataset, batch_size=batch_size, shuffle=True)
+    # Evaluation order does not affect accuracy, but sequential sampling makes smoke
+    # runs and clipping reports reproducible. The calibration loader must reuse the
+    # exact selected dataset object with shuffle disabled for both collection passes.
+    dataloader = None
+    if dataset is not None:
+        processed_dataset = dataset.with_transform(transform)
+        dataloader = DataLoader(
+            processed_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+        )
+    calibration_dataloader = None
+    if calibration_dataset is not None:
+        processed_calibration_dataset = calibration_dataset.with_transform(transform)
+        calibration_dataloader = DataLoader(
+            processed_calibration_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+        )
 
     # ---------------------------------------------------------
     # 4. 모델 로드
@@ -406,15 +653,94 @@ def evaluate_vit_model(args: Arguments) -> None:
         config.pixel_value_max = pixel_domain.max
         model = ViTForImageClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl, torch_dtype=dtype)
     
-    apply_parameter_noise(model, args.weight_noise_std, args.bias_noise_std)
+    # Build the clean artifact identity before applying any robustness perturbation.
+    # The selected dataset fingerprint includes the training data revision and exact
+    # seeded subset indices, while model options describe the converted architecture.
+    calibration_metadata = None
+    if calibration_mode is not None:
+        if calibration_dataset is None:
+            raise RuntimeError("active calibration requires a selected training subset")
+        calibration_metadata = build_vit_calibration_metadata(
+            model_id=model_id,
+            dataset_id=dataset_id,
+            calibration_split=calibration_split,
+            calibration_dataset_fingerprint=calibration_dataset._fingerprint,
+            calibration_samples=args.calibration_samples,
+            calibration_seed=args.calibration_seed,
+            processor=processor,
+            config=config,
+            dtype=args.precision,
+            attention_implementation=effective_attn_impl,
+        )
+
+    # Collection must observe the clean converted checkpoint. Frozen validation and
+    # inference deliberately apply independent parameter noise only after the clean
+    # metadata identity has been constructed.
+    if calibration_mode is not CalibrationMode.COLLECT:
+        apply_parameter_noise(model, args.weight_noise_std, args.bias_noise_std)
 
     model.to(device)
+    model.eval()
 
     # Static device mismatch (frozen per-neuron threshold offsets) via forward pre-hooks.
     # Installed after .to(device) so offsets are sampled on the model's device.
-    if model_backend == "spiking" and args.mismatch_enabled and args.mismatch_theta_std > 0:
+    if (
+        calibration_mode is not CalibrationMode.COLLECT
+        and model_backend == "spiking"
+        and args.mismatch_enabled
+        and args.mismatch_theta_std > 0
+    ):
         handles = install_device_mismatch(model, theta_std=args.mismatch_theta_std, enabled=True)
         print(f"Installed static device mismatch on {len(handles)} spiking modules (σ_θ={args.mismatch_theta_std}).")
+
+    # Collection executes the deterministic training subset twice and terminates
+    # after atomically writing the artifact. No validation example or task metric is
+    # touched in this phase.
+    if calibration_mode is CalibrationMode.COLLECT:
+        if calibration_dataloader is None or calibration_metadata is None:
+            raise RuntimeError("calibration collection setup is incomplete")
+        specs = vit_calibration_specs(
+            model,
+            lower_quantile=args.calibration_lower_quantile,
+            upper_quantile=args.calibration_upper_quantile,
+            margin_fraction=args.calibration_margin_fraction,
+        )
+        collector = create_calibration_collector(
+            calibration_metadata,
+            specs,
+            bin_count=args.calibration_bins,
+        )
+        table = collect_vit_calibration_table(
+            model,
+            calibration_dataloader,
+            collector,
+            device=device,
+            dtype=dtype,
+            expected_samples=args.calibration_samples,
+        )
+        save_calibration_table(table, args.calibration_path)
+        print(
+            f"Saved calibration artifact with {len(table.layers)} layer ranges "
+            f"to {args.calibration_path}"
+        )
+        wandb.log({"Calibration/layer_ranges": len(table.layers)})
+        wandb.finish()
+        return
+
+    # Validation and inference reject any table collected under different data,
+    # preprocessing, numerical, capacity, or model-path metadata before binding the
+    # immutable ranges to their named ViT blocks.
+    calibration_state = None
+    if calibration_mode in (CalibrationMode.VALIDATE, CalibrationMode.INFERENCE):
+        if calibration_metadata is None:
+            raise RuntimeError("frozen calibration setup is incomplete")
+        table = load_calibration_table(args.calibration_path)
+        calibration_state = create_calibration_runtime(
+            calibration_mode,
+            table,
+            expected_metadata=calibration_metadata,
+        )
+        bind_model_calibration(model, calibration_state)
 
     # GPU 병렬화 (DataParallel) 설정
     if use_data_parallel:
@@ -475,6 +801,8 @@ def evaluate_vit_model(args: Arguments) -> None:
     # ---------------------------------------------------------
     # 6. 평가 루프 (Evaluation Loop)
     # ---------------------------------------------------------
+    if dataloader is None or metric_int is None or metric_tot is None:
+        raise RuntimeError("evaluation dataset or accuracy metric setup is incomplete")
     print("Starting evaluation...")
 
     for batch in tqdm(dataloader):
@@ -552,6 +880,28 @@ def evaluate_vit_model(args: Arguments) -> None:
                 f"Gaussian/{site}/output_overflows": counts["output_overflows"],
                 f"Gaussian/{site}/output_overflow_rate": overflow_rate,
             })
+
+    # Layer-wise clipping uses the number of tensor elements at each residual as its
+    # denominator. Report both counts and rates without changing the frozen table,
+    # then remove only model bindings while preserving the completed runtime snapshot.
+    if calibration_state is not None:
+        for item in get_calibration_clipping_report(calibration_state):
+            site = f"{item.module_name}/{item.tensor_name}"
+            print(
+                f"Calibration[{site}] values={item.num_values}, "
+                f"underflows={item.underflows} "
+                f"(rate={item.underflow_rate:.6g}), "
+                f"overflows={item.overflows} "
+                f"(rate={item.overflow_rate:.6g})"
+            )
+            wandb.log({
+                f"Calibration/{site}/values": item.num_values,
+                f"Calibration/{site}/underflows": item.underflows,
+                f"Calibration/{site}/underflow_rate": item.underflow_rate,
+                f"Calibration/{site}/overflows": item.overflows,
+                f"Calibration/{site}/overflow_rate": item.overflow_rate,
+            })
+        clear_model_calibration(model, expected_state=calibration_state)
 
     print("-" * 30)
     wandb.finish()

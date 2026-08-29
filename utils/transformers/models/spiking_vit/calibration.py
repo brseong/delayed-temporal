@@ -1,15 +1,101 @@
 """ViT-specific fixed-range derivation for layer-wise calibration."""
 
+import collections.abc
+import json
 import math
 from typing import Any
 
+import torch
 from torch import nn
+from torch.utils.data import DataLoader, SequentialSampler
 
 from utils.transforms.calibration import (
+    CalibrationCollectorState,
+    CalibrationMetadata,
     CalibrationRangePolicy,
+    CalibrationTable,
     LayerCalibrationSpec,
+    finalize_calibration_collection,
+    start_histogram_calibration_pass,
 )
+from utils.transforms.noise import get_gaussian_time_noise
 from utils.transforms.types import PotentialBounds
+from utils.transformers.calibration import (
+    bind_model_calibration,
+    clear_model_calibration,
+)
+
+
+def select_calibration_subset(
+    dataset: Any,
+    *,
+    sample_count: int,
+    seed: int,
+) -> Any:
+    """Select a reproducible prefix from a seeded training-split permutation.
+
+    Hugging Face datasets derive a new fingerprint from both the source revision and
+    selection indices. Returning that selected dataset lets metadata persist its
+    resulting fingerprint, while two collection passes can iterate the same object
+    with ``shuffle=False`` and therefore replay exactly the same sample population.
+
+    Args:
+        dataset: Loaded training split supporting ``len``, ``shuffle``, and ``select``.
+        sample_count: Exact positive number of calibration examples to retain.
+        seed: Non-negative permutation seed.
+
+    Returns:
+        Dataset subset whose length is exactly ``sample_count`` and whose
+        ``_fingerprint`` is a non-empty string.
+
+    Raises:
+        TypeError: If controls or the dataset protocol are invalid.
+        ValueError: If the split is too small or the selected dataset has no stable
+            fingerprint or exact length.
+    """
+    # Validate controls before touching dataset state. Reject bool aliases and never
+    # silently reduce the requested count, because artifact metadata must identify an
+    # exact population rather than a dataset-dependent ``min`` result.
+    for name, value in (("sample_count", sample_count), ("seed", seed)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{name} must be an integer")
+    if sample_count <= 0:
+        raise ValueError("sample_count must be positive")
+    if seed < 0:
+        raise ValueError("seed must be non-negative")
+    if not hasattr(dataset, "shuffle") or not callable(dataset.shuffle):
+        raise TypeError("dataset must provide shuffle(seed=...)")
+    if not hasattr(dataset, "select") or not hasattr(dataset, "__len__"):
+        raise TypeError("dataset must provide select(indices) and len(dataset)")
+
+    # Resolve split capacity before permutation so an impossible request fails without
+    # constructing a new indices mapping or misleading subset fingerprint.
+    try:
+        dataset_size = len(dataset)
+    except TypeError as error:
+        raise TypeError("dataset must provide len(dataset)") from error
+    if sample_count > dataset_size:
+        raise ValueError(
+            f"calibration sample_count {sample_count} exceeds split size {dataset_size}"
+        )
+
+    # A single seeded permutation followed by a deterministic prefix defines the
+    # selected examples. The returned order is retained for both calibration passes;
+    # no DataLoader-level shuffle is permitted later.
+    shuffled = dataset.shuffle(seed=seed)
+    if not hasattr(shuffled, "select") or not callable(shuffled.select):
+        raise TypeError("shuffled dataset must provide select(indices)")
+    subset = shuffled.select(range(sample_count))
+    if len(subset) != sample_count:
+        raise ValueError("selected calibration dataset has an unexpected length")
+
+    # Hugging Face fingerprints incorporate the source table and transform indices.
+    # Requiring one prevents an unrelated local dataset revision from reusing a table
+    # merely because it has the same name, seed, and number of examples.
+    fingerprint = getattr(subset, "_fingerprint", None)
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise ValueError("selected calibration dataset must have a stable fingerprint")
+    return subset
 
 
 def image_processor_pixel_bounds(
@@ -193,3 +279,329 @@ def vit_residual_calibration_specs(
                 )
             )
     return tuple(specs)
+
+
+def vit_calibration_specs(
+    model: nn.Module,
+    *,
+    lower_quantile: float,
+    upper_quantile: float,
+    margin_fraction: float,
+) -> tuple[LayerCalibrationSpec, ...]:
+    """Declare the encoder-entry and residual calibration sites of a ViT model.
+
+    The encoder entry resets embedding output to one signed range before the first
+    affine projection. Each later block contributes the two residual sites returned
+    by :func:`vit_residual_calibration_specs`, so range growth is reset throughout
+    depth without calibrating fully bounded composed operators.
+
+    Args:
+        model: Unwrapped ViT model or task wrapper.
+        lower_quantile: Lower signed histogram cutoff shared by calibrated sites.
+        upper_quantile: Upper signed histogram cutoff shared by calibrated sites.
+        margin_fraction: Per-side expansion after symmetric range selection.
+
+    Returns:
+        One encoder-input specification followed by two specifications per block.
+
+    Raises:
+        TypeError: If ``model`` is not an unwrapped PyTorch module.
+        ValueError: If the model does not contain exactly one ViT encoder.
+    """
+    # Import locally for the same reason as ViTLayer above: processor-only users do
+    # not need to initialize model registration, while actual model inspection uses
+    # exact class identities rather than name suffixes.
+    from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTEncoder
+
+    if not isinstance(model, nn.Module):
+        raise TypeError("model must be a torch.nn.Module")
+    if isinstance(model, nn.DataParallel):
+        raise RuntimeError("ViT calibration specifications require an unwrapped model")
+    encoder_names = tuple(
+        sorted(
+            name
+            for name, module in model.named_modules()
+            if isinstance(module, ViTEncoder)
+        )
+    )
+    if len(encoder_names) != 1:
+        raise ValueError("model must contain exactly one ViTEncoder module")
+
+    # Encoder outputs are signed and immediately feed affine PWM. Use the same
+    # symmetric policy as residual resets so every persisted range contains zero.
+    entry_spec = LayerCalibrationSpec(
+        module_name=encoder_names[0],
+        tensor_name="input",
+        range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
+        lower_quantile=lower_quantile,
+        upper_quantile=upper_quantile,
+        margin_fraction=margin_fraction,
+    )
+    residual_specs = vit_residual_calibration_specs(
+        model,
+        lower_quantile=lower_quantile,
+        upper_quantile=upper_quantile,
+        margin_fraction=margin_fraction,
+    )
+    return (entry_spec, *residual_specs)
+
+
+def build_vit_calibration_metadata(
+    *,
+    model_id: str,
+    dataset_id: str,
+    calibration_split: str,
+    calibration_dataset_fingerprint: str,
+    calibration_samples: int,
+    calibration_seed: int,
+    processor: Any,
+    config: Any,
+    dtype: str,
+    attention_implementation: str,
+) -> CalibrationMetadata:
+    """Build the complete reusable identity of one ViT calibration artifact.
+
+    The dataset fingerprint, deterministic permutation seed, prefix length, and image
+    processor fields identify the exact representative input population. Model and
+    numerical fields identify the clean converted network whose residual distributions
+    were measured. Robustness noise is intentionally absent so one table can be reused.
+
+    Args:
+        model_id: Pretrained checkpoint identifier.
+        dataset_id: Hugging Face dataset identifier.
+        calibration_split: Training split name used only for calibration.
+        calibration_dataset_fingerprint: Fingerprint after deterministic subset
+            selection, which changes if source data or selected indices change.
+        calibration_samples: Exact number of examples in both collection passes.
+        calibration_seed: Seed used to permute the training split before taking a prefix.
+        processor: Image processor used to construct every calibration tensor.
+        config: Loaded spiking ViT configuration.
+        dtype: Stable evaluator precision name such as ``float32``.
+        attention_implementation: Effective eager or spiking attention backend.
+
+    Returns:
+        Immutable metadata accepted by calibration collection and frozen runtime setup.
+
+    Raises:
+        TypeError: If text or integer identities have invalid types.
+        ValueError: If required identities, image geometry, or processor fields are
+            missing or invalid.
+    """
+    # Validate the exact subset identity before serializing processor state. Booleans
+    # are excluded from integer fields, and an empty fingerprint cannot distinguish
+    # a reconstructed dataset revision from the original collection population.
+    text_values = {
+        "model_id": model_id,
+        "dataset_id": dataset_id,
+        "calibration_split": calibration_split,
+        "calibration_dataset_fingerprint": calibration_dataset_fingerprint,
+        "dtype": dtype,
+        "attention_implementation": attention_implementation,
+    }
+    for name, value in text_values.items():
+        if not isinstance(value, str):
+            raise TypeError(f"{name} must be a string")
+        if not value or value != value.strip():
+            raise ValueError(f"{name} must be non-empty without surrounding whitespace")
+    for name, value in (
+        ("calibration_samples", calibration_samples),
+        ("calibration_seed", calibration_seed),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{name} must be an integer")
+    if calibration_samples <= 0:
+        raise ValueError("calibration_samples must be positive")
+    if calibration_seed < 0:
+        raise ValueError("calibration_seed must be non-negative")
+
+    # Store only deterministic processor fields that mathematically affect the model
+    # tensor. JSON normalization converts tuples and mappings to a stable artifact
+    # identity while rejecting non-finite numeric constants.
+    processor_fields = {
+        "do_resize": bool(getattr(processor, "do_resize", False)),
+        "size": getattr(processor, "size", None),
+        "do_center_crop": bool(getattr(processor, "do_center_crop", False)),
+        "crop_size": getattr(processor, "crop_size", None),
+        "do_rescale": bool(getattr(processor, "do_rescale", False)),
+        "rescale_factor": getattr(processor, "rescale_factor", None),
+        "do_normalize": bool(getattr(processor, "do_normalize", False)),
+        "image_mean": getattr(processor, "image_mean", None),
+        "image_std": getattr(processor, "image_std", None),
+        "subset_selection": "seeded_training_permutation_prefix",
+        "subset_seed": calibration_seed,
+        "subset_samples": calibration_samples,
+        "subset_fingerprint": calibration_dataset_fingerprint,
+    }
+    try:
+        preprocessing = json.dumps(
+            processor_fields,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "image processor calibration metadata must be finite and JSON-compatible"
+        ) from error
+
+    # Normalize scalar or pair image geometry to the channels-first capacity stored
+    # in the calibration schema. A table for one resolution must never constrain a
+    # larger interpolated request without an explicitly different artifact.
+    image_size = getattr(config, "image_size", None)
+    if isinstance(image_size, collections.abc.Iterable) and not isinstance(
+        image_size,
+        (str, bytes),
+    ):
+        image_hw = tuple(int(value) for value in image_size)
+    elif image_size is not None:
+        image_hw = (int(image_size), int(image_size))
+    else:
+        image_hw = ()
+    num_channels = getattr(config, "num_channels", None)
+    if (
+        len(image_hw) != 2
+        or any(value <= 0 for value in image_hw)
+        or isinstance(num_channels, bool)
+        or not isinstance(num_channels, int)
+        or num_channels <= 0
+    ):
+        raise ValueError("ViT config must define positive channels and image geometry")
+
+    # Persist every model-path choice that changes residual distributions. Sort the
+    # pairs explicitly because metadata equality is exact during artifact loading.
+    model_options = tuple(
+        sorted(
+            (
+                ("attention_implementation", attention_implementation),
+                ("hidden_act", str(getattr(config, "hidden_act", ""))),
+                ("spiking_ln_expdiff", bool(getattr(config, "spiking_ln_expdiff", True))),
+                ("spiking_ln_log", bool(getattr(config, "spiking_ln_log", True))),
+                ("spiking_ln_mul", bool(getattr(config, "spiking_ln_mul", True))),
+                ("spiking_mlp_exact_gelu", bool(getattr(config, "spiking_mlp_exact_gelu", False))),
+                ("use_spiking_layernorm", bool(getattr(config, "use_spiking_layernorm", True))),
+                ("use_spiking_mlp", bool(getattr(config, "use_spiking_mlp", True))),
+            )
+        )
+    )
+
+    # CalibrationMetadata validation remains centralized in collector/runtime setup.
+    # Conversion here uses only ordinary immutable scalars and tuples.
+    return CalibrationMetadata(
+        model_family="vit",
+        model_id=model_id,
+        dataset_id=dataset_id,
+        dataset_split=calibration_split,
+        preprocessing=preprocessing,
+        dtype=dtype,
+        theta=float(getattr(config, "theta")),
+        tau_s=float(getattr(config, "tau_s")),
+        tau_m=float(getattr(config, "tau_m")),
+        clip_margin=float(getattr(config, "clip_margin", 1.0e-5)),
+        max_sequence_length=None,
+        input_shape=(num_channels, image_hw[0], image_hw[1]),
+        model_options=model_options,
+    )
+
+
+def collect_vit_calibration_table(
+    model: nn.Module,
+    dataloader: DataLoader,
+    collector: CalibrationCollectorState,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    expected_samples: int,
+) -> CalibrationTable:
+    """Run deterministic ViT min-max and histogram passes and finalize a table.
+
+    Both passes reuse one sequential DataLoader over the already selected training
+    subset. The model remains in evaluation mode with Gaussian timing noise disabled;
+    calibration bindings are removed in ``finally`` even when a forward or table
+    invariant fails, leaving the mutable collector available for diagnosis.
+
+    Args:
+        model: Unwrapped spiking ViT task model containing declared calibration sites.
+        dataloader: Sequential loader over the fixed calibration subset.
+        collector: Empty collector whose specs match the model's named modules.
+        device: Device receiving each preprocessed pixel batch.
+        dtype: Floating model input dtype.
+        expected_samples: Exact subset population replayed in each pass.
+
+    Returns:
+        Final immutable calibration table after identical two-pass populations.
+
+    Raises:
+        TypeError: If arguments have incompatible types.
+        ValueError: If sample counts or loader ordering are inconsistent.
+        RuntimeError: If the model is training, replicated, noisy, already bound, or
+            a batch does not provide a floating ``pixel_values`` tensor.
+    """
+    # Validate collection topology before installing mutable observers. Sequential
+    # sampling is required so both iterations replay the same selected examples in
+    # the same order even when only a prefix-sized calibration artifact is requested.
+    if not isinstance(model, nn.Module):
+        raise TypeError("model must be a torch.nn.Module")
+    if isinstance(model, nn.DataParallel):
+        raise RuntimeError("ViT calibration collection requires an unwrapped model")
+    if model.training:
+        raise RuntimeError("ViT calibration collection requires model.eval()")
+    if not isinstance(dataloader, DataLoader):
+        raise TypeError("dataloader must be a torch.utils.data.DataLoader")
+    if not isinstance(dataloader.sampler, SequentialSampler):
+        raise ValueError("calibration DataLoader must use sequential sampling")
+    if not isinstance(collector, CalibrationCollectorState):
+        raise TypeError("collector must be a CalibrationCollectorState")
+    if not isinstance(device, torch.device):
+        raise TypeError("device must be a torch.device")
+    if not isinstance(dtype, torch.dtype) or not dtype.is_floating_point:
+        raise TypeError("dtype must be a floating torch.dtype")
+    if isinstance(expected_samples, bool) or not isinstance(expected_samples, int):
+        raise TypeError("expected_samples must be an integer")
+    if expected_samples <= 0:
+        raise ValueError("expected_samples must be positive")
+    if len(dataloader.dataset) != expected_samples:
+        raise ValueError("calibration dataset length does not match expected_samples")
+    if get_gaussian_time_noise().enabled:
+        raise RuntimeError("calibration collection requires Gaussian timing noise off")
+
+    # Bind once across both passes so every module retains the same stable name and
+    # collector identity. Forward failures still trigger complete unbinding below.
+    bind_model_calibration(model, collector)
+    try:
+        pass_counts: list[int] = []
+        for pass_index in range(2):
+            observed_samples = 0
+
+            # Calibration needs activations only; labels and task losses are excluded.
+            # no_grad also guarantees observers never inherit an autograd graph.
+            with torch.no_grad():
+                for batch in dataloader:
+                    if not isinstance(batch, dict) or "pixel_values" not in batch:
+                        raise RuntimeError(
+                            "calibration batch must contain pixel_values"
+                        )
+                    pixel_values = batch["pixel_values"]
+                    if not isinstance(pixel_values, torch.Tensor):
+                        raise RuntimeError("pixel_values must be a torch.Tensor")
+                    if not pixel_values.is_floating_point():
+                        raise RuntimeError("pixel_values must be floating point")
+                    observed_samples += int(pixel_values.shape[0])
+                    model(pixel_values.to(device=device, dtype=dtype))
+
+            # Each pass must consume exactly the selected dataset. This catches a
+            # custom collator or iterable behavior that drops or duplicates examples.
+            if observed_samples != expected_samples:
+                raise ValueError(
+                    "calibration pass sample count does not match expected_samples"
+                )
+            pass_counts.append(observed_samples)
+            if pass_index == 0:
+                start_histogram_calibration_pass(collector)
+
+        # The equality is redundant with exact expected counts but documents and
+        # enforces the replay invariant directly before immutable finalization.
+        if pass_counts[0] != pass_counts[1]:
+            raise ValueError("calibration passes consumed different populations")
+        return finalize_calibration_collection(collector)
+    finally:
+        clear_model_calibration(model, expected_state=collector)

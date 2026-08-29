@@ -417,6 +417,7 @@ class ViTIntermediate(nn.Module):
         self._spiking_mlp_exact_gelu = getattr(config, "spiking_mlp_exact_gelu", False)
         self._theta = getattr(config, "theta", 400.0)
         self._eps = 1e-5
+        self._hidden_act_name = config.hidden_act if isinstance(config.hidden_act, str) else None
         # 항상 활성 함수 초기화 (spiking 경로도 GELU 먼저 적용)
         if isinstance(config.hidden_act, str):
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
@@ -424,18 +425,74 @@ class ViTIntermediate(nn.Module):
             self.intermediate_act_fn = config.hidden_act
 
     def forward(self, pot: Potential) -> Potential:
-        pot_z: Potential = self.dense(pot)              # PotentialBounds 전파
+        """Apply the selected ViT MLP activation with a fixed analytic range.
+
+        The operator-composed GELU already propagates its own interval. Direct tanh-
+        GELU, standard GELU, ReLU, SiLU, and Tanh all have conservative envelopes
+        derived only from the incoming affine range, so none may construct metadata
+        from the current activation tensor.
+
+        Args:
+            pot: Normalized block activation on a fixed zero-containing range.
+
+        Returns:
+            Activated MLP intermediate paired with an analytic fixed range.
+
+        Raises:
+            ValueError: If a dense activation has no maintained analytic range rule.
+        """
+        # The affine projection memoizes exact output endpoints for the incoming fixed
+        # domain. Every direct activation rule below consumes those endpoints rather
+        # than reducing the produced tensor.
+        pot_z: Potential = self.dense(pot)
         if self._use_spiking_mlp:
             if self._spiking_mlp_exact_gelu:
                 x = pot_z.value
                 sqrt_2_over_pi = 0.7978845608028654
                 out = 0.5 * x * (1.0 + torch.tanh(sqrt_2_over_pi * (x + 0.044715 * x ** 3)))
-                return Potential(out, PotentialBounds(out.min().item(), out.max().item()))
+                # The tanh gate lies in [0, 1]. Negative inputs therefore remain
+                # between x and zero, while positive inputs remain between zero and x.
+                return Potential(
+                    out,
+                    PotentialBounds(
+                        min(float(pot_z.domain.min), 0.0),
+                        max(float(pot_z.domain.max), 0.0),
+                    ),
+                )
             else:
                 return Potential(*gelu_approximation(*pot_z, theta=self._theta))
 
+        # Dense ReLU and Tanh have standard monotone endpoint mappings. GELU-family
+        # and SiLU-family activations multiply x by a gate in [0, 1], giving the same
+        # conservative sign-preserving envelope used by the direct tanh-GELU branch.
         out = self.intermediate_act_fn(pot_z.value)
-        return Potential(out, PotentialBounds(out.min().item(), out.max().item()))
+        if self._hidden_act_name == "relu":
+            output_domain = PotentialBounds(
+                max(0.0, float(pot_z.domain.min)),
+                max(0.0, float(pot_z.domain.max)),
+            )
+        elif self._hidden_act_name in {
+            "gelu",
+            "gelu_fast",
+            "gelu_new",
+            "gelu_pytorch_tanh",
+            "silu",
+            "swish",
+        }:
+            output_domain = PotentialBounds(
+                min(float(pot_z.domain.min), 0.0),
+                max(float(pot_z.domain.max), 0.0),
+            )
+        elif self._hidden_act_name == "tanh":
+            output_domain = PotentialBounds(
+                math.tanh(float(pot_z.domain.min)),
+                math.tanh(float(pot_z.domain.max)),
+            )
+        else:
+            raise ValueError(
+                "ViT dense activation requires a maintained analytic range rule"
+            )
+        return Potential(out, output_domain)
 
 
 class ViTOutput(nn.Module):
@@ -540,16 +597,53 @@ class ViTEncoder(nn.Module):
     def __init__(self, config: ViTConfig):
         super().__init__()
         self.config = config
+        self._theta = float(getattr(config, "theta", 10.0))
         self.layer = nn.ModuleList([ViTLayer(config) for _ in range(config.num_hidden_layers)])
         print("Number of layers:", config.num_hidden_layers)
         self.gradient_checkpointing = False
 
     def forward(self, hidden_states: torch.Tensor) -> Potential:
-        # 도메인 초기화: ViT 전체에서 딱 한 번 실측
-        pot = Potential(
-            hidden_states,
-            PotentialBounds(hidden_states.min().item(), hidden_states.max().item()),
-        )
+        """Enter the ViT stack through a fixed or calibrated signed range.
+
+        The configured symmetric ``theta`` interval is the collection safety rail and
+        calibration-free physical fallback. An explicitly bound collector observes
+        raw embedding outputs on that fixed rail; frozen execution replaces it with
+        the persisted signed-symmetric encoder-entry range before the first block.
+
+        Args:
+            hidden_states: Patch, class-token, and position embeddings.
+
+        Returns:
+            Final encoder output after fixed-domain block propagation.
+
+        Raises:
+            ValueError: If ``theta`` cannot define a finite positive safety rail.
+        """
+        # Validate configuration rather than current activations. This rail exists to
+        # make collection independent of batch composition and gives the first affine
+        # projection a stable zero-containing PWM interval.
+        if not math.isfinite(self._theta) or self._theta <= 0.0:
+            raise ValueError("ViT encoder theta must be finite and positive")
+        entry_bounds = PotentialBounds(-self._theta, self._theta)
+
+        # Collection checks that raw embeddings fit the physical safety rail. Frozen
+        # phases count and clamp against their persisted range, while an unbound model
+        # still clamps to the fixed theta rail instead of measuring batch extrema.
+        if model_calibration_is_bound(self):
+            pot = calibrated_potential(
+                self,
+                "input",
+                hidden_states,
+                collection_bounds=entry_bounds,
+            )
+        else:
+            pot = Potential(
+                entry_bounds.clamp(hidden_states, name="vit_encoder_input"),
+                entry_bounds,
+            )
+
+        # Every block now receives either an analytic fixed range or a persisted
+        # calibration range; no later layer reconstructs metadata from this batch.
         for layer_module in self.layer:
             pot = layer_module(pot)          # Potential → Potential (전파)
         return pot

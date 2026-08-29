@@ -65,7 +65,11 @@ from utils.transformers.calibration import (  # noqa: E402
     model_calibration_is_bound,
 )
 from utils.transformers.models.spiking_vit.calibration import (  # noqa: E402
+    build_vit_calibration_metadata,
+    collect_vit_calibration_table,
     image_processor_pixel_bounds,
+    select_calibration_subset,
+    vit_calibration_specs,
     vit_residual_calibration_specs,
 )
 
@@ -759,6 +763,299 @@ def verify_preprocessing_derived_image_range() -> None:
     )
 
 
+# @lat: [[calibration#Layer-wise Calibration#Two-pass Collection#Deterministic Training Subset]]
+def verify_deterministic_training_subset() -> None:
+    """Verify seeded subset identity, metadata, and automatic two-pass replay."""
+    import random
+
+    from torch.utils.data import DataLoader, Dataset
+    from utils.transforms.noise import set_gaussian_time_noise
+    from utils.transformers.calibration import model_calibration_is_bound
+
+    class FingerprintedDataset:
+        """Implement the small Hugging Face dataset protocol used by selection."""
+
+        def __init__(self, rows, fingerprint: str) -> None:
+            self.rows = tuple(rows)
+            self._fingerprint = fingerprint
+
+        def __len__(self) -> int:
+            return len(self.rows)
+
+        def shuffle(self, *, seed: int):
+            indices = list(range(len(self.rows)))
+            random.Random(seed).shuffle(indices)
+            return FingerprintedDataset(
+                (self.rows[index] for index in indices),
+                f"{self._fingerprint}:shuffle:{seed}",
+            )
+
+        def select(self, indices):
+            selected_indices = tuple(indices)
+            return FingerprintedDataset(
+                (self.rows[index] for index in selected_indices),
+                f"{self._fingerprint}:select:{selected_indices}",
+            )
+
+    # The same source, seed, and prefix length must reconstruct the same ordered
+    # population and fingerprint; changing the seed changes its artifact identity.
+    source = FingerprintedDataset(range(10), "source-v1")
+    first = select_calibration_subset(source, sample_count=4, seed=7)
+    replay = select_calibration_subset(source, sample_count=4, seed=7)
+    different = select_calibration_subset(source, sample_count=4, seed=8)
+    assert first.rows == replay.rows
+    assert first._fingerprint == replay._fingerprint
+    assert different._fingerprint != first._fingerprint
+    _expect_raises(
+        ValueError,
+        lambda: select_calibration_subset(source, sample_count=11, seed=7),
+        "exceeds split size",
+    )
+
+    # Canonical metadata stores subset selection alongside every processor and model
+    # option that affects the measured residual distributions.
+    processor = SimpleNamespace(
+        do_resize=True,
+        size={"height": 4, "width": 4},
+        do_center_crop=False,
+        crop_size=None,
+        do_rescale=True,
+        rescale_factor=1.0 / 255.0,
+        do_normalize=True,
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+    )
+    config = SimpleNamespace(
+        image_size=4,
+        num_channels=3,
+        hidden_act="gelu",
+        theta=4.0,
+        tau_s=1.0,
+        tau_m=1.0,
+        use_spiking_layernorm=True,
+        spiking_ln_mul=True,
+        spiking_ln_log=True,
+        spiking_ln_expdiff=True,
+        use_spiking_mlp=True,
+        spiking_mlp_exact_gelu=False,
+    )
+    metadata = build_vit_calibration_metadata(
+        model_id="checkpoint",
+        dataset_id="images",
+        calibration_split="train",
+        calibration_dataset_fingerprint=first._fingerprint,
+        calibration_samples=4,
+        calibration_seed=7,
+        processor=processor,
+        config=config,
+        dtype="float32",
+        attention_implementation="eager",
+    )
+    assert metadata.dataset_split == "train"
+    assert metadata.input_shape == (3, 4, 4)
+    assert first._fingerprint in metadata.preprocessing
+
+    class CalibrationDataset(Dataset):
+        """Return deterministic preprocessed tensors to the two-pass driver."""
+
+        def __len__(self) -> int:
+            return 4
+
+        def __getitem__(self, index: int):
+            return {
+                "pixel_values": torch.tensor(
+                    [float(index) - 1.5, float(index) - 1.0],
+                    dtype=torch.float32,
+                )
+            }
+
+    class CalibrationBlock(nn.Module):
+        """Expose one analytic-or-calibrated activation boundary."""
+
+        def forward(self, value: torch.Tensor) -> Potential:
+            bounds = PotentialBounds(-4.0, 4.0)
+            if model_calibration_is_bound(self):
+                return calibrated_potential(
+                    self,
+                    "output",
+                    value,
+                    collection_bounds=bounds,
+                )
+            return Potential(value, bounds)
+
+    class CalibrationDriverModel(nn.Module):
+        """Accept evaluator-style pixel batches and execute the bound site."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.block = CalibrationBlock()
+
+        def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+            return self.block(pixel_values).value
+
+    # The driver owns binding cleanup and moves each sequential batch to the requested
+    # dtype/device. Its finalized table must contain exactly the replayed population.
+    driver_model = CalibrationDriverModel().eval()
+    driver_spec = LayerCalibrationSpec(
+        module_name="block",
+        tensor_name="output",
+        range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
+        lower_quantile=0.0,
+        upper_quantile=1.0,
+        margin_fraction=0.0,
+    )
+    collector = create_calibration_collector(
+        metadata,
+        (driver_spec,),
+        bin_count=4,
+    )
+    loader = DataLoader(CalibrationDataset(), batch_size=2, shuffle=False)
+    set_gaussian_time_noise(enabled=False)
+    table = collect_vit_calibration_table(
+        driver_model,
+        loader,
+        collector,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        expected_samples=4,
+    )
+    assert table.layers[0].num_values == 8
+    assert not model_calibration_is_bound(driver_model.block)
+
+
+# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#ViT Evaluator Artifact Lifecycle]]
+def verify_vit_evaluator_artifact_lifecycle() -> None:
+    """Verify ViT calibration CLI conversion and clean-collection restrictions."""
+    from unittest.mock import patch
+
+    from scripts.evaluation.error_analysis_vit import (
+        parse_arguments,
+        validate_vit_calibration_arguments,
+    )
+
+    # Parsing exposes every artifact and statistical control without aliases to the
+    # legacy quantile diagnostic. The active string converts to the shared enum only
+    # after backend, path, population, and range-policy validation succeeds.
+    with patch(
+        "sys.argv",
+        [
+            "error_analysis_vit.py",
+            "--experiment_name",
+            "calibration-smoke",
+            "--model_backend",
+            "spiking",
+            "--calibration-mode",
+            "collect",
+            "--calibration-path",
+            "artifacts/calibration/vit-smoke.json",
+            "--calibration-samples",
+            "32",
+            "--calibration-seed",
+            "17",
+            "--calibration-bins",
+            "64",
+            "--calibration-lower-quantile",
+            "0.01",
+            "--calibration-upper-quantile",
+            "0.99",
+            "--calibration-margin-fraction",
+            "0.1",
+        ],
+    ):
+        args = parse_arguments()
+    assert validate_vit_calibration_arguments(args) is CalibrationMode.COLLECT
+    assert args.calibration_samples == 32
+    assert args.calibration_seed == 17
+    assert args.calibration_bins == 64
+
+    # Collection must remain clean, whereas frozen validation may combine the table
+    # with independent Gaussian timing noise. Disabled calibration needs no path.
+    _expect_raises(
+        ValueError,
+        lambda: validate_vit_calibration_arguments(
+            replace(args, gaussian_time_noise=True)
+        ),
+        "perturbations to be disabled",
+    )
+    frozen_args = replace(
+        args,
+        calibration_mode="validate",
+        gaussian_time_noise=True,
+    )
+    assert (
+        validate_vit_calibration_arguments(frozen_args)
+        is CalibrationMode.VALIDATE
+    )
+    assert validate_vit_calibration_arguments(
+        replace(args, calibration_mode="none", calibration_path="")
+    ) is None
+
+    # Invalid active paths and statistical controls must fail before dataset loading.
+    _expect_raises(
+        ValueError,
+        lambda: validate_vit_calibration_arguments(
+            replace(args, calibration_path="")
+        ),
+        "calibration_path",
+    )
+    _expect_raises(
+        ValueError,
+        lambda: validate_vit_calibration_arguments(
+            replace(args, calibration_lower_quantile=0.9999)
+        ),
+        "ordered",
+    )
+
+
+# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#ViT Fixed Activation Ranges]]
+def verify_vit_fixed_activation_ranges() -> None:
+    """Verify direct ViT MLP activations propagate input-derived fixed ranges."""
+    from utils.transforms.noise import set_gaussian_time_noise
+    from utils.transformers.models.spiking_vit.configuration_spiking_vit import (
+        ViTConfig,
+    )
+    from utils.transformers.models.spiking_vit.modeling_spiking_vit import (
+        ViTIntermediate,
+    )
+
+    # Every case receives different activation values on the same declared input
+    # range. Output domains must remain identical across those values, proving that
+    # direct activation metadata no longer uses current-tensor extrema.
+    set_gaussian_time_noise(enabled=False)
+    input_domain = PotentialBounds(-2.0, 2.0)
+    first_value = torch.tensor(
+        [[[-1.5, -0.25, 0.5, 1.25]]],
+        dtype=torch.float32,
+    )
+    second_value = torch.tensor(
+        [[[1.5, 0.25, -0.5, -1.25]]],
+        dtype=torch.float32,
+    )
+    cases = (
+        (True, True, "gelu"),
+        (False, False, "gelu"),
+        (False, False, "relu"),
+        (False, False, "tanh"),
+    )
+    for index, (use_spiking_mlp, exact_gelu, hidden_act) in enumerate(cases):
+        torch.manual_seed(1800 + index)
+        config = ViTConfig(
+            hidden_size=4,
+            intermediate_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            theta=4.0,
+            use_spiking_mlp=use_spiking_mlp,
+            spiking_mlp_exact_gelu=exact_gelu,
+            hidden_act=hidden_act,
+        )
+        module = ViTIntermediate(config).eval()
+        first = module(Potential(first_value, input_domain))
+        second = module(Potential(second_value, input_domain))
+        assert first.domain == second.domain
+        assert first.domain.min <= 0.0 <= first.domain.max
+
+
 # @lat: [[calibration#Layer-wise Calibration#Frozen Execution#ViT Residual Range Reset]]
 def verify_vit_residual_range_reset() -> None:
     """Verify ViT block residuals collect raw values and consume frozen ranges."""
@@ -768,7 +1065,10 @@ def verify_vit_residual_range_reset() -> None:
     from utils.transformers.models.spiking_vit.configuration_spiking_vit import (
         ViTConfig,
     )
-    from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTLayer
+    from utils.transformers.models.spiking_vit.modeling_spiking_vit import (
+        ViTEncoder,
+        ViTLayer,
+    )
 
     class ResidualModel(nn.Module):
         """Expose one ViT block under the stable name used by calibration records."""
@@ -870,6 +1170,52 @@ def verify_vit_residual_range_reset() -> None:
     assert sum(item.underflows + item.overflows for item in report) > 0
     assert clear_model_calibration(model, expected_state=runtime) == 1
 
+    # A complete encoder adds one entry site before the two residual sites. Its
+    # calibration-free theta rail makes declared output domains independent of the
+    # current embedding values instead of reconstructing them from batch extrema.
+    class EncoderModel(nn.Module):
+        """Expose a one-block encoder under a wrapper-stable module path."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            config = ViTConfig(
+                hidden_size=4,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                intermediate_size=8,
+                hidden_dropout_prob=0.0,
+                attention_probs_dropout_prob=0.0,
+                theta=4.0,
+                use_spiking_layernorm=False,
+                use_spiking_mlp=True,
+            )
+            config._attn_implementation = "eager"
+            self.encoder = ViTEncoder(config)
+
+    torch.manual_seed(1702)
+    encoder_model = EncoderModel().eval()
+    encoder_specs = vit_calibration_specs(
+        encoder_model,
+        lower_quantile=0.0,
+        upper_quantile=1.0,
+        margin_fraction=0.0,
+    )
+    assert tuple(
+        (spec.module_name, spec.tensor_name) for spec in encoder_specs
+    ) == (
+        ("encoder", "input"),
+        ("encoder.layer.0", "attention_residual"),
+        ("encoder.layer.0", "output"),
+    )
+    small_embeddings = torch.tensor(
+        [[[-0.2, -0.1, 0.1, 0.2], [0.1, -0.2, 0.2, -0.1]]],
+        dtype=torch.float32,
+    )
+    broad_embeddings = small_embeddings * 8.0
+    small_output = encoder_model.encoder(small_embeddings)
+    broad_output = encoder_model.encoder(broad_embeddings)
+    assert small_output.domain == broad_output.domain
+
 
 # @lat: [[calibration#Layer-wise Calibration#Persistence#Canonical Table Round Trip]]
 def verify_canonical_table_round_trip() -> None:
@@ -959,6 +1305,9 @@ def main() -> None:
         verify_collection_and_runtime_phase_separation,
         verify_model_binding_and_potential_boundary,
         verify_preprocessing_derived_image_range,
+        verify_deterministic_training_subset,
+        verify_vit_evaluator_artifact_lifecycle,
+        verify_vit_fixed_activation_ranges,
         verify_vit_residual_range_reset,
         verify_canonical_table_round_trip,
     )

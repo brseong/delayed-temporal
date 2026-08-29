@@ -28,6 +28,12 @@ A signed-symmetric site calibrates both tails and uses their larger absolute end
 
 For a nonnegative domain the shared lower endpoint is globally fixed at zero and only the upper endpoint is calibrated. Strictly positive logarithmic domains instead retain their separately configured positive lower rail; zero is not substituted into a logarithmic encoder.
 
+### Deterministic Training Subset
+
+Calibration uses a fixed-size prefix of a seeded training-split permutation and replays that exact subset sequentially in both collection passes, keeping validation examples outside range selection.
+
+The artifact stores the selected dataset fingerprint, split, seed, sample count, processor configuration, image geometry, dtype, and model-path options. A changed data revision or preprocessing configuration therefore fails frozen metadata validation.
+
 ## Frozen Execution
 
 Frozen validation and inference consume completed records without updating their extrema, histograms, quantiles, margins, or final ranges.
@@ -65,6 +71,18 @@ Each ViT block calibrates its attention residual and final MLP residual as separ
 Collection retains each exact interval sum as a safety rail and observes the raw residual. Frozen validation or inference counts strict excursions, clamps to the persisted layer range, and propagates that range into the next normalization and block.
 
 Residual specifications discover `ViTLayer` instances from the complete unwrapped model and persist their actual `named_modules()` paths, so bare models and task wrappers do not rely on guessed prefixes.
+
+### ViT Evaluator Artifact Lifecycle
+
+The ViT evaluator exposes disabled, collection, frozen-validation, and inference calibration modes with one explicit artifact path and persisted histogram, quantile, margin, subset-size, and subset-seed controls.
+
+Collection requires the clean spiking checkpoint in evaluation mode with sequential training-subset replay and no timing noise, mismatch, or parameter perturbation. Frozen modes validate complete metadata before applying optional robustness axes and reporting clipping.
+
+### ViT Fixed Activation Ranges
+
+ViT direct tanh-GELU, dense GELU, ReLU, SiLU, and Tanh branches derive conservative output ranges only from their fixed affine input bounds, so fully bounded activation mappings bypass calibration.
+
+ReLU and Tanh map interval endpoints directly. GELU-family and SiLU-family outputs remain between the input and zero because their gates lie in $[0,1]$; the operator-composed GELU continues to propagate its own interval.
 
 ## Persistence
 
