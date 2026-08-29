@@ -26,6 +26,9 @@ from utils.transformers.calibration import (
     clear_model_calibration,
     select_calibration_subset,
 )
+from utils.transformers.integrations.spiking_sdpa_attention import (
+    attention_score_representability_bounds,
+)
 
 
 def _normalize_json_metadata(value: Any) -> Any:
@@ -268,12 +271,13 @@ def vit_calibration_specs(
     upper_quantile: float,
     margin_fraction: float,
 ) -> tuple[LayerCalibrationSpec, ...]:
-    """Declare the encoder-entry and residual calibration sites of a ViT model.
+    """Declare ViT residual and optional spiking-attention calibration sites.
 
     The encoder entry resets embedding output to one signed range before the first
     affine projection. Each later block contributes the two residual sites returned
-    by :func:`vit_residual_calibration_specs`, so range growth is reset throughout
-    depth without calibrating fully bounded composed operators.
+    by :func:`vit_residual_calibration_specs`. When the selected backend is spiking
+    attention, every attention module additionally freezes its raw softmin score rail
+    below a configuration- and dtype-derived representability ceiling.
 
     Args:
         model: Unwrapped ViT model or task wrapper.
@@ -282,7 +286,8 @@ def vit_calibration_specs(
         margin_fraction: Per-side expansion after symmetric range selection.
 
     Returns:
-        One encoder-input specification followed by two specifications per block.
+        One encoder-input specification, two residual specifications per block, and
+        one score specification per spiking attention layer.
 
     Raises:
         TypeError: If ``model`` is not an unwrapped PyTorch module.
@@ -291,7 +296,10 @@ def vit_calibration_specs(
     # Import locally for the same reason as ViTLayer above: processor-only users do
     # not need to initialize model registration, while actual model inspection uses
     # exact class identities rather than name suffixes.
-    from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTEncoder
+    from utils.transformers.models.spiking_vit.modeling_spiking_vit import (
+        ViTEncoder,
+        ViTSelfAttention,
+    )
 
     if not isinstance(model, nn.Module):
         raise TypeError("model must be a torch.nn.Module")
@@ -323,7 +331,56 @@ def vit_calibration_specs(
         upper_quantile=upper_quantile,
         margin_fraction=margin_fraction,
     )
-    return (entry_spec, *residual_specs)
+
+    # Attention score calibration belongs only to the maintained spiking backend.
+    # Exact class discovery gives each layer its stable owning module name, while an
+    # eager artifact retains the existing entry-and-residual schema unchanged.
+    attention_specs: list[LayerCalibrationSpec] = []
+    for module_name, module in sorted(model.named_modules()):
+        if not isinstance(module, ViTSelfAttention):
+            continue
+        if module.config._attn_implementation != "spiking_sdpa":
+            continue
+
+        # Derive one request-independent source capacity from the configured patch
+        # grid. The query projection weight supplies the actual execution dtype after
+        # model conversion, device transfer, and evaluator precision selection.
+        image_size = module.config.image_size
+        patch_size = module.config.patch_size
+        image_hw = (
+            tuple(image_size)
+            if isinstance(image_size, collections.abc.Iterable)
+            else (image_size, image_size)
+        )
+        patch_hw = (
+            tuple(patch_size)
+            if isinstance(patch_size, collections.abc.Iterable)
+            else (patch_size, patch_size)
+        )
+        source_length_max = (
+            (int(image_hw[0]) // int(patch_hw[0]))
+            * (int(image_hw[1]) // int(patch_hw[1]))
+            + 1
+        )
+        ceiling = attention_score_representability_bounds(
+            float(getattr(module.config, "theta", 10.0)),
+            float(getattr(module.config, "tau_s", 1.0)),
+            source_length_max,
+            module.query.weight.dtype,
+        )
+        attention_specs.append(
+            LayerCalibrationSpec(
+                module_name=module_name,
+                tensor_name="attention_score",
+                range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC_CEILING,
+                lower_quantile=lower_quantile,
+                upper_quantile=upper_quantile,
+                margin_fraction=margin_fraction,
+                fixed_min=float(ceiling.min),
+                fixed_max=float(ceiling.max),
+            )
+        )
+    return (entry_spec, *residual_specs, *attention_specs)
 
 
 def build_vit_calibration_metadata(

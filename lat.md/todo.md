@@ -110,7 +110,7 @@ The implementation work covers every maintained transform and model adapter, not
 - [x] Remove all GPT-2 live bounds with frozen embedding and Conv1D intervals, analytic MLP activation ranges, residual endpoint addition, and optional model-entry plus two-per-block calibration bindings.
 - [x] Add GPT-2 collection, frozen-validation, and inference evaluator modes using filtered WikiText training subsets, fixed tokenizer/sequence metadata, sequential two-pass replay, and per-site clipping reports.
 - [x] Prefer operator-derived interval arithmetic whenever the input bounds and transformation provide a conservative static result in the maintained execution path.
-- [x] For selected paths without a practical tight analytic envelope, record per-site minima and maxima during a representative noise-free calibration run; current sites are ViT and GPT-2 model entry and pre-norm residual resets.
+- [x] For selected paths without a practical tight analytic envelope, record per-layer distributions during a representative noise-free calibration run; current sites are ViT and GPT-2 model entry, pre-norm residual resets, and spiking attention scores.
 - [x] Persist stable site identifiers together with the checkpoint, dataset split, preprocessing, model family, and active ablation configuration used for calibration.
 - [x] Add explicit collection, frozen-validation, and inference modes so a site cannot measure and clamp against a range created by the same forward invocation.
 - [x] Freeze learned-parameter and embedding-table bounds in versioned caches after checkpoint setup instead of recomputing parameter extrema on repeated forwards, including ordinary and spiking LayerNorm.
@@ -130,7 +130,7 @@ The implementation work covers every maintained transform and model adapter, not
 - [x] Keep LayerNorm outside calibration because its pre-affine normalized result has the finite analytic envelope $|z_i|\leq\sqrt{d-1}$; derive and freeze the post-affine envelope from scale and bias endpoints.
 - [x] Calibrate and clamp every ViT and GPT-2 pre-norm residual output per block, recording raw underflow and overflow before attaching the frozen output range.
 - [x] Connect both ViT pre-norm residual boundaries to optional explicit calibration bindings while retaining batch-independent analytic interval addition when calibration is absent.
-- [x] Keep attention score and value outputs on analytic sequence-capacity bounds rather than calibration sites; retain separate Gaussian miss and saturation validation for their bounded physical readouts.
+- [x] Calibrate one symmetric pre-clamp softmin score range per ViT and GPT-2 attention layer, constrain it by the dtype-, temporal-scale-, and sequence-capacity-derived representability ceiling, and retain separate Gaussian value-readout saturation validation.
 - [x] Keep spike-time windows configuration-derived: LayerNorm log windows remain fixed by `clip_margin`, `theta`, and `tau_s`, while affine identity encoding uses each declared zero-containing fixed interval.
 - [x] Make declared potential and time bounds immutable so cached or propagated endpoints cannot be widened in place.
 - [x] Keep masked attention scores inside the declared softmin range and clamp both Gaussian and noise-free value readouts to a rail derived from fixed $S_{\max}$ and $\theta$.

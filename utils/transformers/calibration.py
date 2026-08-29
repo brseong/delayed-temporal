@@ -310,6 +310,7 @@ def calibrated_potential(
     value: Tensor,
     *,
     collection_bounds: PotentialBounds | None = None,
+    collection_execution_bounds: PotentialBounds | None = None,
 ) -> Potential:
     """Observe or clamp one activation and attach the appropriate fixed bounds.
 
@@ -322,7 +323,9 @@ def calibrated_potential(
         module: Bound module that owns the named activation site.
         tensor_name: Boundary name matching its collector specification or table row.
         value: Raw non-empty finite floating-point activation.
-        collection_bounds: Static analytic safety rail required only for collection.
+        collection_bounds: Static analytic safety rail containing raw collection data.
+        collection_execution_bounds: Optional narrower static rail used to execute
+            the rest of a collection forward after observing the raw activation.
 
     Returns:
         A ``Potential`` whose tensor and declared range are synchronized for the
@@ -330,7 +333,8 @@ def calibrated_potential(
 
     Raises:
         TypeError: If binding attributes, names, tensor, or safety bounds are invalid.
-        ValueError: If collection output escapes its analytic safety rail or the site
+        ValueError: If collection output escapes its analytic safety rail, execution
+            bounds are inconsistent, a frozen range exceeds that ceiling, or the site
             is not declared for the installed state.
         RuntimeError: If the module has no complete calibration binding.
 
@@ -352,6 +356,24 @@ def calibrated_potential(
         raise TypeError("bound calibration module name must be a string")
     if not isinstance(tensor_name, str):
         raise TypeError("tensor_name must be a string")
+
+    # Validate the optional execution ceiling before any observer or clipping counter
+    # can change. It must be a finite sub-interval of the analytic collection rail;
+    # attention uses this distinction to observe broad raw scores but execute softmin
+    # only where its exponentials remain representable.
+    if collection_execution_bounds is not None:
+        if not isinstance(collection_execution_bounds, PotentialBounds):
+            raise TypeError(
+                "collection_execution_bounds must be PotentialBounds or None"
+            )
+        execution_lower = float(collection_execution_bounds.min)
+        execution_upper = float(collection_execution_bounds.max)
+        if (
+            not math.isfinite(execution_lower)
+            or not math.isfinite(execution_upper)
+            or execution_lower > execution_upper
+        ):
+            raise ValueError("collection execution bounds must be ordered and finite")
 
     # Collection must validate the safety rail before observer mutation. This ensures
     # an invalid or escaped activation cannot partially update first- or second-pass
@@ -379,23 +401,45 @@ def calibrated_potential(
             raise ValueError(
                 "calibration activation escaped its static analytic safety bounds"
             )
+        if collection_execution_bounds is not None and (
+            execution_lower < lower or execution_upper > upper
+        ):
+            raise ValueError(
+                "collection execution bounds must lie inside analytic safety bounds"
+            )
 
         # Only a fully validated activation reaches the mutable observer. Raw values
-        # remain unclamped so the histogram describes the actual deterministic layer.
+        # remain unclamped in the histogram. The optional narrower return rail affects
+        # only downstream execution and cannot feed back into either observer pass.
         observe_calibration_activation(state, module_name, tensor_name, value)
+        if collection_execution_bounds is not None:
+            return Potential(
+                collection_execution_bounds.clamp(
+                    value,
+                    name=f"calibration_{tensor_name}",
+                ),
+                collection_execution_bounds,
+            )
         return Potential(value, collection_bounds)
 
     # Frozen phases ignore collection rails entirely. The persisted record supplies
     # both the clamp endpoints and the immutable Potential metadata returned downstream.
     if isinstance(state, CalibrationRuntimeState):
+        layer = get_layer_calibration(state.table, module_name, tensor_name)
+        bounds = PotentialBounds(layer.bounds.min, layer.bounds.max)
+        if collection_execution_bounds is not None and (
+            float(bounds.min) < execution_lower
+            or float(bounds.max) > execution_upper
+        ):
+            raise ValueError(
+                "frozen calibration range exceeds its analytic execution ceiling"
+            )
         clamped = apply_calibrated_activation(
             state,
             module_name,
             tensor_name,
             value,
         )
-        layer = get_layer_calibration(state.table, module_name, tensor_name)
-        bounds = PotentialBounds(layer.bounds.min, layer.bounds.max)
         return Potential(clamped, bounds)
 
     # An unsupported object could be installed only through external attribute

@@ -22,7 +22,7 @@ Min-max and histogram accumulation must be independent of batch order and partit
 
 ### Quantile and Margin Policy
 
-Histogram quantiles use outward bin-edge rounding, while each declared site selects a signed-symmetric, lower-bounded, or upper-bounded policy; fully analytic operators bypass calibration.
+Histogram quantiles use outward bin-edge rounding, while each declared site selects a signed-symmetric, ceiling-constrained symmetric, lower-bounded, or upper-bounded policy; fully analytic operators bypass calibration.
 
 A signed-symmetric site calibrates both tails and uses their larger absolute endpoint for a zero-centered rail. A lower-bounded or upper-bounded site preserves its finite analytic endpoint and calibrates only the opposite direction. Margin is proportional to the pre-margin width and expands only calibrated endpoints, never a fixed analytic endpoint.
 
@@ -127,6 +127,22 @@ Ordinary PyTorch LayerNorm uses a versioned analytic output-range cache, so its 
 Fixed domains remain identical when one activation population is reordered or partitioned into different batch sizes, while Gaussian replica seeds may change sampled values but never potential or time endpoints.
 
 The permanent runtime check covers shared linear, convolution, GPT-2 Conv1D, LayerNorm, and multiplication paths. Model-family integration checks additionally vary activation and token content while requiring the same preprocessing-, parameter-, analytic-, or calibration-derived ranges.
+
+### Attention Score Range Calibration
+
+Each spiking attention layer covered by the ViT or GPT-2 artifact lifecycle freezes one symmetric softmin score range from a noise-free pre-clamp score distribution, while an analytic representability ceiling prevents exponential underflow.
+
+For layer $\ell$, let $q_\ell=Q_p(|s_\ell|)$. Because the configured per-side margin $m$ is a fraction of the full symmetric width $2q_\ell$, calibration selects $c_{\ell,\mathrm{cal}}=q_\ell+2mq_\ell=(1+2m)q_\ell$. With dtype minimum normal $f_{\min}$, temporal scale $\tau_s$, source capacity $S_{\max}$, and log safety margin $\eta$, the representable radius is
+
+$$
+c_{\mathrm{repr}}=\frac{\tau_s}{2}\left(-\log f_{\min}-\log S_{\max}-\eta\right).
+$$
+
+The frozen layer radius is $c_\ell=\min(c_{\ell,\mathrm{cal}},c_{\mathrm{repr}},\theta)$. Collection observes raw scores but executes softmin on the representable safety rail; validation and inference clamp directly to $[-c_\ell,c_\ell]$ and count strict excursions without updating it.
+
+Masked positions are overwritten with $+c_\ell$ after score clamping in the negated-score convention. The artifact persists the quantiles, margin, symmetric analytic ceiling, dtype, $\tau_s$, and $S_{\max}$, so a precision or capacity change invalidates reuse.
+
+The maintained scalar bound contract supports one calibrated radius per attention layer. Per-head calibration would require vector-valued domain metadata and is outside this lifecycle.
 
 ## Persistence
 

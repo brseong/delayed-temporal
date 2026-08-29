@@ -71,6 +71,11 @@ class CalibrationRangePolicy(StrEnum):
     # when their observed distribution is not statistically symmetric.
     SIGNED_SYMMETRIC = "signed_symmetric"
 
+    # Attention scores use a calibrated symmetric magnitude but cannot exceed the
+    # analytic radius representable by their dtype, temporal scale, and reduction
+    # capacity. Both fixed endpoints persist that symmetric execution ceiling.
+    SIGNED_SYMMETRIC_CEILING = "signed_symmetric_ceiling"
+
     # ReLU and GELU-like outputs keep a known lower endpoint and calibrate the upper
     # tail that would otherwise leave the physical range unbounded.
     LOWER_BOUNDED = "lower_bounded"
@@ -83,10 +88,12 @@ class CalibrationRangePolicy(StrEnum):
 class LayerCalibrationSpec:
     """Configure range selection for one explicitly named calibration site.
 
-    Optional fields are policy-dependent: a symmetric site requires both quantiles
-    and no fixed endpoint, a lower-bounded site requires ``fixed_min`` and only an
-    upper quantile, and an upper-bounded site requires ``fixed_max`` and only a lower
-    quantile. Margin expands calibrated sides while analytic endpoints remain fixed.
+    Optional fields are policy-dependent: an ordinary symmetric site requires both
+    quantiles and no fixed endpoint, while a ceiling-constrained symmetric site also
+    requires a pair of equal-magnitude fixed endpoints. A lower-bounded site requires
+    ``fixed_min`` and only an upper quantile, and an upper-bounded site requires
+    ``fixed_max`` and only a lower quantile. Margin expands calibrated sides before a
+    symmetric ceiling is applied; one-sided analytic endpoints remain fixed.
     """
 
     module_name: str
@@ -845,6 +852,21 @@ def _normalize_layer_calibration_spec(
             raise ValueError("lower_quantile must not exceed upper_quantile")
         if fixed_min is not None or fixed_max is not None:
             raise ValueError("signed symmetric policy does not accept fixed endpoints")
+    elif spec.range_policy is CalibrationRangePolicy.SIGNED_SYMMETRIC_CEILING:
+        if lower_quantile is None or upper_quantile is None:
+            raise ValueError(
+                "signed symmetric ceiling policy requires both quantiles"
+            )
+        if lower_quantile > upper_quantile:
+            raise ValueError("lower_quantile must not exceed upper_quantile")
+        if fixed_min is None or fixed_max is None:
+            raise ValueError(
+                "signed symmetric ceiling policy requires both fixed endpoints"
+            )
+        if fixed_min >= 0.0 or fixed_max <= 0.0 or fixed_min != -fixed_max:
+            raise ValueError(
+                "signed symmetric ceiling endpoints must be nonzero and symmetric"
+            )
     elif spec.range_policy is CalibrationRangePolicy.LOWER_BOUNDED:
         if fixed_min is None or fixed_max is not None:
             raise ValueError(
@@ -876,9 +898,10 @@ def select_calibration_policy_range(
     """Build one fixed range using a site's statistical and analytic policy.
 
     Signed symmetric policy selects both histogram tails, encloses them in a
-    zero-centered interval, and expands both calibrated endpoints. Lower-bounded and
-    upper-bounded policies retain their finite analytic endpoint exactly and apply
-    margin only toward the calibrated unbounded side.
+    zero-centered interval, and expands both calibrated endpoints. Its ceiling form
+    then intersects that statistical interval with a symmetric analytic limit.
+    Lower-bounded and upper-bounded policies retain their finite analytic endpoint
+    exactly and apply margin only toward the calibrated unbounded side.
 
     Args:
         histogram: Completed signed activation histogram from deterministic replay.
@@ -922,6 +945,32 @@ def select_calibration_policy_range(
             CalibrationRange(min=-radius, max=radius),
             margin_fraction=margin,
         )
+
+    # Attention score calibration first applies the ordinary symmetric quantile and
+    # margin policy, then intersects that statistical rail with a separately derived
+    # representability ceiling. Calibration observations may exceed the ceiling: such
+    # tails are exactly the approximation excursions frozen runtime must later count.
+    if spec.range_policy is CalibrationRangePolicy.SIGNED_SYMMETRIC_CEILING:
+        selected = select_histogram_quantile_range(
+            histogram,
+            lower_quantile=float(lower_quantile),
+            upper_quantile=float(upper_quantile),
+        )
+        selected_radius = max(
+            abs(float(selected.min)),
+            abs(float(selected.max)),
+        )
+        expanded = apply_calibration_margin(
+            CalibrationRange(min=-selected_radius, max=selected_radius),
+            margin_fraction=margin,
+        )
+        ceiling_radius = float(fixed_max)
+        final_radius = min(float(expanded.max), ceiling_radius)
+        if not math.isfinite(final_radius) or final_radius <= 0.0:
+            raise ValueError(
+                "signed symmetric ceiling produced a non-positive final radius"
+            )
+        return CalibrationRange(min=-final_radius, max=final_radius)
 
     # A lower-bounded site preserves its analytic endpoint and selects only an upper
     # cutoff. The fixed endpoint must cover the complete observed calibration support,

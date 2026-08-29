@@ -66,6 +66,10 @@ from utils.transformers.calibration import (  # noqa: E402
     model_calibration_is_bound,
     select_calibration_subset,
 )
+from utils.transformers.integrations.spiking_sdpa_attention import (  # noqa: E402
+    attention_score_representability_bounds,
+    spiking_scaled_dot_product_attention,
+)
 from utils.transformers.models.spiking_vit.calibration import (  # noqa: E402
     build_vit_calibration_metadata,
     collect_vit_calibration_table,
@@ -277,6 +281,41 @@ def verify_quantile_and_margin_policy() -> None:
     assert math.isclose(symmetric.min, -3.6)
     assert math.isclose(symmetric.max, 3.6)
 
+    # A score-range ceiling is applied only after ordinary symmetric selection and
+    # margin. Raw histogram support may be broader because those tails must remain
+    # measurable even though softmin cannot safely execute on the broader interval.
+    ceiling_constrained = select_calibration_policy_range(
+        histogram,
+        LayerCalibrationSpec(
+            module_name="attention",
+            tensor_name="attention_score",
+            range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC_CEILING,
+            lower_quantile=0.25,
+            upper_quantile=0.75,
+            margin_fraction=0.1,
+            fixed_min=-3.2,
+            fixed_max=3.2,
+        ),
+    )
+    assert ceiling_constrained == CalibrationRange(-3.2, 3.2)
+    _expect_raises(
+        ValueError,
+        lambda: select_calibration_policy_range(
+            histogram,
+            LayerCalibrationSpec(
+                module_name="attention",
+                tensor_name="attention_score",
+                range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC_CEILING,
+                lower_quantile=0.25,
+                upper_quantile=0.75,
+                margin_fraction=0.0,
+                fixed_min=-3.2,
+                fixed_max=3.0,
+            ),
+        ),
+        "symmetric",
+    )
+
     # One-sided policies preserve their analytic endpoint exactly and apply the same
     # width-based margin only toward the statistically calibrated unbounded side.
     positive = CalibrationHistogram(
@@ -354,6 +393,162 @@ def verify_quantile_and_margin_policy() -> None:
         lambda: apply_calibration_margin(selected, margin_fraction=-0.01),
         "non-negative",
     )
+
+
+# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#Attention Score Range Calibration]]
+def verify_attention_score_range_calibration() -> None:
+    """Verify raw score observation, representable execution, and frozen clipping."""
+    from utils.transforms.noise import set_gaussian_time_noise
+
+    # The analytic ceiling is evaluated in log space. Reconstruct its defining
+    # equation independently and require source capacity and dtype to affect the
+    # result while theta remains the outer physical cap.
+    theta = 80.0
+    tau_s = 1.0
+    source_length_max = 512
+    float32_bounds = attention_score_representability_bounds(
+        theta,
+        tau_s,
+        source_length_max,
+        torch.float32,
+    )
+    expected_radius = min(
+        theta,
+        0.5
+        * tau_s
+        * (
+            -math.log(torch.finfo(torch.float32).tiny)
+            - math.log(source_length_max)
+            - 2.0
+        ),
+    )
+    assert math.isclose(float32_bounds.max, expected_radius)
+    assert float32_bounds.min == -float32_bounds.max
+    assert attention_score_representability_bounds(
+        theta,
+        tau_s,
+        source_length_max,
+        torch.float16,
+    ).max < float32_bounds.max
+
+    # Bind a deliberately narrow score ceiling to a standalone attention owner.
+    # Opposite-sign large query and key values generate raw scores beyond that rail;
+    # both collection passes must still observe those raw values while downstream
+    # softmin executes on the safe interval and returns finite outputs.
+    owner = nn.Module()
+    spec = LayerCalibrationSpec(
+        module_name="",
+        tensor_name="attention_score",
+        range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC_CEILING,
+        lower_quantile=0.0,
+        upper_quantile=1.0,
+        margin_fraction=0.0,
+        fixed_min=-1.0,
+        fixed_max=1.0,
+    )
+    collector = create_calibration_collector(
+        _make_metadata(),
+        (spec,),
+        bin_count=16,
+    )
+    query = torch.full((1, 1, 2, 2), 8.0)
+    key = torch.full((1, 1, 2, 2), -8.0)
+    value = torch.tensor([[[[1.0, -1.0], [-1.0, 1.0]]]])
+    set_gaussian_time_noise(enabled=False)
+    assert bind_model_calibration(owner, collector) == 1
+
+    def run_attention() -> torch.Tensor:
+        """Execute the same deterministic score population in either pass."""
+        return spiking_scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            tau_m=1.0,
+            theta=8.0,
+            source_length_max=2,
+            score_calibration_module=owner,
+        )
+
+    first_output = run_attention()
+    assert bool(torch.isfinite(first_output).all())
+    start_histogram_calibration_pass(collector)
+    second_output = run_attention()
+    assert torch.equal(first_output, second_output)
+    table = finalize_calibration_collection(collector)
+    assert clear_model_calibration(owner, expected_state=collector) == 1
+
+    # Full-support quantiles would retain the broad observed scores, so the persisted
+    # unit radius proves that the representability ceiling—not observer clamping—was
+    # applied at finalization. Frozen replay then counts those raw score excursions.
+    layer = table.layers[0]
+    assert layer.bounds == CalibrationRange(-1.0, 1.0)
+    assert layer.observed_min < -1.0 or layer.observed_max > 1.0
+    assert calibration_table_from_dict(calibration_table_to_dict(table)) == table
+    runtime = create_calibration_runtime(
+        CalibrationMode.VALIDATE,
+        table,
+        expected_metadata=table.metadata,
+    )
+    assert bind_model_calibration(owner, runtime) == 1
+    frozen_output = run_attention()
+    assert bool(torch.isfinite(frozen_output).all())
+    report = get_calibration_clipping_report(runtime)
+    assert len(report) == 1
+    assert report[0].underflows + report[0].overflows > 0
+    assert clear_model_calibration(owner, expected_state=runtime) == 1
+
+    # Architecture discovery must add exactly one score site for every selected
+    # spiking attention module while leaving eager artifacts unchanged. Configure the
+    # tiny models after construction because upstream model initialization validates
+    # only built-in attention names; production evaluators register the local backend
+    # before loading their checkpoints.
+    from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
+    from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import GPT2Model
+    from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
+    from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTModel
+
+    vit_config = ViTConfig(
+        image_size=4,
+        patch_size=2,
+        hidden_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=16,
+        theta=8.0,
+        tau_s=1.0,
+    )
+    vit_model = ViTModel(vit_config)
+    vit_config._attn_implementation = "spiking_sdpa"
+    vit_specs = vit_calibration_specs(
+        vit_model,
+        lower_quantile=0.0,
+        upper_quantile=1.0,
+        margin_fraction=0.0,
+    )
+    assert [
+        spec.tensor_name for spec in vit_specs
+    ].count("attention_score") == 1
+
+    gpt2_config = GPT2Config(
+        vocab_size=32,
+        n_positions=8,
+        n_embd=8,
+        n_layer=1,
+        n_head=2,
+        theta=8.0,
+        tau_s=1.0,
+    )
+    gpt2_model = GPT2Model(gpt2_config)
+    gpt2_config._attn_implementation = "spiking_sdpa"
+    gpt2_specs = gpt2_calibration_specs(
+        gpt2_model,
+        lower_quantile=0.0,
+        upper_quantile=1.0,
+        margin_fraction=0.0,
+    )
+    assert [
+        spec.tensor_name for spec in gpt2_specs
+    ].count("attention_score") == 1
 
 
 # @lat: [[calibration#Layer-wise Calibration#Frozen Execution#Layer Record and Clipping]]
@@ -2102,6 +2297,7 @@ def main() -> None:
     checks = (
         verify_observer_and_histogram_invariants,
         verify_quantile_and_margin_policy,
+        verify_attention_score_range_calibration,
         verify_layer_record_and_clipping,
         verify_collection_and_runtime_phase_separation,
         verify_model_binding_and_potential_boundary,

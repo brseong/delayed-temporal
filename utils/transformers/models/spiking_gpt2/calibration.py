@@ -21,6 +21,9 @@ from utils.transformers.calibration import (
     bind_model_calibration,
     clear_model_calibration,
 )
+from utils.transformers.integrations.spiking_sdpa_attention import (
+    attention_score_representability_bounds,
+)
 
 
 def gpt2_calibration_specs(
@@ -30,12 +33,13 @@ def gpt2_calibration_specs(
     upper_quantile: float,
     margin_fraction: float,
 ) -> tuple[LayerCalibrationSpec, ...]:
-    """Declare GPT-2 model-entry and pre-norm residual calibration sites.
+    """Declare GPT-2 residual and optional spiking-attention calibration sites.
 
     One signed-symmetric entry range constrains token-plus-position embeddings before
-    the first block. Every block contributes self-attention and MLP residual outputs,
-    resetting the pre-norm stream twice per depth step without calibrating bounded
-    activations or LayerNorm internals.
+    the first block. Every block contributes self-attention and MLP residual outputs.
+    A spiking attention module additionally freezes its raw softmin score rail below
+    the representability ceiling derived from model capacity, temporal scale, and
+    the query/key/value projection dtype.
 
     Args:
         model: Unwrapped GPT-2 model or task wrapper.
@@ -44,7 +48,8 @@ def gpt2_calibration_specs(
         margin_fraction: Per-side expansion after symmetric quantile selection.
 
     Returns:
-        One model-input specification followed by two specifications per block.
+        One model-input specification, two specifications per block, and one score
+        specification per spiking attention layer.
 
     Raises:
         TypeError: If ``model`` is not an unwrapped PyTorch module.
@@ -55,6 +60,7 @@ def gpt2_calibration_specs(
     # Import exact classes locally so reading calibration utilities does not trigger
     # Hugging Face model registration unless architecture discovery is requested.
     from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import (
+        GPT2Attention,
         GPT2Block,
         GPT2Model,
     )
@@ -110,6 +116,40 @@ def gpt2_calibration_specs(
                     margin_fraction=margin_fraction,
                 )
             )
+
+    # Only the spiking backend consumes calibrated softmin score rails. The eager
+    # architecture therefore preserves the artifact schema used before score-range
+    # calibration was introduced.
+    attention_modules = tuple(
+        sorted(
+            (name, module)
+            for name, module in model.named_modules()
+            if isinstance(module, GPT2Attention)
+            and module.config._attn_implementation == "spiking_sdpa"
+        )
+    )
+    for module_name, module in attention_modules:
+        # GPT-2 cache growth is bounded by the configured position capacity, not the
+        # current token batch. The combined Q/K/V projection weight supplies the
+        # execution dtype that determines the exponential representability floor.
+        ceiling = attention_score_representability_bounds(
+            float(getattr(module.config, "theta", 10.0)),
+            float(getattr(module.config, "tau_s", 1.0)),
+            int(module.config.max_position_embeddings),
+            module.c_attn.weight.dtype,
+        )
+        specs.append(
+            LayerCalibrationSpec(
+                module_name=module_name,
+                tensor_name="attention_score",
+                range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC_CEILING,
+                lower_quantile=lower_quantile,
+                upper_quantile=upper_quantile,
+                margin_fraction=margin_fraction,
+                fixed_min=float(ceiling.min),
+                fixed_max=float(ceiling.max),
+            )
+        )
     return tuple(specs)
 
 

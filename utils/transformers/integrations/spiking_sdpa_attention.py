@@ -11,11 +11,16 @@ from utils.transforms.functions import scaled_dot_product_function, softmin_func
 from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_noise
 from utils.transforms.potential_to_spike import neg_identity_transform
 from utils.transforms.types import PotentialBounds, SpikeSample, TimeBounds
+from utils.transformers.calibration import (
+    calibrated_potential,
+    model_calibration_is_bound,
+)
 
 logger = logging.get_logger(__name__)
 
-# reciprocal_exp_operator의 실효 지수 범위는 2*cap; exp(-2*20) ≈ 2e-18
-_SOFTMIN_CAP = 80.0
+# Reserve two natural-log units between the worst-case normalized weight and the
+# dtype's minimum normal value. This is a configuration constant, not data-derived.
+_SOFTMIN_LOG_SAFETY_MARGIN = 2.0
 
 _is_torch_greater_or_equal_than_2_5 = is_torch_greater_or_equal("2.5", accept_dev=True)
 _is_torch_greater_or_equal_than_2_8 = is_torch_greater_or_equal("2.8", accept_dev=True)
@@ -85,6 +90,72 @@ def attention_output_bounds(
     if not math.isfinite(output_max):
         raise ValueError("attention output bound must be finite")
     return PotentialBounds(-output_max, output_max)
+
+
+@cache
+def attention_score_representability_bounds(
+    theta: float,
+    tau_s: float,
+    source_length_max: int,
+    dtype: torch.dtype,
+) -> PotentialBounds:
+    """Return the largest symmetric softmin score rail representable by a dtype.
+
+    A score rail ``[-c, c]`` can produce a smallest normalized exponential weight
+    near ``exp(-2c / tau_s) / source_length_max``. Requiring that value to stay above
+    the dtype's minimum normal number, with a fixed logarithmic safety margin, gives
+    a configuration-derived ceiling for calibration and fallback execution.
+
+    Args:
+        theta: Positive physical score cap before numerical representability.
+        tau_s: Positive temporal scale used by exponential normalization.
+        source_length_max: Configured maximum denominator population.
+        dtype: Floating payload dtype used by the softmin implementation.
+
+    Returns:
+        A symmetric immutable range whose radius is the smaller of ``theta`` and the
+        representability ceiling.
+
+    Raises:
+        TypeError: If capacity or dtype has an invalid type.
+        ValueError: If configuration is non-finite, non-positive, or leaves no
+            positive representable score radius.
+    """
+    # Validate all configuration scalars before evaluating logarithms. The maximum
+    # source length is used instead of the current request so one attention layer
+    # retains the same cap for short and full-capacity sequences.
+    theta_value = float(theta)
+    tau_value = float(tau_s)
+    if not math.isfinite(theta_value) or theta_value <= 0.0:
+        raise ValueError("attention score theta must be finite and positive")
+    if not math.isfinite(tau_value) or tau_value <= 0.0:
+        raise ValueError("attention score tau_s must be finite and positive")
+    if isinstance(source_length_max, bool) or not isinstance(source_length_max, int):
+        raise TypeError("attention score source_length_max must be an integer")
+    if source_length_max <= 0:
+        raise ValueError("attention score source_length_max must be positive")
+    if not isinstance(dtype, torch.dtype) or not dtype.is_floating_point:
+        raise TypeError("attention score dtype must be a floating torch.dtype")
+
+    # Work in log space so the ceiling calculation itself never constructs the tiny
+    # exponential it is designed to protect. The source-capacity term accounts for
+    # the largest denominator sum before the final normalized exponential readout.
+    dtype_floor = float(torch.finfo(dtype).tiny)
+    log_budget = (
+        -math.log(dtype_floor)
+        - math.log(float(source_length_max))
+        - _SOFTMIN_LOG_SAFETY_MARGIN
+    )
+    representable_radius = 0.5 * tau_value * log_budget
+    radius = min(theta_value, representable_radius)
+
+    # A non-positive budget means this dtype and sequence capacity cannot represent
+    # even a nontrivial symmetric softmin rail under the current temporal scale.
+    if not math.isfinite(radius) or radius <= 0.0:
+        raise ValueError(
+            "attention score configuration has no positive representable radius"
+        )
+    return PotentialBounds(-radius, radius)
 
 
 def _gaussian_attention_value_readout(
@@ -208,6 +279,7 @@ def spiking_scaled_dot_product_attention(
     theta: float = 10.0,
     training: bool = False,
     source_length_max: int | None = None,
+    score_calibration_module: torch.nn.Module | None = None,
 ) -> torch.Tensor:
     """Evaluate scaled dot-product attention with spiking compositions.
 
@@ -230,6 +302,8 @@ def spiking_scaled_dot_product_attention(
         training: Training-state flag forwarded to deterministic value encoding.
         source_length_max: Configured source-position maximum used to derive one
             output rail for every request handled by this attention module.
+        score_calibration_module: Optional bound attention module owning the frozen
+            ``attention_score`` calibration site.
 
     Returns:
         Attention output shaped ``(batch, heads, target, value_features)``.
@@ -278,7 +352,13 @@ def spiking_scaled_dot_product_attention(
     k_exp = domain_qk.clamp(key, name="key").unsqueeze(-3)     # (B,H,1,S,D)
 
     # f_SDP(q,k) = ψ_M sum ≈ -(1/√d_k)·dot(q,k), broadcasted to (B,H,L,S)
-    attn_score, _ = scaled_dot_product_function(q_exp, domain_qk, k_exp, domain_qk, theta)
+    attn_score, analytic_score_bound = scaled_dot_product_function(
+        q_exp,
+        domain_qk,
+        k_exp,
+        domain_qk,
+        theta,
+    )
 
     # # Debug: Compare scores with torch.matmul
     # head_dim = query.size(-1)
@@ -286,13 +366,52 @@ def spiking_scaled_dot_product_attention(
     # score_error = (attn_score + torch_logits).abs().max().item()
     # print(f"[DEBUG] Attn score vs -torch_logits max diff: {score_error:.6f}")
 
-    # softmin chain의 실효 지수 범위는 2*cap이므로 float32 underflow 방지를 위해 cap.
-    # exp(-2*_SOFTMIN_CAP) ≈ 5e-35 > float32_tiny; ±40 밖의 점수는 어차피 weight ≈ 0.
-    softmin_cap = min(float(theta), _SOFTMIN_CAP)
-    
-    # Clamp the unmasked score range first.
-    score_bound = PotentialBounds(-softmin_cap, softmin_cap)
-    attn_score = score_bound.clamp(attn_score, name="attn_score")
+    # Derive the collection safety cap from dtype, temporal scale, and configured
+    # source capacity. It is static for this module and prevents the downstream
+    # normalized exponential from underflowing even before an artifact is installed.
+    representability_ceiling = attention_score_representability_bounds(
+        float(theta),
+        float(tau_m),
+        source_length_max,
+        attn_score.dtype,
+    )
+
+    # Intersect the numerical ceiling with the symmetric portion of the operator's
+    # static analytic interval. Normally the dot-product envelope is much broader;
+    # this intersection also handles small theta configurations without returning a
+    # collection rail wider than the analytic bound that validated the raw score.
+    execution_radius = min(
+        float(representability_ceiling.max),
+        float(analytic_score_bound.max),
+        -float(analytic_score_bound.min),
+    )
+    if not math.isfinite(execution_radius) or execution_radius <= 0.0:
+        raise ValueError("attention score execution radius must be finite and positive")
+    representable_score_bound = PotentialBounds(
+        -execution_radius,
+        execution_radius,
+    )
+
+    # A bound attention module observes raw pre-clamp scores during collection while
+    # executing on the representable ceiling. Frozen phases instead clamp directly to
+    # the persisted layer quantile and verify it does not exceed that same ceiling.
+    if score_calibration_module is not None and model_calibration_is_bound(
+        score_calibration_module
+    ):
+        calibrated_score = calibrated_potential(
+            score_calibration_module,
+            "attention_score",
+            attn_score,
+            collection_bounds=analytic_score_bound,
+            collection_execution_bounds=representable_score_bound,
+        )
+        attn_score = calibrated_score.value
+        score_bound = calibrated_score.domain
+    else:
+        score_bound = representable_score_bound
+        attn_score = score_bound.clamp(attn_score, name="attn_score")
+
+    softmin_cap = float(score_bound.max)
 
     # Hard overwrite: force masked scores to a fixed suppressing value.
     if masked_pos is not None:
@@ -435,6 +554,7 @@ def spiking_sdpa_attention_forward(
         theta=kwargs.get("theta", 10.0),
         training=module.training,
         source_length_max=source_length_max,
+        score_calibration_module=module,
         **sdpa_kwargs,
     )
     

@@ -248,7 +248,7 @@ $$
 \le \theta^2\sqrt D.
 $$
 
-$D=64$에서 endpoint는 $\theta=100$일 때 $8\times10^4$, $\theta=2000$일 때 $3.2\times10^7$이다. Attention은 이를 $c=\min(\theta,80)$으로 즉시 clamp하므로 raw dot-product domain은 이후 graph로 전파되지 않는다. 이 score clamp는 bounded operator의 approximation site이므로 calibration 대상이 아니라 clamp-rate와 task accuracy의 검증 대상이다.
+$D=64$에서 endpoint는 $\theta=100$일 때 $8\times10^4$, $\theta=2000$일 때 $3.2\times10^7$이다. Raw dot-product domain은 analytic safety bound로만 유지하고, 실제 softmin score cap은 noise-free layer-wise calibration quantile과 dtype/$\tau_s$/$S_{\max}$ representability ceiling 중 작은 값으로 고정한다.
 
 Attention value integration은 current common range
 

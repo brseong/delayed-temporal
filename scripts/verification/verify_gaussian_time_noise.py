@@ -3178,9 +3178,9 @@ def verify_gaussian_spiking_attention() -> None:
         expected = torch.matmul(dense_weight, value)
         assert torch.allclose(deterministic, expected, atol=1e-12, rtol=1e-12)
 
-        # A theta below the global softmin cap previously wrote an out-of-domain
-        # mask value. The fixed upper score endpoint must now remain finite and pass
-        # the operator's declared-domain validation for a real suppression mask.
+        # A small theta still sets the outer score ceiling. Masked positions must use
+        # the resulting fixed upper endpoint, rather than a larger independent value,
+        # and pass the operator's declared-domain validation.
         keep_mask = torch.tensor(
             [[[[True, True, False], [True, False, False]]]],
             dtype=torch.bool,
