@@ -44,13 +44,19 @@ Calibration and interval arithmetic establish an immutable bound table before ev
 
 The objective is not to replace every runtime range with the widest possible analytic interval. Analytic propagation is used only where it stays meaningful and depth-independent; calibration fixes sites whose bounds are difficult to derive, data-dependent, or inflated by repeated residual interval addition.
 
+This range reset is necessary even when every individual operation has a finite formula. For a layer with Lipschitz constant $L_i>1$, $\lVert\delta x_{i+1}\rVert\le L_i\lVert\delta x_i\rVert+\lVert e_i\rVert$, so propagated intervals and upstream clipping error can grow with depth. Fixed layer boundaries deliberately clamp that growth, and validation must report both layer clipping rates and final task accuracy.
+
 The required order is: load or calibrate static input envelopes, derive conservative operator outputs, evaluate the raw tensor, record excursions against the fixed output rail, clamp, and pass the unchanged declared envelope downstream. Neither clean nor noisy execution may widen a bound.
 
 Calibration runs with timing noise disabled and is identified by stable operator sites. A checkpoint change, static parameter perturbation, preprocessing change, model-family change, or ablation-path change invalidates the affected calibration and requires rebuilding it before evaluation.
 
 Calibration uncertainty is an engineering tolerance rather than a reason to restore runtime extrema. Each site should store signed lower and upper bounds obtained from representative extrema or quantiles, enlarge them by a documented margin, and report calibration-set and evaluation-set clipping rates. The margin may cover moderate distribution variation, but it must not conceal a domain-propagation error, an invalid operator condition, an attention-mask value outside its declared range, or a Gaussian deadline-miss case. Those cases require analytic interval bounds or a direct implementation fix, and inference must never widen a calibrated bound after observing an activation.
 
-Calibration is a two-pass workflow. The collection pass records unclamped raw site values in deterministic evaluation mode; after ranges and margins are frozen, a validation pass applies the same clamps as inference and measures their clipping rates. A failed validation rebuilds the table rather than updating it online.
+Calibration measurement uses two deterministic collection passes before frozen validation. The first pass records signed min/max values; the second replays the same dataset into fixed-bin histograms whose edges come from the first pass. The histogram and margin determine the immutable range table, after which validation applies inference clamps and reports clipping without updating any range.
+
+Calibration sites use one of three policies. Signed-symmetric sites calibrate both tails and enforce a zero-centered rail; lower-bounded and upper-bounded sites preserve their finite analytic endpoint and calibrate only the unbounded direction. Fully bounded operators retain analytic propagation and are not calibration sites.
+
+Nonnegative domains use the globally fixed lower endpoint zero and calibrate only their upper endpoint. Strictly positive logarithmic domains keep a separately configured positive lower rail because a zero endpoint is invalid for logarithmic encoding.
 
 ### Acceptance Criteria
 
@@ -78,6 +84,21 @@ The implementation work covers every maintained transform and model adapter, not
 - [x] Return sigmoid-GELU and Gaussian/deterministic SwiGLU gates on the structural $[0,1]$ domain before downstream multiplication.
 - [x] Permanently verify sigmoid-GELU and SwiGLU gate-derived output domains, zero-noise counters, forced gate excursion accounting, and finite clamping.
 - [x] Replace global-extrema-times-fan-in bounds in all three affine adapters with output-specific parameter absolute-sum safety rails before applying calibration.
+- [x] Define `CalibrationMode` with distinct `collect`, `validate`, and `inference` phases so command-line and persisted representations use the same stable values.
+- [x] Define the common layer-wise calibration data types: immutable ranges, histograms, layer records, run metadata, and calibration tables, plus mutable min-max observer, histogram observer, and clipping-count state with fixed fields.
+- [x] Add a batch-order-independent min-max observer update that records finite signed extrema and tensor-element counts without retaining tensors or autograd graphs.
+- [x] Select two deterministic calibration collection passes: signed min/max first, then fixed-bin histograms over the same dataset before frozen validation.
+- [x] Construct each second-pass histogram from populated first-pass extrema with an explicit bin count and collection device, zeroed `int64` counters, and no arbitrary widening of constant ranges.
+- [x] Accumulate batch-order-independent fixed-bin counts with inclusive outer endpoints, explicit underflow and overflow tails, constant-range handling, and no hidden device transfer.
+- [x] Finalize a completed histogram only when bins and tails exactly match the total, copying device counters into an immutable JSON-compatible integer tuple without mutating the observer.
+- [x] Select signed lower and upper quantiles from the immutable histogram with outward bin-edge rounding, rejecting cutoffs that fall inside unrecorded tails and leaving margin expansion as a separate policy.
+- [x] Expand symmetric ranges on both calibrated sides, but expand one-sided ranges only toward the calibrated endpoint so a finite analytic endpoint never moves; leave zero-width ranges unchanged rather than inventing an absolute epsilon.
+- [x] Persist policy-specific optional quantiles, analytic endpoints, and margin separately in each immutable layer calibration record so its final range can be reproduced and audited.
+- [x] Build immutable layer records only from identical deterministic passes with zero replay tails, and count strict runtime excursions before autograd-preserving clamp.
+- [x] Canonicalize calibration tables by stable layer identity, require exact metadata compatibility, and provide strict versioned JSON save, load, and setup-time lookup.
+- [x] Permanently verify observer invariants, quantile and margin selection, frozen clipping, schema rejection, tamper detection, and deterministic persistence round trips.
+- [x] Separate two-pass collection from frozen validation and inference with explicit state, one-way phase transitions, missing-site failure, and immutable clipping-report snapshots.
+- [x] Declare calibration targets and range policy per layer: symmetric signed rails calibrate both tails, one-sided analytic rails calibrate only the unbounded direction, and fully bounded operators bypass calibration.
 - [ ] Prefer operator-derived interval arithmetic whenever the input bounds and transformation provide a conservative static result.
 - [ ] For paths without a practical analytic envelope, record per-site minima and maxima during a representative noise-free calibration run.
 - [ ] Persist stable site identifiers together with the checkpoint, dataset split, preprocessing, model family, and active ablation configuration used for calibration.

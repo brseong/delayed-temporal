@@ -43,6 +43,8 @@ Fixed range는 calibration 또는 interval arithmetic으로 inference 전에 정
 
 목표는 모든 위치에 가장 넓은 analytic interval을 강제하는 것이 아니다. 수식으로 tight하고 depth-independent하게 정해지는 operator는 interval arithmetic을 사용하고, nonlinear range가 어렵거나 residual 반복으로 interval이 누적 확대되는 위치는 module/site별 calibration으로 고정한다.
 
+각 layer의 Lipschitz constant가 $L_i>1$이면 $\lVert\delta x_{i+1}\rVert\le L_i\lVert\delta x_i\rVert+\lVert e_i\rVert$에 따라 이전 clipping error와 propagated range가 함께 증폭될 수 있다. 따라서 calibration clamp는 unbounded output만 잘라내는 보조 기능이 아니라 depth 방향의 range를 다시 고정하는 경계이며, layer별 clipping rate와 최종 task accuracy를 함께 검증해야 한다.
+
 ### Potential과 time window
 
 논문의 membrane-potential space $\mathcal V$와 spike-time space $\mathcal T$ 사이 변환은 fixed potential range $(V_{lb},\theta)$와 finite time window $[0,T]$를 전제로 한다.
@@ -448,7 +450,7 @@ Variable sequence length에서는 current $S$로 range를 바꾸면 같은 modul
 
 Calibration은 Gaussian timing noise를 반드시 disable하고 `model.eval()`에서 수행해야 한다. 현재 CLI는 `--collect-quantiles`와 Gaussian option을 동시에 허용하므로 calibration mode에서 이를 명시적으로 거부해야 한다.
 
-Calibration은 두 번의 실행으로 분리한다. Collection pass는 대상 site의 clamp 전 raw signed distribution을 기록하고, 그 결과에 margin을 적용해 immutable range table을 만든다. Frozen validation pass는 inference와 동일하게 excursion을 먼저 집계한 뒤 clamp하며 clipping rate를 확인한다. Validation이 실패하면 calibration을 다시 수행하고, 실행 중 range를 넓히지 않는다.
+Calibration 측정은 deterministic한 두 collection pass로 분리하고 그 뒤 frozen validation을 수행한다. 첫 pass는 clamp 전 activation의 signed min/max를 기록하고, 두 번째 pass는 같은 dataset을 다시 실행하여 첫 pass의 endpoint로 고정한 bin에 histogram을 누적한다. Histogram과 margin으로 immutable range table을 만든 뒤 validation은 inference와 동일하게 excursion을 먼저 집계하고 clamp하며, 실행 중 range를 넓히지 않는다.
 
 Pre-norm ViT와 GPT-2의 residual stream은 단순 interval addition을 block마다 반복하면 실제 activation보다 range가 계속 넓어진다. 이 위치는 post-add raw value를 block별 site로 측정하고 고정 range로 clamp해야 한다. BERT와 RoBERTa의 post-norm 출력은 LayerNorm의 fixed output range가 다음 block 경계를 다시 정하지만, calibration을 사용한다면 동일한 frozen-site 규칙을 따른다.
 
@@ -479,11 +481,15 @@ Fixed range는 backend, noise, ablation, shape가 달라지는 모든 실행 경
 
 Calibration은 module별 signed lower/upper potential range를 보존하고, 같은 configuration에서 재사용할 수 있는 정보와 함께 저장해야 한다.
 
+현재 공통 기반은 stable module/tensor identity로 record를 정렬하고 schema version과 전체 metadata를 strict JSON으로 저장한다. Load 시 unknown field, non-finite value, 중복 identity, metadata mismatch, record-derived range 변조를 거부하며 missing entry를 runtime tensor로 보완하지 않는다. 세부 불변식과 영구 검증은 [[calibration]]에 정의한다.
+
 각 기록에는 최소한 다음 값이 필요하다.
 
 - stable module name과 input/output 구분
 - $V_{lb}$, $V_{ub}$, sample count
-- extrema 또는 선택한 quantile과 calibration-set clipping rate
+- signed extrema와 fixed-bin histogram
+- 선택한 lower/upper quantile과 margin; validation 및 inference clipping rate는 immutable table과 분리된 run statistic으로 기록
+- range policy와 optional analytic endpoint; symmetric signed range는 양쪽 tail을, one-sided range는 unbounded 방향만 calibration
 - checkpoint와 model family
 - dataset split과 preprocessing
 - `theta`, `tau_s`, `tau_m`, `clip_margin`, dtype
@@ -497,7 +503,7 @@ Observed extrema를 쓰는 경우 calibration set 밖의 입력을 보장하지 
 
 Dependency 순서대로 fixed range를 도입하면 각 단계에서 current tensor extrema를 하나의 원인과 함께 제거할 수 있다.
 
-1. Immutable calibration entry, collection accumulator, frozen lookup, and pre-clamp excursion counter를 공통 기반으로 추가한다.
+1. Immutable calibration entry와 histogram, min/max 및 fixed-bin collection accumulator, frozen lookup, pre-clamp excursion counter를 공통 기반으로 추가한다.
 2. 네 evaluator에 collection-only run, frozen validation, metadata validation, missing-entry failure를 추가한다.
 3. Pretrained parameter와 embedding table의 range를 checkpoint loading, dtype/device conversion, static perturbation 뒤 한 번 고정한다.
 4. `SpikingLinear`, `SpikingConv2d`, `SpikingConv1D`가 forward에서 parameter extrema를 읽지 않고 frozen output-specific affine range를 사용하게 한다. 완료되었다.

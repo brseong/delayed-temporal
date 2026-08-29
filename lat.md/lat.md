@@ -6,6 +6,7 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[models]] — Hugging Face model-family adapters, checkpoint compatibility, and ablation controls.
 - [[decisions]] — Rationale and trade-offs behind the project’s major architectural choices.
 - [[noise]] — Gaussian event timing, fixed-deadline potential readout, static non-idealities, and verification.
+- [[calibration]] — Deterministic layer-wise collection, immutable ranges, clipping accounting, and strict persistence.
 - [[evaluation]] — Experiment entry points, metrics, diagnostics, sweeps, and verification boundaries.
 - [[bounds-audit]] — Complete audit of fixed potential ranges, runtime extrema, calibration cases, and migration formulas.
 - [[todo]] — Deferred implementation work with explicit completion and validation requirements.
