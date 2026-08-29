@@ -156,12 +156,44 @@ class ViTPatchEmbeddings(nn.Module):
 
         self._use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
 
+        # The image processor owns the fixed numeric range reaching the patch
+        # projection. Keep the serialized endpoints beside the module so every batch
+        # uses identical PWM rails; missing metadata is diagnosed in ``forward`` only
+        # when the spiking projection actually needs it.
+        pixel_value_min = getattr(config, "pixel_value_min", None)
+        pixel_value_max = getattr(config, "pixel_value_max", None)
+        self._pixel_value_domain = (
+            PotentialBounds(float(pixel_value_min), float(pixel_value_max))
+            if pixel_value_min is not None and pixel_value_max is not None
+            else None
+        )
+
         if self._use_spiking_mlp:
             self.projection = SpikingConv2d(num_channels, hidden_size, kernel_size=patch_size, stride=patch_size, theta=getattr(config, "theta", 400.0))
         else:
             self.projection = nn.Conv2d(num_channels, hidden_size, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = False) -> torch.Tensor:
+        """Project preprocessed pixels with a preprocessing-defined fixed range.
+
+        The spiking convolution must receive the same finite PWM input rail for every
+        image batch. That rail is computed by the evaluator from image-processor
+        rescaling and normalization metadata, serialized in the model configuration,
+        and widened to include zero for the shared signed-PWM reference event.
+
+        Args:
+            pixel_values: Preprocessed image tensor in channels-first layout.
+            interpolate_pos_encoding: Whether the surrounding embedding layer may
+                interpolate positional encodings for a different image resolution.
+
+        Returns:
+            Patch embeddings with spatial positions flattened into token order.
+
+        Raises:
+            RuntimeError: If a spiking projection has no fixed preprocessing range.
+        """
+        # Validate image shape before consulting range metadata so malformed model
+        # inputs retain the standard Hugging Face diagnostics.
         batch_size, num_channels, height, width = pixel_values.shape
         if num_channels != self.num_channels:
             raise ValueError(
@@ -175,10 +207,22 @@ class ViTPatchEmbeddings(nn.Module):
                     f" ({self.image_size[0]}*{self.image_size[1]})."
                 )
         
+        # The converted patch projection may not fall back to current-batch extrema.
+        # A missing range means preprocessing and model calibration are incompatible,
+        # so fail before any PWM event is encoded or parameter-bound cache is created.
         if self._use_spiking_mlp:
-            # SpikingConv2d의 출력은 (B, hidden_size, H_patch, W_patch) → (B, hidden_size, num_patches) → (B, num_patches, hidden_size)
-            embeddings = self.projection(Potential(pixel_values, PotentialBounds(pixel_values.min().item(), pixel_values.max().item()))).value.flatten(2).transpose(1, 2)
+            if self._pixel_value_domain is None:
+                raise RuntimeError(
+                    "spiking ViT patch projection requires fixed pixel_value_min "
+                    "and pixel_value_max from image preprocessing"
+                )
+            projected = self.projection(
+                Potential(pixel_values, self._pixel_value_domain)
+            )
+            embeddings = projected.value.flatten(2).transpose(1, 2)
         else:
+            # The dense ablation performs the same checkpoint-compatible convolution
+            # but does not invoke a temporal encoder, so it needs no PWM input rail.
             embeddings = self.projection(pixel_values).flatten(2).transpose(1, 2)
         return embeddings
 

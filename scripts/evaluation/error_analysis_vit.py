@@ -23,6 +23,7 @@ from utils.transforms.noise import (
     set_gaussian_time_noise,
 )
 from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
+from utils.transformers.models.spiking_vit.calibration import image_processor_pixel_bounds
 from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
 import evaluate
 from tqdm import tqdm
@@ -213,6 +214,7 @@ DATASET_CONFIGS = {
     "imagenet-1k": {"split": "validation", "image_key": "image", "label_key": "label"},
 }
 
+
 def apply_parameter_noise(model: nn.Module, weight_std: float, bias_std: float):
     if weight_std <= 0 and bias_std <= 0:
         return
@@ -396,6 +398,12 @@ def evaluate_vit_model(args: Arguments) -> None:
             hidden_act=args.activation,
             theta=args.theta,
         )
+        pixel_domain = image_processor_pixel_bounds(
+            processor,
+            num_channels=int(config.num_channels),
+        )
+        config.pixel_value_min = pixel_domain.min
+        config.pixel_value_max = pixel_domain.max
         model = ViTForImageClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl, torch_dtype=dtype)
     
     apply_parameter_noise(model, args.weight_noise_std, args.bias_noise_std)

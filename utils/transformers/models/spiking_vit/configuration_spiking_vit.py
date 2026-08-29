@@ -111,6 +111,8 @@ class ViTConfig(PreTrainedConfig):
         spiking_ln_expdiff=True,
         use_spiking_mlp=True,
         spiking_mlp_exact_gelu=False,
+        pixel_value_min=None,
+        pixel_value_max=None,
         **kwargs,
     ):
         """Initialize architecture and deterministic spiking conversion settings.
@@ -135,6 +137,8 @@ class ViTConfig(PreTrainedConfig):
             spiking_ln_expdiff: Use exponential-difference LayerNorm decoding.
             use_spiking_mlp: Enable the converted spiking MLP path.
             spiking_mlp_exact_gelu: Select exact GELU inside that MLP ablation.
+            pixel_value_min: Fixed lower endpoint produced by image preprocessing.
+            pixel_value_max: Fixed upper endpoint produced by image preprocessing.
             **kwargs: Standard ``PreTrainedConfig`` metadata and output controls.
         """
         # Let the upstream configuration base consume serialization metadata and
@@ -171,6 +175,13 @@ class ViTConfig(PreTrainedConfig):
         self.spiking_ln_expdiff = spiking_ln_expdiff
         self.use_spiking_mlp = use_spiking_mlp
         self.spiking_mlp_exact_gelu = spiking_mlp_exact_gelu
+
+        # Pixel bounds describe evaluator preprocessing rather than a checkpoint
+        # parameter. They remain optional for dense compatibility, while the spiking
+        # patch encoder requires both endpoints before it can construct a fixed PWM
+        # input rail without measuring the current image batch.
+        self.pixel_value_min = pixel_value_min
+        self.pixel_value_max = pixel_value_max
 
 
 __all__ = ["ViTConfig"]

@@ -9,6 +9,7 @@ import sys
 import tempfile
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable
 
 import torch
@@ -61,6 +62,9 @@ from utils.transformers.calibration import (  # noqa: E402
     bind_model_calibration,
     calibrated_potential,
     clear_model_calibration,
+)
+from utils.transformers.models.spiking_vit.calibration import (  # noqa: E402
+    image_processor_pixel_bounds,
 )
 
 
@@ -661,6 +665,95 @@ def verify_model_binding_and_potential_boundary() -> None:
     assert get_calibration_clipping_report(runtime) == report
 
 
+# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#Preprocessing-Derived Image Range]]
+def verify_preprocessing_derived_image_range() -> None:
+    """Verify fixed ViT pixel rails from processor rescaling and normalization."""
+    # Three distinct channel statistics must reduce to one scalar range without
+    # depending on an observed image batch. Floating-point endpoint arithmetic is
+    # compared with tolerance because 1/255 cannot be represented exactly.
+    processor = SimpleNamespace(
+        do_rescale=True,
+        rescale_factor=1.0 / 255.0,
+        do_normalize=True,
+        image_mean=(0.5, 0.4, 0.3),
+        image_std=(0.5, 0.2, 0.1),
+    )
+    bounds = image_processor_pixel_bounds(processor, num_channels=3)
+    assert math.isclose(bounds.min, -3.0)
+    assert math.isclose(bounds.max, 7.0)
+
+    # A scalar field broadcasts over every configured channel. If normalization
+    # produces an entirely positive interval, the returned PWM rail widens only to
+    # zero so the shared reference event remains representable.
+    positive_processor = SimpleNamespace(
+        do_rescale=True,
+        rescale_factor=1.0 / 255.0,
+        do_normalize=True,
+        image_mean=-1.0,
+        image_std=1.0,
+    )
+    assert image_processor_pixel_bounds(
+        positive_processor,
+        num_channels=3,
+    ) == PotentialBounds(0.0, 2.0)
+
+    # Disabled preprocessing stages retain the original uint8 range. Invalid
+    # channel counts, metadata lengths, non-positive scales, and non-finite values
+    # must fail during setup instead of creating batch-dependent fallback bounds.
+    raw_processor = SimpleNamespace(do_rescale=False, do_normalize=False)
+    assert image_processor_pixel_bounds(
+        raw_processor,
+        num_channels=1,
+    ) == PotentialBounds(0.0, 255.0)
+    _expect_raises(
+        TypeError,
+        lambda: image_processor_pixel_bounds(raw_processor, num_channels=True),
+        "integer",
+    )
+    _expect_raises(
+        ValueError,
+        lambda: image_processor_pixel_bounds(raw_processor, num_channels=0),
+        "positive",
+    )
+    _expect_raises(
+        ValueError,
+        lambda: image_processor_pixel_bounds(
+            SimpleNamespace(
+                do_rescale=True,
+                rescale_factor=(1.0, 1.0),
+                do_normalize=False,
+            ),
+            num_channels=3,
+        ),
+        "one or 3",
+    )
+    _expect_raises(
+        ValueError,
+        lambda: image_processor_pixel_bounds(
+            SimpleNamespace(
+                do_rescale=False,
+                do_normalize=True,
+                image_mean=0.0,
+                image_std=0.0,
+            ),
+            num_channels=3,
+        ),
+        "positive",
+    )
+    _expect_raises(
+        ValueError,
+        lambda: image_processor_pixel_bounds(
+            SimpleNamespace(
+                do_rescale=True,
+                rescale_factor=float("inf"),
+                do_normalize=False,
+            ),
+            num_channels=3,
+        ),
+        "finite",
+    )
+
+
 # @lat: [[calibration#Layer-wise Calibration#Persistence#Canonical Table Round Trip]]
 def verify_canonical_table_round_trip() -> None:
     """Check canonical ordering, identity validation, strict schema, and atomic I/O."""
@@ -748,6 +841,7 @@ def main() -> None:
         verify_layer_record_and_clipping,
         verify_collection_and_runtime_phase_separation,
         verify_model_binding_and_potential_boundary,
+        verify_preprocessing_derived_image_range,
         verify_canonical_table_round_trip,
     )
     for check in checks:
