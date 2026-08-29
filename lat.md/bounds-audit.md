@@ -157,7 +157,7 @@ $$
 \subset[-1,1].
 $$
 
-논문의 tanh-based GELU approximation을 operator-composed path로 실행하면 각 $f_{\mathrm{Mul}}$, Tanh, addition의 range를 그대로 전달할 수 있다. Direct GELU, `gelu_new`, SiLU는 $x$와 $[0,1]$ gate의 곱이므로 fixed input interval $[l,u]$에서 보수적 output interval $[\min(l,0),\max(u,0)]$을 사용할 수 있다.
+논문의 tanh-based GELU approximation은 각 $f_{\mathrm{Mul}}$, Tanh, addition의 range를 전달하되, ViT affine pre-activation은 layer-wise calibration으로 고정해 넓은 parameter-derived safety interval을 실행 range로 사용하지 않는다. Direct GELU, `gelu_new`, SiLU는 $x$와 $[0,1]$ gate의 곱이므로 fixed input interval $[l,u]$에서 보수적 output interval $[\min(l,0),\max(u,0)]$을 사용할 수 있다.
 
 ### Attention
 

@@ -9,7 +9,7 @@ from .noise import clamp_gaussian_output, get_gaussian_time_noise
 from .types import PotentialBounds, SpikeSample, TimeBounds, check_domain
 from .primitive import signed_pulse_width_modulation_operator
 from .potential_to_spike import neg_identity_transform, neg_log_transform
-from .spike_to_potential import normalized_exp_operator, exponential_difference_operator
+from .spike_to_potential import exponential_difference_operator
 
 
 def _gaussian_multiplication_operator(
@@ -195,9 +195,23 @@ def multiplication_operator(
         domain_V.max * ideal_domain_B.min,
         domain_V.max * ideal_domain_B.max,
     )
-    return result, PotentialBounds(
+    result_domain = PotentialBounds(
         min(result_candidates),
         max(result_candidates),
+    )
+
+    # The optimized PWM subtraction and multiplication occur in the payload dtype,
+    # while interval endpoints are Python scalars. Clamp their last-bit disagreement
+    # to the same ideal rail enforced by the Gaussian path. Noise-off execution does
+    # not create saturation statistics, so this changes only out-of-rail roundoff.
+    return (
+        clamp_gaussian_output(
+            result,
+            result_domain,
+            site="multiplication.output",
+            name="multiplication_result",
+        ),
+        result_domain,
     )
 
 @check_domain
@@ -374,14 +388,28 @@ def exponential_function(
     Returns:
         The transformed potential tensor and the bounds declared by the selected
         physical or deterministic path.
+
+    Raises:
+        TypeError: If ``tau_m`` is not a real scalar.
+        ValueError: If ``tau_m`` is invalid or the final exponential endpoints are
+            not finite and strictly positive in the input tensor dtype.
     """
+    # Validate the time constant before either event sampling or deterministic
+    # encoding. A rejected call must not consume Gaussian RNG state, and both paths
+    # must enforce the same positive finite physical scale.
+    if isinstance(tau_m, bool) or not isinstance(tau_m, Real):
+        raise TypeError("tau_m must be a real scalar")
+    tau_value = float(tau_m)
+    if not isfinite(tau_value) or tau_value <= 0.0:
+        raise ValueError("tau_m must be finite and positive")
+
     # Keep event sampling, reset behavior, and noisy-output statistics isolated in
     # the private implementation while preserving one public operator API.
     if get_gaussian_time_noise().enabled:
         return _gaussian_exponential_function(
             input_value,
             domain,
-            tau_m=tau_m,
+            tau_m=tau_value,
             normalized=normalized,
         )
 
@@ -389,22 +417,44 @@ def exponential_function(
     # the potential interval onto its equally wide time-code interval.
     t_out, tb_out = neg_identity_transform(input_value, domain)
 
-    # Normalized decoding uses the existing temporal primitive and removes its fixed
-    # domain-dependent scale without altering the propagated endpoint bounds.
+    # Normalized decoding removes the encoder's fixed upper-endpoint offset inside
+    # the exponent. Since t = domain.max - x, this evaluates exp(-x/tau_m) directly
+    # instead of constructing exp(t/tau_m) and multiplying by exp(-domain.max/tau_m),
+    # whose intermediate may overflow even when their product is representable.
     if normalized:
-        v_out, domain_v_out = normalized_exp_operator(t_out, tb_out, tau_m=tau_m)
-        scaling_factor = exp(-domain.max / tau_m)
-        return scaling_factor * v_out, PotentialBounds(
-            domain_v_out.min * scaling_factor,
-            domain_v_out.max * scaling_factor,
+        offset = float(domain.max)
+        endpoint_exponents = t_out.new_tensor(
+            [
+                (float(tb_out.min) - offset) / tau_value,
+                (float(tb_out.max) - offset) / tau_value,
+            ]
+        )
+        decoded_endpoints = torch.exp(endpoint_exponents)
+
+        # Validate the final normalized response rather than an algebraically
+        # cancelled intermediate. A true final overflow or positive underflow remains
+        # an invalid operator range and requires a tighter rail or higher precision.
+        if not bool(
+            (
+                torch.isfinite(decoded_endpoints)
+                & (decoded_endpoints > 0.0)
+            ).all()
+        ):
+            raise ValueError(
+                "normalized exponential bounds must be finite and strictly positive "
+                "in the input tensor dtype"
+            )
+        return torch.exp((t_out - offset) / tau_value), PotentialBounds(
+            decoded_endpoints[0].item(),
+            decoded_endpoints[1].item(),
         )
 
     # The unnormalized form centers the finite code window before exponentiation;
     # derive its output interval from the same two temporal endpoints.
     shift_val = tb_out.range / 2
-    return torch.exp((t_out - shift_val) / tau_m), PotentialBounds(
-        exp((tb_out.min - shift_val) / tau_m),
-        exp((tb_out.max - shift_val) / tau_m),
+    return torch.exp((t_out - shift_val) / tau_value), PotentialBounds(
+        exp((tb_out.min - shift_val) / tau_value),
+        exp((tb_out.max - shift_val) / tau_value),
     )
 
 
@@ -750,9 +800,22 @@ def gelu_approximation(
     theta: float = 400.0,
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Approximate GELU activation using spiking operators (tanh form).
+    """Approximate GELU with the composed tanh-form TTFS operators.
 
-    Uses the approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).
+    The implementation evaluates ``0.5 * x * (1 + tanh(sqrt(2/pi) *
+    (x + 0.044715 * x^3)))`` through multiplication and tanh operators. Every
+    intermediate carries an analytic interval derived from ``domain``; endpoint
+    clamps remove only payload-dtype roundoff before the next domain check.
+
+    Args:
+        input_value: Activation tensor contained by ``domain``.
+        domain: Fixed signed input interval, optionally supplied by layer-wise
+            calibration before this function is called.
+        tau_s: Shared temporal scale used by the internal tanh composition.
+        theta: Symmetric identity-code rail used by multiplication.
+
+    Returns:
+        The composed GELU approximation and its analytic output domain.
     """
     input_clamped = domain.clamp(input_value, name="gelu_x")
 
@@ -766,9 +829,13 @@ def gelu_approximation(
     coeff_domain = PotentialBounds(coeff, coeff)
     x3_scaled, domain_x3_scaled = multiplication_operator(x3, domain_x3, coeff_tensor, coeff_domain, theta)
 
-    # x + 0.044715 * x^3
-    inner = input_clamped + x3_scaled
+    # x + 0.044715 * x^3. Floating-point addition can round a mathematical
+    # endpoint a few ulps beyond the interval obtained from real arithmetic.
     inner_domain = PotentialBounds(domain.min + domain_x3_scaled.min, domain.max + domain_x3_scaled.max)
+    inner = inner_domain.clamp(
+        input_clamped + x3_scaled,
+        name="gelu_inner",
+    )
 
     # sqrt(2/pi) * inner
     scale_const = 0.7978845608028654
@@ -779,9 +846,13 @@ def gelu_approximation(
     # tanh(sqrt(2/pi) * (x + 0.044715 * x^3))
     tanh_out, tanh_domain = tanh(tanh_in, tanh_in_domain, tau_s=tau_s, theta=theta)
 
-    # 0.5 * (1 + tanh(...))
-    one_plus = 1.0 + tanh_out
+    # 0.5 * (1 + tanh(...)). Apply the same endpoint correction before the
+    # value enters the next TTFS operator, whose contract checks its domain.
     one_plus_domain = PotentialBounds(1.0 + tanh_domain.min, 1.0 + tanh_domain.max)
+    one_plus = one_plus_domain.clamp(
+        1.0 + tanh_out,
+        name="gelu_one_plus",
+    )
     half = 0.5
     half_tensor = input_value.new_tensor(half).expand_as(input_value)
     half_domain = PotentialBounds(half, half)

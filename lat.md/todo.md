@@ -131,6 +131,7 @@ The implementation work covers every maintained transform and model adapter, not
 - [x] Calibrate and clamp every ViT and GPT-2 pre-norm residual output per block, recording raw underflow and overflow before attaching the frozen output range.
 - [x] Connect both ViT pre-norm residual boundaries to optional explicit calibration bindings while retaining batch-independent analytic interval addition when calibration is absent.
 - [x] Calibrate one symmetric pre-clamp softmin score range per ViT and GPT-2 attention layer, constrain it by the dtype-, temporal-scale-, and sequence-capacity-derived representability ceiling, and retain separate Gaussian value-readout saturation validation.
+- [x] Calibrate each operator-composed ViT GELU affine pre-activation per layer, retain an analytic final activation interval, and remove avoidable deterministic exponential intermediate overflow without changing the operator equation.
 - [x] Keep spike-time windows configuration-derived: LayerNorm log windows remain fixed by `clip_margin`, `theta`, and `tau_s`, while affine identity encoding uses each declared zero-containing fixed interval.
 - [x] Make declared potential and time bounds immutable so cached or propagated endpoints cannot be widened in place.
 - [x] Keep masked attention scores inside the declared softmin range and clamp both Gaussian and noise-free value readouts to a rail derived from fixed $S_{\max}$ and $\theta$.

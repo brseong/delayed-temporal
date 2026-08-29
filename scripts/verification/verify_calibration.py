@@ -1217,8 +1217,10 @@ def verify_vit_evaluator_artifact_lifecycle() -> None:
 
 
 # @lat: [[calibration#Layer-wise Calibration#Frozen Execution#ViT Fixed Activation Ranges]]
+# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#ViT GELU Pre-activation Calibration]]
 def verify_vit_fixed_activation_ranges() -> None:
-    """Verify direct ViT MLP activations propagate input-derived fixed ranges."""
+    """Verify analytic ViT activations and calibrated composed-GELU inputs."""
+    from utils.transforms.functions import exponential_function
     from utils.transforms.noise import set_gaussian_time_noise
     from utils.transformers.models.spiking_vit.configuration_spiking_vit import (
         ViTConfig,
@@ -1264,6 +1266,103 @@ def verify_vit_fixed_activation_ranges() -> None:
         assert first.domain == second.domain
         assert first.domain.min <= 0.0 <= first.domain.max
 
+
+    # The final response exp(-x) over [-80, 80] is representable in float32 even
+    # though the former exp(t) intermediate reached exp(160). Stable decoding must
+    # preserve the operator equation without requiring a narrower calibration rail.
+    wide_input = torch.tensor([-80.0, 0.0, 80.0], dtype=torch.float32)
+    wide_output, wide_domain = exponential_function(
+        wide_input,
+        PotentialBounds(-80.0, 80.0),
+    )
+    assert bool(torch.isfinite(wide_output).all())
+    assert wide_domain.min > 0.0 and math.isfinite(wide_domain.max)
+    assert torch.allclose(
+        wide_output,
+        torch.exp(-wide_input),
+        rtol=1.0e-6,
+        atol=0.0,
+    )
+
+    # Give one standalone composed-GELU module a deterministic projection so the
+    # calibration population and a later excursion have predictable pre-activations.
+    calibration_config = ViTConfig(
+        hidden_size=4,
+        intermediate_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        theta=100.0,
+        use_spiking_mlp=True,
+        spiking_mlp_exact_gelu=False,
+    )
+    calibrated_module = ViTIntermediate(calibration_config).eval()
+    with torch.no_grad():
+        calibrated_module.dense.weight.zero_()
+        calibrated_module.dense.weight[:, 0] = 1.0
+        calibrated_module.dense.bias.zero_()
+
+    # Collection observes the raw affine output under its broad parameter-derived
+    # safety range. The symmetric site is stable and contains the PWM zero reference.
+    calibration_input = Potential(
+        torch.tensor(
+            [[[-0.1, 0.0, 0.0, 0.0]], [[0.1, 0.0, 0.0, 0.0]]],
+            dtype=torch.float32,
+        ),
+        input_domain,
+    )
+    activation_spec = LayerCalibrationSpec(
+        module_name="",
+        tensor_name="activation_input",
+        range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
+        lower_quantile=0.0,
+        upper_quantile=1.0,
+        margin_fraction=0.0,
+    )
+    collector = create_calibration_collector(
+        _make_metadata(),
+        (activation_spec,),
+        bin_count=16,
+    )
+    assert bind_model_calibration(calibrated_module, collector) == 1
+
+    first_calibrated = calibrated_module(calibration_input)
+    assert bool(torch.isfinite(first_calibrated.value).all())
+    start_histogram_calibration_pass(collector)
+    second_calibrated = calibrated_module(calibration_input)
+    assert torch.equal(first_calibrated.value, second_calibrated.value)
+    activation_table = finalize_calibration_collection(collector)
+    assert clear_model_calibration(calibrated_module, expected_state=collector) == 1
+
+    # Full-support quantiles freeze the measured affine distribution. Frozen replay
+    # clamps a broader affine output before GELU and reports that strict excursion.
+    activation_record = activation_table.layers[0]
+    assert math.isclose(activation_record.bounds.min, -0.1, rel_tol=1.0e-6)
+    assert math.isclose(
+        activation_record.bounds.max, 0.1, rel_tol=1.0e-6
+    )
+    runtime = create_calibration_runtime(
+        CalibrationMode.VALIDATE,
+        activation_table,
+        expected_metadata=activation_table.metadata,
+    )
+    assert bind_model_calibration(calibrated_module, runtime) == 1
+
+    excursion_input = Potential(
+        torch.tensor(
+            [[[-1.5, 0.0, 0.0, 0.0]], [[1.5, 0.0, 0.0, 0.0]]],
+            dtype=torch.float32,
+        ),
+        input_domain,
+    )
+    frozen_output = calibrated_module(excursion_input)
+    assert bool(torch.isfinite(frozen_output.value).all())
+    clipping_report = get_calibration_clipping_report(runtime)
+    assert len(clipping_report) == 1
+    assert (
+        clipping_report[0].underflows + clipping_report[0].overflows
+        == excursion_input.value.shape[0] * calibration_config.intermediate_size
+    )
+    assert clear_model_calibration(calibrated_module, expected_state=runtime) == 1
 
 # @lat: [[calibration#Layer-wise Calibration#Frozen Execution#BERT Fixed Range Flow]]
 def verify_bert_fixed_range_flow() -> None:
@@ -1901,6 +2000,7 @@ def verify_vit_residual_range_reset() -> None:
         ("encoder", "input"),
         ("encoder.layer.0", "attention_residual"),
         ("encoder.layer.0", "output"),
+        ("encoder.layer.0.intermediate", "activation_input"),
     )
     small_embeddings = torch.tensor(
         [[[-0.2, -0.1, 0.1, 0.2], [0.1, -0.2, 0.2, -0.1]]],

@@ -271,13 +271,13 @@ def vit_calibration_specs(
     upper_quantile: float,
     margin_fraction: float,
 ) -> tuple[LayerCalibrationSpec, ...]:
-    """Declare ViT residual and optional spiking-attention calibration sites.
+    """Declare ViT residual, GELU-input, and attention calibration sites.
 
     The encoder entry resets embedding output to one signed range before the first
     affine projection. Each later block contributes the two residual sites returned
-    by :func:`vit_residual_calibration_specs`. When the selected backend is spiking
-    attention, every attention module additionally freezes its raw softmin score rail
-    below a configuration- and dtype-derived representability ceiling.
+    by :func:`vit_residual_calibration_specs`. Operator-composed GELU modules freeze
+    their affine pre-activation distributions, and spiking attention modules freeze
+    raw softmin score rails below a configuration- and dtype-derived ceiling.
 
     Args:
         model: Unwrapped ViT model or task wrapper.
@@ -286,8 +286,8 @@ def vit_calibration_specs(
         margin_fraction: Per-side expansion after symmetric range selection.
 
     Returns:
-        One encoder-input specification, two residual specifications per block, and
-        one score specification per spiking attention layer.
+        One encoder-input specification, two residual specifications per block, one
+        specification per composed GELU, and one per spiking attention layer.
 
     Raises:
         TypeError: If ``model`` is not an unwrapped PyTorch module.
@@ -298,6 +298,7 @@ def vit_calibration_specs(
     # exact class identities rather than name suffixes.
     from utils.transformers.models.spiking_vit.modeling_spiking_vit import (
         ViTEncoder,
+        ViTIntermediate,
         ViTSelfAttention,
     )
 
@@ -331,6 +332,30 @@ def vit_calibration_specs(
         upper_quantile=upper_quantile,
         margin_fraction=margin_fraction,
     )
+
+    # The operator-composed GELU is the only ViT activation whose internal
+    # exponential window benefits from a measured affine-input range. Exact or dense
+    # activations retain their analytic fixed-domain rules and declare no unused site.
+    activation_specs: list[LayerCalibrationSpec] = []
+    for module_name, module in sorted(model.named_modules()):
+        if not isinstance(module, ViTIntermediate):
+            continue
+        if not module._use_spiking_mlp or module._spiking_mlp_exact_gelu:
+            continue
+
+        # Affine pre-activations cross zero and feed signed PWM multiplication. Both
+        # histogram tails therefore select one symmetric rail containing the shared
+        # zero reference required by every downstream composed GELU operator.
+        activation_specs.append(
+            LayerCalibrationSpec(
+                module_name=module_name,
+                tensor_name="activation_input",
+                range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
+                lower_quantile=lower_quantile,
+                upper_quantile=upper_quantile,
+                margin_fraction=margin_fraction,
+            )
+        )
 
     # Attention score calibration belongs only to the maintained spiking backend.
     # Exact class discovery gives each layer its stable owning module name, while an
@@ -380,7 +405,16 @@ def vit_calibration_specs(
                 fixed_max=float(ceiling.max),
             )
         )
-    return (entry_spec, *residual_specs, *attention_specs)
+
+    # Grouping by semantic role keeps declarations readable; collector construction
+    # canonicalizes the final identities before persistence, so runtime lookup never
+    # depends on this presentation order.
+    return (
+        entry_spec,
+        *residual_specs,
+        *activation_specs,
+        *attention_specs,
+    )
 
 
 def build_vit_calibration_metadata(

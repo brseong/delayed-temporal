@@ -425,12 +425,13 @@ class ViTIntermediate(nn.Module):
             self.intermediate_act_fn = config.hidden_act
 
     def forward(self, pot: Potential) -> Potential:
-        """Apply the selected ViT MLP activation with a fixed analytic range.
+        """Apply the selected ViT MLP activation from a fixed pre-activation range.
 
-        The operator-composed GELU already propagates its own interval. Direct tanh-
-        GELU, standard GELU, ReLU, SiLU, and Tanh all have conservative envelopes
-        derived only from the incoming affine range, so none may construct metadata
-        from the current activation tensor.
+        An explicitly bound operator-composed GELU observes the raw affine output
+        during collection and consumes its frozen layer-wise range during validation
+        or inference. Direct tanh-GELU, standard GELU, ReLU, SiLU, and Tanh retain
+        conservative envelopes derived only from their fixed affine ranges, so no
+        activation constructs metadata from the current tensor.
 
         Args:
             pot: Normalized block activation on a fixed zero-containing range.
@@ -440,11 +441,26 @@ class ViTIntermediate(nn.Module):
 
         Raises:
             ValueError: If a dense activation has no maintained analytic range rule.
+            RuntimeError: If calibration is bound without the declared activation
+                input site.
         """
         # The affine projection memoizes exact output endpoints for the incoming fixed
         # domain. Every direct activation rule below consumes those endpoints rather
         # than reducing the produced tensor.
         pot_z: Potential = self.dense(pot)
+
+        # Only modules named by the active calibration table receive a binding. In
+        # collection this records the unclamped affine output and returns its analytic
+        # safety range; frozen modes count excursions before returning the persisted
+        # clamp range consumed by every following GELU sub-operator.
+        if model_calibration_is_bound(self):
+            pot_z = calibrated_potential(
+                self,
+                "activation_input",
+                pot_z.value,
+                collection_bounds=pot_z.domain,
+            )
+
         if self._use_spiking_mlp:
             if self._spiking_mlp_exact_gelu:
                 x = pot_z.value

@@ -88,6 +88,16 @@ ViT direct tanh-GELU, dense GELU, ReLU, SiLU, and Tanh branches derive conservat
 
 ReLU and Tanh map interval endpoints directly. GELU-family and SiLU-family outputs remain between the input and zero because their gates lie in $[0,1]$; the operator-composed GELU continues to propagate its own interval.
 
+### ViT GELU Pre-activation Calibration
+
+Each operator-composed ViT GELU layer freezes a signed-symmetric range for its affine pre-activation, preventing a broad parameter-derived safety interval from controlling the composed exponential window.
+
+Collection records the raw affine output under the stable `ViTIntermediate` module identity and continues with its analytic safety range. Frozen validation and inference count strict excursions, clamp to the persisted range, and pass that unchanged range into the GELU composition.
+
+The final GELU output still uses its analytic gate-derived interval. Calibration therefore limits the layer input distribution and reports approximation clipping; it does not infer the bounded activation output from runtime tensors.
+
+The deterministic exponential removes the negative-identity encoder offset inside the exponent before decoding. This computes the same normalized response without constructing a larger intermediate exponential that may overflow even when the final result is representable.
+
 ### BERT Fixed Range Flow
 
 BERT freezes its three embedding-table ranges, propagates the normalized `Potential` through the encoder and first-token pooler, and derives GELU or ReLU output ranges from fixed affine endpoints.
