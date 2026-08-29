@@ -1,6 +1,7 @@
 """ViT-specific fixed-range derivation for layer-wise calibration."""
 
 import collections.abc
+import dataclasses
 import json
 import math
 from typing import Any
@@ -25,6 +26,56 @@ from utils.transformers.calibration import (
     clear_model_calibration,
     select_calibration_subset,
 )
+
+
+def _normalize_json_metadata(value: Any) -> Any:
+    """Convert processor metadata containers into canonical JSON-compatible values.
+
+    Transformers may expose image geometry through frozen dataclasses such as
+    ``SizeDict`` rather than plain dictionaries. Calibration identity needs their
+    complete field values, but must not depend on that library-specific container
+    type or Python object representation.
+
+    Args:
+        value: Nested scalar, mapping, sequence, or dataclass metadata value.
+
+    Returns:
+        An equivalent tree containing only JSON scalar, list, and string-keyed dict
+        values. Floating-point finiteness is checked later by strict ``json.dumps``.
+
+    Raises:
+        TypeError: If a mapping key is not a string or a value uses an unsupported
+            runtime object type.
+    """
+    # Dataclass conversion preserves every declared field, including None-valued
+    # alternative geometry modes. Process it before generic containers because
+    # Transformers SizeDict does not implement collections.abc.Mapping.
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return _normalize_json_metadata(dataclasses.asdict(value))
+
+    # Normalize mappings recursively and sort only during JSON serialization. String
+    # keys are required so distinct Python key types cannot collapse to one JSON name.
+    if isinstance(value, collections.abc.Mapping):
+        normalized_mapping: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("processor metadata mapping keys must be strings")
+            normalized_mapping[key] = _normalize_json_metadata(item)
+        return normalized_mapping
+
+    # Tuple/list identity is intentionally normalized to JSON arrays. Processor
+    # channel vectors use both forms across Transformers versions but have the same
+    # deterministic preprocessing meaning.
+    if isinstance(value, (tuple, list)):
+        return [_normalize_json_metadata(item) for item in value]
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+
+    # Do not stringify unknown objects: repr output can be version-dependent and
+    # would make artifact compatibility appear stable without preserving semantics.
+    raise TypeError(
+        f"unsupported processor metadata type: {type(value).__name__}"
+    )
 
 
 def image_processor_pixel_bounds(
@@ -362,8 +413,9 @@ def build_vit_calibration_metadata(
         "subset_fingerprint": calibration_dataset_fingerprint,
     }
     try:
+        normalized_processor_fields = _normalize_json_metadata(processor_fields)
         preprocessing = json.dumps(
-            processor_fields,
+            normalized_processor_fields,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,

@@ -8,7 +8,7 @@ import copy
 import math
 import sys
 import tempfile
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable
@@ -820,9 +820,17 @@ def verify_deterministic_training_subset() -> None:
 
     # Canonical metadata stores subset selection alongside every processor and model
     # option that affects the measured residual distributions.
+    @dataclass(frozen=True)
+    class ProcessorSize:
+        """Mirror Transformers SizeDict's dataclass-based geometry container."""
+
+        height: int
+        width: int
+        shortest_edge: int | None = None
+
     processor = SimpleNamespace(
         do_resize=True,
-        size={"height": 4, "width": 4},
+        size=ProcessorSize(height=4, width=4),
         do_center_crop=False,
         crop_size=None,
         do_rescale=True,

@@ -66,6 +66,8 @@ ViT patch projection derives its fixed pixel range from image-processor rescalin
 
 The evaluator maps uint8 endpoints through each configured channel, reduces them to one scalar range, and includes zero when necessary for signed PWM. Invalid or missing metadata fails before the spiking patch projection encodes events.
 
+Processor geometry may be represented by Transformers dataclasses such as `SizeDict`; metadata normalization preserves all declared fields as canonical JSON containers rather than relying on library-specific object representations.
+
 ### ViT Residual Range Reset
 
 Each ViT block calibrates its attention residual and final MLP residual as separate signed-symmetric layer ranges, preventing analytic interval addition from widening recursively through depth.
