@@ -52,6 +52,8 @@ Calibration state binds to stable module names without entering checkpoints. Col
 
 Binding rejects missing modules, undeclared tensor boundaries, repeated installation, and `DataParallel`. Adapters retain analytic bounds when unbound and query complete bindings before entering collection or frozen clipping. Phase cleanup preserves the completed state.
 
+The empty module name is the canonical `named_modules()` identity of a bound root model and is valid for model-entry calibration; nested modules retain their ordinary dotted names.
+
 ### Affine Fixed-Domain Consumption
 
 Every maintained affine adapter encodes and clamps with the upstream fixed `PotentialBounds`, then memoizes its exact parameter-derived output interval for those immutable endpoints.
@@ -95,6 +97,12 @@ The public embedding call still returns a tensor by default. The internal model 
 RoBERTa freezes embedding and affine parameter ranges, propagates `Potential` across every operator-backed adapter, and preserves the public Hugging Face model-output types.
 
 Dense ablations keep functional PyTorch values but reuse frozen affine intervals. Local language-model and sequence-classification wrappers request the final encoder `Potential` privately so their spiking heads never reconstruct a range from a tensor.
+
+### GPT-2 Fixed Range Flow
+
+GPT-2 freezes token and position table ranges, derives MLP activation ranges analytically, and exposes signed-symmetric model-entry plus two residual calibration sites per pre-norm block.
+
+Unbound execution retains exact interval sums. Collection uses those sums as safety rails, while frozen execution resets attention and MLP residual streams to persisted ranges so depth cannot recursively widen them.
 
 ## Persistence
 

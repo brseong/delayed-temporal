@@ -51,6 +51,10 @@ from utils.transforms import neg_identity_transform
 from utils.transforms.functions import gelu_approximation
 from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_noise
 from utils.transforms.types import Potential, PotentialBounds, SpikeSample
+from utils.transformers.calibration import (
+    calibrated_potential,
+    model_calibration_is_bound,
+)
 from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import (
     SpikingLayerNorm,
@@ -574,29 +578,108 @@ class GPT2MLP(nn.Module):
         super().__init__()
         embed_dim = config.hidden_size
         self.use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
-        if self.use_spiking_mlp:
-            _theta = getattr(config, "theta", 400.0)
-            self.c_fc = SpikingConv1D(intermediate_size, embed_dim, theta=_theta)
-            self.c_proj = SpikingConv1D(embed_dim, intermediate_size, theta=_theta)
-        else:
-            self.c_fc = Conv1D(intermediate_size, embed_dim)
-            self.c_proj = Conv1D(embed_dim, intermediate_size)
+        _theta = getattr(config, "theta", 400.0)
+        # SpikingConv1D preserves the Hugging Face Conv1D parameter layout. Dense
+        # ablation calls its inherited tensor forward directly, while both paths can
+        # reuse the same transposed-weight interval cache.
+        self.c_fc = SpikingConv1D(intermediate_size, embed_dim, theta=_theta)
+        self.c_proj = SpikingConv1D(embed_dim, intermediate_size, theta=_theta)
+        self._activation_name = str(config.activation_function)
         self.act = ACT2FN[config.activation_function]
         self.dropout = nn.Dropout(config.resid_pdrop)
 
     def forward(self, hidden_states: Potential) -> Potential:
+        """Apply GPT-2's feed-forward network with fixed analytic ranges.
+
+        Dense and spiking projections share pretrained parameters and exact frozen
+        affine intervals. ReLU and Tanh map endpoints directly; GELU-family and SiLU
+        activations multiply their input by a gate in ``[0, 1]``. Evaluation dropout
+        preserves the projection range, while training scaling is analytic.
+
+        Args:
+            hidden_states: Pre-normalized block activation with fixed bounds.
+
+        Returns:
+            Feed-forward output paired with a batch-independent range.
+
+        Raises:
+            ValueError: If the activation or dropout has no maintained fixed rule.
+        """
+        # Select only numerical projection execution. The dense branch remains the
+        # inherited Hugging Face Conv1D operation and attaches the same frozen range.
         if self.use_spiking_mlp:
-            hidden_states = self.c_fc(hidden_states)
-            x = self.act(hidden_states.value)
-            hidden_states = Potential(x, PotentialBounds(x.min().item(), x.max().item()))
-            hidden_states = self.c_proj(hidden_states)
-            x = self.dropout(hidden_states.value)
+            projected = self.c_fc(hidden_states)
         else:
-            x = self.c_fc(hidden_states.value)
-            x = self.act(x)
-            x = self.c_proj(x)
-            x = self.dropout(x)
-        return Potential(x, PotentialBounds(x.min().item(), x.max().item()))
+            projected = Potential(
+                Conv1D.forward(self.c_fc, hidden_states.value),
+                self.c_fc.freeze_parameter_bounds(hidden_states.domain),
+            )
+
+        # Every maintained GPT-2 activation has a standard envelope derived from the
+        # affine endpoints. Unknown custom functions must provide an explicit rule
+        # instead of restoring output-tensor extrema.
+        activated_value = self.act(projected.value)
+        if self._activation_name == "relu":
+            activated_domain = PotentialBounds(
+                max(0.0, float(projected.domain.min)),
+                max(0.0, float(projected.domain.max)),
+            )
+        elif self._activation_name == "tanh":
+            activated_domain = PotentialBounds(
+                math.tanh(float(projected.domain.min)),
+                math.tanh(float(projected.domain.max)),
+            )
+        elif self._activation_name in {
+            "gelu",
+            "gelu_fast",
+            "gelu_new",
+            "gelu_pytorch_tanh",
+            "quick_gelu",
+            "silu",
+            "swish",
+        }:
+            activated_domain = PotentialBounds(
+                min(float(projected.domain.min), 0.0),
+                max(float(projected.domain.max), 0.0),
+            )
+        else:
+            raise ValueError(
+                "GPT-2 MLP activation requires a maintained analytic range rule"
+            )
+        activated = Potential(activated_value, activated_domain)
+
+        # The output projection follows the same dense/spiking split as c_fc while
+        # retaining one parameter-derived interval contract.
+        if self.use_spiking_mlp:
+            projected_output = self.c_proj(activated)
+        else:
+            projected_output = Potential(
+                Conv1D.forward(self.c_proj, activated.value),
+                self.c_proj.freeze_parameter_bounds(activated.domain),
+            )
+
+        # Dropout is identity in maintained evaluation. Include zero and inverse keep
+        # scaling for completeness without measuring a realized training mask.
+        x = self.dropout(projected_output.value)
+        dropout_probability = float(self.dropout.p)
+        if not math.isfinite(dropout_probability) or not 0.0 <= dropout_probability <= 1.0:
+            raise ValueError("GPT-2 MLP dropout probability must lie in [0, 1]")
+        output_domain = projected_output.domain
+        if self.training and dropout_probability > 0.0:
+            if dropout_probability >= 1.0:
+                output_domain = PotentialBounds(0.0, 0.0)
+            else:
+                scale = 1.0 / (1.0 - dropout_probability)
+                candidates = (
+                    0.0,
+                    float(output_domain.min) * scale,
+                    float(output_domain.max) * scale,
+                )
+                output_domain = PotentialBounds(
+                    min(candidates),
+                    max(candidates),
+                )
+        return Potential(x, output_domain)
 
 
 class GPT2Block(GradientCheckpointingLayer):
@@ -640,7 +723,30 @@ class GPT2Block(GradientCheckpointingLayer):
         use_cache: bool | None = False,
         **kwargs,
     ) -> Potential:
+        """Apply one pre-norm GPT-2 block with optional frozen residual ranges.
+
+        Without calibration, residual additions use exact interval endpoint sums.
+        A bound collector observes raw self-attention and final MLP residuals on those
+        analytic safety rails; frozen execution counts and clamps excursions against
+        persisted per-block ranges so intervals do not grow recursively with depth.
+
+        Args:
+            hidden_states: Incoming residual stream and its fixed range.
+            past_key_values: Optional autoregressive key/value cache.
+            cache_position: Absolute positions represented in the cache update.
+            attention_mask: Causal or additive attention mask.
+            encoder_hidden_states: Unsupported cross-attention source input.
+            encoder_attention_mask: Unsupported cross-attention source mask.
+            use_cache: Whether attention updates and returns cache state.
+            **kwargs: Existing attention backend arguments.
+
+        Returns:
+            Block output on an analytic or frozen calibrated residual range.
+        """
+        # Pre-norm attention retains the incoming residual value and interval. The
+        # attention projection supplies an independent fixed range for endpoint sum.
         residual = hidden_states.value
+        residual_domain = hidden_states.domain
         pot = _apply_norm(self.ln_1, hidden_states)
         attn_output, _ = self.attn(
             pot,
@@ -650,9 +756,22 @@ class GPT2Block(GradientCheckpointingLayer):
             use_cache=use_cache,
             **kwargs,
         )
-        # residual connection
+        # The self-attention residual is the first range-reset boundary in each block.
+        # Collection observes the raw sum before any frozen clamp is applied.
         x = attn_output.value + residual
-        hidden_states = Potential(x, PotentialBounds(x.min().item(), x.max().item()))
+        attention_residual_bounds = PotentialBounds(
+            float(residual_domain.min) + float(attn_output.domain.min),
+            float(residual_domain.max) + float(attn_output.domain.max),
+        )
+        if model_calibration_is_bound(self):
+            hidden_states = calibrated_potential(
+                self,
+                "attention_residual",
+                x,
+                collection_bounds=attention_residual_bounds,
+            )
+        else:
+            hidden_states = Potential(x, attention_residual_bounds)
 
         if encoder_hidden_states is not None:
             # add one self-attention block for cross-attention
@@ -670,16 +789,42 @@ class GPT2Block(GradientCheckpointingLayer):
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=encoder_attention_mask,
             )
-            # residual connection
+            # Cross-attention is not constructed by the maintained GPT-2 backend.
+            # Keep endpoint arithmetic explicit so this unreachable compatibility
+            # branch cannot reintroduce live bounds if support is added later.
             x = residual + cross_attn_output.value
-            hidden_states = Potential(x, PotentialBounds(x.min().item(), x.max().item()))
+            hidden_states = Potential(
+                x,
+                PotentialBounds(
+                    float(hidden_states.domain.min)
+                    + float(cross_attn_output.domain.min),
+                    float(hidden_states.domain.max)
+                    + float(cross_attn_output.domain.max),
+                ),
+            )
 
+        # The MLP residual is the second calibrated block boundary. Its analytic sum
+        # remains the collection safety rail and unbound fallback.
         residual = hidden_states.value
+        residual_domain = hidden_states.domain
         pot = _apply_norm(self.ln_2, hidden_states)
         feed_forward_hidden_states = self.mlp(pot)
-        # residual connection
         x = residual + feed_forward_hidden_states.value
-        hidden_states = Potential(x, PotentialBounds(x.min().item(), x.max().item()))
+        output_bounds = PotentialBounds(
+            float(residual_domain.min)
+            + float(feed_forward_hidden_states.domain.min),
+            float(residual_domain.max)
+            + float(feed_forward_hidden_states.domain.max),
+        )
+        if model_calibration_is_bound(self):
+            hidden_states = calibrated_potential(
+                self,
+                "output",
+                x,
+                collection_bounds=output_bounds,
+            )
+        else:
+            hidden_states = Potential(x, output_bounds)
 
         return hidden_states
 
@@ -897,11 +1042,84 @@ class GPT2Model(GPT2PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+    def freeze_embedding_bounds(
+        self,
+        *,
+        refresh: bool = False,
+    ) -> tuple[PotentialBounds, PotentialBounds]:
+        """Freeze token and position embedding-table ranges for model entry.
+
+        Token, optional token-type, and position values are table lookups. The two
+        complete pretrained tables therefore define conservative input-independent
+        ranges before the first GPT-2 block, including autoregressive cache positions.
+
+        Args:
+            refresh: Recompute after an intentional embedding parameter replacement
+                or update.
+
+        Returns:
+            Frozen token-table and position-table potential ranges.
+
+        Raises:
+            RuntimeError: If parameters changed after freezing or during reduction.
+            ValueError: If either table contains non-finite values.
+        """
+        # Include Parameter identity as well as PyTorch version so public embedding
+        # replacement cannot reuse a cache from a different table at version zero.
+        identity = (
+            id(self.wte.weight),
+            self.wte.weight._version,
+            id(self.wpe.weight),
+            self.wpe.weight._version,
+        )
+        cached = self.__dict__.get("_frozen_embedding_bounds")
+        if cached is not None and not refresh:
+            cached_identity, cached_bounds = cached
+            if identity != cached_identity:
+                raise RuntimeError(
+                    "GPT-2 embedding parameters changed after bounds were frozen; "
+                    "call freeze_embedding_bounds(refresh=True) before inference"
+                )
+            return cached_bounds
+
+        # Reduce once in float64, keeping derived scalars out of the state dict and
+        # avoiding inward rounding for low-precision checkpoint parameters.
+        tables = (
+            self.wte.weight.detach().to(dtype=torch.float64),
+            self.wpe.weight.detach().to(dtype=torch.float64),
+        )
+        if not all(bool(torch.isfinite(table).all()) for table in tables):
+            raise ValueError("GPT-2 embedding parameters must be finite")
+        frozen_bounds = tuple(
+            PotentialBounds(table.min().item(), table.max().item())
+            for table in tables
+        )
+
+        # A concurrent update or replacement invalidates the complete reduction.
+        final_identity = (
+            id(self.wte.weight),
+            self.wte.weight._version,
+            id(self.wpe.weight),
+            self.wpe.weight._version,
+        )
+        if final_identity != identity:
+            raise RuntimeError(
+                "GPT-2 embedding parameters changed while bounds were being frozen"
+            )
+        self.__dict__["_frozen_embedding_bounds"] = (
+            final_identity,
+            frozen_bounds,
+        )
+        return frozen_bounds
+
     def get_input_embeddings(self):
         return self.wte
 
     def set_input_embeddings(self, new_embeddings):
         self.wte = new_embeddings
+        # Public embedding replacement intentionally begins a new parameter regime.
+        # Discard only derived metadata; the next setup/forward freezes the new table.
+        self.__dict__.pop("_frozen_embedding_bounds", None)
 
     @merge_with_config_defaults
     @capture_outputs
@@ -914,7 +1132,7 @@ class GPT2Model(GPT2PreTrainedModel):
         attention_mask: torch.FloatTensor | None = None,
         token_type_ids: torch.LongTensor | None = None,
         position_ids: torch.LongTensor | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
+        inputs_embeds: Potential | torch.FloatTensor | None = None,
         encoder_hidden_states: torch.Tensor | None = None,
         encoder_attention_mask: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
@@ -937,6 +1155,8 @@ class GPT2Model(GPT2PreTrainedModel):
         kwargs.pop("output_attentions", None)
         kwargs.pop("output_hidden_states", None)
 
+        # Resolve exactly one token source. Custom embeddings may carry a separately
+        # established fixed range; plain tensors must fit the frozen token-table rail.
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is not None:
@@ -944,7 +1164,10 @@ class GPT2Model(GPT2PreTrainedModel):
             input_shape = input_ids.size()
             input_ids = input_ids.view(-1, input_shape[-1])
             batch_size = input_ids.shape[0]
-        elif inputs_embeds is not None:
+        elif isinstance(inputs_embeds, Potential):
+            input_shape = inputs_embeds.value.size()[:-1]
+            batch_size = inputs_embeds.value.shape[0]
+        elif isinstance(inputs_embeds, torch.Tensor):
             input_shape = inputs_embeds.size()[:-1]
             batch_size = inputs_embeds.shape[0]
         else:
@@ -961,8 +1184,48 @@ class GPT2Model(GPT2PreTrainedModel):
             if self.config.add_cross_attention and not isinstance(past_key_values, EncoderDecoderCache):
                 past_key_values = EncoderDecoderCache(past_key_values, DynamicCache(config=self.config))
 
+        # Freeze table endpoints only after checkpoint initialization and before any
+        # block execution. Integer lookup is covered automatically; custom tensor
+        # values are validated against their predeclared range without defining it.
+        word_bounds, position_bounds = self.freeze_embedding_bounds()
         if inputs_embeds is None:
-            inputs_embeds = self.wte(input_ids)
+            token_embeddings = self.wte(input_ids)
+            token_bounds = word_bounds
+            validate_token_values = False
+        elif isinstance(inputs_embeds, Potential):
+            token_embeddings = inputs_embeds.value
+            token_bounds = inputs_embeds.domain
+            validate_token_values = True
+        else:
+            token_embeddings = inputs_embeds
+            token_bounds = word_bounds
+            validate_token_values = True
+        if not token_embeddings.is_floating_point() or token_embeddings.is_complex():
+            raise TypeError("inputs_embeds must be a real floating-point tensor")
+        if token_embeddings.numel() == 0:
+            raise ValueError("inputs_embeds must not be empty")
+        if not isinstance(token_bounds, PotentialBounds):
+            raise TypeError("inputs_embeds domain must be PotentialBounds")
+        token_lower = float(token_bounds.min)
+        token_upper = float(token_bounds.max)
+        if (
+            not math.isfinite(token_lower)
+            or not math.isfinite(token_upper)
+            or token_lower > token_upper
+        ):
+            raise ValueError("inputs_embeds fixed range must be finite and ordered")
+        if validate_token_values:
+            token_min, token_max = torch.aminmax(token_embeddings.detach())
+            if (
+                not bool(torch.isfinite(token_min) and torch.isfinite(token_max))
+                or token_min.item() < token_lower
+                or token_max.item() > token_upper
+            ):
+                raise ValueError("inputs_embeds escaped its declared fixed range")
+
+        # Mask construction operates on the unwrapped tensor exactly as before. The
+        # Potential metadata remains beside it for the later embedding-sum interval.
+        inputs_embeds = token_embeddings
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -973,7 +1236,11 @@ class GPT2Model(GPT2PreTrainedModel):
             position_ids = cache_position.unsqueeze(0)
 
         position_embeds = self.wpe(position_ids)
-        hidden_states = inputs_embeds + position_embeds.to(inputs_embeds.device)
+        hidden_states = token_embeddings + position_embeds.to(token_embeddings.device)
+        hidden_domain = PotentialBounds(
+            token_lower + float(position_bounds.min),
+            token_upper + float(position_bounds.max),
+        )
 
         # Attention mask.
         if attention_mask is not None and attention_mask.ndim < 4:
@@ -1000,12 +1267,46 @@ class GPT2Model(GPT2PreTrainedModel):
         if token_type_ids is not None:
             token_type_embeds = self.wte(token_type_ids)
             hidden_states = hidden_states + token_type_embeds
+            hidden_domain = PotentialBounds(
+                float(hidden_domain.min) + float(word_bounds.min),
+                float(hidden_domain.max) + float(word_bounds.max),
+            )
 
+        # Embedding dropout is identity in evaluation. Its training envelope includes
+        # zero and inverse keep-probability scaling without reading the sampled mask.
         hidden_states = self.drop(hidden_states)
+        dropout_probability = float(self.drop.p)
+        if not math.isfinite(dropout_probability) or not 0.0 <= dropout_probability <= 1.0:
+            raise ValueError("GPT-2 embedding dropout probability must lie in [0, 1]")
+        if self.training and dropout_probability > 0.0:
+            if dropout_probability >= 1.0:
+                hidden_domain = PotentialBounds(0.0, 0.0)
+            else:
+                scale = 1.0 / (1.0 - dropout_probability)
+                candidates = (
+                    0.0,
+                    float(hidden_domain.min) * scale,
+                    float(hidden_domain.max) * scale,
+                )
+                hidden_domain = PotentialBounds(
+                    min(candidates),
+                    max(candidates),
+                )
 
         output_shape = (-1,) + input_shape[1:] + (hidden_states.size(-1),)
 
-        pot = Potential(hidden_states, PotentialBounds(hidden_states.min().item(), hidden_states.max().item()))
+        # Model entry is a signed calibration boundary. Collection observes the raw
+        # embedding sum on its table-derived safety rail; frozen phases reset the
+        # residual stream to the persisted range before the first block.
+        if model_calibration_is_bound(self):
+            pot = calibrated_potential(
+                self,
+                "input",
+                hidden_states,
+                collection_bounds=hidden_domain,
+            )
+        else:
+            pot = Potential(hidden_states, hidden_domain)
 
         for i, block in enumerate(self.h):
             pot = block(

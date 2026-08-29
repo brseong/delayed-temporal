@@ -72,6 +72,9 @@ from utils.transformers.models.spiking_vit.calibration import (  # noqa: E402
     vit_calibration_specs,
     vit_residual_calibration_specs,
 )
+from utils.transformers.models.spiking_gpt2.calibration import (  # noqa: E402
+    gpt2_calibration_specs,
+)
 
 
 def _expect_raises(
@@ -1268,6 +1271,129 @@ def verify_roberta_fixed_range_flow() -> None:
         assert predicted.logits.shape == (2, 4, 32)
 
 
+# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#GPT-2 Fixed Range Flow]]
+def verify_gpt2_fixed_range_flow() -> None:
+    """Verify GPT-2 embedding, MLP, and pre-norm residual fixed-range flow."""
+    from utils.transforms.noise import set_gaussian_time_noise
+    from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
+    from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import (
+        GPT2MLP,
+        GPT2Model,
+    )
+
+    def make_config(
+        *,
+        use_spiking_mlp: bool,
+        activation_function: str = "gelu_new",
+    ) -> GPT2Config:
+        """Construct a small cache-free GPT-2 verification configuration."""
+        config = GPT2Config(
+            vocab_size=32,
+            n_positions=16,
+            n_embd=8,
+            n_layer=1,
+            n_head=2,
+            use_spiking_mlp=use_spiking_mlp,
+            use_spiking_layernorm=False,
+            activation_function=activation_function,
+            theta=8.0,
+            resid_pdrop=0.0,
+            attn_pdrop=0.0,
+            embd_pdrop=0.0,
+            use_cache=False,
+        )
+        config._attn_implementation = "eager"
+        return config
+
+    # Every maintained activation maps the same declared input range identically
+    # across different tensor values, for both dense and spiking Conv1D execution.
+    set_gaussian_time_noise(enabled=False)
+    input_domain = PotentialBounds(-2.0, 2.0)
+    first_value = torch.tensor(
+        [[[-1.5, -1.0, -0.5, -0.25, 0.25, 0.5, 1.0, 1.5]]]
+    )
+    second_value = -first_value
+    for use_spiking_mlp in (False, True):
+        for activation_name in ("gelu_new", "relu", "silu", "tanh"):
+            torch.manual_seed(2100)
+            config = make_config(
+                use_spiking_mlp=use_spiking_mlp,
+                activation_function=activation_name,
+            )
+            mlp = GPT2MLP(16, config).eval()
+            first = mlp(Potential(first_value, input_domain))
+            second = mlp(Potential(second_value, input_domain))
+            assert first.domain == second.domain
+
+    # Architecture discovery declares one root model entry and two residual sites per
+    # block. Two identical passes collect a complete immutable table from token IDs.
+    torch.manual_seed(2110)
+    model = GPT2Model(make_config(use_spiking_mlp=True)).eval()
+    specs = gpt2_calibration_specs(
+        model,
+        lower_quantile=0.0,
+        upper_quantile=1.0,
+        margin_fraction=0.0,
+    )
+    assert tuple((spec.module_name, spec.tensor_name) for spec in specs) == (
+        ("", "input"),
+        ("h.0", "attention_residual"),
+        ("h.0", "output"),
+    )
+    metadata = replace(
+        _make_metadata(),
+        model_family="gpt2",
+        model_id="tiny-gpt2",
+        max_sequence_length=4,
+        input_shape=(4,),
+        model_options=(("use_spiking_mlp", True),),
+    )
+    collector = create_calibration_collector(metadata, specs, bin_count=16)
+    input_ids = torch.tensor([[1, 2, 3, 4], [4, 3, 2, 1]])
+    attention_mask = torch.ones_like(input_ids)
+    assert bind_model_calibration(model, collector) == 2
+    first_pass = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        use_cache=False,
+    )
+    start_histogram_calibration_pass(collector)
+    second_pass = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        use_cache=False,
+    )
+    assert torch.equal(first_pass.last_hidden_state, second_pass.last_hidden_state)
+    table = finalize_calibration_collection(collector)
+    assert clear_model_calibration(model, expected_state=collector) == 2
+
+    # Frozen validation binds exactly the same root and block modules. Every site is
+    # exercised without updating its persisted range, and reports a positive element
+    # denominator even when this in-population replay has no excursions.
+    runtime = create_calibration_runtime(
+        CalibrationMode.VALIDATE,
+        table,
+        expected_metadata=metadata,
+    )
+    assert bind_model_calibration(model, runtime) == 2
+    frozen = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        use_cache=False,
+    )
+    assert frozen.last_hidden_state.shape == (2, 4, 8)
+    report = get_calibration_clipping_report(runtime)
+    assert {
+        (item.module_name, item.tensor_name) for item in report
+    } == {
+        ("", "input"),
+        ("h.0", "attention_residual"),
+        ("h.0", "output"),
+    }
+    assert all(item.num_values > 0 for item in report)
+    assert clear_model_calibration(model, expected_state=runtime) == 2
+
+
 # @lat: [[calibration#Layer-wise Calibration#Frozen Execution#ViT Residual Range Reset]]
 def verify_vit_residual_range_reset() -> None:
     """Verify ViT block residuals collect raw values and consume frozen ranges."""
@@ -1522,6 +1648,7 @@ def main() -> None:
         verify_vit_fixed_activation_ranges,
         verify_bert_fixed_range_flow,
         verify_roberta_fixed_range_flow,
+        verify_gpt2_fixed_range_flow,
         verify_vit_residual_range_reset,
         verify_canonical_table_round_trip,
     )

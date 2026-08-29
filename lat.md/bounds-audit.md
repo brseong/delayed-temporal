@@ -4,14 +4,14 @@
 
 ## 결론
 
-현재 model adapter에는 live activation으로 `PotentialBounds`를 만드는 production 위치가 GPT-2의 6곳 남아 있어 model-wide fixed range 조건을 만족하지 않는다. ViT, BERT, RoBERTa production 경로의 위반은 모두 제거했다.
+현재 maintained model adapter에는 live activation으로 `PotentialBounds`를 만드는 production 위치가 없다. GPT-2 residual은 analytic sum과 optional frozen calibration을 사용하며 evaluator artifact lifecycle 연결은 별도 후속 단계다.
 
 Transform operator의 time window는 고정되어 있다. 최초 감사의 32곳 중 GPT-2 attention의 2곳, Gaussian 및 deterministic LayerNorm의 각 3곳, ordinary LayerNorm helper의 1곳은 fixed/analytic range로 교체되었다.
 
 핵심 결과는 다음과 같다.
 
 - `utils/transforms/`의 production operator는 입력 range, threshold $\theta$, time constant $\tau_s,\tau_m$, tensor shape에 대한 interval arithmetic으로 output range를 계산한다. `TimeBounds`를 live activation extrema로 만드는 위치는 없다.
-- 최초 감사에서 shared model operator와 네 model family의 live activation extrema 위치는 각각 7, 4, 4, 9, 8곳이었다. Shared operator, ViT, BERT, RoBERTa와 GPT-2 attention을 전환한 현재 합계는 6곳이다.
+- 최초 감사에서 shared model operator와 네 model family의 live activation extrema 위치는 각각 7, 4, 4, 9, 8곳이었다. Shared operator와 네 model adapter를 모두 전환한 현재 합계는 0곳이다.
 - `SpikingLinear`, `SpikingConv2d`, `SpikingConv1D`는 upstream fixed input range의 양 끝점을 weight 부호별로 선택해 exact affine range를 memoize하고 이후 parameter mutation을 검증한다. `SpikingLayerNorm`의 Gaussian과 deterministic 경로도 ablation별 frozen weight, bias, output domain을 공유한다.
 - ViT, BERT, RoBERTa, GPT-2 attention adapter는 이제 Gaussian value integration의 fixed range $[-S_{\max}\theta,S_{\max}\theta]$를 spiking backend와 공유한다.
 - 기존 quantile 수집은 진단용으로 남아 있다. ViT layer-wise calibration은 별도 artifact에 signed extrema, fixed-bin histogram, quantile, margin, training-subset identity, layer clipping을 보존한다.
@@ -319,7 +319,7 @@ Constrained division은 $X\leq Y$를 public $[0,1]$ rail에 반영하고 Gaussia
 
 ## 전수 검색 결과
 
-최초 source audit는 32곳을 확인했으며, attention adapter, 모든 shared LayerNorm 경로, ViT, BERT, RoBERTa adapter 전환 뒤 live activation extrema call site는 GPT-2의 6곳 남아 있다.
+최초 source audit는 32곳을 확인했으며, attention adapter, 모든 shared LayerNorm 경로와 네 model adapter 전환 뒤 live activation extrema call site는 0곳이다.
 
 | 구분 | live activation call site | 주요 원인 |
 |---|---:|---|
@@ -327,8 +327,8 @@ Constrained division은 $X\leq Y$를 public $[0,1]$ rail에 반영하고 Gaussia
 | ViT | 0 | preprocessing range, analytic activation range, calibrated encoder entry로 전환 완료 |
 | BERT | 0 | frozen embedding-table interval과 upstream `Potential` 전달로 전환 완료 |
 | RoBERTa | 0 | frozen table/affine interval과 internal `Potential` 전달로 전환 완료 |
-| GPT-2 | 6 | model entry, MLP, 세 residual path |
-| 합계 | 6 | 남은 위치가 inference batch의 extrema에 의존 |
+| GPT-2 | 0 | frozen embedding/affine interval, analytic activation, calibrated residual boundary로 전환 완료 |
+| 합계 | 0 | maintained forward가 activation extrema로 domain을 만들지 않음 |
 
 ### Transform operator
 
@@ -412,17 +412,17 @@ Public `RobertaModel` output은 Hugging Face tensor API를 유지한다. Local L
 
 ### GPT-2
 
-GPT-2에는 최초 8개의 activation-derived call site가 있었으며, attention의 2곳을 제거한 뒤 6곳이 남았다.
+GPT-2의 최초 8개 activation-derived call site는 모두 제거되었다. MLP와 model entry는 parameter-derived interval을 사용하고 세 residual branch는 endpoint addition을 사용하며 maintained self-attention과 MLP residual에는 optional calibration reset을 연결했다.
 
 | 함수 | 수 | 현재 동작 | 교체 |
 |---|---:|---|---|
 | [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Attention#forward]] | 0 | backend별 fixed range를 `c_proj`에 전달하고 projection/dropout range를 analytic propagation | 완료 |
-| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2MLP#forward]] | 2 | activation output과 final dropout output extrema 사용 | activation range/calibration 뒤 Conv1D range 전달; evaluation dropout은 range 불변 |
-| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Block#forward]] | 3 | attention, optional cross-attention, MLP residual output extrema 사용 | residual endpoint addition |
-| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Model#forward]] | 1 | token-plus-position embedding extrema 사용 | embedding table range 합 또는 model-entry calibration |
+| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2MLP#forward]] | 0 | dense/spiking Conv1D frozen interval, analytic activation, dropout interval 사용 | 완료 |
+| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Block#forward]] | 0 | residual endpoint addition과 optional `attention_residual`/`output` frozen calibration 사용 | adapter 완료; evaluator lifecycle 연결 필요 |
+| [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Model#forward]] | 0 | frozen token/position table interval과 optional model-entry calibration 사용 | adapter 완료; evaluator lifecycle 연결 필요 |
 | [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#SpikingConv1D#forward]] | 0 | transposed output-column absolute-sum rail을 freeze하며 forward-time parameter scan 없음 | 완료 |
 
-현재 spiking GPT-2 MLP도 projection만 spiking이며 activation은 `ACT2FN`을 직접 실행한다. Default `gelu_new`, GELU, SiLU는 calibration이 필요하고 ReLU/Tanh는 analytic range를 사용할 수 있다. Cross-attention은 constructor에서 거부되지만 residual code가 남아 있으므로, 지원하지 않는 동안 해당 branch를 제거하거나 지원 시 별도 fixed range를 정의해야 한다.
+GPT-2 MLP activation은 dense/spiking projection 모두 `ACT2FN` 값을 유지한다. GELU-family와 SiLU는 $[\min(l,0),\max(u,0)]$, ReLU와 Tanh는 endpoint mapping을 사용한다. Cross-attention은 constructor에서 지원하지 않지만 남은 compatibility branch도 endpoint addition만 사용한다.
 
 ### Attention backend
 
@@ -546,4 +546,4 @@ Migration 완료는 numerical output뿐 아니라 declared potential range의 �
 
 Audit 자체는 완료되었지만 구현은 아직 fixed potential range contract를 만족하지 않는다.
 
-Transform algebra와 time window는 이미 static하고 attention range 전달, 모든 LayerNorm range propagation, affine와 encoder embedding parameter range freezing, ViT layer-wise calibration도 완료되었다. 남은 작업은 GPT-2 adapter의 6개 activation-derived range를 제거하는 것이다.
+Transform algebra, time window, attention, LayerNorm, affine, embedding, activation, residual의 maintained forward range는 모두 static하다. 남은 작업은 GPT-2 residual artifact lifecycle과 최종 source-audit 자동 검증을 evaluator에 연결하는 것이다.

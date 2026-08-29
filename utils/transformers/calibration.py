@@ -169,8 +169,11 @@ def model_calibration_is_bound(module: nn.Module) -> bool:
         (CalibrationCollectorState, CalibrationRuntimeState),
     ):
         raise TypeError("bound calibration state has an invalid type")
-    if not isinstance(module_name, str) or not module_name:
-        raise TypeError("bound calibration module name must be a non-empty string")
+    # ``named_modules`` uses the empty string for the root module. Calibration keys
+    # and binding already preserve that canonical identity, so accept it here while
+    # continuing to reject non-string corruption.
+    if not isinstance(module_name, str):
+        raise TypeError("bound calibration module name must be a string")
     return True
 
 
