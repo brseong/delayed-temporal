@@ -17,7 +17,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from scripts.evaluation.brainscales2_toy_hil import _run_hagen_output
+from scripts.evaluation.brainscales2_toy_hil import (
+    _aggregate_isolated_conditions,
+    _apply_condition_worker_config,
+    _load_isolated_condition,
+    _run_hagen_output,
+)
 from utils.hardware.brainscales2.config import BrainScaleS2PoolConfig
 from utils.hardware.brainscales2.hagen import HagenConfig, HagenPWMBackend, HagenResult
 from utils.hardware.brainscales2.toy import (
@@ -333,6 +338,120 @@ def verify_hagen_host_tiling() -> None:
     assert all(0.0 <= row["saturation_rate"] <= 1.0 for row in schedule)
 
 
+def verify_condition_process_isolation_contract() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Condition process isolation]]
+    with TemporaryDirectory() as directory:
+        output = Path(directory)
+        config_path = output / "worker_config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "checkpoint": str(output / "checkpoint.pt"),
+                    "output_dir": str(output / "worker"),
+                    "condition_worker": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        loaded_args = _apply_condition_worker_config(
+            SimpleNamespace(
+                condition_worker_config=config_path,
+                checkpoint=None,
+                output_dir=output,
+                condition_worker=False,
+            )
+        )
+        assert loaded_args.checkpoint == output / "checkpoint.pt"
+        assert loaded_args.output_dir == output / "worker"
+        assert loaded_args.condition_worker is True
+
+        labels = torch.tensor([0, 1])
+        baseline_logits = torch.tensor([[2.0, 0.0], [0.0, 2.0]])
+        hidden = torch.tensor([[0, 31], [15, 8]], dtype=torch.int32)
+        spiking = BrainScaleS2PoolConfig(
+            trials=4,
+            pool_sizes=(1, 2),
+            placements=("same-quadrant",),
+            routings=("broadcast",),
+        )
+        worker_dirs: list[Path] = []
+        for pool_size in (1, 2):
+            result = MockToyPoolBackend().run_uint5(
+                hidden,
+                ToyPoolConfig(
+                    pool_size=pool_size,
+                    logical_neurons=2,
+                    inference_trials=2,
+                    calibration_trials=4,
+                    seed=40 + pool_size,
+                    miss_probability=0.0,
+                ),
+                spiking,
+            )
+            key = f"ttfs_M{pool_size}_local-pool_dedicated"
+            evaluation = ToyConditionEvaluation(
+                key=key,
+                pool_size=pool_size,
+                pooling_domain="ttfs",
+                pool_result=result,
+                logits=baseline_logits.reshape(1, 2, 2).repeat(2, 1, 1),
+                pwm_metadata={"first": {"shared": True}, "output": {}},
+            )
+            worker_dir = output / "condition_workers" / key
+            write_toy_artifacts(
+                worker_dir,
+                labels=labels,
+                float_logits=baseline_logits,
+                ideal_logits=baseline_logits,
+                ideal_hidden_uint5=hidden,
+                evaluations=[evaluation],
+                manifest={
+                    "pool_sizes": [pool_size],
+                    "placements": ["local-pool"],
+                    "conditions": [
+                        {
+                            "key": key,
+                            "pool_size": pool_size,
+                            "pooling_domain": "ttfs",
+                            "placement": result.placement,
+                            "mapping": result.mapping,
+                            "physical_coordinates": result.physical_coordinates,
+                            "pool_metadata": result.metadata,
+                            "pwm_metadata": evaluation.pwm_metadata,
+                        }
+                    ],
+                },
+                runtime={"elapsed_s": float(pool_size)},
+                bootstrap_iterations=10,
+            )
+            restored, _, _, _ = _load_isolated_condition(worker_dir)
+            assert restored.key == key
+            worker_dirs.append(worker_dir)
+
+        first_hidden_dir = output / "condition_workers" / "first_hidden_avg1"
+        first_hidden_dir.mkdir(parents=True)
+        _aggregate_isolated_conditions(
+            SimpleNamespace(
+                output_dir=output,
+                pool_sizes=[1, 2],
+                placements=["local-pool"],
+                bootstrap_iterations=10,
+                seed=0,
+            ),
+            worker_dirs,
+            {1: first_hidden_dir},
+        )
+        master = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+        isolation = master["condition_process_isolation"]
+        assert isolation["enabled"] is True
+        assert isolation["worker_count"] == 2
+        assert isolation["resumable"] is True
+        with (output / "metrics.csv").open(newline="", encoding="utf-8") as handle:
+            conditions = {row["condition"] for row in csv.DictReader(handle)}
+        assert "ttfs_M1_local-pool_dedicated" in conditions
+        assert "ttfs_M2_local-pool_dedicated" in conditions
+
+
 def verify_metrics_and_artifact_schema() -> None:
     # @lat: [[hardware#Toy ANN2SNN Verification#Network artifact contract]]
     spiking = BrainScaleS2PoolConfig(
@@ -432,6 +551,8 @@ def verify_python311_and_notebook_contract() -> None:
     assert "POOL_SAMPLE_CHUNK_SIZE = 64" in source
     assert "'--pool-sample-chunk-size', POOL_SAMPLE_CHUNK_SIZE" in source
     assert "HAGEN_ROW_CHUNK_SIZE = 512" in source
+    assert "ARTIFACT_ROOT = None" in source
+    assert "if ARTIFACT_ROOT is not None" in source
     assert "'--hagen-row-chunk-size', HAGEN_ROW_CHUNK_SIZE" in source
     assert source.index("'--phase', 'train'") < source.index(
         "setup_hardware_client()"
@@ -451,6 +572,7 @@ def main() -> None:
     verify_replay_split_and_reproducibility()
     verify_hagen_output_row_chunking()
     verify_hagen_host_tiling()
+    verify_condition_process_isolation_contract()
     verify_metrics_and_artifact_schema()
     verify_python311_and_notebook_contract()
     print("BrainScaleS-2 toy ANN2SNN verification passed")

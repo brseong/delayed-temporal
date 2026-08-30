@@ -51,6 +51,7 @@ from utils.hardware.brainscales2.toy_pooling import (
     MockToyPoolBackend,
     ReplayToyPoolBackend,
     ToyPoolConfig,
+    ToyPoolResult,
     concatenate_toy_pool_results,
 )
 
@@ -157,7 +158,47 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--synaptic-weight", type=float, default=63.0)
     parser.add_argument("--input-fan-in", type=int, default=4)
     parser.add_argument("--raw-time-scale-s", type=float)
+    parser.add_argument("--condition-worker-config", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--condition-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--prepare-first-hidden", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--first-hidden-cache", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--condition-hagen-avg", type=int, default=1, help=argparse.SUPPRESS)
+    parser.add_argument("--condition-code-revision", help=argparse.SUPPRESS)
+    parser.add_argument("--condition-hagen-calibration-sha256", help=argparse.SUPPRESS)
+    parser.add_argument("--condition-spiking-calibration-sha256", help=argparse.SUPPRESS)
+    parser.add_argument("--condition-checkpoint-sha256", help=argparse.SUPPRESS)
+    parser.add_argument("--condition-converted-sha256", help=argparse.SUPPRESS)
     return parser.parse_args()
+
+
+_WORKER_PATH_FIELDS = {
+    "dataset_cache",
+    "checkpoint",
+    "converted_checkpoint",
+    "replay_events",
+    "output_dir",
+    "hagen_calibration",
+    "spiking_calibration",
+    "condition_worker_config",
+    "first_hidden_cache",
+}
+
+
+def _apply_condition_worker_config(args: argparse.Namespace) -> argparse.Namespace:
+    if args.condition_worker_config is None:
+        return args
+    config_path = args.condition_worker_config.resolve()
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    unknown = sorted(set(payload) - set(vars(args)))
+    if unknown:
+        raise ValueError(f"condition worker config has unknown keys: {unknown}")
+    for key, value in payload.items():
+        if key in _WORKER_PATH_FIELDS and value is not None:
+            value = Path(value)
+        setattr(args, key, value)
+    args.condition_worker_config = config_path
+    args.condition_worker = True
+    return args
 
 
 def _git_revision() -> str | None:
@@ -505,6 +546,15 @@ def evaluation_phase(args: argparse.Namespace) -> None:
     spiking_config = _spiking_config(args)
     evaluations: list[ToyConditionEvaluation] = []
     first_cache: dict[int, tuple[torch.Tensor, dict[str, Any]]] = {}
+    if args.first_hidden_cache is not None:
+        cached = torch.load(args.first_hidden_cache, map_location="cpu", weights_only=False)
+        cached_avg = int(cached["hagen_avg"])
+        cached_hidden = cached["first_hidden"].to(torch.int32)
+        if cached_hidden.shape != (test_x.shape[0], converted.architecture.hidden_features):
+            raise ValueError("shared first-hidden cache does not match the evaluation shape")
+        if cached.get("source_parameter_sha256") != parameter_sha256(model):
+            raise ValueError("shared first-hidden cache belongs to a different checkpoint")
+        first_cache[cached_avg] = (cached_hidden, cached["metadata"])
 
     for placement in placements:
         for effective_pool_size in pool_sizes:
@@ -670,6 +720,276 @@ def evaluation_phase(args: argparse.Namespace) -> None:
     )
 
 
+def _serialize_worker_config(args: argparse.Namespace) -> dict[str, Any]:
+    def normalize(value: Any) -> Any:
+        if isinstance(value, Path):
+            return str(value.resolve())
+        if isinstance(value, (tuple, list)):
+            return [normalize(child) for child in value]
+        return value
+
+    return {
+        key: normalize(value)
+        for key, value in vars(args).items()
+        if key != "condition_worker_config"
+    }
+
+
+def _run_condition_subprocess(
+    args: argparse.Namespace,
+    worker_dir: Path,
+    *,
+    required: tuple[str, ...],
+    overrides: dict[str, Any],
+) -> None:
+    worker_dir.mkdir(parents=True, exist_ok=True)
+    config_path = worker_dir / "worker_config.json"
+    payload = _serialize_worker_config(args)
+    payload.update(overrides)
+    payload.update(
+        {
+            "condition_code_revision": _git_revision(),
+            "condition_hagen_calibration_sha256": file_sha256(args.hagen_calibration),
+            "condition_spiking_calibration_sha256": file_sha256(args.spiking_calibration),
+            "condition_checkpoint_sha256": file_sha256(args.checkpoint),
+            "condition_converted_sha256": file_sha256(args.converted_checkpoint),
+        }
+    )
+    payload.update(
+        {
+            "condition_worker": True,
+            "condition_worker_config": None,
+            "output_dir": str(worker_dir.resolve()),
+        }
+    )
+    same_config = False
+    if config_path.is_file():
+        try:
+            same_config = json.loads(config_path.read_text(encoding="utf-8")) == payload
+        except (OSError, json.JSONDecodeError):
+            same_config = False
+    if same_config and all((worker_dir / name).is_file() for name in required):
+        print(f"Reusing completed condition worker {worker_dir.name}", flush=True)
+        return
+    _json_write(config_path, payload)
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--output-dir",
+        str(worker_dir.resolve()),
+        "--condition-worker-config",
+        str(config_path.resolve()),
+    ]
+    print("Launching isolated worker:", worker_dir.name, flush=True)
+    subprocess.run(command, cwd=REPOSITORY_ROOT, check=True)
+    missing = [name for name in required if not (worker_dir / name).is_file()]
+    if missing:
+        raise RuntimeError(f"condition worker {worker_dir.name} missed artifacts: {missing}")
+
+
+def prepare_first_hidden_phase(args: argparse.Namespace) -> None:
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    dataset = load_dataset_bundle(args.task, cache_dir=args.dataset_cache)
+    test_x, _ = _select_test_data(args, dataset)
+    model = _load_float_checkpoint(args)
+    converted = _load_or_convert(args, model, dataset.calibration_x)
+    hagen = _hagen_backend(args)
+    if hagen is None:
+        raise ValueError("physical first-hidden preparation requires a Hagen backend")
+    input_uint5 = converted.encode_input(test_x)
+    first = hagen.first_layer(
+        converted,
+        input_uint5,
+        avg=args.condition_hagen_avg,
+    )
+    payload = {
+        "hagen_avg": args.condition_hagen_avg,
+        "first_hidden": first.value.to(torch.int32),
+        "metadata": first.metadata,
+        "test_samples": test_x.shape[0],
+        "source_parameter_sha256": parameter_sha256(model),
+    }
+    torch.save(payload, args.output_dir / "first_hidden.pt")
+    _json_write(
+        args.output_dir / "first_hidden_manifest.json",
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "first_hidden"
+        },
+    )
+    print(f"Wrote shared physical first hidden to {args.output_dir}", flush=True)
+
+
+def _load_isolated_condition(
+    worker_dir: Path,
+) -> tuple[ToyConditionEvaluation, dict[str, Any], dict[str, Any], dict[str, Any]]:
+    manifest = json.loads((worker_dir / "manifest.json").read_text(encoding="utf-8"))
+    runtime = json.loads((worker_dir / "runtime.json").read_text(encoding="utf-8"))
+    archive = torch.load(
+        worker_dir / "intermediates.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    if len(archive["conditions"]) != 1 or len(manifest["conditions"]) != 1:
+        raise ValueError(f"isolated worker {worker_dir} must contain exactly one condition")
+    key, tensors = next(iter(archive["conditions"].items()))
+    condition_manifest = manifest["conditions"][0]
+    if condition_manifest["key"] != key:
+        raise ValueError(f"isolated worker {worker_dir} condition keys disagree")
+    pool_result = ToyPoolResult(
+        first_spike_s=tensors["first_spike_s"],
+        fired=tensors["fired"],
+        spike_count=tensors["spike_count"],
+        nominal_input_s=tensors["nominal_input_s"],
+        pooled_first_spike_s=tensors["pooled_first_spike_s"],
+        decoded_uint5=tensors["decoded_uint5"],
+        all_miss=tensors["all_miss"],
+        physical_coordinates=tensors["physical_coordinates"],
+        pool_size=int(tensors["first_spike_s"].shape[-1]),
+        placement=condition_manifest["placement"],
+        mapping=condition_manifest["mapping"],
+        metadata=condition_manifest["pool_metadata"],
+    )
+    evaluation = ToyConditionEvaluation(
+        key=key,
+        pool_size=int(condition_manifest["pool_size"]),
+        pooling_domain=condition_manifest["pooling_domain"],
+        pool_result=pool_result,
+        logits=tensors["logits"],
+        pwm_metadata=condition_manifest["pwm_metadata"],
+    )
+    return evaluation, archive, manifest, runtime
+
+
+def _aggregate_isolated_conditions(
+    args: argparse.Namespace,
+    worker_dirs: list[Path],
+    first_hidden_dirs: dict[int, Path],
+) -> None:
+    evaluations: list[ToyConditionEvaluation] = []
+    manifests: list[dict[str, Any]] = []
+    runtimes: dict[str, Any] = {}
+    reference_archive: dict[str, Any] | None = None
+    for worker_dir in worker_dirs:
+        evaluation, archive, manifest, runtime = _load_isolated_condition(worker_dir)
+        if reference_archive is None:
+            reference_archive = archive
+        else:
+            for key in ("labels", "float_logits", "ideal_logits", "ideal_hidden_uint5"):
+                if not torch.equal(reference_archive[key], archive[key]):
+                    raise ValueError(f"isolated workers disagree on {key}")
+        evaluations.append(evaluation)
+        manifests.append(manifest)
+        runtimes[evaluation.key] = runtime
+    if reference_archive is None:
+        raise ValueError("no isolated condition workers were produced")
+    base_manifest = {
+        key: value
+        for key, value in manifests[0].items()
+        if key not in {"schema_version", "event_csv_coverage", "conditions"}
+    }
+    base_manifest.update(
+        {
+            "pool_sizes": sorted({item.pool_size for item in evaluations}),
+            "placements": list(dict.fromkeys(item.pool_result.placement for item in evaluations)),
+            "conditions": [
+                condition
+                for manifest in manifests
+                for condition in manifest["conditions"]
+            ],
+            "condition_process_isolation": {
+                "enabled": True,
+                "worker_count": len(worker_dirs),
+                "worker_directories": [
+                    str(path.relative_to(args.output_dir)) for path in worker_dirs
+                ],
+                "worker_environments": {
+                    manifest["conditions"][0]["key"]: manifest.get("environment")
+                    for manifest in manifests
+                },
+                "shared_first_hidden": {
+                    str(avg): str(path.relative_to(args.output_dir))
+                    for avg, path in first_hidden_dirs.items()
+                },
+                "resumable": True,
+            },
+        }
+    )
+    metrics = write_toy_artifacts(
+        args.output_dir,
+        labels=reference_archive["labels"],
+        float_logits=reference_archive["float_logits"],
+        ideal_logits=reference_archive["ideal_logits"],
+        ideal_hidden_uint5=reference_archive["ideal_hidden_uint5"],
+        evaluations=evaluations,
+        manifest=base_manifest,
+        runtime={
+            "condition_process_isolation": True,
+            "condition_workers": runtimes,
+        },
+        bootstrap_iterations=args.bootstrap_iterations,
+        seed=args.seed,
+    )
+    float_accuracy = next(row["accuracy"] for row in metrics if row["condition"] == "float-ann")
+    ideal_accuracy = next(
+        row["accuracy"] for row in metrics if row["condition"] == "ideal-converted"
+    )
+    print(
+        f"Aggregated isolated HIL artifacts at {args.output_dir}; "
+        f"float_accuracy={float_accuracy:.4f}, ideal_accuracy={ideal_accuracy:.4f}",
+        flush=True,
+    )
+
+
+def isolated_hardware_evaluation_phase(args: argparse.Namespace) -> None:
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    pool_sizes = [1, 4] if args.quick else list(args.pool_sizes)
+    placements = [args.placements[0]] if args.quick else list(args.placements)
+    condition_root = args.output_dir / "condition_workers"
+    hagen_averages = (
+        {1}
+        if args.pooling_domain == "ttfs"
+        else {int(pool_size) for pool_size in pool_sizes}
+    )
+    first_hidden_dirs: dict[int, Path] = {}
+    for hagen_avg in sorted(hagen_averages):
+        worker_dir = condition_root / f"first_hidden_avg{hagen_avg}"
+        _run_condition_subprocess(
+            args,
+            worker_dir,
+            required=("first_hidden.pt", "first_hidden_manifest.json"),
+            overrides={
+                "prepare_first_hidden": True,
+                "condition_hagen_avg": hagen_avg,
+                "first_hidden_cache": None,
+            },
+        )
+        first_hidden_dirs[hagen_avg] = worker_dir
+
+    worker_dirs: list[Path] = []
+    for placement in placements:
+        for pool_size in pool_sizes:
+            hagen_avg = 1 if args.pooling_domain == "ttfs" else int(pool_size)
+            key = f"{args.pooling_domain}_M{pool_size}_{placement}_{args.pool_mapping}"
+            worker_dir = condition_root / key
+            _run_condition_subprocess(
+                args,
+                worker_dir,
+                required=("manifest.json", "runtime.json", "intermediates.pt"),
+                overrides={
+                    "prepare_first_hidden": False,
+                    "first_hidden_cache": str(
+                        (first_hidden_dirs[hagen_avg] / "first_hidden.pt").resolve()
+                    ),
+                    "placements": [placement],
+                    "pool_sizes": [pool_size],
+                },
+            )
+            worker_dirs.append(worker_dir)
+    _aggregate_isolated_conditions(args, worker_dirs, first_hidden_dirs)
+
+
 def probe_phase(args: argparse.Namespace) -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     dataset = load_dataset_bundle(args.task, cache_dir=args.dataset_cache)
@@ -695,9 +1015,17 @@ def probe_phase(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    args = parse_args()
+    args = _apply_condition_worker_config(parse_args())
     _validate_architecture(args)
-    if args.phase == "train":
+    if args.prepare_first_hidden:
+        prepare_first_hidden_phase(args)
+    elif (
+        args.phase == "hardware-eval"
+        and args.pool_backend == "hardware"
+        and not args.condition_worker
+    ):
+        isolated_hardware_evaluation_phase(args)
+    elif args.phase == "train":
         train_phase(args)
     elif args.phase == "convert":
         convert_phase(args)

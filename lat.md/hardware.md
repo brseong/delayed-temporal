@@ -118,6 +118,8 @@ Full hardware evaluation bounds hxtorch memory by slicing only the sample axis b
 
 After temporal decoding, the physical Hagen readout also slices the flattened trial-sample row axis before each PWM call. The concatenated logits retain their original row order, and each row chunk records its calibration, chip, shape, and elapsed-time metadata.
 
+Formal multi-condition runs materialize each required physical Hagen hidden tensor once, then execute every placement and pool size in a fresh child process. Completed worker directories are resumable, and the parent rebuilds the combined artifact so process isolation does not change paired inputs or the result schema.
+
 ### Local mock and replay evidence
 
 Synthetic and artifact-replay backends validate accuracy propagation before hardware use but are not promoted to new physical evidence.
@@ -159,6 +161,10 @@ Hardware sample chunks must concatenate along the sample axis without altering t
 ### Hagen output row chunking
 
 Physical Hagen readout chunks must preserve flattened trial-sample row order, bound each PWM call, and retain per-chunk provenance in the aggregate metadata.
+
+### Condition process isolation
+
+Each hardware condition must run in a fresh process, reuse the matching shared first-hidden tensor, resume only matching completed worker configs, and aggregate into the standard paired artifact schema.
 
 ### Miss-aware temporal decoding
 
