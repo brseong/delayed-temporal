@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import FrozenInstanceError
 import math
 from pathlib import Path
+import subprocess
 import sys
 
 import torch
@@ -45,7 +46,14 @@ from utils.transforms.spike_to_potential import (
     exponential_difference_operator,
     normalized_exp_operator,
 )
-from utils.transforms.types import Potential, PotentialBounds, SpikeSample, TimeBounds
+from utils.transforms.types import (
+    ClosedBounds,
+    Potential,
+    PotentialBounds,
+    SpikeSample,
+    TimeBounds,
+    check_domain,
+)
 from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import SpikingConv1D
 from utils.transformers.models.spiking_ops import (
     SpikingConv2d,
@@ -125,6 +133,83 @@ def verify_immutable_memoized_bounds() -> None:
     assert not torch.equal(first_output, second_output)
     assert first_domain == second_domain == PotentialBounds(-4.0, 4.0)
     set_gaussian_time_noise(enabled=False)
+
+
+# @lat: [[evaluation#Evaluation and Verification#Gaussian Spike-Time Verification#Closed-Domain Verification]]
+def verify_closed_bounds_validation() -> None:
+    """Verify central endpoint validation and optimization-safe domain checks.
+
+    Every physical interval must reject non-real, non-finite, and reversed endpoints
+    when it is constructed. Tensor membership failures must raise an explicit
+    exception even when Python removes ``assert`` statements under ``-O``.
+
+    Raises:
+        AssertionError: If malformed bounds or out-of-domain tensors are accepted.
+    """
+    for bounds_type in (ClosedBounds, PotentialBounds, TimeBounds):
+        assert bounds_type(1.0, 1.0).range == 0.0
+        for endpoints, error_type, message in (
+            ((False, 1.0), TypeError, "real scalar"),
+            (("0", 1.0), TypeError, "real scalar"),
+            ((0.0, float("inf")), ValueError, "finite"),
+            ((float("nan"), 1.0), ValueError, "finite"),
+            ((2.0, 1.0), ValueError, "min <= max"),
+        ):
+            try:
+                bounds_type(*endpoints)
+            except error_type as exc:
+                assert message in str(exc)
+            else:
+                raise AssertionError(
+                    f"{bounds_type.__name__} accepted invalid endpoints {endpoints}"
+                )
+
+    @check_domain
+    def identity(input_value: torch.Tensor, domain: PotentialBounds) -> torch.Tensor:
+        return input_value
+
+    valid_domain = PotentialBounds(-1.0, 1.0)
+    valid = torch.tensor([-1.0, 0.0, 1.0])
+    assert identity(valid, valid_domain) is valid
+    for invalid in (
+        torch.tensor([-1.01, 0.0]),
+        torch.tensor([0.0, 1.01]),
+        torch.tensor([0.0, float("nan")]),
+    ):
+        try:
+            identity(invalid, valid_domain)
+        except ValueError as exc:
+            assert "must be within the specified domain" in str(exc)
+        else:
+            raise AssertionError("check_domain accepted an out-of-domain tensor")
+
+    optimized_check = """
+import torch
+from utils.transforms.types import PotentialBounds, check_domain
+
+@check_domain
+def identity(input_value, domain):
+    return input_value
+
+try:
+    identity(torch.tensor([2.0]), PotentialBounds(-1.0, 1.0))
+except ValueError:
+    pass
+else:
+    raise SystemExit('optimized check_domain accepted an invalid tensor')
+"""
+    completed = subprocess.run(
+        [sys.executable, "-O", "-c", optimized_check],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            "check_domain failed under optimized Python:\n"
+            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+        )
 
 
 # @lat: [[evaluation#Evaluation and Verification#Gaussian Spike-Time Verification]]
@@ -214,24 +299,6 @@ def verify_gaussian_time_input_validation() -> None:
             0.0,
             1.0,
             object(),
-        ),
-        (
-            "non-finite domain endpoint",
-            ValueError,
-            "endpoints must be finite",
-            valid_nominal,
-            0.0,
-            1.0,
-            TimeBounds(0.0, float("inf")),
-        ),
-        (
-            "reversed domain",
-            ValueError,
-            "min <= max",
-            valid_nominal,
-            0.0,
-            1.0,
-            TimeBounds(4.0, 0.0),
         ),
     ]
 
@@ -2994,30 +3061,27 @@ def verify_gaussian_spiking_layernorm() -> None:
                         bias.max().item(),
                     )
 
-                    # Select the analytic pre-affine magnitude for this topology.
-                    # Dense normalization uses the finite-feature theorem, direct
-                    # exponential subtraction uses R-1/R, and the spiking
-                    # exponential-difference contract retains its relaxed R rail.
+                    # Dense population normalization uses sqrt(d-1). Every mixed
+                    # dual-rail topology uses sqrt(d), preventing the physical
+                    # identity window from inheriting the much wider log-rail ratio.
                     all_dense = not (
                         use_spiking_mul
                         or use_spiking_log
                         or use_spiking_expdiff
                     )
-                    ratio = (
-                        ablation_layer.theta - ablation_layer.clip_margin
-                    ) / ablation_layer.clip_margin
                     if all_dense:
                         result_limit = math.sqrt(value.shape[-1] - 1)
                         effective_weight = weight
-                    elif use_spiking_expdiff:
-                        result_limit = ratio
-                        effective_weight = weight.clamp(
-                            -ablation_layer.theta,
-                            ablation_layer.theta,
-                        )
                     else:
-                        result_limit = ratio - 1.0 / ratio
-                        effective_weight = weight
+                        result_limit = math.sqrt(value.shape[-1])
+                        effective_weight = (
+                            weight.clamp(
+                                -ablation_layer.theta,
+                                ablation_layer.theta,
+                            )
+                            if use_spiking_expdiff
+                            else weight
+                        )
 
                     # The spiking final multiplication propagates one global gamma
                     # interval, whereas dense and direct branches apply gamma and
@@ -3119,8 +3183,8 @@ def verify_gaussian_spiking_layernorm() -> None:
         assert parameter_bounds[2] != original_bounds[2]
 
         # Bound-defining configuration belongs to the same cache identity as gamma
-        # and beta. Changing the clip margin changes R and must also fail closed until
-        # refresh recomputes every domain for the new physical time window.
+        # and beta. Changing the clip margin must fail closed until refresh publishes
+        # a new tuple, even though the finite-feature output endpoints stay equal.
         mutation_layer.clip_margin = 0.2
         try:
             mutation_layer.freeze_parameter_bounds()
@@ -3133,7 +3197,8 @@ def verify_gaussian_spiking_layernorm() -> None:
         configuration_bounds = mutation_layer.freeze_parameter_bounds(
             refresh=True
         )
-        assert configuration_bounds[2] != parameter_bounds[2]
+        assert configuration_bounds is not parameter_bounds
+        assert configuration_bounds[2] == parameter_bounds[2]
 
         # A refreshed deterministic call must consume the newly published object;
         # this also proves that invalidation does not permanently poison the module.
@@ -3332,6 +3397,7 @@ def verify_gaussian_spiking_attention() -> None:
 
 if __name__ == "__main__":
     verify_immutable_memoized_bounds()
+    verify_closed_bounds_validation()
     verify_broadcast_gaussian_time_inputs()
     verify_gaussian_time_input_validation()
     verify_gaussian_sampler_rng_contract()

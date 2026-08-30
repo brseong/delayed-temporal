@@ -35,7 +35,9 @@ The ViT and GPT-2 runners separate clean range collection from frozen validation
 
 `--calibration-mode collect` selects a fixed-size prefix of a seeded training-split permutation, replays it sequentially for min-max and fixed-bin histogram passes, writes one JSON artifact, and exits without loading validation metrics. Timing noise, mismatch, parameter perturbation, and `DataParallel` are rejected in this mode.
 
-`--calibration-mode validate` and `--calibration-mode inference` reconstruct the same training-subset and model metadata, require an exact artifact match, bind frozen model-entry and per-block residual ranges, and report strict layer underflow and overflow after the run. Robustness noise may be enabled only after the clean artifact identity is checked.
+`--calibration-mode validate` and `--calibration-mode inference` reconstruct the same training-subset and model metadata, require an exact artifact match, bind only declared residual, ViT GELU-input, and spiking-attention score ranges, and report strict layer underflow and overflow after the run. Analytic model-entry ranges bypass calibration.
+
+The maintained defaults select the observed minimum and maximum (`0/1`) without tail truncation, then add a 5% per-side margin. Interior quantiles remain available only as explicit diagnostic overrides.
 
 The artifact path is explicit through `--calibration-path`. ViT records image processing and geometry; GPT-2 records empty-text filtering, tokenizer controls, padded sequence length, and dataset configuration. Both record the seeded training subset, checkpoint, TTFS constants, attention path, and active ablations.
 
@@ -52,9 +54,37 @@ Available diagnostics include:
 - ViT alerts and histograms for centered LayerNorm activations and bounds.
 - W&B logging for configuration, intermediate metrics, and final metrics.
 
-Clamp logging uses global module-name state. Hooks must set and clear that state consistently, especially when model execution is parallelized.
+Clamp logging uses global module-name state. Hooks set and restore nested names consistently, and the evaluator rejects named clamp reporting under `DataParallel`; use one process per GPU.
+
+The ViT runner enables batch-aggregated named clamp reporting only with `--report-clamp-stats`. Nested hooks attribute each clamp to its encoder, attention, LayerNorm, affine, or convolution module, restore the outer name after each call, and print one run-wide count and rate per site.
 
 Each spiking runner prints per-site Gaussian rates and logs them under `Gaussian/<site>/...` in W&B. Gaussian counters are process-wide mutable state and are reset whenever a new seeded replica is configured.
+
+## Fixed-Domain ViT-S Real-Data Audit
+
+The fixed-domain audit measures one cached pretrained ViT-S checkpoint on the same 5,000-image ImageNet-1k validation subset and separates analytic rails, residual calibration, and Gaussian event effects.
+
+The checkpoint is `/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k`; all runs use float32, batch size 32, $\theta=2000$, and all three spiking LayerNorm stages plus spiking attention and MLP. The dense Hugging Face reference scores 80.26%, while calibration-free spiking scores 80.54%.
+
+| Condition | Accuracy | Interpretation |
+|---|---:|---|
+| Hugging Face dense | 80.26% | Same checkpoint, preprocessing, and validation subset |
+| Analytic fixed rails | 80.54% | The $\sqrt d$ mixed LayerNorm rail removes the prior float32 timestamp-cancellation failure |
+| Min/max + 5% calibration | 80.36% | 1,024 training images, 48 necessary sites, full 5,000-image validation |
+| Retired tail-trim calibration | 59.26% | 1,024 training images, 2,048 bins, 0.001/0.999 quantiles, 5% margin |
+| Retired calibration + Gaussian | 59.26% | $r_t=3.162\times10^{-10}$, $\sigma_t=1.2648\times10^{-6}$, seed 0 |
+
+The analytic run reports zero excursions for the input embedding convolution, affine input rails, attention scores, attention value outputs, LayerNorm variance, and the new $\sqrt d$ normalized LayerNorm rail across all 5,000 images. Inactive LayerNorm dual rails clamped to `clip_margin` and the product primitive's structural reset rail are bookkeeping, not failures of those ideal output rails. The conventional classifier has no TTFS rail and is assessed by task accuracy.
+
+The retired tail-trim artifact is the observed accuracy bottleneck. Its largest single rate is layer-10 attention-score overflow at 0.158845%; layer-0 output underflow is 0.114174%, and encoder-input underflow/overflow are 0.0577443%/0.0628810%. These individually small clamps compound to a 21.28-point loss relative to the analytic spiking run, so this artifact is diagnostic and must not be treated as the maintained accuracy baseline.
+
+The replacement artifact uses only the 48 necessary residual, composed-GELU-input, and spiking-attention-score sites, selects observed min/max, and adds 5% per side. Full 5,000-image validation scores 80.36%, recovering 21.10 percentage points from tail trimming and remaining within 0.18 points of calibration-free spiking.
+
+Only 408 of 41,204,520,000 calibrated values exceed their frozen rails, an aggregate rate of $9.90183\times10^{-9}$. The largest site is layer-1 attention-score overflow at 377 of 1,164,270,000 values ($3.23808\times10^{-7}$); the next is layer-0 attention-residual overflow at 23 of 378,240,000 values ($6.0808\times10^{-8}$).
+
+At the precision-limited Gaussian setting, division-numerator misses are 8.67352%, multiplication-output underflow saturation is 0.901420%, LayerNorm positive/negative log misses are 0.583904%/0.600765%, and convolution data-event misses are 0.453567%. Division-output overflow is $9.46541\times10^{-6}$; affine output, attention value, exponential output, and normalized LayerNorm saturation are zero.
+
+The identical retired-calibration clean and Gaussian accuracies do not establish continuous-noise robustness because this $\sigma_t$ is below float32 spacing at relevant deadlines. They establish that physical miss and saturation counters remain observable even when top-1 predictions do not change. The replacement full-run log is `artifacts/logs/fixed_domain_validation/vit_small_minmax_margin5_clean_5000.log`, and its frozen table is `artifacts/calibration/vit_small_fixed_domain_minmax_margin5.json`.
 
 ## Noise and Ablation Sweeps
 
@@ -134,11 +164,17 @@ These measurements identify the division numerator deadline boundary—not conti
 
 The maintained Gaussian model requires a seeded decorator-level regression check independent of model datasets and checkpoints.
 
+### Closed-Domain Verification
+
+Central domain construction and tensor membership checks must fail consistently before malformed rails enter any operator.
+
+[[scripts/verification/verify_gaussian_time_noise.py#verify_closed_bounds_validation]] accepts inclusive singleton rails, rejects non-real, non-finite, and reversed endpoints for every bounds type, and confirms that `check_domain` raises explicit exceptions under optimized Python.
+
 [[scripts/verification/verify_gaussian_time_noise.py#verify_immutable_memoized_bounds]] rejects mutation of potential and time endpoints and checks that equal attention configurations reuse one bounds object while distinct configurations remain separate.
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_broadcast_gaussian_time_inputs]] first locks the shared scalar/tensor broadcasting contract, including value alignment plus nominal dtype and device preservation.
 
-[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_time_input_validation]] rejects malformed domains, non-floating or non-finite times, negative scales, and nominal codewords outside the declared interval before sampling.
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_time_input_validation]] rejects wrong domain types, non-floating or non-finite times, negative scales, and nominal codewords outside the declared interval before sampling; malformed endpoint declarations are rejected earlier by the common bounds constructor.
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_sampler_rng_contract]] checks full seeded-stream replay, generator advance across consecutive calls, and exact RNG non-consumption when every standard deviation is zero.
 

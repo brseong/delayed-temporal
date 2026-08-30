@@ -35,11 +35,11 @@ def gpt2_calibration_specs(
 ) -> tuple[LayerCalibrationSpec, ...]:
     """Declare GPT-2 residual and optional spiking-attention calibration sites.
 
-    One signed-symmetric entry range constrains token-plus-position embeddings before
-    the first block. Every block contributes self-attention and MLP residual outputs.
-    A spiking attention module additionally freezes its raw softmin score rail below
-    the representability ceiling derived from model capacity, temporal scale, and
-    the query/key/value projection dtype.
+    Every block contributes its recursively widening self-attention and MLP residual
+    outputs. A spiking attention module additionally freezes its raw softmin score
+    rail below the representability ceiling derived from model capacity, temporal
+    scale, and the query/key/value projection dtype. The embedding sum keeps its
+    parameter-derived analytic interval and therefore declares no site.
 
     Args:
         model: Unwrapped GPT-2 model or task wrapper.
@@ -48,8 +48,8 @@ def gpt2_calibration_specs(
         margin_fraction: Per-side expansion after symmetric quantile selection.
 
     Returns:
-        One model-input specification, two specifications per block, and one score
-        specification per spiking attention layer.
+        Two specifications per block and one score specification per spiking
+        attention layer.
 
     Raises:
         TypeError: If ``model`` is not an unwrapped PyTorch module.
@@ -91,19 +91,10 @@ def gpt2_calibration_specs(
     if not block_names:
         raise ValueError("model contains no GPT2Block modules")
 
-    # All three site types carry signed residual streams into affine PWM. A symmetric
-    # policy calibrates both tails and guarantees the shared zero reference remains
+    # Residual resets carry signed streams into affine PWM. A symmetric policy uses
+    # both observed extrema and guarantees the shared zero reference remains
     # representable after every frozen range reset.
-    specs = [
-        LayerCalibrationSpec(
-            module_name=model_names[0],
-            tensor_name="input",
-            range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
-            lower_quantile=lower_quantile,
-            upper_quantile=upper_quantile,
-            margin_fraction=margin_fraction,
-        )
-    ]
+    specs: list[LayerCalibrationSpec] = []
     for module_name in block_names:
         for tensor_name in ("attention_residual", "output"):
             specs.append(

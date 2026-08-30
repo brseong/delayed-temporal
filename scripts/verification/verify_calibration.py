@@ -57,6 +57,7 @@ from utils.transforms.calibration import (  # noqa: E402
     update_histogram_observer,
     update_min_max_observer,
     validate_calibration_metadata,
+    validate_calibration_table_specs,
 )
 from utils.transforms.types import Potential, PotentialBounds  # noqa: E402
 from utils.transformers.calibration import (  # noqa: E402
@@ -1142,6 +1143,15 @@ def verify_vit_evaluator_artifact_lifecycle() -> None:
         validate_vit_calibration_arguments,
     )
 
+    # The maintained policy keeps both observed extrema and expands the selected
+    # interval by five percent per side. Interior quantiles remain explicit-only
+    # diagnostics rather than silently trimming calibration tails.
+    with patch("sys.argv", ["error_analysis_vit.py"]):
+        default_args = parse_arguments()
+    assert default_args.calibration_lower_quantile == 0.0
+    assert default_args.calibration_upper_quantile == 1.0
+    assert default_args.calibration_margin_fraction == 0.05
+
     # Parsing exposes every artifact and statistical control without aliases to the
     # legacy quantile diagnostic. The active string converts to the shared enum only
     # after backend, path, population, and range-policy validation succeeds.
@@ -1591,6 +1601,14 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
     from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
     from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import GPT2Model
 
+    # Default collection retains the observed minimum and maximum before applying a
+    # five-percent per-side margin; tail trimming requires an explicit override.
+    with patch("sys.argv", ["error_analysis_gpt2.py"]):
+        default_args = parse_arguments()
+    assert default_args.calibration_lower_quantile == 0.0
+    assert default_args.calibration_upper_quantile == 1.0
+    assert default_args.calibration_margin_fraction == 0.05
+
     # The CLI exposes collection identity and histogram controls independently from
     # the older diagnostic quantile hook. Validation runs before datasets or model
     # checkpoints are loaded and restricts collection to a clean spiking backend.
@@ -1702,7 +1720,7 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
             }
 
     # The production driver binds one collector across two sequential passes, ignores
-    # labels, disables cache, finalizes all entry/residual records, and unbinds state.
+    # labels, disables cache, finalizes all residual records, and unbinds state.
     torch.manual_seed(2120)
     model = GPT2Model(config).eval()
     specs = gpt2_calibration_specs(
@@ -1721,7 +1739,7 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
         device=torch.device("cpu"),
         expected_samples=4,
     )
-    assert len(table.layers) == 3
+    assert len(table.layers) == 2
     assert all(layer.num_values > 0 for layer in table.layers)
     assert not model_calibration_is_bound(model)
     assert not model_calibration_is_bound(model.h[0])
@@ -1781,8 +1799,8 @@ def verify_gpt2_fixed_range_flow() -> None:
             second = mlp(Potential(second_value, input_domain))
             assert first.domain == second.domain
 
-    # Architecture discovery declares one root model entry and two residual sites per
-    # block. Two identical passes collect a complete immutable table from token IDs.
+    # Architecture discovery leaves the parameter-derived model entry analytic and
+    # declares only the two recursively widening residual sites per block.
     torch.manual_seed(2110)
     model = GPT2Model(make_config(use_spiking_mlp=True)).eval()
     specs = gpt2_calibration_specs(
@@ -1792,7 +1810,6 @@ def verify_gpt2_fixed_range_flow() -> None:
         margin_fraction=0.0,
     )
     assert tuple((spec.module_name, spec.tensor_name) for spec in specs) == (
-        ("", "input"),
         ("h.0", "attention_residual"),
         ("h.0", "output"),
     )
@@ -1807,7 +1824,7 @@ def verify_gpt2_fixed_range_flow() -> None:
     collector = create_calibration_collector(metadata, specs, bin_count=16)
     input_ids = torch.tensor([[1, 2, 3, 4], [4, 3, 2, 1]])
     attention_mask = torch.ones_like(input_ids)
-    assert bind_model_calibration(model, collector) == 2
+    assert bind_model_calibration(model, collector) == 1
     first_pass = model(
         input_ids=input_ids,
         attention_mask=attention_mask,
@@ -1821,9 +1838,9 @@ def verify_gpt2_fixed_range_flow() -> None:
     )
     assert torch.equal(first_pass.last_hidden_state, second_pass.last_hidden_state)
     table = finalize_calibration_collection(collector)
-    assert clear_model_calibration(model, expected_state=collector) == 2
+    assert clear_model_calibration(model, expected_state=collector) == 1
 
-    # Frozen validation binds exactly the same root and block modules. Every site is
+    # Frozen validation binds exactly the same block module. Every residual site is
     # exercised without updating its persisted range, and reports a positive element
     # denominator even when this in-population replay has no excursions.
     runtime = create_calibration_runtime(
@@ -1831,7 +1848,7 @@ def verify_gpt2_fixed_range_flow() -> None:
         table,
         expected_metadata=metadata,
     )
-    assert bind_model_calibration(model, runtime) == 2
+    assert bind_model_calibration(model, runtime) == 1
     frozen = model(
         input_ids=input_ids,
         attention_mask=attention_mask,
@@ -1842,12 +1859,11 @@ def verify_gpt2_fixed_range_flow() -> None:
     assert {
         (item.module_name, item.tensor_name) for item in report
     } == {
-        ("", "input"),
         ("h.0", "attention_residual"),
         ("h.0", "output"),
     }
     assert all(item.num_values > 0 for item in report)
-    assert clear_model_calibration(model, expected_state=runtime) == 2
+    assert clear_model_calibration(model, expected_state=runtime) == 1
 
 
 # @lat: [[calibration#Layer-wise Calibration#Frozen Execution#ViT Residual Range Reset]]
@@ -1997,7 +2013,6 @@ def verify_vit_residual_range_reset() -> None:
     assert tuple(
         (spec.module_name, spec.tensor_name) for spec in encoder_specs
     ) == (
-        ("encoder", "input"),
         ("encoder.layer.0", "attention_residual"),
         ("encoder.layer.0", "output"),
         ("encoder.layer.0.intermediate", "activation_input"),
@@ -2027,6 +2042,37 @@ def verify_canonical_table_round_trip() -> None:
         "encoder.layer.0",
         "encoder.layer.1",
     ]
+    matching_specs = tuple(
+        LayerCalibrationSpec(
+            module_name=layer.module_name,
+            tensor_name=layer.tensor_name,
+            range_policy=layer.range_policy,
+            lower_quantile=layer.lower_quantile,
+            upper_quantile=layer.upper_quantile,
+            margin_fraction=layer.margin_fraction,
+            fixed_min=layer.fixed_min,
+            fixed_max=layer.fixed_max,
+        )
+        for layer in table.layers
+    )
+    validate_calibration_table_specs(table, matching_specs)
+    _expect_raises(
+        ValueError,
+        lambda: validate_calibration_table_specs(table, matching_specs[:-1]),
+        "site mismatch",
+    )
+    changed_specs = (
+        replace(
+            matching_specs[0],
+            margin_fraction=matching_specs[0].margin_fraction + 0.1,
+        ),
+        *matching_specs[1:],
+    )
+    _expect_raises(
+        ValueError,
+        lambda: validate_calibration_table_specs(table, changed_specs),
+        "policy mismatch",
+    )
     assert get_layer_calibration(table, "encoder.layer.1", "output") == later
     _expect_raises(
         KeyError,

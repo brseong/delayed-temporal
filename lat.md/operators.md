@@ -108,9 +108,11 @@ LayerNorm is a multi-stage composition and the most delicate shared operator in 
 
 Three flags independently replace variance multiplication, log encoding, and exponential-difference decoding with tensor equivalents. These switches support causal attribution of error but also mean “spiking LayerNorm enabled” is not enough to identify the exact execution path; all three stage flags must be recorded.
 
-Gaussian and deterministic paths derive output bounds without observing the current activation. The fully dense bypass uses the finite-feature bound $|z_i|\leq\sqrt{d-1}$, while mixed paths propagate exponential-difference ranges through subtraction and the learned affine map.
+Gaussian and deterministic paths derive output bounds without observing the current activation. The fully dense bypass uses $|z_i|\leq\sqrt{d-1}$. Every mixed dual-rail path uses $|z_i|\leq\sqrt d$, because one signed numerator square is bounded by the sum of all rail squares used in the denominator.
 
-[[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#freeze_parameter_bounds]] precomputes learned weight, bias, and final output domains for the active ablation configuration. Dense, direct exponential, and spiking exponential-difference modes respectively use normalized magnitudes $\sqrt{d-1}$, $R-1/R$, and $R$, where $R=(\theta-m)/m$. [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#_gaussian_forward]] and [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#forward]] reuse the same immutable domain, so a noise toggle changes value-generation semantics but not metadata.
+[[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#freeze_parameter_bounds]] precomputes learned weight, bias, and final output domains for the active ablation configuration. Dense mode uses $\sqrt{d-1}$ and every mixed mode uses $\sqrt d$ before affine endpoint propagation. This avoids catastrophic cancellation when the next float32 identity encoder subtracts timestamps on a formerly $10^7$–$10^8$ log-ratio rail.
+
+[[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#_gaussian_forward]] and [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#forward]] reuse the same immutable domain. Noise-off roundoff and Gaussian one-sided-event excursions are clamped at the finite-feature normalization rail; Gaussian mode records pre-clamp saturation under `layernorm.normalized_output`.
 
 [[utils/transformers/models/spiking_ops.py#_apply_norm]] applies the same finite-feature envelope to ordinary `torch.nn.LayerNorm`, then transforms both endpoints with its learned scale and optional bias. Modules without an affine stage retain the symmetric normalized envelope.
 

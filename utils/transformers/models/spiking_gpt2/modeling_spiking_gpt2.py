@@ -1295,18 +1295,9 @@ class GPT2Model(GPT2PreTrainedModel):
 
         output_shape = (-1,) + input_shape[1:] + (hidden_states.size(-1),)
 
-        # Model entry is a signed calibration boundary. Collection observes the raw
-        # embedding sum on its table-derived safety rail; frozen phases reset the
-        # residual stream to the persisted range before the first block.
-        if model_calibration_is_bound(self):
-            pot = calibrated_potential(
-                self,
-                "input",
-                hidden_states,
-                collection_bounds=hidden_domain,
-            )
-        else:
-            pot = Potential(hidden_states, hidden_domain)
+        # Frozen token and position tables define the entry interval analytically.
+        # Calibration begins only at recursively widening residual boundaries.
+        pot = Potential(hidden_states, hidden_domain)
 
         for i, block in enumerate(self.h):
             pot = block(

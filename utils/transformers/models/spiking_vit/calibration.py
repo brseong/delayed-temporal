@@ -273,11 +273,11 @@ def vit_calibration_specs(
 ) -> tuple[LayerCalibrationSpec, ...]:
     """Declare ViT residual, GELU-input, and attention calibration sites.
 
-    The encoder entry resets embedding output to one signed range before the first
-    affine projection. Each later block contributes the two residual sites returned
-    by :func:`vit_residual_calibration_specs`. Operator-composed GELU modules freeze
+    Each block contributes the two recursive residual sites returned by
+    :func:`vit_residual_calibration_specs`. Operator-composed GELU modules freeze
     their affine pre-activation distributions, and spiking attention modules freeze
-    raw softmin score rails below a configuration- and dtype-derived ceiling.
+    raw softmin score rails below a configuration- and dtype-derived ceiling. The
+    encoder entry keeps its analytic theta rail and therefore declares no site.
 
     Args:
         model: Unwrapped ViT model or task wrapper.
@@ -286,8 +286,8 @@ def vit_calibration_specs(
         margin_fraction: Per-side expansion after symmetric range selection.
 
     Returns:
-        One encoder-input specification, two residual specifications per block, one
-        specification per composed GELU, and one per spiking attention layer.
+        Two residual specifications per block, one specification per composed GELU,
+        and one per spiking attention layer.
 
     Raises:
         TypeError: If ``model`` is not an unwrapped PyTorch module.
@@ -306,26 +306,11 @@ def vit_calibration_specs(
         raise TypeError("model must be a torch.nn.Module")
     if isinstance(model, nn.DataParallel):
         raise RuntimeError("ViT calibration specifications require an unwrapped model")
-    encoder_names = tuple(
-        sorted(
-            name
-            for name, module in model.named_modules()
-            if isinstance(module, ViTEncoder)
-        )
+    encoders = tuple(
+        module for module in model.modules() if isinstance(module, ViTEncoder)
     )
-    if len(encoder_names) != 1:
+    if len(encoders) != 1:
         raise ValueError("model must contain exactly one ViTEncoder module")
-
-    # Encoder outputs are signed and immediately feed affine PWM. Use the same
-    # symmetric policy as residual resets so every persisted range contains zero.
-    entry_spec = LayerCalibrationSpec(
-        module_name=encoder_names[0],
-        tensor_name="input",
-        range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
-        lower_quantile=lower_quantile,
-        upper_quantile=upper_quantile,
-        margin_fraction=margin_fraction,
-    )
     residual_specs = vit_residual_calibration_specs(
         model,
         lower_quantile=lower_quantile,
@@ -359,7 +344,7 @@ def vit_calibration_specs(
 
     # Attention score calibration belongs only to the maintained spiking backend.
     # Exact class discovery gives each layer its stable owning module name, while an
-    # eager artifact retains the existing entry-and-residual schema unchanged.
+    # eager artifact retains the residual-only schema unchanged.
     attention_specs: list[LayerCalibrationSpec] = []
     for module_name, module in sorted(model.named_modules()):
         if not isinstance(module, ViTSelfAttention):
@@ -410,7 +395,6 @@ def vit_calibration_specs(
     # canonicalizes the final identities before persistence, so runtime lookup never
     # depends on this presentation order.
     return (
-        entry_spec,
         *residual_specs,
         *activation_specs,
         *attention_specs,

@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 from typing import Protocol, Callable, NamedTuple, TypeVar
 from functools import wraps
 import inspect
+import math
+from numbers import Real
 
 import torch
 from torch import Tensor
@@ -18,6 +20,16 @@ class ClosedBounds:
     """
     min: Number  # Inclusive lower endpoint of the domain.
     max: Number  # Inclusive upper endpoint of the domain.
+
+    def __post_init__(self) -> None:
+        """Reject malformed physical intervals at their construction boundary."""
+        for name, endpoint in (("min", self.min), ("max", self.max)):
+            if isinstance(endpoint, bool) or not isinstance(endpoint, Real):
+                raise TypeError(f"ClosedBounds {name} endpoint must be a real scalar")
+            if not math.isfinite(endpoint):
+                raise ValueError("ClosedBounds endpoints must be finite")
+        if self.min > self.max:
+            raise ValueError("ClosedBounds endpoints must satisfy min <= max")
 
     @property
     def range(self) -> Number:
@@ -65,6 +77,9 @@ def set_clamp_log_enabled(enabled: bool):
 def set_current_module_name(name: str | None):
     global _CURRENT_MODULE_NAME
     _CURRENT_MODULE_NAME = name
+
+def get_current_module_name() -> str | None:
+    return _CURRENT_MODULE_NAME
 
 def get_clamp_stats():
     return _CLAMP_STATS
@@ -125,8 +140,16 @@ def check_domain[**P, R](func: Callable[P, R]) -> Callable[P, R]:
                 domain = list(domains.values())[0]
 
             if domain is not None:
-                assert domain.min <= tensor.min() and tensor.max() <= domain.max,\
-                    f"Argument '{name}' must be within the specified domain [{domain.min}, {domain.max}]. Got min {tensor.min()} and max {tensor.max()}."
+                tensor_min = tensor.min()
+                tensor_max = tensor.max()
+                if not bool(
+                    (domain.min <= tensor_min) & (tensor_max <= domain.max)
+                ):
+                    raise ValueError(
+                        f"Argument '{name}' must be within the specified domain "
+                        f"[{domain.min}, {domain.max}]. Got min {tensor_min} and "
+                        f"max {tensor_max}."
+                    )
 
         return func(*args, **kwargs)
     return wrapper

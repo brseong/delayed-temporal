@@ -23,6 +23,7 @@ from utils.transforms.calibration import (
     get_calibration_clipping_report,
     load_calibration_table,
     save_calibration_table,
+    validate_calibration_table_specs,
 )
 from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import GPT2LMHeadModel, SpikingConv1D
 from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
@@ -210,20 +211,20 @@ def parse_arguments() -> Arguments:
     parser.add_argument(
         "--calibration-lower-quantile",
         type=float,
-        default=0.001,
-        help="Lower signed residual quantile retained during calibration.",
+        default=0.0,
+        help="Lower histogram endpoint; defaults to the observed minimum.",
     )
     parser.add_argument(
         "--calibration-upper-quantile",
         type=float,
-        default=0.999,
-        help="Upper signed residual quantile retained during calibration.",
+        default=1.0,
+        help="Upper histogram endpoint; defaults to the observed maximum.",
     )
     parser.add_argument(
         "--calibration-margin-fraction",
         type=float,
         default=0.05,
-        help="Per-side residual range expansion after quantile selection.",
+        help="Per-side range expansion after endpoint selection.",
     )
 
     # These options match the other model evaluators so one experiment convention
@@ -710,6 +711,13 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         if calibration_metadata is None:
             raise RuntimeError("frozen calibration setup is incomplete")
         table = load_calibration_table(args.calibration_path)
+        expected_specs = gpt2_calibration_specs(
+            model,
+            lower_quantile=args.calibration_lower_quantile,
+            upper_quantile=args.calibration_upper_quantile,
+            margin_fraction=args.calibration_margin_fraction,
+        )
+        validate_calibration_table_specs(table, expected_specs)
         calibration_state = create_calibration_runtime(
             calibration_mode,
             table,

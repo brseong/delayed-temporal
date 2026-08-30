@@ -22,9 +22,11 @@ Min-max and histogram accumulation must be independent of batch order and partit
 
 ### Quantile and Margin Policy
 
-Histogram quantiles use outward bin-edge rounding, while each declared site selects a signed-symmetric, ceiling-constrained symmetric, lower-bounded, or upper-bounded policy; fully analytic operators bypass calibration.
+Maintained calibration selects the observed minimum and maximum (`q=0/1`) and then adds a 5% per-side margin; interior histogram quantiles remain explicit diagnostic overrides, and fully analytic operators bypass calibration.
 
-A signed-symmetric site calibrates both tails and uses their larger absolute endpoint for a zero-centered rail. A lower-bounded or upper-bounded site preserves its finite analytic endpoint and calibrates only the opposite direction. Margin is proportional to the pre-margin width and expands only calibrated endpoints, never a fixed analytic endpoint.
+A signed-symmetric site uses the larger absolute observed endpoint for a zero-centered rail. A lower-bounded or upper-bounded site preserves its finite analytic endpoint and calibrates only the opposite direction. Margin is proportional to the pre-margin width and expands only calibrated endpoints, never a fixed analytic endpoint.
+
+The fixed-bin histogram and outward bin-edge rule remain in the artifact lifecycle for reproducibility and explicit interior-quantile diagnostics. Canonical collection does not discard either observed tail before applying its margin.
 
 For a nonnegative domain the shared lower endpoint is globally fixed at zero and only the upper endpoint is calibrated. Strictly positive logarithmic domains instead retain their separately configured positive lower rail; zero is not substituted into a logarithmic encoder.
 
@@ -78,9 +80,11 @@ Residual specifications discover `ViTLayer` instances from the complete unwrappe
 
 ### ViT Evaluator Artifact Lifecycle
 
-The ViT evaluator exposes disabled, collection, frozen-validation, and inference calibration modes with one explicit artifact path and persisted histogram, quantile, margin, subset-size, and subset-seed controls.
+The ViT evaluator exposes disabled, collection, frozen-validation, and inference calibration modes through one explicit artifact path.
 
-Collection requires the clean spiking checkpoint in evaluation mode with sequential training-subset replay and no timing noise, mismatch, or parameter perturbation. Frozen modes validate complete metadata before applying optional robustness axes and reporting clipping.
+The artifact persists histogram, endpoint-selection, margin, subset-size, and subset-seed controls. Defaults retain observed extrema and add 5% per side.
+
+Collection requires the clean spiking checkpoint in evaluation mode with sequential training-subset replay and no timing noise, mismatch, or parameter perturbation. Frozen modes validate metadata and the current 48-site topology before applying optional robustness axes and reporting clipping.
 
 ### ViT Fixed Activation Ranges
 
@@ -112,13 +116,13 @@ Dense ablations keep functional PyTorch values but reuse frozen affine intervals
 
 ### GPT-2 Fixed Range Flow
 
-GPT-2 freezes token and position table ranges, derives MLP activation ranges analytically, and exposes signed-symmetric model-entry plus two residual calibration sites per pre-norm block.
+GPT-2 freezes token and position table ranges, derives the embedding sum and MLP activation ranges analytically, and exposes two signed-symmetric residual calibration sites per pre-norm block.
 
 Unbound execution retains exact interval sums. Collection uses those sums as safety rails, while frozen execution resets attention and MLP residual streams to persisted ranges so depth cannot recursively widen them.
 
 ### GPT-2 Evaluator Artifact Lifecycle
 
-The GPT-2 evaluator collects or consumes immutable model-entry and per-block residual ranges without using evaluation texts to select those ranges.
+The GPT-2 evaluator collects or consumes immutable per-block residual ranges without using evaluation texts to select those ranges. The model entry remains on its parameter-derived analytic interval.
 
 Collection removes empty WikiText rows, selects a fixed prefix of a seeded training-split permutation, tokenizes to one padded maximum length, and replays the same sequential loader for min-max and histogram passes with cache, loss, timing noise, and `DataParallel` disabled.
 
@@ -142,7 +146,7 @@ The permanent runtime check covers shared linear, convolution, GPT-2 Conv1D, Lay
 
 Each spiking attention layer covered by the ViT or GPT-2 artifact lifecycle freezes one symmetric softmin score range from a noise-free pre-clamp score distribution, while an analytic representability ceiling prevents exponential underflow.
 
-For layer $\ell$, let $q_\ell=Q_p(|s_\ell|)$. Because the configured per-side margin $m$ is a fraction of the full symmetric width $2q_\ell$, calibration selects $c_{\ell,\mathrm{cal}}=q_\ell+2mq_\ell=(1+2m)q_\ell$. With dtype minimum normal $f_{\min}$, temporal scale $\tau$, source capacity $S_{\max}$, and log safety margin $\eta$, the representable radius is
+For layer $\ell$, let $q_\ell=\max(|\min s_\ell|,|\max s_\ell|)$ over the clean calibration population. Because the configured per-side margin $m$ is a fraction of the full symmetric width $2q_\ell$, calibration selects $c_{\ell,\mathrm{cal}}=q_\ell+2mq_\ell=(1+2m)q_\ell$. With dtype minimum normal $f_{\min}$, temporal scale $\tau$, source capacity $S_{\max}$, and log safety margin $\eta$, the representable radius is
 
 $$
 c_{\mathrm{repr}}=\frac{\tau}{2}\left(-\log f_{\min}-\log S_{\max}-\eta\right).
@@ -150,7 +154,7 @@ $$
 
 The frozen layer radius is $c_\ell=\min(c_{\ell,\mathrm{cal}},c_{\mathrm{repr}},\theta)$. Collection observes raw scores but executes softmin on the representable safety rail; validation and inference clamp directly to $[-c_\ell,c_\ell]$ and count strict excursions without updating it.
 
-Masked positions are overwritten with $+c_\ell$ after score clamping in the negated-score convention. The artifact persists the quantiles, margin, symmetric analytic ceiling, dtype, model-wide `tau_s`, and $S_{\max}$; attention uses $\tau=\tau_s$, and the common metadata schema mirrors that value in its `tau_m` slot. A precision, scale, or capacity change invalidates reuse.
+Masked positions are overwritten with $+c_\ell$ after score clamping in the negated-score convention. The artifact persists endpoint-selection parameters, margin, symmetric analytic ceiling, dtype, model-wide `tau_s`, and $S_{\max}$; attention uses $\tau=\tau_s$, and the common metadata schema mirrors that value in its `tau_m` slot. A precision, scale, or capacity change invalidates reuse.
 
 The maintained scalar bound contract supports one calibrated radius per attention layer. Per-head calibration would require vector-valued domain metadata and is outside this lifecycle.
 
@@ -158,6 +162,12 @@ The maintained scalar bound contract supports one calibrated radius per attentio
 
 Calibration artifacts use a versioned immutable schema with complete model, data, numerical, capacity, and ablation metadata.
 
+Repository persistence is deny-by-default for generated artifacts. Only `artifacts/calibration/vit_small_fixed_domain_minmax_margin5.json`, the reviewed ViT-S min/max-plus-margin configuration, is whitelisted as a representative table; logs and alternative runs remain local outputs.
+
+The representative table is evidence for the documented environment, not a portable fallback: exact checkpoint identity, including its `/data/nas/` path, preprocessing fingerprint, dtype, and ablations must match before reuse.
+
 ### Canonical Table Round Trip
 
-Tables reject duplicate layer identities and incompatible metadata, serialize in deterministic order, round-trip exactly through strict JSON, and fail on unknown fields, non-finite values, tampering, or missing lookup entries.
+Tables serialize in deterministic order, round-trip exactly through strict JSON, and reject duplicate identities or incompatible metadata.
+
+Loading also fails on unknown fields, non-finite values, tampering, missing lookup entries, stale site sets, or changed range-selection policies.

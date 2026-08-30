@@ -100,10 +100,10 @@ class SpikingLayerNorm(nn.Module):
     ) -> tuple[PotentialBounds, PotentialBounds, PotentialBounds]:
         """Freeze learned parameter and final output bounds for this ablation.
 
-        LayerNorm has three distinct affine-input envelopes. A fully dense module
-        uses ``sqrt(d - 1)`` for population-normalized features. A direct exponential
-        path uses ``R - 1/R``, and a spiking exponential-difference path uses the
-        relaxed magnitude ``R``, where ``R = (theta-clip_margin)/clip_margin``.
+        LayerNorm has two finite-feature affine-input envelopes. A fully dense module
+        uses ``sqrt(d - 1)`` for population-normalized features. Every dual-rail
+        spiking or mixed path uses ``sqrt(d)``; Gaussian excursions beyond that
+        ideal normalization rail are saturated before the learned affine stage.
         This method combines the active envelope with learned scale and bias once,
         after checkpoint loading and static perturbation.
 
@@ -181,32 +181,31 @@ class SpikingLayerNorm(nn.Module):
         weight_domain = PotentialBounds(weight.min().item(), weight.max().item())
         bias_domain = PotentialBounds(bias.min().item(), bias.max().item())
 
-        # Select the fixed pre-affine magnitude for the active ablation. The spiking
-        # expdiff branch deliberately preserves its existing relaxed [-R,R] contract,
-        # while direct exponential subtraction can use the tighter R-1/R interval.
+        # Dense population normalization has the tight sqrt(d-1) theorem. For every
+        # mixed dual-rail path, |a_i-b_i|^2 <= a_i^2+b_i^2 and the denominator
+        # contains the mean of all d rail-square sums, giving the bound sqrt(d).
         all_dense = not (
             self.use_spiking_mul
             or self.use_spiking_log
             or self.use_spiking_expdiff
         )
-        ratio = (theta - margin) / margin
+        feature_count = math.prod(self.normalized_shape)
         if all_dense:
-            feature_count = math.prod(self.normalized_shape)
             result_limit = math.sqrt(max(feature_count - 1, 0))
             effective_weight = weight
-        elif self.use_spiking_expdiff:
-            result_limit = ratio
-            effective_weight = weight.clamp(-theta, theta)
         else:
-            result_limit = ratio - 1.0 / ratio
-            effective_weight = weight
+            result_limit = math.sqrt(feature_count)
+            effective_weight = (
+                weight.clamp(-theta, theta)
+                if self.use_spiking_expdiff
+                else weight
+            )
         if not math.isfinite(result_limit) or result_limit < 0.0:
             raise ValueError("SpikingLayerNorm normalized bound must be finite")
 
-        # Dense and direct branches apply gamma featurewise, giving an exact global
-        # endpoint reduction. The spiking final multiplication currently propagates
-        # one global gamma interval, so preserve that broader operator-level contract
-        # to contain Gaussian factor-event excursions before final bias addition.
+        # Dense and direct branches apply gamma featurewise. The spiking final
+        # multiplication propagates one global gamma interval; pre-affine Gaussian
+        # excursions are already saturated at the finite-feature normalization rail.
         if self.use_spiking_expdiff and not all_dense:
             effective_min = effective_weight.min().item()
             effective_max = effective_weight.max().item()
@@ -405,14 +404,14 @@ class SpikingLayerNorm(nn.Module):
         if self.use_spiking_expdiff:
             # The event-aware operator owns both causal external rails, internal
             # exponential misses, and output saturation statistics.
-            y_pos, domain_y_pos = exponential_difference_operator(
+            y_pos, _ = exponential_difference_operator(
                 t_err_pos,
                 tb_err,
                 t_sigma,
                 tb_sigma,
                 tau_s=tau_s,
             )
-            y_neg, domain_y_neg = exponential_difference_operator(
+            y_neg, _ = exponential_difference_operator(
                 t_err_neg,
                 tb_err,
                 t_sigma,
@@ -421,12 +420,17 @@ class SpikingLayerNorm(nn.Module):
             )
             result = y_pos - y_neg
 
-            # Both exponential-difference outputs are non-negative dual-rail
-            # magnitudes. Ignore their positive lower endpoints deliberately and
-            # use one relaxed symmetric rail: the signed difference cannot exceed
-            # either magnitude's largest declared upper endpoint in absolute value.
-            result_limit = max(domain_y_pos.max, domain_y_neg.max)
+            # Event misses may leave a one-sided exponential excursion. Count and
+            # saturate it at the finite-feature ideal normalization rail before the
+            # learned affine multiplication.
+            result_limit = math.sqrt(math.prod(self.normalized_shape))
             result_domain = PotentialBounds(-result_limit, result_limit)
+            result = clamp_gaussian_output(
+                result,
+                result_domain,
+                site="layernorm.normalized_output",
+                name="layernorm_normalized",
+            )
 
             # Retain the existing spiking affine rescaling used by this ablation.
             # The multiplier consumes the frozen gamma interval, while the final
@@ -517,6 +521,14 @@ class SpikingLayerNorm(nn.Module):
             # The corresponding signed interval and affine propagation were already
             # evaluated in ``freeze_parameter_bounds`` using stable scalar math.
             result = y_pos - y_neg
+            result_limit = math.sqrt(math.prod(self.normalized_shape))
+            result_domain = PotentialBounds(-result_limit, result_limit)
+            result = clamp_gaussian_output(
+                result,
+                result_domain,
+                site="layernorm.normalized_output",
+                name="layernorm_normalized",
+            )
             out = self.weight * result + self.bias
 
         # Every Gaussian ablation combination now returns the same immutable object
@@ -614,14 +626,14 @@ class SpikingLayerNorm(nn.Module):
         if self.use_spiking_expdiff:
             # Preserve both exponential output domains rather than recovering a rail
             # from their realized tensor difference after the operator has run.
-            y_pos, domain_y_pos = exponential_difference_operator(
+            y_pos, _ = exponential_difference_operator(
                 t_err_pos,
                 tb_err,
                 t_sigma,
                 tb_sigma,
                 tau_s=tau_s,
             )
-            y_neg, domain_y_neg = exponential_difference_operator(
+            y_neg, _ = exponential_difference_operator(
                 t_err_neg,
                 tb_err,
                 t_sigma,
@@ -630,11 +642,16 @@ class SpikingLayerNorm(nn.Module):
             )
             result: torch.Tensor = y_pos - y_neg
 
-            # The dual-rail exponential magnitudes are non-negative. Relax their
-            # signed difference to one symmetric interval whose magnitude is the
-            # larger declared upper rail, matching the event-aware construction.
-            result_limit = max(domain_y_pos.max, domain_y_neg.max)
+            # Enforce the finite-feature normalization contract before affine
+            # scaling; deterministic roundoff is clamped without creating stats.
+            result_limit = math.sqrt(math.prod(self.normalized_shape))
             result_domain = PotentialBounds(-result_limit, result_limit)
+            result = clamp_gaussian_output(
+                result,
+                result_domain,
+                site="layernorm.normalized_output",
+                name="layernorm_normalized",
+            )
 
             # Propagate the signed interval through the learned scale using its
             # frozen gamma domain. The final module rail was derived from this same
@@ -651,6 +668,14 @@ class SpikingLayerNorm(nn.Module):
             y_pos = torch.exp((t_sigma - t_err_pos) / tau_s)
             y_neg = torch.exp((t_sigma - t_err_neg) / tau_s)
             result = y_pos - y_neg
+            result_limit = math.sqrt(math.prod(self.normalized_shape))
+            result_domain = PotentialBounds(-result_limit, result_limit)
+            result = clamp_gaussian_output(
+                result,
+                result_domain,
+                site="layernorm.normalized_output",
+                name="layernorm_normalized",
+            )
             out = self.weight * result + self.bias
 
             # Both delivered time tensors lie in their fixed declared windows. Form

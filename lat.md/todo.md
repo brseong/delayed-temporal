@@ -74,9 +74,10 @@ The migration is complete only when static-domain behavior is invariant under ev
 The merged calibration work closes every known live-extrema violation; the remaining work concerns central validation and empirical evaluation rather than runtime calibration.
 
 - [x] Rename the inclusive base interval to `ClosedBounds`; clamping, membership, and deadline equality all include both endpoints.
-- [ ] Enforce finite, ordered bound endpoints centrally and replace `check_domain` assertions with explicit exceptions that remain active under optimized Python.
+- [x] Enforce finite, ordered bound endpoints centrally and replace `check_domain` assertions with explicit exceptions that remain active under optimized Python.
 - [x] Keep nonzero spiking attention training dropout outside the paper scope; the compatibility branch is documented, and maintained fixed-range claims apply only to evaluation with dropout disabled.
-- [ ] Run real-checkpoint, real-dataset evaluations and report per-site clipping, Gaussian saturation, deadline misses, and task accuracy for conservative LayerNorm, attention, affine, embedding, and task-head rails.
+- [x] Run the ViT-S/ImageNet-1k real-checkpoint audit and report per-site clipping, Gaussian saturation, deadline misses, and task accuracy for LayerNorm, attention, affine, embedding, and the conventional task head; see [[evaluation#Fixed-Domain ViT-S Real-Data Audit]].
+- [ ] Repeat the real-data fixed-domain audit for BERT, RoBERTa, and GPT-2 before making a cross-family empirical claim.
 
 ### Implementation Checklist
 
@@ -111,15 +112,16 @@ The implementation work covers every maintained transform and model adapter, not
 - [x] Bind calibration state to stable model-module identities without checkpoint keys, use analytic safety rails during collection, and return persisted clamp rails as `PotentialBounds` during validation and inference.
 - [x] Select a fixed-size prefix of a seeded training-split permutation for ViT calibration, replay the exact subset sequentially in both passes, and persist its split, seed, sample count, fingerprint, preprocessing, dtype, and model-path identity.
 - [x] Add ViT collection, frozen-validation, and inference CLI modes with strict clean-collection constraints, exact metadata validation, missing-entry failure, and per-layer frozen clipping reports.
-- [x] Replace all ViT live activation-derived ranges with preprocessing-derived input bounds, analytic activation intervals, a calibrated encoder-entry range, and two calibrated residual boundaries per block.
+- [x] Replace all ViT live activation-derived ranges with preprocessing-derived input bounds, an analytic encoder-entry rail, analytic activation intervals, and two calibrated residual boundaries per block.
 - [x] Replace BERT intermediate GELU and ReLU live output extrema with ranges derived from the fixed affine input interval.
 - [x] Propagate the fixed BERT encoder range through first-token pooling and use a configuration-derived standalone encoder fallback without live extrema.
 - [x] Freeze BERT word, token-type, and position table ranges, sum their intervals before embedding LayerNorm, and preserve the resulting `Potential` through the internal encoder API.
 - [x] Remove all RoBERTa live bounds by freezing embedding and affine ranges, propagating `Potential` through the encoder and pooler, and carrying the final range into local LM and classification heads without changing public model outputs.
-- [x] Remove all GPT-2 live bounds with frozen embedding and Conv1D intervals, analytic MLP activation ranges, residual endpoint addition, and optional model-entry plus two-per-block calibration bindings.
+- [x] Remove all GPT-2 live bounds with frozen embedding and Conv1D intervals, an analytic model-entry range, analytic MLP activation ranges, residual endpoint addition, and two-per-block calibration bindings.
 - [x] Add GPT-2 collection, frozen-validation, and inference evaluator modes using filtered WikiText training subsets, fixed tokenizer/sequence metadata, sequential two-pass replay, and per-site clipping reports.
 - [x] Prefer operator-derived interval arithmetic whenever the input bounds and transformation provide a conservative static result in the maintained execution path.
-- [x] For selected paths without a practical tight analytic envelope, record per-layer distributions during a representative noise-free calibration run; current sites are ViT and GPT-2 model entry, pre-norm residual resets, and spiking attention scores.
+- [x] For paths without a practical tight analytic envelope, calibrate only ViT/GPT-2 pre-norm residual resets, ViT composed-GELU pre-activations, and spiking attention scores; analytic model entries bypass calibration.
+- [x] Make maintained calibration retain observed min/max without tail truncation and add a 5% per-side margin; keep interior quantiles only as explicit diagnostic overrides.
 - [x] Persist stable site identifiers together with the checkpoint, dataset split, preprocessing, model family, and active ablation configuration used for calibration.
 - [x] Add explicit collection, frozen-validation, and inference modes so a site cannot measure and clamp against a range created by the same forward invocation.
 - [x] Freeze learned-parameter and embedding-table bounds in versioned caches after checkpoint setup instead of recomputing parameter extrema on repeated forwards, including ordinary and spiking LayerNorm.

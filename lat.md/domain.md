@@ -14,7 +14,7 @@ Bounds serve three roles:
 - They support interval arithmetic for composed output ranges.
 - They provide explicit locations for clipping diagnostics.
 
-`ClosedBounds` denotes the inclusive representable envelope used by clamping, domain membership, and deadline classification. Whether endpoint values are finite and ordered is a separate constructor-validation contract.
+`ClosedBounds` denotes the inclusive representable envelope used by clamping, domain membership, and deadline classification. Construction rejects non-real, non-finite, or reversed endpoints centrally, and decorated tensor checks raise explicit runtime exceptions rather than optimization-sensitive assertions.
 
 ## Domain Propagation
 

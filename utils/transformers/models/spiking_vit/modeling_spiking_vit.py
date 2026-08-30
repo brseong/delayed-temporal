@@ -621,12 +621,11 @@ class ViTEncoder(nn.Module):
         self.gradient_checkpointing = False
 
     def forward(self, hidden_states: torch.Tensor) -> Potential:
-        """Enter the ViT stack through a fixed or calibrated signed range.
+        """Enter the ViT stack through the analytic signed theta range.
 
-        The configured symmetric ``theta`` interval is the collection safety rail and
-        calibration-free physical fallback. An explicitly bound collector observes
-        raw embedding outputs on that fixed rail; frozen execution replaces it with
-        the persisted signed-symmetric encoder-entry range before the first block.
+        The configured symmetric ``theta`` interval is the fixed physical rail for
+        embeddings before the first block. Calibration is reserved for recursively
+        widening residuals and nonlinear operator boundaries later in the stack.
 
         Args:
             hidden_states: Patch, class-token, and position embeddings.
@@ -644,24 +643,14 @@ class ViTEncoder(nn.Module):
             raise ValueError("ViT encoder theta must be finite and positive")
         entry_bounds = PotentialBounds(-self._theta, self._theta)
 
-        # Collection checks that raw embeddings fit the physical safety rail. Frozen
-        # phases count and clamp against their persisted range, while an unbound model
-        # still clamps to the fixed theta rail instead of measuring batch extrema.
-        if model_calibration_is_bound(self):
-            pot = calibrated_potential(
-                self,
-                "input",
-                hidden_states,
-                collection_bounds=entry_bounds,
-            )
-        else:
-            pot = Potential(
-                entry_bounds.clamp(hidden_states, name="vit_encoder_input"),
-                entry_bounds,
-            )
+        # Clamp against the fixed theta rail instead of measuring batch extrema.
+        pot = Potential(
+            entry_bounds.clamp(hidden_states, name="vit_encoder_input"),
+            entry_bounds,
+        )
 
-        # Every block now receives either an analytic fixed range or a persisted
-        # calibration range; no later layer reconstructs metadata from this batch.
+        # Every block receives an analytic fixed range; selected internal boundaries
+        # may replace it with a persisted calibration range without batch reductions.
         for layer_module in self.layer:
             pot = layer_module(pot)          # Potential → Potential (전파)
         return pot

@@ -1566,6 +1566,74 @@ def create_calibration_table(
     )
 
 
+def validate_calibration_table_specs(
+    table: CalibrationTable,
+    specs: Iterable[LayerCalibrationSpec],
+) -> None:
+    """Require a frozen table to match the model's current site declarations.
+
+    Metadata identifies the model and input configuration, while this check binds an
+    artifact to the current calibration topology and range-selection policy. It
+    prevents a stale table from silently retaining a removed site or using different
+    endpoint and margin controls.
+
+    Args:
+        table: Loaded immutable calibration artifact.
+        specs: Site declarations rebuilt from the current model and CLI policy.
+
+    Raises:
+        TypeError: If the table or specification iterable is malformed.
+        ValueError: If site identities, policies, endpoints, or margins differ.
+    """
+    if not isinstance(table, CalibrationTable):
+        raise TypeError("table must be a CalibrationTable")
+    canonical = create_calibration_table(
+        table.metadata,
+        table.layers,
+        format_version=table.format_version,
+    )
+    if canonical != table:
+        raise ValueError("calibration table is not in canonical layer order")
+    if isinstance(specs, (str, bytes)) or not isinstance(specs, Iterable):
+        raise TypeError("specs must be an iterable of LayerCalibrationSpec records")
+
+    expected: dict[tuple[str, str], tuple[object, ...]] = {}
+    for spec in specs:
+        normalized = _normalize_layer_calibration_spec(spec)
+        key = (spec.module_name, spec.tensor_name)
+        if key in expected:
+            raise ValueError(
+                "duplicate calibration specification for "
+                f"module={spec.module_name!r}, tensor={spec.tensor_name!r}"
+            )
+        expected[key] = (spec.range_policy, *normalized)
+
+    actual = {
+        (layer.module_name, layer.tensor_name): (
+            layer.range_policy,
+            layer.lower_quantile,
+            layer.upper_quantile,
+            layer.margin_fraction,
+            layer.fixed_min,
+            layer.fixed_max,
+        )
+        for layer in table.layers
+    }
+    if set(actual) != set(expected):
+        missing = sorted(set(expected) - set(actual))
+        unexpected = sorted(set(actual) - set(expected))
+        raise ValueError(
+            "calibration table site mismatch: "
+            f"missing={missing!r}, unexpected={unexpected!r}"
+        )
+    for key in sorted(expected):
+        if actual[key] != expected[key]:
+            raise ValueError(
+                "calibration table policy mismatch for "
+                f"module={key[0]!r}, tensor={key[1]!r}"
+            )
+
+
 def validate_calibration_metadata(
     actual: CalibrationMetadata,
     expected: CalibrationMetadata,

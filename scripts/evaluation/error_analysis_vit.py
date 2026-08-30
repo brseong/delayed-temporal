@@ -16,7 +16,17 @@ from torch.nn.parallel import DataParallel
 from datasets import load_dataset
 from transformers import AttentionInterface, AutoModelForImageClassification
 from transformers.models.vit import ViTImageProcessor
-from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTForImageClassification, SpikingLayerNorm
+from utils.transformers.models.spiking_vit.modeling_spiking_vit import (
+    ViTEncoder,
+    ViTForImageClassification,
+    ViTSelfAttention,
+)
+from utils.transformers.models.spiking_ops import (
+    SpikingConv2d,
+    SpikingLayerNorm,
+    SpikingLinear,
+)
+from utils.transforms import types as transform_types
 from utils.transforms.types import Potential
 from utils.transforms.calibration import (
     CalibrationMode,
@@ -25,6 +35,7 @@ from utils.transforms.calibration import (
     get_calibration_clipping_report,
     load_calibration_table,
     save_calibration_table,
+    validate_calibration_table_specs,
 )
 from utils.transforms.noise import (
     get_gaussian_noise_stats,
@@ -111,6 +122,7 @@ class Arguments:
 
     # Diagnostic and smoke-evaluation controls do not alter operator definitions.
     collect_quantiles: bool
+    report_clamp_stats: bool
     quick_test: bool
 
 def parse_arguments() -> Arguments:
@@ -209,20 +221,20 @@ def parse_arguments() -> Arguments:
     parser.add_argument(
         "--calibration-lower-quantile",
         type=float,
-        default=0.001,
-        help="Lower signed residual quantile retained during calibration.",
+        default=0.0,
+        help="Lower histogram endpoint; defaults to the observed minimum.",
     )
     parser.add_argument(
         "--calibration-upper-quantile",
         type=float,
-        default=0.999,
-        help="Upper signed residual quantile retained during calibration.",
+        default=1.0,
+        help="Upper histogram endpoint; defaults to the observed maximum.",
     )
     parser.add_argument(
         "--calibration-margin-fraction",
         type=float,
         default=0.05,
-        help="Per-side residual range expansion after quantile selection.",
+        help="Per-side range expansion after endpoint selection.",
     )
 
     # Direct Gaussian spike-time noise uses the common four-option CLI shared by
@@ -264,6 +276,12 @@ def parse_arguments() -> Arguments:
                         help="Standard deviation of Gaussian noise to add to biases (default: 0.0).")
     parser.add_argument("--collect-quantiles", action="store_true",
                         help="Collect and print 99.9%% quantiles of absolute activations.")
+    parser.add_argument(
+        "--report-clamp-stats",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Aggregate and print named fixed-domain clamp counts across evaluation.",
+    )
     parser.add_argument("--quick-test", action="store_true",
                         help="Run a quick test with a small subset of the dataset and fewer batches.")
 
@@ -306,6 +324,7 @@ def parse_arguments() -> Arguments:
         weight_noise_std=args.weight_noise_std,
         bias_noise_std=args.bias_noise_std,
         collect_quantiles=args.collect_quantiles,
+        report_clamp_stats=args.report_clamp_stats,
         quick_test=args.quick_test,
     )
 
@@ -594,6 +613,11 @@ def evaluate_vit_model(args: Arguments) -> None:
             "layer-wise calibration does not support DataParallel; "
             "run one evaluation process per GPU"
         )
+    if args.report_clamp_stats and use_data_parallel:
+        raise RuntimeError(
+            "named clamp statistics do not support DataParallel; "
+            "run one evaluation process per GPU"
+        )
 
     # Installing a configuration starts one seeded measurement replica and clears
     # prior Gaussian counters. HF evaluation installs the disabled state explicitly.
@@ -840,6 +864,13 @@ def evaluate_vit_model(args: Arguments) -> None:
         if calibration_metadata is None:
             raise RuntimeError("frozen calibration setup is incomplete")
         table = load_calibration_table(args.calibration_path)
+        expected_specs = vit_calibration_specs(
+            model,
+            lower_quantile=args.calibration_lower_quantile,
+            upper_quantile=args.calibration_upper_quantile,
+            margin_fraction=args.calibration_margin_fraction,
+        )
+        validate_calibration_table_specs(table, expected_specs)
         calibration_state = create_calibration_runtime(
             calibration_mode,
             table,
@@ -885,6 +916,43 @@ def evaluate_vit_model(args: Arguments) -> None:
         if isinstance(module, (nn.LayerNorm, SpikingLayerNorm)):
             hooks.append(module.register_forward_hook(make_ln_hook(name, args.theta)))
 
+    # Attribute every explicit physical clamp to its leaf affine/normalization
+    # module while restoring the outer encoder or attention context after nested
+    # calls. Aggregate raw counts across batches for a reproducible per-site report.
+    clamp_totals = {}
+
+    def make_clamp_hook(name):
+        previous_names = []
+
+        def pre_hook(_module, _inp):
+            previous_names.append(transform_types.get_current_module_name())
+            transform_types.set_current_module_name(name)
+
+        def post_hook(_module, _inp, _out):
+            previous = previous_names.pop() if previous_names else None
+            transform_types.set_current_module_name(previous)
+
+        return pre_hook, post_hook
+
+    if model_backend == "spiking" and args.report_clamp_stats:
+        for name, module in model.named_modules():
+            if isinstance(
+                module,
+                (
+                    ViTEncoder,
+                    ViTSelfAttention,
+                    SpikingLayerNorm,
+                    SpikingLinear,
+                    SpikingConv2d,
+                ),
+            ):
+                pre_hook, post_hook = make_clamp_hook(name)
+                hooks.append(module.register_forward_pre_hook(pre_hook))
+                hooks.append(module.register_forward_hook(post_hook))
+        transform_types.clear_clamp_stats()
+        transform_types.set_current_module_name(None)
+        transform_types.set_clamp_log_enabled(True)
+
     quantiles = []
     def make_quantile_hook():
         def hook_fn(module, inp, out):
@@ -919,8 +987,20 @@ def evaluate_vit_model(args: Arguments) -> None:
             print(f"[DEBUG] Ground Truth Labels for Batch 0: {labels.tolist()}")
 
         # 예측 (Gradients 계산 불필요)
+        if model_backend == "spiking" and args.report_clamp_stats:
+            transform_types.clear_clamp_stats()
         with torch.no_grad():
             outputs = model(pixel_values)
+
+        if model_backend == "spiking" and args.report_clamp_stats:
+            for tag, stats in transform_types.get_clamp_stats().items():
+                aggregate = clamp_totals.setdefault(
+                    tag,
+                    {"underflow": 0, "overflow": 0, "total": 0},
+                )
+                for field in ("underflow", "overflow", "total"):
+                    aggregate[field] += stats[field]
+            transform_types.set_current_module_name(None)
 
         log_step[0] += 1
 
@@ -937,6 +1017,9 @@ def evaluate_vit_model(args: Arguments) -> None:
     for h in hooks:
         h.remove()
     tb_writer.close()
+    transform_types.set_current_module_name(None)
+    if model_backend == "spiking" and args.report_clamp_stats:
+        transform_types.set_clamp_log_enabled(False)
 
     if args.collect_quantiles and quantiles:
         max_q = max(quantiles)
@@ -985,6 +1068,27 @@ def evaluate_vit_model(args: Arguments) -> None:
                 f"Gaussian/{site}/output_overflows": counts["output_overflows"],
                 f"Gaussian/{site}/output_overflow_rate": overflow_rate,
             })
+
+    # Analytic and calibrated rails use the same count schema. Conventional dense
+    # classifier outputs have no declared TTFS rail and are represented by accuracy,
+    # not by a fabricated clipping denominator.
+    for (module_name, clamp_name), stats in sorted(clamp_totals.items()):
+        total = stats["total"]
+        underflow_rate = stats["underflow"] / total if total else 0.0
+        overflow_rate = stats["overflow"] / total if total else 0.0
+        site = f"{module_name}/{clamp_name}"
+        print(
+            f"Clamp[{site}] values={total}, underflows={stats['underflow']} "
+            f"(rate={underflow_rate:.6g}), overflows={stats['overflow']} "
+            f"(rate={overflow_rate:.6g})"
+        )
+        wandb.log({
+            f"Clamp/{site}/values": total,
+            f"Clamp/{site}/underflows": stats["underflow"],
+            f"Clamp/{site}/underflow_rate": underflow_rate,
+            f"Clamp/{site}/overflows": stats["overflow"],
+            f"Clamp/{site}/overflow_rate": overflow_rate,
+        })
 
     # Layer-wise clipping uses the number of tensor elements at each residual as its
     # denominator. Report both counts and rates without changing the frozen table,
