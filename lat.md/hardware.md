@@ -116,6 +116,8 @@ At `M=16`, dedicated placement uses 480 of 512 neuron circuits. The 128-hidden-u
 
 Full hardware evaluation bounds hxtorch memory by slicing only the sample axis before constructing each grouped graph. Each sample chunk performs label-free timing calibration and inference, then [[utils/hardware/brainscales2/toy_pooling.py#concatenate_toy_pool_results]] restores the original sample order while retaining per-chunk calibration metadata; trials, logical units, replicas, coordinates, and miss masks are not merged or averaged away.
 
+After temporal decoding, the physical Hagen readout also slices the flattened trial-sample row axis before each PWM call. The concatenated logits retain their original row order, and each row chunk records its calibration, chip, shape, and elapsed-time metadata.
+
 ### Local mock and replay evidence
 
 Synthetic and artifact-replay backends validate accuracy propagation before hardware use but are not promoted to new physical evidence.
@@ -153,6 +155,10 @@ Each logical hidden source must occupy its own simultaneous fan-in lane block an
 ### Chunked pool aggregation
 
 Hardware sample chunks must concatenate along the sample axis without altering trial, logical-neuron, replica, coordinate, or miss-mask semantics, and each chunk's calibration provenance must remain explicit.
+
+### Hagen output row chunking
+
+Physical Hagen readout chunks must preserve flattened trial-sample row order, bound each PWM call, and retain per-chunk provenance in the aggregate metadata.
 
 ### Miss-aware temporal decoding
 

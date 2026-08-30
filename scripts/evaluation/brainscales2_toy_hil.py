@@ -23,7 +23,12 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from utils.hardware.brainscales2.config import BrainScaleS2PoolConfig
-from utils.hardware.brainscales2.hagen import HagenConfig, HagenPWMBackend, file_sha256
+from utils.hardware.brainscales2.hagen import (
+    HagenConfig,
+    HagenPWMBackend,
+    HagenResult,
+    file_sha256,
+)
 from utils.hardware.brainscales2.toy import (
     ARCHITECTURES,
     ConvertedToyModel,
@@ -108,6 +113,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pool-trials", type=int, default=8)
     parser.add_argument("--pool-calibration-trials", type=int, default=32)
     parser.add_argument("--pool-sample-chunk-size", type=int, default=64)
+    parser.add_argument("--hagen-row-chunk-size", type=int, default=512)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--train-seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--epochs", type=int)
@@ -197,6 +203,8 @@ def _validate_architecture(args: argparse.Namespace) -> None:
     architecture = ARCHITECTURES[args.architecture]
     if args.pool_sample_chunk_size <= 0:
         raise ValueError("pool_sample_chunk_size must be positive")
+    if args.hagen_row_chunk_size <= 0:
+        raise ValueError("hagen_row_chunk_size must be positive")
     if architecture.task != args.task:
         raise ValueError(
             f"architecture {architecture.name} belongs to {architecture.task}, not {args.task}"
@@ -413,6 +421,55 @@ def _run_temporal_pool(
     return concatenate_toy_pool_results(results)
 
 
+def _run_hagen_output(
+    args: argparse.Namespace,
+    hagen: HagenPWMBackend,
+    converted: ConvertedToyModel,
+    flat_hidden: torch.Tensor,
+) -> HagenResult:
+    if (
+        hagen.config.mode != "hardware"
+        or flat_hidden.shape[0] <= args.hagen_row_chunk_size
+    ):
+        return hagen.output_layer(converted, flat_hidden)
+    chunk_results: list[HagenResult] = []
+    row_chunks: list[dict[str, Any]] = []
+    for start in range(0, flat_hidden.shape[0], args.hagen_row_chunk_size):
+        stop = min(start + args.hagen_row_chunk_size, flat_hidden.shape[0])
+        print(
+            f"  Hagen output row chunk [{start}:{stop}) / {flat_hidden.shape[0]}",
+            flush=True,
+        )
+        result = hagen.output_layer(converted, flat_hidden[start:stop])
+        chunk_results.append(result)
+        row_chunks.append(
+            {
+                "row_start": start,
+                "row_stop": stop,
+                "metadata": result.metadata,
+            }
+        )
+    combined = torch.cat([result.value for result in chunk_results], dim=0)
+    metadata = dict(chunk_results[0].metadata)
+    for key in ("input_shape", "output_shape", "elapsed_s"):
+        metadata.pop(key, None)
+    metadata.update(
+        {
+            "chunked": True,
+            "row_chunk_size": args.hagen_row_chunk_size,
+            "row_chunk_count": len(chunk_results),
+            "row_chunks": row_chunks,
+            "input_shape": list(flat_hidden.shape),
+            "output_shape": list(combined.shape),
+            "elapsed_s": sum(
+                float(result.metadata.get("elapsed_s", 0.0))
+                for result in chunk_results
+            ),
+        }
+    )
+    return HagenResult(combined, metadata)
+
+
 def _select_test_data(args: argparse.Namespace, dataset: Any) -> tuple[torch.Tensor, torch.Tensor]:
     limit = args.max_test_samples
     if args.phase == "hardware-smoke":
@@ -501,7 +558,7 @@ def evaluation_phase(args: argparse.Namespace) -> None:
                 _, flat_logits = converted.output_from_hidden(flat_hidden)
                 output_metadata = {"backend": "torch"}
             else:
-                output = hagen.output_layer(converted, flat_hidden)
+                output = _run_hagen_output(args, hagen, converted, flat_hidden)
                 flat_logits = output.value
                 output_metadata = output.metadata
             logits = flat_logits.reshape(
@@ -555,6 +612,7 @@ def evaluation_phase(args: argparse.Namespace) -> None:
         "pooling_domain": args.pooling_domain,
         "pool_mapping": args.pool_mapping,
         "pool_sample_chunk_size": args.pool_sample_chunk_size,
+        "hagen_row_chunk_size": args.hagen_row_chunk_size,
         "pool_sizes": pool_sizes,
         "placements": placements,
         "conversion": converted.manifest.to_dict(),

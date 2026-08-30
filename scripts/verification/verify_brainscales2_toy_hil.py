@@ -17,8 +17,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from scripts.evaluation.brainscales2_toy_hil import _run_hagen_output
 from utils.hardware.brainscales2.config import BrainScaleS2PoolConfig
-from utils.hardware.brainscales2.hagen import HagenConfig, HagenPWMBackend
+from utils.hardware.brainscales2.hagen import HagenConfig, HagenPWMBackend, HagenResult
 from utils.hardware.brainscales2.toy import (
     ARCHITECTURES,
     ToyMLP,
@@ -261,6 +262,47 @@ def verify_replay_split_and_reproducibility() -> None:
     assert first.metadata["scope"] == "rough-model-only"
 
 
+class _FakeChunkedHagen:
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(mode="hardware")
+        self.row_counts: list[int] = []
+
+    def output_layer(self, converted: object, hidden: torch.Tensor) -> HagenResult:
+        del converted
+        self.row_counts.append(hidden.shape[0])
+        value = hidden.sum(dim=1, keepdim=True).to(torch.int8)
+        return HagenResult(
+            value=value,
+            metadata={
+                "backend": "fake-hardware",
+                "input_shape": list(hidden.shape),
+                "output_shape": list(value.shape),
+                "elapsed_s": 0.25,
+            },
+        )
+
+
+def verify_hagen_output_row_chunking() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Hagen output row chunking]]
+    hagen = _FakeChunkedHagen()
+    hidden = torch.arange(14, dtype=torch.int32).reshape(7, 2)
+    result = _run_hagen_output(
+        SimpleNamespace(hagen_row_chunk_size=3),
+        hagen,
+        None,
+        hidden,
+    )
+    assert hagen.row_counts == [3, 3, 1]
+    torch.testing.assert_close(
+        result.value, hidden.sum(dim=1, keepdim=True).to(torch.int8)
+    )
+    assert result.metadata["chunked"] is True
+    assert result.metadata["row_chunk_count"] == 3
+    assert result.metadata["input_shape"] == [7, 2]
+    assert result.metadata["output_shape"] == [7, 1]
+    assert result.metadata["elapsed_s"] == 0.75
+
+
 def verify_hagen_host_tiling() -> None:
     # @lat: [[hardware#Toy ANN2SNN Verification#Hagen tiling contract]]
     _, converted, _ = _converted_fixture()
@@ -389,6 +431,8 @@ def verify_python311_and_notebook_contract() -> None:
     assert "'--input-fan-in', SPIKING_INPUT_FAN_IN" in source
     assert "POOL_SAMPLE_CHUNK_SIZE = 64" in source
     assert "'--pool-sample-chunk-size', POOL_SAMPLE_CHUNK_SIZE" in source
+    assert "HAGEN_ROW_CHUNK_SIZE = 512" in source
+    assert "'--hagen-row-chunk-size', HAGEN_ROW_CHUNK_SIZE" in source
     assert source.index("'--phase', 'train'") < source.index(
         "setup_hardware_client()"
     )
@@ -405,6 +449,7 @@ def main() -> None:
     verify_mock_and_all_miss_policy()
     verify_chunked_pool_aggregation()
     verify_replay_split_and_reproducibility()
+    verify_hagen_output_row_chunking()
     verify_hagen_host_tiling()
     verify_metrics_and_artifact_schema()
     verify_python311_and_notebook_contract()
