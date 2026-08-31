@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import ast
 import csv
 import json
+import subprocess
 import sys
 
 import torch
@@ -22,6 +23,7 @@ from scripts.evaluation.brainscales2_toy_hil import (
     _apply_condition_worker_config,
     _load_isolated_condition,
     _run_hagen_output,
+    _run_worker_command_with_retries,
 )
 from utils.hardware.brainscales2.config import BrainScaleS2PoolConfig
 from utils.hardware.brainscales2.hagen import HagenConfig, HagenPWMBackend, HagenResult
@@ -424,6 +426,15 @@ def verify_condition_process_isolation_contract() -> None:
                 runtime={"elapsed_s": float(pool_size)},
                 bootstrap_iterations=10,
             )
+            (worker_dir / "worker_status.json").write_text(
+                json.dumps(
+                    {
+                        "status": "passed",
+                        "attempts": [{"attempt": 1, "status": "passed"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
             restored, _, _, _ = _load_isolated_condition(worker_dir)
             assert restored.key == key
             worker_dirs.append(worker_dir)
@@ -446,10 +457,80 @@ def verify_condition_process_isolation_contract() -> None:
         assert isolation["enabled"] is True
         assert isolation["worker_count"] == 2
         assert isolation["resumable"] is True
+        assert set(isolation["worker_status"]) == {
+            "condition_workers/ttfs_M1_local-pool_dedicated",
+            "condition_workers/ttfs_M2_local-pool_dedicated",
+        }
         with (output / "metrics.csv").open(newline="", encoding="utf-8") as handle:
             conditions = {row["condition"] for row in csv.DictReader(handle)}
         assert "ttfs_M1_local-pool_dedicated" in conditions
         assert "ttfs_M2_local-pool_dedicated" in conditions
+
+
+def verify_transient_worker_retry() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Transient worker retry]]
+    with TemporaryDirectory() as directory:
+        worker_dir = Path(directory)
+        calls: list[list[str]] = []
+        delays: list[float] = []
+
+        def flaky_runner(
+            command: list[str], *, cwd: Path, check: bool
+        ) -> subprocess.CompletedProcess[str]:
+            assert cwd == REPOSITORY_ROOT
+            assert check is True
+            calls.append(command)
+            if len(calls) < 3:
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0)
+
+        status = _run_worker_command_with_retries(
+            ["worker"],
+            worker_dir,
+            max_attempts=3,
+            retry_backoff_s=2.0,
+            runner=flaky_runner,
+            sleeper=delays.append,
+        )
+        assert len(calls) == 3
+        assert delays == [2.0, 4.0]
+        assert status["status"] == "passed"
+        assert [attempt["status"] for attempt in status["attempts"]] == [
+            "failed",
+            "failed",
+            "passed",
+        ]
+        saved = json.loads(
+            (worker_dir / "worker_status.json").read_text(encoding="utf-8")
+        )
+        assert saved == status
+
+        exhausted_dir = worker_dir / "exhausted"
+        exhausted_dir.mkdir()
+
+        def failing_runner(
+            command: list[str], *, cwd: Path, check: bool
+        ) -> subprocess.CompletedProcess[str]:
+            raise subprocess.CalledProcessError(7, command)
+
+        try:
+            _run_worker_command_with_retries(
+                ["worker"],
+                exhausted_dir,
+                max_attempts=2,
+                retry_backoff_s=0.0,
+                runner=failing_runner,
+                sleeper=lambda _: None,
+            )
+        except subprocess.CalledProcessError as error:
+            assert error.returncode == 7
+        else:
+            raise AssertionError("exhausted worker retry must re-raise")
+        exhausted = json.loads(
+            (exhausted_dir / "worker_status.json").read_text(encoding="utf-8")
+        )
+        assert exhausted["status"] == "failed"
+        assert len(exhausted["attempts"]) == 2
 
 
 def verify_metrics_and_artifact_schema() -> None:
@@ -551,9 +632,16 @@ def verify_python311_and_notebook_contract() -> None:
     assert "POOL_SAMPLE_CHUNK_SIZE = 64" in source
     assert "'--pool-sample-chunk-size', POOL_SAMPLE_CHUNK_SIZE" in source
     assert "HAGEN_ROW_CHUNK_SIZE = 512" in source
+    assert "CONDITION_WORKER_MAX_ATTEMPTS = 3" in source
+    assert "CONDITION_WORKER_RETRY_BACKOFF_S = 20.0" in source
     assert "ARTIFACT_ROOT = None" in source
     assert "if ARTIFACT_ROOT is not None" in source
     assert "'--hagen-row-chunk-size', HAGEN_ROW_CHUNK_SIZE" in source
+    assert "'--condition-worker-max-attempts', CONDITION_WORKER_MAX_ATTEMPTS" in source
+    assert (
+        "'--condition-worker-retry-backoff-s', "
+        "CONDITION_WORKER_RETRY_BACKOFF_S"
+    ) in source
     assert source.index("'--phase', 'train'") < source.index(
         "setup_hardware_client()"
     )
@@ -573,6 +661,7 @@ def main() -> None:
     verify_hagen_output_row_chunking()
     verify_hagen_host_tiling()
     verify_condition_process_isolation_contract()
+    verify_transient_worker_retry()
     verify_metrics_and_artifact_schema()
     verify_python311_and_notebook_contract()
     print("BrainScaleS-2 toy ANN2SNN verification passed")

@@ -6,8 +6,8 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from time import perf_counter
-from typing import Any
+from time import perf_counter, sleep
+from typing import Any, Callable
 import argparse
 import csv
 import json
@@ -115,6 +115,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pool-calibration-trials", type=int, default=32)
     parser.add_argument("--pool-sample-chunk-size", type=int, default=64)
     parser.add_argument("--hagen-row-chunk-size", type=int, default=512)
+    parser.add_argument("--condition-worker-max-attempts", type=int, default=3)
+    parser.add_argument("--condition-worker-retry-backoff-s", type=float, default=20.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--train-seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--epochs", type=int)
@@ -246,6 +248,10 @@ def _validate_architecture(args: argparse.Namespace) -> None:
         raise ValueError("pool_sample_chunk_size must be positive")
     if args.hagen_row_chunk_size <= 0:
         raise ValueError("hagen_row_chunk_size must be positive")
+    if args.condition_worker_max_attempts <= 0:
+        raise ValueError("condition_worker_max_attempts must be positive")
+    if args.condition_worker_retry_backoff_s < 0:
+        raise ValueError("condition_worker_retry_backoff_s must be non-negative")
     if architecture.task != args.task:
         raise ValueError(
             f"architecture {architecture.name} belongs to {architecture.task}, not {args.task}"
@@ -735,6 +741,76 @@ def _serialize_worker_config(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _run_worker_command_with_retries(
+    command: list[str],
+    worker_dir: Path,
+    *,
+    max_attempts: int,
+    retry_backoff_s: float,
+    runner: Callable[..., Any] = subprocess.run,
+    sleeper: Callable[[float], None] = sleep,
+) -> dict[str, Any]:
+    """Run one isolated worker with bounded process-level reconnect attempts."""
+    status_path = worker_dir / "worker_status.json"
+    attempts: list[dict[str, Any]] = []
+    for attempt in range(1, max_attempts + 1):
+        started_at = datetime.now(timezone.utc).isoformat()
+        print(
+            f"Worker {worker_dir.name} attempt {attempt}/{max_attempts}",
+            flush=True,
+        )
+        try:
+            runner(command, cwd=REPOSITORY_ROOT, check=True)
+        except subprocess.CalledProcessError as error:
+            attempts.append(
+                {
+                    "attempt": attempt,
+                    "started_at": started_at,
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "returncode": error.returncode,
+                    "status": "failed",
+                }
+            )
+            final = attempt == max_attempts
+            _json_write(
+                status_path,
+                {
+                    "status": "failed" if final else "retrying",
+                    "max_attempts": max_attempts,
+                    "retry_backoff_s": retry_backoff_s,
+                    "attempts": attempts,
+                },
+            )
+            if final:
+                raise
+            delay_s = retry_backoff_s * attempt
+            print(
+                f"Worker {worker_dir.name} failed with exit {error.returncode}; "
+                f"retrying in {delay_s:g}s",
+                flush=True,
+            )
+            sleeper(delay_s)
+            continue
+        attempts.append(
+            {
+                "attempt": attempt,
+                "started_at": started_at,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "returncode": 0,
+                "status": "passed",
+            }
+        )
+        status = {
+            "status": "passed",
+            "max_attempts": max_attempts,
+            "retry_backoff_s": retry_backoff_s,
+            "attempts": attempts,
+        }
+        _json_write(status_path, status)
+        return status
+    raise AssertionError("unreachable worker retry state")
+
+
 def _run_condition_subprocess(
     args: argparse.Namespace,
     worker_dir: Path,
@@ -781,9 +857,25 @@ def _run_condition_subprocess(
         str(config_path.resolve()),
     ]
     print("Launching isolated worker:", worker_dir.name, flush=True)
-    subprocess.run(command, cwd=REPOSITORY_ROOT, check=True)
+    _run_worker_command_with_retries(
+        command,
+        worker_dir,
+        max_attempts=args.condition_worker_max_attempts,
+        retry_backoff_s=args.condition_worker_retry_backoff_s,
+    )
     missing = [name for name in required if not (worker_dir / name).is_file()]
     if missing:
+        status_path = worker_dir / "worker_status.json"
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        _json_write(
+            status_path,
+            {
+                **status,
+                "status": "failed",
+                "reason": "missing-required-artifacts",
+                "missing": missing,
+            },
+        )
         raise RuntimeError(f"condition worker {worker_dir.name} missed artifacts: {missing}")
 
 
@@ -907,6 +999,13 @@ def _aggregate_isolated_conditions(
                 "worker_environments": {
                     manifest["conditions"][0]["key"]: manifest.get("environment")
                     for manifest in manifests
+                },
+                "worker_status": {
+                    str(path.relative_to(args.output_dir)): json.loads(
+                        (path / "worker_status.json").read_text(encoding="utf-8")
+                    )
+                    for path in [*first_hidden_dirs.values(), *worker_dirs]
+                    if (path / "worker_status.json").is_file()
                 },
                 "shared_first_hidden": {
                     str(avg): str(path.relative_to(args.output_dir))
