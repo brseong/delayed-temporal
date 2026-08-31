@@ -392,6 +392,25 @@ def verify_hagen_host_tiling() -> None:
     assert all(0.0 <= row["saturation_rate"] <= 1.0 for row in schedule)
 
 
+def verify_host_mediated_implicit_relu_boundary() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Host-mediated implicit ReLU boundary]]
+    hidden, metadata = HagenPWMBackend._implicit_lower_bound_uint5(  # noqa: SLF001
+        torch.tensor([[-128.0, -3.0, 0.0, 3.0, 62.0, 127.0]]),
+        shift=1,
+    )
+    torch.testing.assert_close(
+        hidden,
+        torch.tensor([[0, 0, 0, 2, 31, 31]], dtype=torch.int32),
+    )
+    assert metadata["relu_boundary"] == "implicit-lower-bound-host"
+    assert metadata["converting_relu"] is None
+    assert metadata["host_mediated_lower_bound"] is True
+    assert metadata["lower_bound_v"] == 0.0
+    assert metadata["upper_bound_v"] == 31.0
+    assert metadata["lower_bound_clamped_values"] == 2
+    assert metadata["upper_bound_clamped_values"] == 1
+
+
 def verify_condition_process_isolation_contract() -> None:
     # @lat: [[hardware#Toy ANN2SNN Verification#Condition process isolation]]
     with TemporaryDirectory() as directory:
@@ -708,6 +727,8 @@ def verify_python311_and_notebook_contract() -> None:
     assert "SMOKE_MAX_MULTI_SPIKE_RATE" in source
     assert "SPIKING_INPUT_FAN_IN = 4" in source
     assert "'--input-fan-in', SPIKING_INPUT_FAN_IN" in source
+    assert "RELU_BOUNDARY = 'implicit-lower-bound-host'" in source
+    assert "'--relu-boundary', RELU_BOUNDARY" in source
     assert "POOL_SAMPLE_CHUNK_SIZE = 64" in source
     assert "'--pool-sample-chunk-size', POOL_SAMPLE_CHUNK_SIZE" in source
     assert "POOL_REPLICA_SAMPLE_BUDGET = 256" in source
@@ -747,6 +768,7 @@ def main() -> None:
     verify_replay_split_and_reproducibility()
     verify_hagen_output_row_chunking()
     verify_hagen_host_tiling()
+    verify_host_mediated_implicit_relu_boundary()
     verify_condition_process_isolation_contract()
     verify_transient_worker_retry()
     verify_metrics_and_artifact_schema()

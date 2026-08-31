@@ -154,6 +154,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hagen-num-sends", type=int)
     parser.add_argument("--hagen-wait-between-events", type=int, default=5)
     parser.add_argument("--hagen-hidden-shift", type=int, default=1)
+    parser.add_argument(
+        "--relu-boundary",
+        choices=("implicit-lower-bound-host", "hagen-converting-relu"),
+        default="implicit-lower-bound-host",
+        help=(
+            "hidden activation boundary: default maps raw Hagen PWM output through "
+            "a host-mediated V_lb=0 Potential before TTFS; the other choice is a "
+            "Hagen ConvertingReLU baseline"
+        ),
+    )
 
     parser.add_argument("--dt-s", type=float, default=1.0e-6)
     parser.add_argument("--input-early-s", type=float, default=5.0e-6)
@@ -597,6 +607,8 @@ def evaluation_phase(args: argparse.Namespace) -> None:
             raise ValueError("shared first-hidden cache does not match the evaluation shape")
         if cached.get("source_parameter_sha256") != parameter_sha256(model):
             raise ValueError("shared first-hidden cache belongs to a different checkpoint")
+        if cached.get("relu_boundary") != args.relu_boundary:
+            raise ValueError("shared first-hidden cache uses a different ReLU boundary")
         first_cache[cached_avg] = (cached_hidden, cached["metadata"])
 
     for placement in placements:
@@ -613,7 +625,12 @@ def evaluation_phase(args: argparse.Namespace) -> None:
                     first_metadata = {"backend": "torch", "avg": 1}
                 else:
                     input_uint5 = converted.encode_input(test_x)
-                    first = hagen.first_layer(converted, input_uint5, avg=hagen_avg)
+                    first = hagen.first_layer(
+                        converted,
+                        input_uint5,
+                        avg=hagen_avg,
+                        relu_boundary=args.relu_boundary,
+                    )
                     first_hidden = first.value
                     first_metadata = first.metadata
                 first_cache[hagen_avg] = (first_hidden, first_metadata)
@@ -703,6 +720,7 @@ def evaluation_phase(args: argparse.Namespace) -> None:
         "pwm_backend": args.pwm_backend,
         "pool_backend": args.pool_backend,
         "pooling_domain": args.pooling_domain,
+        "relu_boundary": args.relu_boundary,
         "pool_mapping": args.pool_mapping,
         "pool_sample_chunk_size": args.pool_sample_chunk_size,
         "pool_replica_sample_budget": args.pool_replica_sample_budget,
@@ -740,6 +758,13 @@ def evaluation_phase(args: argparse.Namespace) -> None:
             "host_free_latency_or_energy": False,
             "transformer_hardware_execution": False,
             "replay_is_hardware_evidence": False,
+            "implicit_relu_continuous_on_chip": False,
+            "implicit_relu_host_mediated": (
+                args.relu_boundary == "implicit-lower-bound-host"
+            ),
+            "hagen_converting_relu_baseline": (
+                args.relu_boundary == "hagen-converting-relu"
+            ),
         },
     }
     metrics = write_toy_artifacts(
@@ -1041,9 +1066,11 @@ def prepare_first_hidden_phase(args: argparse.Namespace) -> None:
         converted,
         input_uint5,
         avg=args.condition_hagen_avg,
+        relu_boundary=args.relu_boundary,
     )
     payload = {
         "hagen_avg": args.condition_hagen_avg,
+        "relu_boundary": args.relu_boundary,
         "first_hidden": first.value.to(torch.int32),
         "metadata": first.metadata,
         "test_samples": test_x.shape[0],
@@ -1255,6 +1282,7 @@ def probe_phase(args: argparse.Namespace) -> None:
         converted,
         calibration_input,
         calibration_target,
+        relu_boundary=args.relu_boundary,
     )
     payload["elapsed_s"] = perf_counter() - started
     _json_write(args.output_dir / "hagen_probe.json", payload)

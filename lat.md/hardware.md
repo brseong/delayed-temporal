@@ -94,7 +94,9 @@ Float training ends before conversion; parameter hashes prove that range calibra
 
 The host switches between Hagen PWM execution and spiking LIF execution, so measured accuracy includes both physical stages while latency and energy are not end-to-end hardware claims.
 
-[[utils/hardware/brainscales2/hagen.py#HagenPWMBackend]] lazy-loads `hxtorch.perceptron`, executes bias-free physical affine layers with the converted constant lane, invokes `ConvertingReLU` before releasing hardware, and records calibration, chip, tiling, and timing metadata.
+[[utils/hardware/brainscales2/hagen.py#HagenPWMBackend]] lazy-loads `hxtorch.perceptron`, executes bias-free physical affine layers with the converted constant lane, and records calibration, chip, tiling, activation-boundary, and timing metadata.
+
+The formal default does not invoke Hagen `ConvertingReLU`. It scales the cached raw first PWM preactivation into a [[utils/transforms/types.py#Potential]] with $V_{lb}=0$ and upper UInt5 bound 31, applies that declared bound in the adapter, and passes the resulting UInt5 values to the reused TTFS encoder. This is an explicit host-mediated Hagen-to-spiking representation boundary because the two modes are released and reinitialized separately; it must not be described as a continuous on-chip lower clamp. `--relu-boundary hagen-converting-relu` remains only as an explicit-Hagen baseline, and both choices record their clamp counts and provenance in manifests.
 
 The integer reference shift applies to its int32 accumulator, whereas physical Hagen output is already Int8. A separate Hagen hidden shift defaults to one and the probe recommends it from unlabeled calibration activations; physical output logits receive no second software shift.
 
@@ -143,6 +145,10 @@ The EBRAINS notebook is a one-pass opt-in pipeline that trains and converts befo
 ## Toy ANN2SNN Verification
 
 These test specifications protect the conversion and network-level hardware boundary without requiring hxtorch locally.
+
+### Host-mediated implicit ReLU boundary
+
+The default hidden boundary must lower raw PWM values through the declared $V_{lb}=0$ Potential range without calling `ConvertingReLU`, retain UInt5 upper saturation, and label the result as host-mediated rather than continuous on-chip activation.
 
 ### Deterministic datasets and frozen conversion
 

@@ -12,10 +12,12 @@ from typing import Any, Literal
 import torch
 
 from .toy import ConvertedToyModel, QuantizedAffine
+from utils.transforms.types import Potential, PotentialBounds
 
 
 HagenMode = Literal["mock", "hardware"]
 HagenTiling = Literal["auto", "high-level", "host-128"]
+ReLUBoundary = Literal["implicit-lower-bound-host", "hagen-converting-relu"]
 
 
 def file_sha256(path: Path | None) -> str | None:
@@ -207,8 +209,11 @@ class HagenPWMBackend:
         affine: QuantizedAffine,
         *,
         avg: int,
-        converting_relu_shift: int | None = None,
+        relu_boundary: ReLUBoundary | None = None,
+        activation_shift: int | None = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
+        if (relu_boundary is None) != (activation_shift is None):
+            raise ValueError("relu_boundary and activation_shift must be specified together")
         if not self.dependencies_available():
             raise RuntimeError(
                 "hxtorch.perceptron is unavailable; use the EBRAINS-experimental kernel"
@@ -224,21 +229,41 @@ class HagenPWMBackend:
                 affine,
                 avg=avg,
             )
-            converting_relu = None
-            if converting_relu_shift is not None:
+            activation_metadata: dict[str, Any] = {
+                "relu_boundary": None,
+                "converting_relu": None,
+                "host_mediated_lower_bound": False,
+            }
+            if relu_boundary == "hagen-converting-relu":
+                assert activation_shift is not None
                 try:
                     output = hxtorch.perceptron.converting_relu(
                         output,
-                        shift=converting_relu_shift,
+                        shift=activation_shift,
                         mock=self.config.mode == "mock",
                     )
                 except (AttributeError, TypeError):
                     output = torch.round(
-                        output.to(torch.float64) / (2 ** converting_relu_shift)
+                        output.to(torch.float64) / (2 ** activation_shift)
                     ).clamp(0, 31)
-                    converting_relu = "host-fallback"
+                    activation_metadata["converting_relu"] = "host-fallback"
                 else:
-                    converting_relu = "hxtorch"
+                    activation_metadata["converting_relu"] = "hxtorch"
+                activation_metadata.update(
+                    {
+                        "relu_boundary": relu_boundary,
+                        "activation_shift": activation_shift,
+                    }
+                )
+            elif relu_boundary == "implicit-lower-bound-host":
+                assert activation_shift is not None
+                output, lower_bound_metadata = self._implicit_lower_bound_uint5(
+                    output,
+                    shift=activation_shift,
+                )
+                activation_metadata.update(lower_bound_metadata)
+            elif relu_boundary is not None:
+                raise ValueError(f"unsupported ReLU boundary: {relu_boundary}")
             chip_identifier = None
             get_identifier = getattr(hxtorch, "get_unique_identifier", None)
             if callable(get_identifier) and self.config.mode == "hardware":
@@ -260,11 +285,44 @@ class HagenPWMBackend:
                 "output_shape": list(output.shape),
                 "elapsed_s": perf_counter() - started,
                 "host_accumulated": tiling == "host-128",
-                "converting_relu": converting_relu,
+                **activation_metadata,
             }
         finally:
             if initialized:
                 hxtorch.release_hardware()
+
+    @staticmethod
+    def _implicit_lower_bound_uint5(
+        raw_preactivation: torch.Tensor,
+        *,
+        shift: int,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Lower raw PWM preactivations at the cached ``V_lb=0`` TTFS boundary.
+
+        Hagen and the spiking graph run in separate hardware modes.  This is
+        deliberately a host-mediated representation boundary, not a claim of a
+        continuous on-chip Hagen-to-LIF lower clamp.
+        """
+        scaled = torch.round(raw_preactivation.detach().to(torch.float64) / (2 ** shift))
+        potential = Potential(
+            scaled.to(torch.float32),
+            PotentialBounds(0.0, 31.0),
+        )
+        lower_clamped = int((potential.value < potential.domain.min).sum().item())
+        upper_clamped = int((potential.value > potential.domain.max).sum().item())
+        bounded = potential.domain.clamp(potential.value).to(torch.int32)
+        return bounded, {
+            "relu_boundary": "implicit-lower-bound-host",
+            "converting_relu": None,
+            "host_mediated_lower_bound": True,
+            "lower_bound_v": 0.0,
+            "upper_bound_v": 31.0,
+            "activation_shift": shift,
+            "lower_bound_clamped_values": lower_clamped,
+            "upper_bound_clamped_values": upper_clamped,
+            "raw_preactivation_minimum": float(raw_preactivation.min()),
+            "raw_preactivation_maximum": float(raw_preactivation.max()),
+        }
 
     def first_layer(
         self,
@@ -272,14 +330,16 @@ class HagenPWMBackend:
         input_uint5: torch.Tensor,
         *,
         avg: int = 1,
+        relu_boundary: ReLUBoundary = "implicit-lower-bound-host",
     ) -> HagenResult:
-        """Execute first PWM affine and convert its output to hidden UInt5."""
+        """Execute first PWM affine and apply the selected hidden ReLU boundary."""
         augmented = self._augment(input_uint5)
         hidden, metadata = self._execute(
             augmented,
             converted.first,
             avg=avg,
-            converting_relu_shift=self.config.hidden_shift,
+            relu_boundary=relu_boundary,
+            activation_shift=self.config.hidden_shift,
         )
         metadata["integer_reference_hidden_shift"] = converted.manifest.hidden_shift
         metadata["hagen_hidden_shift"] = self.config.hidden_shift
@@ -307,8 +367,9 @@ class HagenPWMBackend:
         target_hidden_uint5: torch.Tensor,
         *,
         candidates: tuple[int, ...] = (0, 1, 2, 3, 4),
+        relu_boundary: ReLUBoundary = "implicit-lower-bound-host",
     ) -> dict[str, Any]:
-        """Select a label-free Hagen ReLU shift against converted activations."""
+        """Select a label-free hidden-boundary scale against converted activations."""
         if input_uint5.shape[0] != target_hidden_uint5.shape[0]:
             raise ValueError("shift calibration inputs and targets must share samples")
         augmented = self._augment(input_uint5)
@@ -320,7 +381,8 @@ class HagenPWMBackend:
                 augmented,
                 converted.first,
                 avg=1,
-                converting_relu_shift=shift,
+                relu_boundary=relu_boundary,
+                activation_shift=shift,
             )
             output = output.to(torch.float64)
             mse = float((output - target).square().mean()) / scale
