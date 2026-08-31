@@ -77,7 +77,7 @@ The merged calibration work closes every known live-extrema violation; the remai
 - [x] Enforce finite, ordered bound endpoints centrally and replace `check_domain` assertions with explicit exceptions that remain active under optimized Python.
 - [x] Keep nonzero spiking attention training dropout outside the paper scope; the compatibility branch is documented, and maintained fixed-range claims apply only to evaluation with dropout disabled.
 - [x] Run the ViT-S/ImageNet-1k real-checkpoint audit and report per-site clipping, Gaussian saturation, deadline misses, and task accuracy for LayerNorm, attention, affine, embedding, and the conventional task head; see [[evaluation#Fixed-Domain ViT-S Real-Data Audit]].
-- [ ] Repeat the real-data fixed-domain audit for BERT, RoBERTa, and GPT-2 before making a cross-family empirical claim.
+- [x] Repeat the real-data fixed-domain audit for BERT, RoBERTa, and GPT-2; the classifier gaps are small, and GPT-2's attention-local threshold reduces the original single-threshold PPL gap from 2.6267 to 0.4934; see [[evaluation#Fixed-Domain Text-Model Real-Data Audit]].
 
 ### Implementation Checklist
 

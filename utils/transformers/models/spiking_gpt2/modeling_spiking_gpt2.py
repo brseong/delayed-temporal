@@ -66,6 +66,26 @@ from utils.transformers.models.spiking_ops import (
 logger = logging.get_logger(__name__)
 
 
+def resolve_gpt2_attention_theta(config) -> float:
+    """Resolve GPT-2's operator-local attention threshold.
+
+    ``attention_theta=None`` retains the historical model-wide ``theta``. A
+    distinct positive value narrows only score coding, softmin, and attention
+    value readout; LayerNorm and affine/MLP operators continue to use ``theta``.
+    """
+    configured = getattr(config, "attention_theta", None)
+    value = getattr(config, "theta", 10.0) if configured is None else configured
+    if isinstance(value, bool):
+        raise TypeError("GPT-2 attention_theta must be a real scalar")
+    try:
+        resolved = float(value)
+    except (TypeError, ValueError) as error:
+        raise TypeError("GPT-2 attention_theta must be a real scalar") from error
+    if not math.isfinite(resolved) or resolved <= 0.0:
+        raise ValueError("GPT-2 attention_theta must be finite and positive")
+    return resolved
+
+
 class SpikingConv1D(Conv1D):
     def __init__(self, nf, nx, theta=400.0, **kwargs):
         super().__init__(nf, nx, **kwargs)
@@ -401,6 +421,7 @@ class GPT2Attention(nn.Module):
         self.reorder_and_upcast_attn = config.reorder_and_upcast_attn
 
         _theta = getattr(config, "theta", 400.0)
+        self.attention_theta = resolve_gpt2_attention_theta(config)
         self.c_attn = SpikingConv1D(3 * self.embed_dim, self.embed_dim, theta=_theta)
         self.c_proj = SpikingConv1D(self.embed_dim, self.embed_dim, theta=_theta)
 
@@ -511,7 +532,7 @@ class GPT2Attention(nn.Module):
             )
         else:
             if using_spiking:
-                theta = float(getattr(self.config, "theta", 10.0))
+                theta = self.attention_theta
                 source_length_max = int(self.config.max_position_embeddings)
                 kwargs["theta"] = theta
                 kwargs["tau"] = getattr(self.config, "tau_s", 1.0)
@@ -1825,6 +1846,7 @@ class GPT2ForQuestionAnswering(GPT2PreTrainedModel):
 
 
 __all__ = [
+    "resolve_gpt2_attention_theta",
     "GPT2DoubleHeadsModel",
     "GPT2ForQuestionAnswering",
     "GPT2ForSequenceClassification",

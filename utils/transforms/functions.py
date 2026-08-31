@@ -810,7 +810,7 @@ def gelu_approximation(
         input_value: Activation tensor contained by ``domain``.
         domain: Fixed signed input interval, optionally supplied by layer-wise
             calibration before this function is called.
-        tau_s: Shared temporal scale used by the internal tanh composition.
+        tau_s: Positive physical time scale; matched input scaling preserves tanh.
         theta: Symmetric identity-code rail used by multiplication.
 
     Returns:
@@ -873,7 +873,7 @@ def gelu_approximation_sigmoid(
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Approximate GELU with a structurally bounded sigmoid gate.
 
-    The approximation computes ``v * sigmoid(1.702 * v / tau_s)`` from
+    The approximation computes ``v * sigmoid(1.702 * v)`` from
     multiplication, exponential, and division operators. The completed sigmoid gate
     is mathematically restricted to ``[0, 1]`` even when its internal division
     carries a broader generic ratio interval. Gaussian gate excursions are counted
@@ -882,17 +882,19 @@ def gelu_approximation_sigmoid(
     Args:
         input_value: Activation tensor contained by ``domain``.
         domain: Declared input potential interval.
-        tau_s: Shared exponential and logarithmic temporal scale.
+        tau_s: Positive physical time scale canceled from the sigmoid gate slope.
         theta: Symmetric identity-code rail used by multiplication.
 
     Returns:
         The sigmoid-form GELU approximation and its interval-arithmetic output
         domain derived from ``domain`` and the fixed gate interval ``[0, 1]``.
     """
-    # Step 1: scale the activation by the fixed sigmoid coefficient. The declared
-    # interval follows the same positive affine map and remains independent of the
-    # current activation tensor or Gaussian samples.
-    scale_const = 1.702
+    # Pre-scale the fixed sigmoid coefficient by tau_s. Exponential decoding
+    # divides by the same value, leaving the pretrained gate slope unchanged.
+    tau_value = float(tau_s)
+    if not isfinite(tau_value) or tau_value <= 0.0:
+        raise ValueError("tau_s must be finite and positive")
+    scale_const = 1.702 * tau_value
     scale_bound = PotentialBounds(scale_const, scale_const)
     scaled_input, _ = multiplication_operator(
         input_value,
@@ -909,7 +911,7 @@ def gelu_approximation_sigmoid(
     # Step 2: intersect both the value and declared interval with the established
     # exponential stability cap. Keeping these two views synchronized prevents the
     # encoder metadata from claiming a wider range than the tensor it receives.
-    stability_cap = 80.0
+    stability_cap = 80.0 * tau_value
     scaled_input_clamped = scaled_input.clamp(
         min=-stability_cap,
         max=stability_cap,
@@ -982,10 +984,12 @@ def tanh(
         The composed tanh approximation clamped to ``[-1, 1]`` together with that
         fixed structural potential domain.
     """
-    # Step 1: scale the input by two through the maintained multiplication operator.
-    # The following negative exponential supplies the sign in exp(-2v), so the
-    # multiplier itself remains the positive constant used by the original formula.
-    scale_const = 2.0
+    # Pre-scale the tanh coefficient by tau_s. Exponential decoding divides by
+    # the same value, so the final argument remains exp(-2v).
+    tau_value = float(tau_s)
+    if not isfinite(tau_value) or tau_value <= 0.0:
+        raise ValueError("tau_s must be finite and positive")
+    scale_const = 2.0 * tau_value
     scale_bound = PotentialBounds(scale_const, scale_const)
     scaled_input, _ = multiplication_operator(
         input_value,
@@ -1002,7 +1006,7 @@ def tanh(
     # Step 2: constrain the direct exponential argument to the established numerical
     # stability interval. The declared domain follows the same endpoint intersection
     # so the encoder and tensor value retain one synchronized potential contract.
-    stability_cap = 80.0
+    stability_cap = 80.0 * tau_value
     scaled_input_clamped = scaled_input.clamp(
         min=-stability_cap,
         max=stability_cap,
@@ -1078,14 +1082,18 @@ def _gaussian_swiglu_function(
     Raises:
         RuntimeError: If direct event-aware encoding does not return ``SpikeSample``.
     """
-    # Step 1: Scale u by beta and propagate the same affine endpoint bounds used by
-    # the deterministic composition before applying its exponential stability cap.
-    scaled_u = beta * u
+    # Scale by tau_s before exponential encoding so the physical time
+    # constant changes latency without changing the requested sigmoid(beta*u).
+    tau_value = float(tau_s)
+    if not isfinite(tau_value) or tau_value <= 0.0:
+        raise ValueError("tau_s must be finite and positive")
+    gate_scale = beta * tau_value
+    scaled_u = gate_scale * u
     scaled_domain_u = PotentialBounds(
-        beta * domain_u.min,
-        beta * domain_u.max,
+        gate_scale * domain_u.min,
+        gate_scale * domain_u.max,
     )
-    stability_cap = 20.0
+    stability_cap = 20.0 * tau_value
     scaled_u_clamped = scaled_u.clamp(
         min=-stability_cap,
         max=stability_cap,
@@ -1226,8 +1234,9 @@ def swiglu_function(
         v: Second input potential
         domain_v: Potential bounds for v
         beta: Scaling constant for sigmoid computation (default: 1.0)
-        tau_s: Positive exponential and logarithmic time constant. At the default
-            value one, the gate is exactly ``sigmoid(beta * u)``.
+        tau_s: Positive exponential and logarithmic time constant. Input scaling
+            cancels this physical time constant, so the gate remains exactly
+            ``sigmoid(beta * u)``.
         theta: Parameter for multiplication operator (default: 400.0)
     
     Returns:
@@ -1246,12 +1255,20 @@ def swiglu_function(
             theta=theta,
         )
 
-    # Step 1: Scale u by beta
-    scaled_u = beta * u
-    scaled_domain_u = PotentialBounds(beta * domain_u.min, beta * domain_u.max)
-    
-    # Stability cap for exp
-    _STABILITY_CAP = 20.0
+    # Scale by tau_s so the gate remains sigmoid(beta*u) for every
+    # positive physical time constant rather than changing its temperature.
+    tau_value = float(tau_s)
+    if not isfinite(tau_value) or tau_value <= 0.0:
+        raise ValueError("tau_s must be finite and positive")
+    gate_scale = beta * tau_value
+    scaled_u = gate_scale * u
+    scaled_domain_u = PotentialBounds(
+        gate_scale * domain_u.min, gate_scale * domain_u.max
+    )
+
+    # Stability cap is expressed in potential units and scales with tau_s,
+    # keeping the final exponential argument inside the same [-20, 20] rail.
+    _STABILITY_CAP = 20.0 * tau_value
     scaled_u_clamped = scaled_u.clamp(min=-_STABILITY_CAP, max=_STABILITY_CAP)
     scaled_domain_u_clamped = PotentialBounds(
         max(scaled_domain_u.min, -_STABILITY_CAP),

@@ -48,7 +48,7 @@ GPT-2 adapts causal self-attention, cache-aware decoding, pre-norm blocks, and t
 
 [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Model]] wraps token-plus-position embeddings, propagates a bounded potential through causal blocks, and returns standard cache-aware outputs. [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2LMHeadModel]] retains the tied conventional language-model head.
 
-[[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Attention#forward]] uses `max_position_embeddings` for the spiking attention rail and preserves the combined projection range for dense attention. Eager attention and residual dropout propagate analytic ranges without runtime extrema; nonzero spiking attention training dropout remains outside the paper scope.
+[[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Attention#forward]] uses `max_position_embeddings` for the spiking attention rail and preserves the combined projection range for dense attention. Its resolved `attention_theta` controls Q/K score coding, softmin, and V readout without narrowing LayerNorm or affine/MLP rails; `None` falls back to global `theta`. Eager attention and residual dropout propagate analytic ranges without runtime extrema; nonzero spiking attention training dropout remains outside the paper scope.
 
 The adapter does not support cross-attention in its spiking `GPT2Attention`. Its current MLP uses spiking projections when enabled but evaluates the configured activation directly, so model-family claims must record which nonlinear path is actually operator-composed.
 
@@ -56,7 +56,7 @@ The adapter does not support cross-attention in its spiking `GPT2Attention`. Its
 
 Attention is registered as a Hugging Face backend named `spiking_sdpa` and selected through each model’s configuration.
 
-Evaluation runners choose `spiking_sdpa` only for the spiking backend on non-CPU devices; otherwise they use eager tensor attention. Model adapters derive one attention `tau` from model-wide `tau_s` and pass `theta`, `tau`, and fixed `source_length_max` to [[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_sdpa_attention_forward]], whose module binding supplies score calibration.
+Evaluation runners choose `spiking_sdpa` only for the spiking backend on non-CPU devices; otherwise they use eager tensor attention. Model adapters derive one attention `tau` from model-wide `tau_s` and pass the applicable attention threshold, `tau`, and fixed `source_length_max` to [[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_sdpa_attention_forward]], whose module binding supplies score calibration.
 
 This backend boundary keeps Q/K/V projection ownership in each model while centralizing score normalization and value accumulation. It also allows attention to be disabled independently during ablations.
 
@@ -73,6 +73,7 @@ The shared controls are:
 - `use_spiking_mlp`
 - attention implementation selection
 - `theta` and `tau_s`
+- GPT-2 `attention_theta`, resolved to `theta` when omitted
 
 ViT additionally distinguishes an operator-composed cubic GELU from a direct evaluation of the same tanh formula. Experiments must log the full flag set because several configurations can all be described informally as a “spiking model” while executing different arithmetic.
 

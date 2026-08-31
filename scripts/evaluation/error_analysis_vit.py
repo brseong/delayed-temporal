@@ -11,7 +11,7 @@ if str(_REPO_ROOT) not in sys.path:
 import torch, wandb, argparse
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
+from utils.transformers.optional_tensorboard import create_summary_writer
 from torch.nn.parallel import DataParallel
 from datasets import load_dataset
 from transformers import AttentionInterface, AutoModelForImageClassification
@@ -888,7 +888,7 @@ def evaluate_vit_model(args: Arguments) -> None:
     # ---------------------------------------------------------
     # 5. TensorBoard 히스토그램 훅 등록
     # ---------------------------------------------------------
-    tb_writer = SummaryWriter(log_dir=f"runs/{args.experiment_name}")
+    tb_writer = create_summary_writer(log_dir=f"runs/{args.experiment_name}")
     log_step = [0]
     hooks = []
 

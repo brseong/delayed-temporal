@@ -19,8 +19,8 @@ class SpikingLayerNorm(nn.Module):
 
     Computes (x - mean) / std using ψ_M for variance and ψ_ED for division,
     with dual-rail encoding to handle signed activations.
-    Output is rescaled to match pretrained ANN LayerNorm weights, so the residual
-    1/sqrt(theta) factor from the spiking derivation is compensated explicitly.
+    Matched logarithmic references cancel the finite-domain upper endpoint, so the
+    normalized result has no residual theta scale before pretrained affine weights.
 
     Each of the three SNN stages can be replaced with its standard-PyTorch equivalent
     for ablation analysis:
@@ -318,35 +318,48 @@ class SpikingLayerNorm(nn.Module):
         theta = self.theta
         tau_s = self.tau_s
 
-        # LayerNorm first forms a signed residual around the feature mean. Dual
-        # positive rails use the independent clipping margin to keep both signs
-        # inside the strictly positive log domain and below the threshold endpoint.
+        # LayerNorm first forms exact non-negative magnitudes for the two signed
+        # rails. Only the later logarithmic carrier copies receive the strictly
+        # positive encoder floor; inactive rails remain zero in the variance.
         x_err = x - x.mean(dim=-1, keepdim=True)
+        magnitude_domain = PotentialBounds(0.0, theta - clip_margin)
+        x_err_pos_magnitude = magnitude_domain.clamp(
+            x_err.clamp_min(0.0), name="x_err_pos_magnitude"
+        )
+        x_err_neg_magnitude = magnitude_domain.clamp(
+            (-x_err).clamp_min(0.0), name="x_err_neg_magnitude"
+        )
         domain_err = PotentialBounds(clip_margin, theta - clip_margin)
-        x_err_pos = domain_err.clamp(x_err, name="x_err_pos")
-        x_err_neg = domain_err.clamp(-x_err, name="x_err_neg")
+        x_err_pos = domain_err.clamp(
+            x_err_pos_magnitude, name="x_err_pos_log_carrier"
+        )
+        x_err_neg = domain_err.clamp(
+            x_err_neg_magnitude, name="x_err_neg_log_carrier"
+        )
+        positive_active = x_err_pos_magnitude >= clip_margin
+        negative_active = x_err_neg_magnitude >= clip_margin
 
         # The variance ablation changes only the squaring implementation. Gaussian
         # multiplication already performs its own sampled event readout and clamp.
         if self.use_spiking_mul:
             M_pos, _ = multiplication_operator(
-                x_err_pos,
-                domain_err,
-                x_err_pos,
-                domain_err,
+                x_err_pos_magnitude,
+                magnitude_domain,
+                x_err_pos_magnitude,
+                magnitude_domain,
                 theta,
             )
             M_neg, _ = multiplication_operator(
-                x_err_neg,
-                domain_err,
-                x_err_neg,
-                domain_err,
+                x_err_neg_magnitude,
+                magnitude_domain,
+                x_err_neg_magnitude,
+                magnitude_domain,
                 theta,
             )
             var_x = (M_pos + M_neg).mean(dim=-1, keepdim=True)
         else:
             var_x = (
-                x_err_pos.pow(2) + x_err_neg.pow(2)
+                x_err_pos_magnitude.pow(2) + x_err_neg_magnitude.pow(2)
             ).mean(dim=-1, keepdim=True)
 
         # Add the numerical stabilizer before enforcing the calibrated variance
@@ -418,6 +431,8 @@ class SpikingLayerNorm(nn.Module):
                 tb_sigma,
                 tau_s=tau_s,
             )
+            y_pos = torch.where(positive_active, y_pos, torch.zeros_like(y_pos))
+            y_neg = torch.where(negative_active, y_neg, torch.zeros_like(y_neg))
             result = y_pos - y_neg
 
             # Event misses may leave a one-sided exponential excursion. Count and
@@ -493,11 +508,15 @@ class SpikingLayerNorm(nn.Module):
                 delta_neg = negative_pulse_width - sigma_pulse_width
                 y_pos = torch.exp(delta_pos / tau_s)
                 y_neg = torch.exp(delta_neg / tau_s)
+                y_pos = torch.where(positive_active, y_pos, torch.zeros_like(y_pos))
+                y_neg = torch.where(negative_active, y_neg, torch.zeros_like(y_neg))
             else:
                 # With direct log tensors there are no miss masks to resolve, so the
                 # original analytical exponential-difference formula remains exact.
                 y_pos = torch.exp((t_sigma - t_err_pos) / tau_s)
                 y_neg = torch.exp((t_sigma - t_err_neg) / tau_s)
+                y_pos = torch.where(positive_active, y_pos, torch.zeros_like(y_pos))
+                y_neg = torch.where(negative_active, y_neg, torch.zeros_like(y_neg))
 
             # Each causal width lies in its declared deadline interval and a miss adds
             # the reset width zero. Their signed difference therefore spans the same
@@ -586,19 +605,46 @@ class SpikingLayerNorm(nn.Module):
             
         # The clip margin defines only the representable positive dual-rail domain;
         # it is independent of the epsilon later added to the feature variance.
+        magnitude_domain = PotentialBounds(0.0, theta - clip_margin)
+        x_err_pos_magnitude = magnitude_domain.clamp(
+            x_err.clamp_min(0.0), name="x_err_pos_magnitude"
+        )
+        x_err_neg_magnitude = magnitude_domain.clamp(
+            (-x_err).clamp_min(0.0), name="x_err_neg_magnitude"
+        )
         domain_err: PotentialBounds = PotentialBounds(
             clip_margin,
             theta - clip_margin,
         )
-        x_err_pos = domain_err.clamp(x_err, name="x_err_pos")
-        x_err_neg = domain_err.clamp(-x_err, name="x_err_neg")
+        x_err_pos = domain_err.clamp(
+            x_err_pos_magnitude, name="x_err_pos_log_carrier"
+        )
+        x_err_neg = domain_err.clamp(
+            x_err_neg_magnitude, name="x_err_neg_log_carrier"
+        )
+        positive_active = x_err_pos_magnitude >= clip_margin
+        negative_active = x_err_neg_magnitude >= clip_margin
 
         if self.use_spiking_mul:
-            M_pos, _ = multiplication_operator(x_err_pos, domain_err, x_err_pos, domain_err, theta)
-            M_neg, _ = multiplication_operator(x_err_neg, domain_err, x_err_neg, domain_err, theta)
+            M_pos, _ = multiplication_operator(
+                x_err_pos_magnitude,
+                magnitude_domain,
+                x_err_pos_magnitude,
+                magnitude_domain,
+                theta,
+            )
+            M_neg, _ = multiplication_operator(
+                x_err_neg_magnitude,
+                magnitude_domain,
+                x_err_neg_magnitude,
+                magnitude_domain,
+                theta,
+            )
             var_x = (M_pos + M_neg).mean(dim=-1, keepdim=True)
         else:
-            var_x = (x_err_pos.pow(2) + x_err_neg.pow(2)).mean(dim=-1, keepdim=True)
+            var_x = (
+                x_err_pos_magnitude.pow(2) + x_err_neg_magnitude.pow(2)
+            ).mean(dim=-1, keepdim=True)
 
         var_x = var_x + eps
         domain_var: PotentialBounds = PotentialBounds(domain_err.min ** 2, domain_err.max ** 2)
@@ -640,6 +686,8 @@ class SpikingLayerNorm(nn.Module):
                 tb_sigma,
                 tau_s=tau_s,
             )
+            y_pos = torch.where(positive_active, y_pos, torch.zeros_like(y_pos))
+            y_neg = torch.where(negative_active, y_neg, torch.zeros_like(y_neg))
             result: torch.Tensor = y_pos - y_neg
 
             # Enforce the finite-feature normalization contract before affine
@@ -667,6 +715,8 @@ class SpikingLayerNorm(nn.Module):
         else:
             y_pos = torch.exp((t_sigma - t_err_pos) / tau_s)
             y_neg = torch.exp((t_sigma - t_err_neg) / tau_s)
+            y_pos = torch.where(positive_active, y_pos, torch.zeros_like(y_pos))
+            y_neg = torch.where(negative_active, y_neg, torch.zeros_like(y_neg))
             result = y_pos - y_neg
             result_limit = math.sqrt(math.prod(self.normalized_shape))
             result_domain = PotentialBounds(-result_limit, result_limit)

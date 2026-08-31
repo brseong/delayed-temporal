@@ -12,13 +12,20 @@ import torch
 import wandb
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
+from utils.transformers.optional_tensorboard import create_summary_writer
 from datasets import load_dataset
 from transformers import AttentionInterface, AutoModelForSequenceClassification, AutoTokenizer
 from utils.transformers.models.spiking_bert.configuration_bert import BertConfig
-from utils.transformers.models.spiking_bert.modeling_spiking_bert import BertForSequenceClassification, SpikingLayerNorm
+from utils.transformers.models.spiking_bert.modeling_spiking_bert import (
+    BertEncoder,
+    BertForSequenceClassification,
+    BertSelfAttention,
+    SpikingLayerNorm,
+)
 from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
 from utils.transforms.types import Potential
+from utils.transforms import types
+from utils.transformers.models.spiking_ops import SpikingLinear
 from utils.transforms.noise import get_gaussian_noise_stats, set_gaussian_time_noise
 import evaluate
 from tqdm import tqdm
@@ -70,6 +77,7 @@ class Arguments:
     dataset_name: str | None
     dataset_config_name: str | None
     dataset_split: str
+    cache_dir: str
     max_length: int
     batch_size: int
     device: Literal["cuda", "cpu"]
@@ -93,6 +101,7 @@ class Arguments:
     # Quantile collection is a deterministic calibration diagnostic rather than a
     # dynamic-noise control.
     collect_quantiles: bool
+    report_clamp_stats: bool
 
 def parse_arguments() -> Arguments:
     """Parse BERT evaluation and direct Gaussian timing options.
@@ -121,6 +130,8 @@ def parse_arguments() -> Arguments:
                         help="Optional dataset config override. If omitted, task preset is used.")
     parser.add_argument("--dataset_split", type=str, default=None,
                         help="Optional dataset split override. If omitted, task preset is used.")
+    parser.add_argument("--cache-dir", type=str, default="/data/nas/datasets/",
+                        help="Hugging Face dataset cache directory.")
     parser.add_argument("--max_length", type=int, default=128,
                         help="Maximum token length for tokenizer padding/truncation.")
     parser.add_argument("--batch_size", type=int, default=32,
@@ -174,6 +185,8 @@ def parse_arguments() -> Arguments:
     )
     parser.add_argument("--collect-quantiles", action="store_true",
                         help="Collect and print 99.9%% quantiles of absolute activations.")
+    parser.add_argument("--report-clamp-stats", action="store_true",
+                        help="Aggregate and print per-site fixed-domain clamp counts.")
 
     # Resolve optional dataset overrides before constructing the typed result; the
     # Gaussian values themselves are copied without unit conversion or reseeding.
@@ -192,6 +205,7 @@ def parse_arguments() -> Arguments:
         dataset_name=dataset_name,
         dataset_config_name=dataset_config_name,
         dataset_split=dataset_split,
+        cache_dir=args.cache_dir,
         max_length=args.max_length,
         batch_size=args.batch_size,
         device=args.device,
@@ -209,6 +223,7 @@ def parse_arguments() -> Arguments:
         time_noise_mean=args.time_noise_mean,
         time_noise_seed=args.time_noise_seed,
         collect_quantiles=args.collect_quantiles,
+        report_clamp_stats=args.report_clamp_stats,
     )
 
 
@@ -306,9 +321,9 @@ def evaluate_bert_model(args: Arguments) -> None:
     print(f"Loading dataset: {dataset_name}/{dataset_config_name} ({dataset_split})...")
     assert dataset_name is not None
     if dataset_config_name is None:
-        dataset = load_dataset(dataset_name, split=dataset_split, cache_dir="/data/nas/datasets/")
+        dataset = load_dataset(dataset_name, split=dataset_split, cache_dir=args.cache_dir)
     else:
-        dataset = load_dataset(dataset_name, dataset_config_name, split=dataset_split, cache_dir="/data/nas/datasets/")
+        dataset = load_dataset(dataset_name, dataset_config_name, split=dataset_split, cache_dir=args.cache_dir)
     preferred_text_column = DATASET_PRESETS.get(args.task, {}).get("text_column")
     text_column = infer_text_column(dataset.column_names, preferred=preferred_text_column)
     
@@ -362,9 +377,23 @@ def evaluate_bert_model(args: Arguments) -> None:
         model = nn.Module.cpu(model)
     model.eval()
 
-    tb_writer = SummaryWriter(log_dir=f"runs/{args.experiment_name}")
+    tb_writer = create_summary_writer(log_dir=f"runs/{args.experiment_name}")
     log_step = [0]
     hooks = []
+    clamp_totals: dict[tuple[str, str], dict[str, int]] = {}
+
+    def make_clamp_hook(name: str):
+        previous_names: list[str | None] = []
+
+        def pre_hook(_module, _inp):
+            previous_names.append(types.get_current_module_name())
+            types.set_current_module_name(name)
+
+        def post_hook(_module, _inp, _out):
+            previous = previous_names.pop() if previous_names else None
+            types.set_current_module_name(previous)
+
+        return pre_hook, post_hook
 
     def make_ln_hook(tag):
         def hook_fn(module, inp, out):
@@ -378,6 +407,16 @@ def evaluate_bert_model(args: Arguments) -> None:
     for name, module in model.named_modules():
         if isinstance(module, (nn.LayerNorm, SpikingLayerNorm)):
             hooks.append(module.register_forward_hook(make_ln_hook(name)))
+
+    if model_backend == "spiking" and args.report_clamp_stats:
+        for name, module in model.named_modules():
+            if isinstance(module, (BertEncoder, BertSelfAttention, SpikingLayerNorm, SpikingLinear)):
+                pre_hook, post_hook = make_clamp_hook(name)
+                hooks.append(module.register_forward_pre_hook(pre_hook))
+                hooks.append(module.register_forward_hook(post_hook))
+        types.clear_clamp_stats()
+        types.set_current_module_name(None)
+        types.set_clamp_log_enabled(True)
 
     quantiles = []
     def make_quantile_hook():
@@ -404,8 +443,19 @@ def evaluate_bert_model(args: Arguments) -> None:
         attention_mask = batch["attention_mask"].to(torch_device)
         labels = batch["labels"].to(torch_device)
 
+        if model_backend == "spiking" and args.report_clamp_stats:
+            types.clear_clamp_stats()
         with torch.no_grad():
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+
+        if model_backend == "spiking" and args.report_clamp_stats:
+            for tag, stats in types.get_clamp_stats().items():
+                aggregate = clamp_totals.setdefault(
+                    tag, {"underflow": 0, "overflow": 0, "total": 0}
+                )
+                for field in ("underflow", "overflow", "total"):
+                    aggregate[field] += stats[field]
+            types.set_current_module_name(None)
 
         log_step[0] += 1
 
@@ -420,6 +470,9 @@ def evaluate_bert_model(args: Arguments) -> None:
     for h in hooks:
         h.remove()
     tb_writer.close()
+    types.set_current_module_name(None)
+    if model_backend == "spiking" and args.report_clamp_stats:
+        types.set_clamp_log_enabled(False)
 
     if args.collect_quantiles and quantiles:
         max_q = max(quantiles)
@@ -434,6 +487,17 @@ def evaluate_bert_model(args: Arguments) -> None:
     print(f"Evaluation Results for {model_id}:")
     print(f"Accuracy: {final_score['accuracy']:.4f}")
     wandb.log({"Final Accuracy": final_score["accuracy"]})
+
+    for (module_name, clamp_name), stats in sorted(clamp_totals.items()):
+        total = stats["total"]
+        underflow_rate = stats["underflow"] / total if total else 0.0
+        overflow_rate = stats["overflow"] / total if total else 0.0
+        site = f"{module_name}/{clamp_name}"
+        print(
+            f"Clamp[{site}] values={total}, underflows={stats['underflow']} "
+            f"(rate={underflow_rate:.6g}), overflows={stats['overflow']} "
+            f"(rate={overflow_rate:.6g})"
+        )
 
     # Report the five stored counter fields with event and output denominators kept
     # separate; derived rates are logging values rather than additional state.

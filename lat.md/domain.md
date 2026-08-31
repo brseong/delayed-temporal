@@ -75,6 +75,7 @@ Operations with positive-only logarithmic encoding represent a signed centered v
 `theta`, the applicable temporal scale, and finite domain endpoints jointly determine representable magnitude, latency, clipping, and numerical conditioning.
 
 - `theta` remains the default symmetric calibration scale and the basis of the global absolute Gaussian time-noise standard deviation. Affine adapters themselves consume the upstream fixed potential interval and derive the zero-reference time from that interval.
+- GPT-2 may override that default with `attention_theta` for Q/K score coding, softmin, and V readout only. LayerNorm, affine/MLP paths, and the global Gaussian-noise conversion continue to use `theta`; omission makes the two thresholds identical.
 - `tau_s` controls log-encoding and exponential-difference scale.
 - `tau_m` remains the generic exponential-operator parameter. Softmin and attention expose one `tau`, derived from the model-wide `tau_s`, and have no separate `tau_m` or `tau_s` keyword.
 - `clip_margin` keeps LayerNorm logarithmic rails away from zero and below `theta`, while `eps` independently stabilizes its variance denominator.

@@ -80,6 +80,8 @@ Nonlinear activations are constructed from multiplication, exponential, division
 
 [[utils/transforms/functions.py#gelu_approximation]] uses the cubic tanh approximation, including dynamic products for `x^2`, `x^3`, the gate, and gated output. [[utils/transforms/functions.py#tanh]] reduces tanh to an exponential and division identity, then returns the structural $[-1,1]$ domain and records Gaussian excursions before clamping. [[utils/transforms/functions.py#gelu_approximation_sigmoid]] and [[utils/transforms/functions.py#swiglu_function]] clamp their completed sigmoid-like gates to $[0,1]$ before downstream multiplication; Gaussian gate excursions are recorded without widening the propagated product domains.
 
+The pretrained activation function is invariant to the positive physical time constant. Tanh pre-scales its exponential argument by $2\tau_s$, sigmoid-GELU by $1.702\tau_s$, and SwiGLU by $\beta\tau_s$; exponential decoding divides by the same $\tau_s$. Thus these paths retain $\tanh(x)$, $\operatorname{sigmoid}(1.702x)$, and $\operatorname{sigmoid}(\beta u)$ at every valid temporal scale. Softmin keeps $\tau_s$ as an intentional normalization temperature instead.
+
 Fixed scalar multiplication is conceptually absorbable into a synaptic weight in the paper’s operation-count abstraction, even when the reference tensor implementation calls the generic multiplication function. [[evaluation#Symbolic Operation-Count Check]] preserves that distinction.
 
 SwiGLU treats the exponential neuron’s deadline response as `biased_exp` and applies a fixed current gain derived from the declared domain. The gain cancels the identity encoder’s constant offset without adding a runtime operator. [[utils/transforms/functions.py#_gaussian_swiglu_function]] and the deterministic branch share the same $[0,1]$ gate contract.
@@ -105,6 +107,8 @@ In noise-free execution, the scalar zero-reference time cancels algebraically an
 LayerNorm is a multi-stage composition and the most delicate shared operator in the current model stack.
 
 [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm]] performs centering, dual-rail magnitude encoding, variance estimation, log encoding of variance and rails, exponential-difference normalization, and learned affine output scaling.
+
+Centered values first form actual nonnegative magnitude rails on $[0,\theta-\epsilon_{\mathrm{enc}}]$. Variance squares those magnitudes, not their logarithmic carrier copies. Only log carriers are floored to $\epsilon_{\mathrm{enc}}$, and active masks suppress the inactive or below-floor numerator rail after exponential decoding. A constant feature vector therefore produces the learned bias exactly. Suppressing a nonzero numerator below the encoder floor and clamping variance to the finite positive window remain explicit finite-domain approximations.
 
 Three flags independently replace variance multiplication, log encoding, and exponential-difference decoding with tensor equivalents. These switches support causal attribution of error but also mean “spiking LayerNorm enabled” is not enough to identify the exact execution path; all three stage flags must be recorded.
 

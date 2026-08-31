@@ -13,7 +13,7 @@ import torch
 import wandb
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
+from utils.transformers.optional_tensorboard import create_summary_writer
 from datasets import load_dataset
 from transformers import AttentionInterface, AutoModelForCausalLM, AutoTokenizer
 from utils.transforms.calibration import (
@@ -25,7 +25,11 @@ from utils.transforms.calibration import (
     save_calibration_table,
     validate_calibration_table_specs,
 )
-from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import GPT2LMHeadModel, SpikingConv1D
+from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import (
+    GPT2Attention,
+    GPT2LMHeadModel,
+    SpikingConv1D,
+)
 from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
 from utils.transformers.models.spiking_gpt2.calibration import (
     build_gpt2_calibration_metadata,
@@ -87,6 +91,7 @@ class Arguments:
     dataset_name: str | None
     dataset_config_name: str | None
     dataset_split: str
+    cache_dir: str
     max_length: int
     batch_size: int
     device: Literal["cuda", "cpu"]
@@ -99,6 +104,7 @@ class Arguments:
     spiking_mlp: bool
     activation: str
     theta: float
+    attention_theta: float
     tau_s: float
 
     # Layer-wise calibration uses a deterministic training subset for collection and
@@ -121,6 +127,7 @@ class Arguments:
 
     # Quantile collection is calibration instrumentation, not dynamic noise state.
     collect_quantiles: bool
+    report_clamp_stats: bool
 
 def parse_arguments() -> Arguments:
     """Parse GPT-2 evaluation and direct Gaussian timing options.
@@ -149,6 +156,8 @@ def parse_arguments() -> Arguments:
                         help="Optional dataset config override. If omitted, task preset is used.")
     parser.add_argument("--dataset_split", type=str, default=None,
                         help="Optional dataset split override. If omitted, task preset is used.")
+    parser.add_argument("--cache-dir", type=str, default="/data/nas/datasets/",
+                        help="Hugging Face dataset cache directory.")
     parser.add_argument("--max_length", type=int, default=128,
                         help="Maximum token length for tokenizer padding/truncation.")
     parser.add_argument("--batch_size", type=int, default=32,
@@ -173,6 +182,12 @@ def parse_arguments() -> Arguments:
                         help="Activation function for the spiking backend (default: gelu_new).")
     parser.add_argument("--theta", type=float, default=100.0,
                         help="Domain bound theta used by spiking backend modules.")
+    parser.add_argument(
+        "--attention-theta",
+        type=float,
+        default=None,
+        help="Attention-only theta; defaults to the global --theta value.",
+    )
     parser.add_argument("--tau-s", type=float, default=1.0,
                         help="Spike-time constant tau_s used by SpikingLayerNorm.")
 
@@ -255,6 +270,8 @@ def parse_arguments() -> Arguments:
     )
     parser.add_argument("--collect-quantiles", action="store_true",
                         help="Collect and print 99.9%% quantiles of absolute activations.")
+    parser.add_argument("--report-clamp-stats", action="store_true",
+                        help="Aggregate and print per-site fixed-domain clamp counts.")
 
     # Resolve dataset defaults first and copy all Gaussian values without changing
     # units; evaluation will perform the single 2*theta conversion.
@@ -264,6 +281,9 @@ def parse_arguments() -> Arguments:
     dataset_name = cast(str | None, args.dataset_name or preset["dataset_name"])
     dataset_config_name = cast(str | None, args.dataset_config_name if args.dataset_config_name is not None else preset["dataset_config_name"])
     dataset_split = cast(str, args.dataset_split or preset["dataset_split"])
+    attention_theta = args.theta if args.attention_theta is None else args.attention_theta
+    if not math.isfinite(attention_theta) or attention_theta <= 0.0:
+        parser.error("--attention-theta must be finite and positive")
 
     return Arguments(
         experiment_name=args.experiment_name,
@@ -273,6 +293,7 @@ def parse_arguments() -> Arguments:
         dataset_name=dataset_name,
         dataset_config_name=dataset_config_name,
         dataset_split=dataset_split,
+        cache_dir=args.cache_dir,
         max_length=args.max_length,
         batch_size=args.batch_size,
         device=args.device,
@@ -285,6 +306,7 @@ def parse_arguments() -> Arguments:
         spiking_mlp=args.spiking_mlp,
         activation=args.activation,
         theta=args.theta,
+        attention_theta=attention_theta,
         tau_s=args.tau_s,
         calibration_mode=args.calibration_mode,
         calibration_path=args.calibration_path,
@@ -299,6 +321,7 @@ def parse_arguments() -> Arguments:
         time_noise_mean=args.time_noise_mean,
         time_noise_seed=args.time_noise_seed,
         collect_quantiles=args.collect_quantiles,
+        report_clamp_stats=args.report_clamp_stats,
     )
 
 
@@ -469,7 +492,8 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             f"ln:{args.spiking_layernorm}, attn:{args.spiking_attention}, "
             f"mul:{args.spiking_ln_mul}, log:{args.spiking_ln_log}, "
             f"expdiff:{args.spiking_ln_expdiff}, mlp:{args.spiking_mlp}, "
-            f"act:{args.activation}, theta:{args.theta}, tau_s:{args.tau_s}"
+            f"act:{args.activation}, theta:{args.theta}, "
+            f"attention_theta:{args.attention_theta}, tau_s:{args.tau_s}"
         )
 
     # Evaluation and calibration use disjoint splits. Collection never loads test
@@ -490,7 +514,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             return load_dataset(
                 dataset_name,
                 split=split,
-                cache_dir="/data/nas/datasets/",
+                cache_dir=args.cache_dir,
             )
 
         # Calibration and evaluation must share the same named configuration so the
@@ -499,7 +523,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             dataset_name,
             dataset_config_name,
             split=split,
-            cache_dir="/data/nas/datasets/",
+            cache_dir=args.cache_dir,
         )
 
     dataset = None
@@ -625,6 +649,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         config.use_spiking_mlp = args.spiking_mlp
         config.activation_function = args.activation
         config.theta = args.theta
+        config.attention_theta = args.attention_theta
         config.tau_s = args.tau_s
         model = GPT2LMHeadModel.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl)
 
@@ -728,9 +753,10 @@ def evaluate_gpt2_model(args: Arguments) -> None:
     if dataloader is None:
         raise RuntimeError("GPT-2 evaluation requires an evaluation DataLoader")
 
-    tb_writer = SummaryWriter(log_dir=f"runs/{args.experiment_name}")
+    tb_writer = create_summary_writer(log_dir=f"runs/{args.experiment_name}")
     log_step = [0]
     hooks = []
+    clamp_totals: dict[tuple[str, str], dict[str, int]] = {}
 
     def make_ln_hook(tag):
         def hook_fn(_module, inp, out):
@@ -741,18 +767,31 @@ def evaluate_gpt2_model(args: Arguments) -> None:
                 tb_writer.add_histogram(f"{tag}/output", out_val.detach().cpu().float(), log_step[0])
         return hook_fn
 
-    def make_clamp_hook(name):
+    def make_clamp_hook(name: str):
+        previous_names: list[str | None] = []
+
         def pre_hook(_module, _inp):
+            previous_names.append(types.get_current_module_name())
             types.set_current_module_name(name)
+
         def post_hook(_module, _inp, _out):
-            types.set_current_module_name(None)
+            previous = previous_names.pop() if previous_names else None
+            types.set_current_module_name(previous)
+
         return pre_hook, post_hook
 
     for name, module in model.named_modules():
         if isinstance(module, (nn.LayerNorm, SpikingLayerNorm)):
             hooks.append(module.register_forward_hook(make_ln_hook(name)))
         
-        if isinstance(module, (SpikingLayerNorm, SpikingLinear, SpikingConv1D)):
+        if (
+            model_backend == "spiking"
+            and args.report_clamp_stats
+            and isinstance(
+                module,
+                (GPT2Attention, SpikingLayerNorm, SpikingLinear, SpikingConv1D),
+            )
+        ):
             pre_h, post_h = make_clamp_hook(name)
             hooks.append(module.register_forward_pre_hook(pre_h))
             hooks.append(module.register_forward_hook(post_h))
@@ -776,7 +815,9 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             if isinstance(module, (nn.Linear, nn.LayerNorm, nn.Embedding, SpikingLayerNorm, SpikingLinear, SpikingConv1D, Conv1D)):
                 hooks.append(module.register_forward_hook(make_quantile_hook()))
 
-    if model_backend == "spiking":
+    if model_backend == "spiking" and args.report_clamp_stats:
+        types.clear_clamp_stats()
+        types.set_current_module_name(None)
         types.set_clamp_log_enabled(True)
 
     print("Starting evaluation...")
@@ -789,13 +830,24 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         attention_mask = batch["attention_mask"].to(torch_device)
         labels = batch["labels"].to(torch_device)
 
-        types.clear_clamp_stats()
+        if model_backend == "spiking" and args.report_clamp_stats:
+            types.clear_clamp_stats()
         with torch.no_grad():
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
 
         # Log clamp stats
-        clamp_stats = types.get_clamp_stats()
+        clamp_stats = (
+            types.get_clamp_stats()
+            if model_backend == "spiking" and args.report_clamp_stats
+            else {}
+        )
         for (module_name, clamp_name), stats in clamp_stats.items():
+            aggregate = clamp_totals.setdefault(
+                (module_name, clamp_name),
+                {"underflow": 0, "overflow": 0, "total": 0},
+            )
+            for field in ("underflow", "overflow", "total"):
+                aggregate[field] += stats[field]
             total = stats["total"]
             if total > 0:
                 underflow_ratio = stats["underflow"] / total
@@ -818,7 +870,9 @@ def evaluate_gpt2_model(args: Arguments) -> None:
     for h in hooks:
         h.remove()
     tb_writer.close()
-    types.set_clamp_log_enabled(False)
+    types.set_current_module_name(None)
+    if model_backend == "spiking" and args.report_clamp_stats:
+        types.set_clamp_log_enabled(False)
 
     if args.collect_quantiles and quantiles:
         max_q = max(quantiles)
@@ -835,6 +889,17 @@ def evaluate_gpt2_model(args: Arguments) -> None:
     print(f"Average Loss: {avg_loss:.4f}")
     print(f"Perplexity: {perplexity:.4f}")
     wandb.log({"Final Average Loss": avg_loss, "Final Perplexity": perplexity})
+
+    for (module_name, clamp_name), stats in sorted(clamp_totals.items()):
+        total = stats["total"]
+        underflow_rate = stats["underflow"] / total if total else 0.0
+        overflow_rate = stats["overflow"] / total if total else 0.0
+        site = f"{module_name}/{clamp_name}"
+        print(
+            f"Clamp[{site}] values={total}, underflows={stats['underflow']} "
+            f"(rate={underflow_rate:.6g}), overflows={stats['overflow']} "
+            f"(rate={overflow_rate:.6g})"
+        )
 
     # Convert only the maintained raw counters into report rates, preserving event
     # and output denominators as separate physical populations.

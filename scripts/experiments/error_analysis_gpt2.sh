@@ -8,6 +8,7 @@ cd "$repo_root"
 source ./venv/bin/activate
 device="cuda"
 theta=2000
+attention_theta=${ATTENTION_THETA:-100}
 task="wikitext2" # wikitext2 | wikitext103
 
 expr_names=(
@@ -39,7 +40,7 @@ for index in "${!expr_names[@]}"; do
     script="CUDA_VISIBLE_DEVICES=${gpu} python3 scripts/evaluation/error_analysis_gpt2.py \
         --experiment_name ${expr_names[$index]} --device ${device} \
         --batch_size 8 \
-        ${flags[$index]} --theta ${theta} \
+        ${flags[$index]} --theta ${theta} --attention-theta ${attention_theta} \
         --task ${task}"
     echo $script
     eval $script &

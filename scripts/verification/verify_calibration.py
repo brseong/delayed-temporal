@@ -1608,6 +1608,7 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
     assert default_args.calibration_lower_quantile == 0.0
     assert default_args.calibration_upper_quantile == 1.0
     assert default_args.calibration_margin_fraction == 0.05
+    assert default_args.attention_theta == default_args.theta
 
     # The CLI exposes collection identity and histogram controls independently from
     # the older diagnostic quantile hook. Validation runs before datasets or model
@@ -1634,6 +1635,10 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
             "0.99",
             "--calibration-margin-fraction",
             "0.1",
+            "--theta",
+            "2000",
+            "--attention-theta",
+            "100",
         ],
     ):
         args = parse_arguments()
@@ -1641,6 +1646,8 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
     assert args.calibration_samples == 4
     assert args.calibration_seed == 19
     assert args.calibration_bins == 16
+    assert args.theta == 2000.0
+    assert args.attention_theta == 100.0
     _expect_raises(
         ValueError,
         lambda: validate_gpt2_calibration_arguments(
@@ -1669,6 +1676,7 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
         use_spiking_layernorm=False,
         activation_function="gelu_new",
         theta=8.0,
+        attention_theta=2.0,
         tau_s=1.0,
         resid_pdrop=0.0,
         attn_pdrop=0.0,
@@ -1701,6 +1709,34 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
     assert metadata.max_sequence_length == 4
     assert "filtered-selected-v1" in metadata.preprocessing
     assert metadata.input_shape == (4,)
+    assert dict(metadata.model_options)["attention_theta"] == 2.0
+
+    # The local threshold affects only attention's score/value code window. Affine
+    # projections retain the global rail, and score calibration uses the local cap.
+    config._attn_implementation = "spiking_sdpa"
+    torch.manual_seed(2119)
+    spiking_model = GPT2Model(config).eval()
+    attention = spiking_model.h[0].attn
+    assert attention.attention_theta == 2.0
+    assert attention.c_attn.theta == 8.0
+    spiking_specs = gpt2_calibration_specs(
+        spiking_model,
+        lower_quantile=0.0,
+        upper_quantile=1.0,
+        margin_fraction=0.0,
+    )
+    score_spec = next(
+        spec for spec in spiking_specs if spec.tensor_name == "attention_score"
+    )
+    expected_score_bounds = attention_score_representability_bounds(
+        2.0,
+        1.0,
+        8,
+        attention.c_attn.weight.dtype,
+    )
+    assert score_spec.fixed_min == expected_score_bounds.min
+    assert score_spec.fixed_max == expected_score_bounds.max
+    config._attn_implementation = "eager"
 
     class TokenDataset(Dataset):
         """Return fixed padded token batches through default dictionary collation."""

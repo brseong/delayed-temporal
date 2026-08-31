@@ -17,7 +17,7 @@ Shell drivers under `scripts/experiments` supply experiment matrices and use `sc
 
 Every main runner selects either an upstream Hugging Face model or a local spiking model loaded from the same pretrained checkpoint.
 
-The `hf` backend provides the dense reference. The `spiking` backend reconstructs the corresponding local adapter and records LayerNorm stages, attention selection, MLP mode, `theta`, and noise settings.
+The `hf` backend provides the dense reference. The `spiking` backend reconstructs the corresponding local adapter and records LayerNorm stages, attention selection, MLP mode, global `theta`, GPT-2's effective `attention_theta`, and noise settings.
 
 On GPU, spiking attention is registered through Hugging Face’s attention interface. On CPU or when attention is disabled, the model uses eager dense attention even if other components remain spiking, so the resolved attention implementation is part of the experiment identity.
 
@@ -35,7 +35,7 @@ The ViT and GPT-2 runners separate clean range collection from frozen validation
 
 `--calibration-mode collect` selects a fixed-size prefix of a seeded training-split permutation, replays it sequentially for min-max and fixed-bin histogram passes, writes one JSON artifact, and exits without loading validation metrics. Timing noise, mismatch, parameter perturbation, and `DataParallel` are rejected in this mode.
 
-`--calibration-mode validate` and `--calibration-mode inference` reconstruct the same training-subset and model metadata, require an exact artifact match, bind only declared residual, ViT GELU-input, and spiking-attention score ranges, and report strict layer underflow and overflow after the run. Analytic model-entry ranges bypass calibration.
+`--calibration-mode validate` and `--calibration-mode inference` reconstruct the same training-subset and model metadata, require an exact artifact match, bind only declared residual, ViT GELU-input, and spiking-attention score ranges, and report strict layer underflow and overflow after the run. GPT-2 metadata records effective `attention_theta` separately from global `theta`, so artifacts cannot cross those numerical contracts. Analytic model-entry ranges bypass calibration.
 
 The maintained defaults select the observed minimum and maximum (`0/1`) without tail truncation, then add a 5% per-side margin. Interior quantiles remain available only as explicit diagnostic overrides.
 
@@ -56,7 +56,9 @@ Available diagnostics include:
 
 Clamp logging uses global module-name state. Hooks set and restore nested names consistently, and the evaluator rejects named clamp reporting under `DataParallel`; use one process per GPU.
 
-The ViT runner enables batch-aggregated named clamp reporting only with `--report-clamp-stats`. Nested hooks attribute each clamp to its encoder, attention, LayerNorm, affine, or convolution module, restore the outer name after each call, and print one run-wide count and rate per site.
+All four runners enable batch-aggregated named clamp reporting only with `--report-clamp-stats`. Nested hooks attribute each clamp to its encoder, attention, LayerNorm, affine, or convolution module, restore the outer name after each call, and print one run-wide count and rate per site.
+
+The text-model runners accept `--cache-dir` so a documented local dataset cache can be selected independently of the checkpoint cache. TensorBoard logging is optional: when the package is absent, a no-op writer preserves evaluation behavior instead of preventing the run.
 
 Each spiking runner prints per-site Gaussian rates and logs them under `Gaussian/<site>/...` in W&B. Gaussian counters are process-wide mutable state and are reset whenever a new seeded replica is configured.
 
@@ -85,6 +87,54 @@ Only 408 of 41,204,520,000 calibrated values exceed their frozen rails, an aggre
 At the precision-limited Gaussian setting, division-numerator misses are 8.67352%, multiplication-output underflow saturation is 0.901420%, LayerNorm positive/negative log misses are 0.583904%/0.600765%, and convolution data-event misses are 0.453567%. Division-output overflow is $9.46541\times10^{-6}$; affine output, attention value, exponential output, and normalized LayerNorm saturation are zero.
 
 The identical retired-calibration clean and Gaussian accuracies do not establish continuous-noise robustness because this $\sigma_t$ is below float32 spacing at relevant deadlines. They establish that physical miss and saturation counters remain observable even when top-1 predictions do not change. The replacement full-run log is `artifacts/logs/fixed_domain_validation/vit_small_minmax_margin5_clean_5000.log`, and its frozen table is `artifacts/calibration/vit_small_fixed_domain_minmax_margin5.json`.
+
+## Fixed-Domain Text-Model Real-Data Audit
+
+The text-model audit compares cached pretrained checkpoints on complete held-out splits and distinguishes representative wrapper settings from a deliberately narrow-domain diagnostic.
+
+All runs use float32, maximum length 128, no timing noise, and all three temporal LayerNorm stages when LayerNorm is enabled. BERT and RoBERTa use all 872 GLUE/SST-2 validation examples with batch size 32. GPT-2 uses all 181 nonempty WikiText-2 test batches with batch size 16. The representative wrapper thresholds are 1,000 for BERT, 2,000 for RoBERTa, and global 2,000 plus attention-local 100 for GPT-2.
+
+| Model and checkpoint | Dense reference | Full spiking | Difference |
+|---|---:|---:|---:|
+| BERT, `textattack/bert-base-uncased-SST-2` | 92.43% | 92.20% | -0.23 percentage points |
+| RoBERTa, `Bhumika/roberta-base-finetuned-sst2` | 94.50% | 94.04% | -0.46 percentage points |
+| GPT-2, `neulab/gpt2-finetuned-wikitext103` | loss 3.1093, PPL 22.4057 | loss 3.1311, PPL 22.8991 | +0.4934 PPL |
+
+BERT has no attention-score excursion and only 383 actual negative LayerNorm-magnitude overflows among 2,143,027,200 values, a $1.78719\times10^{-7}$ rate. RoBERTa records 65,129 score excursions among 2,057,306,112 values, a $3.16574\times10^{-5}$ rate, with no actual magnitude excursion. Roughly half of each LayerNorm log carrier is floored because only one signed rail is active per centered value; these carrier-floor counts and the positive division-numerator floor are structural bookkeeping rather than output-domain failures.
+
+The initial single-threshold GPT-2 run at $\theta=2000$ records 47,764,010 attention-score excursions among 6,820,724,736 values, a 0.700278% rate. Its only actual LayerNorm magnitude excursion is 49,147 positive-rail overflows among 7,104,921,600 values, a $6.91732\times10^{-6}$ rate. The score rail is limited by float32 softmin representability, so observed-extrema calibration cannot widen it past that analytic ceiling.
+
+### GPT-2 Path Attribution
+
+The representative GPT-2 ablation uses the local all-dense-stage wrapper as its attribution baseline, separating wrapper fidelity from temporal-operator effects.
+
+| Enabled temporal path at $\theta=2000$ | Loss | PPL | PPL change from local wrapper |
+|---|---:|---:|---:|
+| Local wrapper, no temporal path | 3.1227 | 22.7082 | 0 |
+| LayerNorm only | 3.1307 | 22.8910 | +0.1828 |
+| Attention only | 3.2008 | 24.5520 | +1.8438 |
+| LayerNorm + MLP affine | 3.1307 | 22.8908 | +0.1826 |
+| Attention + MLP affine | 3.2011 | 24.5584 | +1.8502 |
+| LayerNorm + attention + MLP affine | 3.2202 | 25.0324 | +2.3242 |
+| LayerNorm + attention + MLP affine, attention-local $\theta=100$ | 3.1311 | 22.8991 | +0.1909 |
+
+With one global threshold, attention is the dominant isolated contribution, LayerNorm is smaller, and the spiking GPT-2 MLP affine path is negligible in both pairwise controls. GPT-2 keeps `gelu_new` as a dense activation inside the fixed-range MLP, so this audit does not claim a temporal GELU contribution. Narrowing only attention's code window to 100 recovers 2.1333 PPL while preserving LayerNorm's required 2,000-wide rail; the mixed result is within 0.0081 PPL of the LayerNorm-only control.
+
+At a global $\theta=100$, any mixed LayerNorm path collapses to roughly PPL 24,000--25,000 because centered magnitudes exceed the narrow LayerNorm rail. A 1,024-text min/max-plus-5% residual and score artifact leaves residual excursions at zero but cannot repair that threshold error. The attention-local override avoids this conflict; calibration remains restricted to declared residual and score sites and does not replace operator threshold selection.
+
+The classifier results and mixed-threshold GPT-2 result support low degradation for these three selected checkpoints. The GPT-2 improvement comes from an explicit operator-local numerical contract rather than quantile tail trimming: the wider global rail protects LayerNorm range, while the narrower attention window improves float32 temporal subtraction precision.
+
+### Text-Model LayerNorm Execution Path
+
+The audited BERT, RoBERTa, and GPT-2 configurations use the same explicit LayerNorm stage topology.
+
+| Stage | Audited implementation |
+|---|---|
+| Centering | Tensor feature mean subtraction |
+| Variance square | Temporal multiplication, `spiking_ln_mul=True` |
+| Negative logarithm | Temporal log encoding, `spiking_ln_log=True` |
+| Normalized dual-rail readout | Temporal exponential difference, `spiking_ln_expdiff=True` |
+| Learned affine | Temporal product when exponential difference is active |
 
 ## Noise and Ablation Sweeps
 

@@ -595,8 +595,9 @@ def verify_exponential_time_constant_scaling() -> None:
     Logarithmic encoders multiply temporal differences by ``tau_s``; exponential
     decoders must divide by the same scale so division remains X/Y instead of
     ``(X/Y)**tau_s``. This regression covers the primitive normalized decoder,
-    direct Gaussian exponential, exponential difference, division, softmin, SwiGLU,
-    and full-spiking LayerNorm at three scales. It also checks dtype-level endpoint
+    direct Gaussian exponential, exponential difference, division, softmin,
+    fixed-shape activations, SwiGLU, and full-spiking LayerNorm at three scales. It
+    also checks dtype-level endpoint
     failures and RNG non-consumption.
 
     Raises:
@@ -847,15 +848,15 @@ def verify_exponential_time_constant_scaling() -> None:
         assert torch.allclose(deterministic_softmin, expected_softmin)
         assert torch.allclose(gaussian_softmin, expected_softmin)
 
-        # SwiGLU uses the same exponential temperature in sigmoid(beta*u/tau_s).
-        # An asymmetric u domain additionally verifies fixed bias cancellation at
-        # every tested scale rather than only at the default tau_s one.
+        # SwiGLU pre-scales its gate input by tau_s so the physical time
+        # constant changes latency but not sigmoid(beta*u). An asymmetric u domain
+        # verifies fixed bias cancellation at every tested scale.
         u = torch.tensor([-0.75, 0.0, 1.0, 2.0], dtype=torch.float64)
         v = torch.tensor([1.0, -0.5, 2.0, 0.25], dtype=torch.float64)
         domain_u = PotentialBounds(-1.0, 3.0)
         domain_v = PotentialBounds(-2.0, 2.0)
         beta = 0.7
-        expected_swiglu = v * u * torch.sigmoid(beta * u / tau_s)
+        expected_swiglu = v * u * torch.sigmoid(beta * u)
         set_gaussian_time_noise(enabled=False)
         deterministic_swiglu, _ = swiglu_function(
             u,
@@ -878,6 +879,32 @@ def verify_exponential_time_constant_scaling() -> None:
         )
         assert torch.allclose(deterministic_swiglu, expected_swiglu)
         assert torch.allclose(gaussian_swiglu, expected_swiglu)
+
+        # GELU-sigmoid and tanh are pretrained activation definitions, not
+        # temperature controls. Their input slopes cancel tau_s so only physical
+        # latency changes across the three tested scales.
+        activation = torch.tensor([-1.5, -0.25, 0.0, 0.75, 1.5], dtype=torch.float64)
+        activation_domain = PotentialBounds(-2.0, 2.0)
+        expected_gelu = activation * torch.sigmoid(1.702 * activation)
+        expected_tanh = torch.tanh(activation)
+        set_gaussian_time_noise(enabled=False)
+        deterministic_gelu, _ = gelu_approximation_sigmoid(
+            activation, activation_domain, tau_s=tau_s, theta=8.0
+        )
+        deterministic_tanh, _ = tanh(
+            activation, activation_domain, tau_s=tau_s, theta=8.0
+        )
+        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1707)
+        gaussian_gelu, _ = gelu_approximation_sigmoid(
+            activation, activation_domain, tau_s=tau_s, theta=8.0
+        )
+        gaussian_tanh, _ = tanh(
+            activation, activation_domain, tau_s=tau_s, theta=8.0
+        )
+        assert torch.allclose(deterministic_gelu, expected_gelu)
+        assert torch.allclose(gaussian_gelu, expected_gelu)
+        assert torch.allclose(deterministic_tanh, expected_tanh)
+        assert torch.allclose(gaussian_tanh, expected_tanh)
 
         # LayerNorm log times scale with tau_s and exponential-difference decoding
         # divides by it, so the complete normalized activation is scale-invariant.
@@ -2928,13 +2955,17 @@ def verify_gaussian_spiking_layernorm() -> None:
         # Reconstruct the nominal log times and deadline carriers independently from
         # the production branch, then apply d_err-d_sigma before the direct exp call.
         x_err = value - value.mean(dim=-1, keepdim=True)
+        magnitude_domain = PotentialBounds(0.0, 3.9)
+        x_err_pos_magnitude = magnitude_domain.clamp(x_err.clamp_min(0.0))
+        x_err_neg_magnitude = magnitude_domain.clamp((-x_err).clamp_min(0.0))
         domain_err = PotentialBounds(0.1, 3.9)
-        x_err_pos = domain_err.clamp(x_err)
-        x_err_neg = domain_err.clamp(-x_err)
-        var_x = (x_err_pos.square() + x_err_neg.square()).mean(
-            dim=-1,
-            keepdim=True,
-        ) + direct_exp_layer.eps
+        x_err_pos = domain_err.clamp(x_err_pos_magnitude)
+        x_err_neg = domain_err.clamp(x_err_neg_magnitude)
+        positive_active = x_err_pos_magnitude >= domain_err.min
+        negative_active = x_err_neg_magnitude >= domain_err.min
+        var_x = (
+            x_err_pos_magnitude.square() + x_err_neg_magnitude.square()
+        ).mean(dim=-1, keepdim=True) + direct_exp_layer.eps
         domain_var = PotentialBounds(domain_err.min ** 2, domain_err.max ** 2)
         var_x = domain_var.clamp(var_x)
         deadline = math.log(domain_err.max / domain_err.min)
@@ -2955,10 +2986,16 @@ def verify_gaussian_spiking_layernorm() -> None:
             )
 
         sigma_width = shifted_width(nominal_sigma)
-        expected_result = torch.exp(
+        expected_positive = torch.exp(
             shifted_width(nominal_pos) - sigma_width
-        ) - torch.exp(
+        )
+        expected_negative = torch.exp(
             shifted_width(nominal_neg) - sigma_width
+        )
+        expected_result = torch.where(
+            positive_active, expected_positive, torch.zeros_like(expected_positive)
+        ) - torch.where(
+            negative_active, expected_negative, torch.zeros_like(expected_negative)
         )
         expected_direct_exp = weight * expected_result + bias
         assert torch.allclose(direct_exp_output.value, expected_direct_exp)
@@ -3003,6 +3040,16 @@ def verify_gaussian_spiking_layernorm() -> None:
         assert zero_stats["layernorm.log_negative"]["events"] == value.numel()
         assert zero_stats["exponential_difference.internal"]["events"] == 16
         assert all(site_stats["misses"] == 0 for site_stats in zero_stats.values())
+
+        # A constant feature vector has zero centered magnitude on both rails. The
+        # encoder floor may represent its logarithmic carriers, but active masks must
+        # prevent either carrier from contributing to the normalized output.
+        constant_value = torch.full_like(value, 1.25)
+        set_gaussian_time_noise(enabled=False)
+        constant_output = full_layer(
+            Potential(constant_value, PotentialBounds(-2.0, 2.0))
+        )
+        assert torch.allclose(constant_output.value, bias.expand_as(constant_value))
 
         # A shift larger than the identity, log, and internal exponential windows
         # prevents every sampled stage from firing. Both final multiplication rails

@@ -63,6 +63,7 @@ def gpt2_calibration_specs(
         GPT2Attention,
         GPT2Block,
         GPT2Model,
+        resolve_gpt2_attention_theta,
     )
 
     if not isinstance(model, nn.Module):
@@ -124,7 +125,7 @@ def gpt2_calibration_specs(
         # current token batch. The combined Q/K/V projection weight supplies the
         # execution dtype that determines the exponential representability floor.
         ceiling = attention_score_representability_bounds(
-            float(getattr(module.config, "theta", 10.0)),
+            resolve_gpt2_attention_theta(module.config),
             float(getattr(module.config, "tau_s", 1.0)),
             int(module.config.max_position_embeddings),
             module.c_attn.weight.dtype,
@@ -255,6 +256,12 @@ def build_gpt2_calibration_metadata(
             "tokenizer calibration metadata must be finite and JSON-compatible"
         ) from error
 
+    # Resolve the operator-local rail through the same validation used by model
+    # construction, including the backward-compatible fallback to global theta.
+    from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import (
+        resolve_gpt2_attention_theta,
+    )
+
     # Persist all configured paths that alter residual distributions. Training-only
     # dropout probabilities are included because model.eval() makes their effective
     # behavior zero, while recording them still rejects a different checkpoint config.
@@ -262,6 +269,10 @@ def build_gpt2_calibration_metadata(
         sorted(
             (
                 ("activation_function", str(getattr(config, "activation_function", ""))),
+                (
+                    "attention_theta",
+                    resolve_gpt2_attention_theta(config),
+                ),
                 ("attention_implementation", attention_implementation),
                 ("attn_pdrop", float(getattr(config, "attn_pdrop", 0.0))),
                 ("embd_pdrop", float(getattr(config, "embd_pdrop", 0.0))),
