@@ -569,4 +569,4 @@ Migration 완료는 numerical output뿐 아니라 declared potential range의 �
 
 재검토 결과 maintained inference 구현은 fixed potential range contract의 핵심 조건인 live activation extrema 비의존성과 noise-independent declared bounds를 만족한다.
 
-Transform algebra, time window, attention, LayerNorm, affine, embedding, activation, residual의 maintained forward range는 모두 static하며 ViT와 GPT-2 artifact lifecycle, AST source audit, batch partition 및 Gaussian seed 불변성 검증이 연결되었다. 구현상 남은 calibration blocker는 없으며 실제 checkpoint와 dataset을 사용하는 full evaluation이 남아 있다.
+Transform algebra, time window, attention, LayerNorm, affine, embedding, activation, residual의 maintained forward range는 모두 static하며 ViT와 GPT-2 artifact lifecycle, AST source audit, batch partition 및 Gaussian seed 불변성 검증이 연결되었다. 구현상 남은 calibration blocker는 없고 ViT-S, BERT, RoBERTa, GPT-2의 실제 checkpoint 및 held-out audit도 완료되었다. 남은 publication caveat와 handoff 상태는 [[todo#2026-08-31 Session Handoff]]에 기록한다.

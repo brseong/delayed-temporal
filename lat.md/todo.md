@@ -2,6 +2,51 @@
 
 This file tracks concrete follow-up work that is intentionally deferred from the maintained architecture and operator implementation.
 
+## 2026-08-31 Session Handoff
+
+This handoff records the fixed-domain completion state, GPT-2 precision evidence, unpublished workspace changes, and publication risks that the next session must not infer from the manuscript alone.
+
+### Established State
+
+The maintained implementation now uses static bounds throughout, limits calibration to necessary sites, retains observed min/max with a 5% margin, and uses operator-local GPT-2 attention timing scale.
+
+- Commit `44ddb0b` contains the merged text-model accuracy work: global GPT-2 $\theta=2000$, attention-local $\theta=100$, corresponding metadata identity, validation, and representative wrapper defaults.
+- Generated artifacts are deny-by-default. Only the reviewed ViT-S min/max-plus-5% table is whitelisted; alternate GPT-2 calibration and precision logs remain local outputs.
+- The simultaneous GPT-2 dense and mixed-window runs are 22.7076 and 22.8991 under the current batch-mean evaluator, a relative PPL increase of 0.843%; see [[evaluation#Fixed-Domain Text-Model Real-Data Audit]].
+- The fixed-score-rail sweep and float64 reference isolate the large shared-window attention degradation as predominantly numerical; see [[evaluation#Fixed-Domain Text-Model Real-Data Audit#GPT-2 Floating-Point Precision Control]].
+
+### Delivery State
+
+The reviewed precision-control tooling, appendix note, and knowledge-graph updates are delivered together on top of `44ddb0b`; generated result artifacts remain local.
+
+- `main` contains `44ddb0b` plus the precision-control handoff commit. Their remote publication state must be checked explicitly before assuming they are pushed.
+- The requested `/root/.codex/worktrees/a4c5/delayed-temporal` worktree is removed. Other detached and EBRAINS/toy worktrees remain registered and were outside this session's scope.
+- The handoff commit adds GPT-2 dtype control, its float32-only calibration guard, verification, the precision sweep, the strict summarizer, and the updated evaluation graph.
+- `paper/gpt2_fp_precision_appendix_results_ko.md` is force-tracked as an appendix-ready table and English draft. `artifacts/precision_gpt2/` remains ignored and contains the local raw logs and generated CSV/Markdown.
+- The calibration verifier passes all 18 groups, the float64 full-model smoke and held-out run complete, Python and shell syntax pass, `git diff --check` passes, and `lat check` passes. Ruff was unavailable in the active environment.
+- Importing custom Transformer families emits pre-existing auto-docstring diagnostics labeled `[ERROR]` for unregistered custom configs and undocumented parameters even though verification exits successfully. This noise should be cleaned or filtered so it cannot hide a real failure.
+
+### Publication Risks
+
+The evidence supports a limited finite-precision claim, but several protocol and manuscript discrepancies remain publication blockers until explicitly resolved.
+
+- The current GPT-2 metric is $\exp$ of an unweighted mean of 181 per-batch losses, not token-weighted corpus perplexity. Every reported comparison uses identical batching, but a publication-facing PPL table should disclose this or be rerun with token-weighted NLL.
+- The float64 $\theta=2000$ reference also widens the softmin execution score radius from 40.242257 to 350.772, so it corroborates but does not independently prove a pure dtype intervention. The fixed-radius float32 window sweep is the primary causal control.
+- Attention-score excursion counts are recorded before causal-mask overwrite and include future positions. Their absolute rate is an upper-bound diagnostic; only like-for-like sweep comparisons are currently justified.
+- `paper/neurips_2026.tex` still reports the old GPT-2 row 22.40 to 23.43 ($+1.03$) and presents one GPT-2 threshold, while the current representative run is 22.7076 to 22.8991 with global/attention thresholds 2,000/100.
+- `paper/reviewer_technical_verification_notes_ko.md` still cites the earlier dense value 22.4057 and $+2.6267$ shared-window gap. The current simultaneous dense reference makes that gap $+2.3248$.
+- “The entire conversion gap is caused by floating-point precision” is unsupported. The safe claim is that the additional degradation from sharing $\theta=2000$ with attention is predominantly a float32 timestamp-subtraction effect; roughly 0.81--0.84% relative PPL remains.
+
+### Next Session
+
+The next session should resolve metric policy and publication consistency before treating the appendix evidence as final.
+
+1. Decide whether to preserve and disclose batch-mean aggregation or implement token-weighted NLL and rerun the full dense, wrapper, attention-window, and float64 matrix.
+2. Reconcile the manuscript and reviewer notes with one canonical simultaneous protocol, including separate global and attention thresholds; manuscript rewriting remains intentionally deferred until authorized.
+3. Decide whether the tracked appendix drafting note should be incorporated into the manuscript or retained as a separate internal record.
+4. Push `44ddb0b` and the precision-control handoff commit after confirming the intended remote branch.
+5. If a reviewer requires a pure dtype intervention, add a reviewed diagnostic that holds the softmin score radius fixed across float32 and float64 rather than over-interpreting the present float64 reference.
+
 ## Causal Signed PWM Migration
 
 Signed temporal differences must subtract two causal event-to-deadline PWM rails so neither physical path integrates backward or requires event-order detection.
@@ -77,7 +122,7 @@ The merged calibration work closes every known live-extrema violation; the remai
 - [x] Enforce finite, ordered bound endpoints centrally and replace `check_domain` assertions with explicit exceptions that remain active under optimized Python.
 - [x] Keep nonzero spiking attention training dropout outside the paper scope; the compatibility branch is documented, and maintained fixed-range claims apply only to evaluation with dropout disabled.
 - [x] Run the ViT-S/ImageNet-1k real-checkpoint audit and report per-site clipping, Gaussian saturation, deadline misses, and task accuracy for LayerNorm, attention, affine, embedding, and the conventional task head; see [[evaluation#Fixed-Domain ViT-S Real-Data Audit]].
-- [x] Repeat the real-data fixed-domain audit for BERT, RoBERTa, and GPT-2; the classifier gaps are small, and GPT-2's attention-local threshold reduces the original single-threshold PPL gap from 2.6267 to 0.4934; see [[evaluation#Fixed-Domain Text-Model Real-Data Audit]].
+- [x] Repeat the real-data fixed-domain audit for BERT, RoBERTa, and GPT-2; the classifier gaps are small, and under the simultaneous current protocol GPT-2's attention-local threshold reduces the single-threshold PPL gap from 2.3248 to 0.1915; see [[evaluation#Fixed-Domain Text-Model Real-Data Audit]].
 
 ### Implementation Checklist
 

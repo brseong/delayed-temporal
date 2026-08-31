@@ -1609,6 +1609,14 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
     assert default_args.calibration_upper_quantile == 1.0
     assert default_args.calibration_margin_fraction == 0.05
     assert default_args.attention_theta == default_args.theta
+    assert default_args.dtype == "float32"
+    _expect_raises(
+        ValueError,
+        lambda: validate_gpt2_calibration_arguments(
+            replace(default_args, dtype="float16")
+        ),
+        "dtype must be float32 or float64",
+    )
 
     # The CLI exposes collection identity and histogram controls independently from
     # the older diagnostic quantile hook. Validation runs before datasets or model
@@ -1648,6 +1656,13 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
     assert args.calibration_bins == 16
     assert args.theta == 2000.0
     assert args.attention_theta == 100.0
+    _expect_raises(
+        ValueError,
+        lambda: validate_gpt2_calibration_arguments(
+            replace(args, dtype="float64")
+        ),
+        "require dtype=float32",
+    )
     _expect_raises(
         ValueError,
         lambda: validate_gpt2_calibration_arguments(

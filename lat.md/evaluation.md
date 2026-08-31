@@ -23,9 +23,9 @@ On GPU, spiking attention is registered through Hugging Face’s attention inter
 
 ## Metrics
 
-Task metrics remain conventional so operator conversion can be compared directly with the source model.
+Task metrics retain each evaluator's established aggregation so operator conversion can be compared with a source model under the identical runner.
 
-ViT, BERT, and RoBERTa report classification accuracy. GPT-2 masks padding labels, averages causal language-model loss over evaluated batches, and reports perplexity.
+ViT, BERT, and RoBERTa report classification accuracy. GPT-2 masks padding labels and reports $\exp$ of the unweighted mean of per-batch causal-language-model losses. This is batching-consistent but is not token-weighted corpus perplexity; publication tables must either retain identical batching and disclose the aggregation or rerun all GPT-2 conditions with token-weighted NLL.
 
 Quick tests and `max_eval_batches` are smoke-test controls, not final evaluation protocols. Final comparisons should keep dataset split, preprocessing, batch limit, precision, checkpoint, and random seed fixed across backends.
 
@@ -98,11 +98,11 @@ All runs use float32, maximum length 128, no timing noise, and all three tempora
 |---|---:|---:|---:|
 | BERT, `textattack/bert-base-uncased-SST-2` | 92.43% | 92.20% | -0.23 percentage points |
 | RoBERTa, `Bhumika/roberta-base-finetuned-sst2` | 94.50% | 94.04% | -0.46 percentage points |
-| GPT-2, `neulab/gpt2-finetuned-wikitext103` | loss 3.1093, PPL 22.4057 | loss 3.1311, PPL 22.8991 | +0.4934 PPL |
+| GPT-2, `neulab/gpt2-finetuned-wikitext103` | loss 3.1227, PPL 22.7076 | loss 3.1311, PPL 22.8991 | +0.1915 PPL |
 
 BERT has no attention-score excursion and only 383 actual negative LayerNorm-magnitude overflows among 2,143,027,200 values, a $1.78719\times10^{-7}$ rate. RoBERTa records 65,129 score excursions among 2,057,306,112 values, a $3.16574\times10^{-5}$ rate, with no actual magnitude excursion. Roughly half of each LayerNorm log carrier is floored because only one signed rail is active per centered value; these carrier-floor counts and the positive division-numerator floor are structural bookkeeping rather than output-domain failures.
 
-The initial single-threshold GPT-2 run at $\theta=2000$ records 47,764,010 attention-score excursions among 6,820,724,736 values, a 0.700278% rate. Its only actual LayerNorm magnitude excursion is 49,147 positive-rail overflows among 7,104,921,600 values, a $6.91732\times10^{-6}$ rate. The score rail is limited by float32 softmin representability, so observed-extrema calibration cannot widen it past that analytic ceiling.
+The initial single-threshold GPT-2 run at $\theta=2000$ records 47,764,010 attention-score excursions among 6,820,724,736 values, a 0.700278% pre-mask diagnostic rate. Score clamping is counted before the causal overwrite, so this population includes future positions and is only an upper bound on effective unmasked clipping. Its only actual LayerNorm magnitude excursion is 49,147 positive-rail overflows among 7,104,921,600 values, a $6.91732\times10^{-6}$ rate. The score rail is limited by float32 softmin representability, so observed-extrema calibration cannot widen it past that analytic ceiling.
 
 ### GPT-2 Path Attribution
 
@@ -122,7 +122,29 @@ With one global threshold, attention is the dominant isolated contribution, Laye
 
 At a global $\theta=100$, any mixed LayerNorm path collapses to roughly PPL 24,000--25,000 because centered magnitudes exceed the narrow LayerNorm rail. A 1,024-text min/max-plus-5% residual and score artifact leaves residual excursions at zero but cannot repair that threshold error. The attention-local override avoids this conflict; calibration remains restricted to declared residual and score sites and does not replace operator threshold selection.
 
-The classifier results and mixed-threshold GPT-2 result support low degradation for these three selected checkpoints. The GPT-2 improvement comes from an explicit operator-local numerical contract rather than quantile tail trimming: the wider global rail protects LayerNorm range, while the narrower attention window improves float32 temporal subtraction precision.
+The classifier results and mixed-threshold GPT-2 result support low degradation for these three selected checkpoints. The fresh simultaneous GPT-2 baseline and conversion runs differ by 0.843% PPL. The improvement comes from an explicit operator-local numerical contract rather than quantile tail trimming: the wider global rail protects LayerNorm range, while the narrower attention window improves float32 temporal subtraction precision.
+
+### GPT-2 Floating-Point Precision Control
+
+The appendix control separates float32 timestamp resolution from execution-range clipping in the fully converted GPT-2 path.
+
+[[scripts/evaluation/error_analysis_gpt2.py#evaluate_gpt2_model]] accepts an explicit float32 or float64 model dtype when calibration is disabled. Active calibration remains float32-only because artifact metadata currently locks that numerical contract.
+
+The reproducible `scripts/experiments/precision_analysis_gpt2.sh` protocol evaluates the complete WikiText-2 test split at batch size 16 and length 128. Its float32 attention thresholds 50, 100, 200, 500, 1,000, and 2,000 all retain the same softmin execution score radius, 40.242257, while timestamp ULP grows from $3.8147\times10^{-6}$ to $1.2207\times10^{-4}$.
+
+| Attention $\theta$ | dtype | Loss | PPL | Score excursion rate |
+|---:|---:|---:|---:|---:|
+| 50 | float32 | 3.1308 | 22.8913 | 0.640466% |
+| 100 | float32 | 3.1311 | 22.8991 | 0.641252% |
+| 200 | float32 | 3.1316 | 22.9102 | 0.637540% |
+| 500 | float32 | 3.1375 | 23.0466 | 0.645425% |
+| 1,000 | float32 | 3.1535 | 23.4172 | 0.655191% |
+| 2,000 | float32 | 3.2202 | 25.0324 | 0.700278% |
+| 2,000 | float64 | 3.1308 | 22.8928 | 0% |
+
+All float32 points record zero query, key, value, normalized-weight, division-result, and attention-output excursions. PPL worsens even from $\theta=100$ to 200 while the same pre-mask score diagnostic decreases, so its count does not explain the trend. Reducing the attention window to 50 recovers 92.1% of the dense-reference PPL gap and 91.7% of excess NLL.
+
+The float64 endpoint confirms recovery at the original time window but also widens the exponent-representable score rail to 350.772. It is therefore a corroborating numerical reference rather than a pure dtype intervention. [[scripts/analysis/summarize_gpt2_precision.py#parse_run]] rejects incomplete logs, mismatched dtypes or thresholds, loss/PPL inconsistencies, missing clamp counts, and any non-score attention payload excursion.
 
 ### Text-Model LayerNorm Execution Path
 

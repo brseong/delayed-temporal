@@ -95,6 +95,7 @@ class Arguments:
     max_length: int
     batch_size: int
     device: Literal["cuda", "cpu"]
+    dtype: Literal["float32", "float64"]
     max_eval_batches: int
     spiking_layernorm: bool
     spiking_attention: bool
@@ -166,6 +167,12 @@ def parse_arguments() -> Arguments:
                         help="If > 0, stop after this many evaluation batches for smoke testing.")
     parser.add_argument("--device", type=str, choices=["cuda", "cpu"], default="cuda",
                         help="Device to run the evaluation on (e.g., 'cuda' or 'cpu').")
+    parser.add_argument(
+        "--dtype",
+        choices=("float32", "float64"),
+        default="float32",
+        help="Floating-point dtype for the model and temporal payloads.",
+    )
     parser.add_argument("--spiking-layernorm", action=argparse.BooleanOptionalAction, default=True,
                         help="Use SpikingLayerNorm when --model_backend spiking is selected.")
     parser.add_argument("--spiking-attention", action=argparse.BooleanOptionalAction, default=True,
@@ -297,6 +304,7 @@ def parse_arguments() -> Arguments:
         max_length=args.max_length,
         batch_size=args.batch_size,
         device=args.device,
+        dtype=args.dtype,
         max_eval_batches=args.max_eval_batches,
         spiking_layernorm=args.spiking_layernorm,
         spiking_attention=args.spiking_attention,
@@ -349,6 +357,12 @@ def validate_gpt2_calibration_arguments(
     # contains only active phases shared by collectors and frozen runtimes.
     if not isinstance(args.calibration_mode, str):
         raise TypeError("calibration_mode must be a string")
+    if args.dtype not in ("float32", "float64"):
+        raise ValueError("dtype must be float32 or float64")
+    if args.dtype != "float32" and args.calibration_mode != "none":
+        raise ValueError(
+            "layer-wise calibration artifacts currently require dtype=float32"
+        )
     if args.calibration_mode == "none":
         return None
     try:
@@ -442,6 +456,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
     device_str = args.device
 
     torch_device = torch.device(device_str)
+    torch_dtype = torch.float32 if args.dtype == "float32" else torch.float64
     calibration_mode = validate_gpt2_calibration_arguments(args)
 
     # Convert the common user-facing fraction exactly once. tau_s does not rescale
@@ -476,6 +491,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
     cfg["attn_impl"] = effective_attn_impl
     wandb.init(entity="CIDA", project="gpt2-evaluation", config=cfg, name=args.experiment_name)
     print(f"Using device: {torch_device}")
+    print(f"Floating dtype: {args.dtype}")
     print(f"Model backend: {model_backend}")
     print(
         "Gaussian time noise — "
@@ -666,10 +682,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             "run one evaluation process per GPU"
         )
 
-    if torch_device.type == "cuda":
-        model = nn.Module.cuda(model)
-    else:
-        model = nn.Module.cpu(model)
+    model = model.to(device=torch_device, dtype=torch_dtype)
     model.eval()
 
     # Construct the clean artifact identity before collection or frozen binding. The
