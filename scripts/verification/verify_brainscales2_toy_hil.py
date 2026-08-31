@@ -489,6 +489,7 @@ def verify_transient_worker_retry() -> None:
             worker_dir,
             max_attempts=3,
             retry_backoff_s=2.0,
+            idle_timeout_s=10.0,
             runner=flaky_runner,
             sleeper=delays.append,
         )
@@ -519,6 +520,7 @@ def verify_transient_worker_retry() -> None:
                 exhausted_dir,
                 max_attempts=2,
                 retry_backoff_s=0.0,
+                idle_timeout_s=10.0,
                 runner=failing_runner,
                 sleeper=lambda _: None,
             )
@@ -531,6 +533,31 @@ def verify_transient_worker_retry() -> None:
         )
         assert exhausted["status"] == "failed"
         assert len(exhausted["attempts"]) == 2
+
+        silent_dir = worker_dir / "silent"
+        silent_dir.mkdir()
+        try:
+            _run_worker_command_with_retries(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; print('started', flush=True); time.sleep(30)",
+                ],
+                silent_dir,
+                max_attempts=1,
+                retry_backoff_s=0.0,
+                idle_timeout_s=0.25,
+            )
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            raise AssertionError("silent worker must hit its idle watchdog")
+        silent = json.loads(
+            (silent_dir / "worker_status.json").read_text(encoding="utf-8")
+        )
+        assert silent["status"] == "failed"
+        assert silent["attempts"][0]["failure"] == "idle-timeout"
+        assert (silent_dir / "worker_attempt_1.log").is_file()
 
 
 def verify_metrics_and_artifact_schema() -> None:
@@ -634,6 +661,7 @@ def verify_python311_and_notebook_contract() -> None:
     assert "HAGEN_ROW_CHUNK_SIZE = 512" in source
     assert "CONDITION_WORKER_MAX_ATTEMPTS = 3" in source
     assert "CONDITION_WORKER_RETRY_BACKOFF_S = 20.0" in source
+    assert "CONDITION_WORKER_IDLE_TIMEOUT_S = 180.0" in source
     assert "ARTIFACT_ROOT = None" in source
     assert "if ARTIFACT_ROOT is not None" in source
     assert "'--hagen-row-chunk-size', HAGEN_ROW_CHUNK_SIZE" in source
@@ -641,6 +669,10 @@ def verify_python311_and_notebook_contract() -> None:
     assert (
         "'--condition-worker-retry-backoff-s', "
         "CONDITION_WORKER_RETRY_BACKOFF_S"
+    ) in source
+    assert (
+        "'--condition-worker-idle-timeout-s', "
+        "CONDITION_WORKER_IDLE_TIMEOUT_S"
     ) in source
     assert source.index("'--phase', 'train'") < source.index(
         "setup_hardware_client()"

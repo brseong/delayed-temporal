@@ -6,13 +6,16 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from time import perf_counter, sleep
+from queue import Empty, Queue
+from threading import Thread
+from time import monotonic, perf_counter, sleep
 from typing import Any, Callable
 import argparse
 import csv
 import json
 import os
 import platform
+import signal
 import subprocess
 import sys
 
@@ -117,6 +120,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hagen-row-chunk-size", type=int, default=512)
     parser.add_argument("--condition-worker-max-attempts", type=int, default=3)
     parser.add_argument("--condition-worker-retry-backoff-s", type=float, default=20.0)
+    parser.add_argument("--condition-worker-idle-timeout-s", type=float, default=180.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--train-seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--epochs", type=int)
@@ -252,6 +256,8 @@ def _validate_architecture(args: argparse.Namespace) -> None:
         raise ValueError("condition_worker_max_attempts must be positive")
     if args.condition_worker_retry_backoff_s < 0:
         raise ValueError("condition_worker_retry_backoff_s must be non-negative")
+    if args.condition_worker_idle_timeout_s <= 0:
+        raise ValueError("condition_worker_idle_timeout_s must be positive")
     if architecture.task != args.task:
         raise ValueError(
             f"architecture {architecture.name} belongs to {architecture.task}, not {args.task}"
@@ -741,13 +747,105 @@ def _serialize_worker_config(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _terminate_worker_process_group(
+    process: subprocess.Popen[str], *, grace_s: float = 5.0
+) -> None:
+    """Terminate exactly one isolated worker process group."""
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=grace_s)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    process.wait()
+
+
+def _run_streamed_worker_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    check: bool,
+    idle_timeout_s: float,
+    attempt_log_path: Path,
+) -> subprocess.CompletedProcess[str]:
+    """Stream a child worker while enforcing a no-output timeout."""
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        start_new_session=True,
+    )
+    if process.stdout is None:
+        _terminate_worker_process_group(process)
+        raise RuntimeError("condition worker stdout pipe was not created")
+
+    messages: Queue[str | None] = Queue()
+
+    def pump_output() -> None:
+        try:
+            for line in process.stdout:
+                messages.put(line)
+        finally:
+            messages.put(None)
+
+    Thread(target=pump_output, name="condition-worker-output", daemon=True).start()
+    attempt_log_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with attempt_log_path.open("w", encoding="utf-8") as attempt_log:
+            last_output_at = monotonic()
+            while True:
+                idle_s = monotonic() - last_output_at
+                remaining_s = idle_timeout_s - idle_s
+                if remaining_s <= 0:
+                    _terminate_worker_process_group(process)
+                    raise subprocess.TimeoutExpired(command, idle_timeout_s)
+                try:
+                    line = messages.get(timeout=min(30.0, remaining_s))
+                except Empty:
+                    idle_s = monotonic() - last_output_at
+                    print(
+                        f"Worker is still waiting for native output "
+                        f"({idle_s:.0f}s idle; timeout {idle_timeout_s:g}s)",
+                        flush=True,
+                    )
+                    continue
+                if line is None:
+                    break
+                last_output_at = monotonic()
+                print(line, end="", flush=True)
+                attempt_log.write(line)
+                attempt_log.flush()
+        returncode = process.wait()
+    except BaseException:
+        _terminate_worker_process_group(process)
+        raise
+    finally:
+        process.stdout.close()
+    if check and returncode:
+        raise subprocess.CalledProcessError(returncode, command)
+    return subprocess.CompletedProcess(command, returncode)
+
+
 def _run_worker_command_with_retries(
     command: list[str],
     worker_dir: Path,
     *,
     max_attempts: int,
     retry_backoff_s: float,
-    runner: Callable[..., Any] = subprocess.run,
+    idle_timeout_s: float,
+    runner: Callable[..., Any] | None = None,
     sleeper: Callable[[float], None] = sleep,
 ) -> dict[str, Any]:
     """Run one isolated worker with bounded process-level reconnect attempts."""
@@ -759,16 +857,29 @@ def _run_worker_command_with_retries(
             f"Worker {worker_dir.name} attempt {attempt}/{max_attempts}",
             flush=True,
         )
+        attempt_log_path = worker_dir / f"worker_attempt_{attempt}.log"
         try:
-            runner(command, cwd=REPOSITORY_ROOT, check=True)
-        except subprocess.CalledProcessError as error:
+            if runner is None:
+                _run_streamed_worker_command(
+                    command,
+                    cwd=REPOSITORY_ROOT,
+                    check=True,
+                    idle_timeout_s=idle_timeout_s,
+                    attempt_log_path=attempt_log_path,
+                )
+            else:
+                runner(command, cwd=REPOSITORY_ROOT, check=True)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            timed_out = isinstance(error, subprocess.TimeoutExpired)
             attempts.append(
                 {
                     "attempt": attempt,
                     "started_at": started_at,
                     "finished_at": datetime.now(timezone.utc).isoformat(),
-                    "returncode": error.returncode,
+                    "returncode": 124 if timed_out else error.returncode,
                     "status": "failed",
+                    "failure": "idle-timeout" if timed_out else "process-exit",
+                    "attempt_log": attempt_log_path.name if runner is None else None,
                 }
             )
             final = attempt == max_attempts
@@ -778,14 +889,16 @@ def _run_worker_command_with_retries(
                     "status": "failed" if final else "retrying",
                     "max_attempts": max_attempts,
                     "retry_backoff_s": retry_backoff_s,
+                    "idle_timeout_s": idle_timeout_s,
                     "attempts": attempts,
                 },
             )
             if final:
                 raise
             delay_s = retry_backoff_s * attempt
+            failure = "idle timeout" if timed_out else f"exit {error.returncode}"
             print(
-                f"Worker {worker_dir.name} failed with exit {error.returncode}; "
+                f"Worker {worker_dir.name} failed with {failure}; "
                 f"retrying in {delay_s:g}s",
                 flush=True,
             )
@@ -798,12 +911,14 @@ def _run_worker_command_with_retries(
                 "finished_at": datetime.now(timezone.utc).isoformat(),
                 "returncode": 0,
                 "status": "passed",
+                "attempt_log": attempt_log_path.name if runner is None else None,
             }
         )
         status = {
             "status": "passed",
             "max_attempts": max_attempts,
             "retry_backoff_s": retry_backoff_s,
+            "idle_timeout_s": idle_timeout_s,
             "attempts": attempts,
         }
         _json_write(status_path, status)
@@ -862,6 +977,7 @@ def _run_condition_subprocess(
         worker_dir,
         max_attempts=args.condition_worker_max_attempts,
         retry_backoff_s=args.condition_worker_retry_backoff_s,
+        idle_timeout_s=args.condition_worker_idle_timeout_s,
     )
     missing = [name for name in required if not (worker_dir / name).is_file()]
     if missing:

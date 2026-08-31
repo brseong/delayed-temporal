@@ -120,7 +120,7 @@ After temporal decoding, the physical Hagen readout also slices the flattened tr
 
 Formal multi-condition runs materialize each required physical Hagen hidden tensor once, then execute every placement and pool size in a fresh child process. Completed worker directories are resumable, and the parent rebuilds the combined artifact so process isolation does not change paired inputs or the result schema.
 
-Each child process is retried only up to a configured bound with increasing backoff. A retry starts the condition from the beginning in a fresh process; only complete artifact sets are reused, and `worker_status.json` plus the aggregate manifest retain the automatic attempt history.
+Each child process is retried only up to a configured bound with increasing backoff. A no-output watchdog terminates the isolated process group when a native RPC call does not return. Retries restart the condition; only complete artifacts are reused, and attempt logs and status enter the manifest.
 
 ### Local mock and replay evidence
 
@@ -170,7 +170,9 @@ Each hardware condition must run in a fresh process, reuse the matching shared f
 
 ### Transient worker retry
 
-A failed child process must retry only up to the configured bound with increasing backoff, persist every automatic attempt, return after recovery, and re-raise the final process error after exhaustion.
+A failed child must retry only to the configured bound, persist every attempt, and re-raise after exhaustion. A silent child must hit its idle timeout and terminate only its isolated process group.
+
+Retries use increasing backoff, and a recovered worker returns normally to condition aggregation.
 
 ### Miss-aware temporal decoding
 
