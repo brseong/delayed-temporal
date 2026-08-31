@@ -116,7 +116,7 @@ At `M=16`, dedicated placement uses 480 of 512 neuron circuits. The 128-hidden-u
 
 [[utils/hardware/brainscales2/toy_pooling.py#GroupedHardwarePoolBackend]] constructs one grouped-broadcast `Synapse -> LIF` graph for dedicated mapping. Each logical source expands into the operating point's simultaneous fan-in lanes, which project only to that source's replica block; the network path never substitutes the primitive experiment's unreliable independent-input routing condition.
 
-Full hardware evaluation bounds hxtorch memory by slicing only the sample axis before constructing each grouped graph. The requested sample chunk is an upper bound: the effective size also caps `pool_size * samples` at 256 replica-samples, so M=8 and M=16 reduce a requested 64 to 32 and 16. Each chunk calibrates and infers, then [[utils/hardware/brainscales2/toy_pooling.py#concatenate_toy_pool_results]] restores order and provenance.
+Full hardware evaluation slices samples and caps `pool_size * samples` at 128 replica-samples, so M=8 and M=16 use 16 and 8 samples. Every chunk runs in a disposable child process to release native hxtorch memory under the 2 GB EBRAINS limit, then [[utils/hardware/brainscales2/toy_pooling.py#concatenate_toy_pool_results]] restores order and provenance.
 
 After temporal decoding, the physical Hagen readout also slices the flattened trial-sample row axis before each PWM call. The concatenated logits retain their original row order, and each row chunk records its calibration, chip, shape, and elapsed-time metadata.
 
@@ -173,6 +173,10 @@ The effective hardware chunk must not exceed its configured replica-sample budge
 The physical pool chunk must reduce with pool size so every grouped graph stays below its replica-sample memory budget.
 
 A requested sample chunk remains an upper bound; the effective size is `min(requested, budget // pool_size)` with a minimum of one sample.
+
+### Pool chunk process isolation
+
+Every full-run hardware chunk must execute in a disposable child, persist its result and attempt status, and be reusable after a later chunk or outer condition is killed.
 
 ### Hagen output row chunking
 

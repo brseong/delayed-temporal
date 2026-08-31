@@ -23,6 +23,7 @@ from scripts.evaluation.brainscales2_toy_hil import (
     _apply_condition_worker_config,
     _load_isolated_condition,
     _run_hagen_output,
+    _run_isolated_pool_chunks,
     _run_temporal_pool,
     _run_worker_command_with_retries,
 )
@@ -49,6 +50,7 @@ from utils.hardware.brainscales2.toy_pooling import (
     ReplayToyPoolBackend,
     TimingCalibration,
     ToyPoolConfig,
+    ToyPoolResult,
     concatenate_toy_pool_results,
     decode_pool_observations,
     resolve_grouped_physical_coordinates,
@@ -289,6 +291,61 @@ def verify_pool_size_aware_hardware_chunk_cap() -> None:
     assert result.metadata["requested_pool_sample_chunk_size"] == 64
     assert result.metadata["effective_pool_sample_chunk_size"] == 32
     assert result.metadata["pool_replica_sample_budget"] == 256
+
+
+def verify_pool_chunk_process_isolation() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Pool chunk process isolation]]
+    spiking = BrainScaleS2PoolConfig(
+        trials=4,
+        pool_sizes=(8,),
+        placements=("same-quadrant",),
+        routings=("broadcast",),
+    )
+    config = ToyPoolConfig(
+        pool_size=8,
+        logical_neurons=2,
+        inference_trials=2,
+        calibration_trials=4,
+        seed=37,
+        miss_probability=0.0,
+    )
+    hidden = torch.arange(35 * 2, dtype=torch.int32).reshape(35, 2).remainder(32)
+    launched: list[tuple[str, int]] = []
+    backend = MockToyPoolBackend()
+
+    def launch(
+        args: SimpleNamespace,
+        chunk_dir: Path,
+        hidden_chunk: torch.Tensor,
+        pool_config: ToyPoolConfig,
+        spiking_config: BrainScaleS2PoolConfig,
+    ) -> ToyPoolResult:
+        chunk_dir.mkdir(parents=True)
+        launched.append((chunk_dir.name, hidden_chunk.shape[0]))
+        (chunk_dir / "worker_status.json").write_text(
+            json.dumps({"status": "passed", "attempts": [{"attempt": 1}]}),
+            encoding="utf-8",
+        )
+        return backend.run_uint5(hidden_chunk, pool_config, spiking_config)
+
+    with TemporaryDirectory() as directory:
+        result = _run_isolated_pool_chunks(
+            SimpleNamespace(output_dir=Path(directory)),
+            hidden,
+            config,
+            spiking,
+            16,
+            launcher=launch,
+        )
+    assert launched == [
+        ("chunk_000000_000016", 16),
+        ("chunk_000016_000032", 16),
+        ("chunk_000032_000035", 3),
+    ]
+    assert result.decoded_uint5.shape[1] == 35
+    assert result.metadata["chunk_process_isolation"] is True
+    assert len(result.metadata["chunk_worker_dirs"]) == 3
+    assert len(result.metadata["chunk_worker_status"]) == 3
 
 
 def verify_replay_split_and_reproducibility() -> None:
@@ -731,7 +788,7 @@ def verify_python311_and_notebook_contract() -> None:
     assert "'--relu-boundary', RELU_BOUNDARY" in source
     assert "POOL_SAMPLE_CHUNK_SIZE = 64" in source
     assert "'--pool-sample-chunk-size', POOL_SAMPLE_CHUNK_SIZE" in source
-    assert "POOL_REPLICA_SAMPLE_BUDGET = 256" in source
+    assert "POOL_REPLICA_SAMPLE_BUDGET = 128" in source
     assert "'--pool-replica-sample-budget', POOL_REPLICA_SAMPLE_BUDGET" in source
     assert "HAGEN_ROW_CHUNK_SIZE = 512" in source
     assert "CONDITION_WORKER_MAX_ATTEMPTS = 3" in source
@@ -765,6 +822,7 @@ def main() -> None:
     verify_mock_and_all_miss_policy()
     verify_chunked_pool_aggregation()
     verify_pool_size_aware_hardware_chunk_cap()
+    verify_pool_chunk_process_isolation()
     verify_replay_split_and_reproducibility()
     verify_hagen_output_row_chunking()
     verify_hagen_host_tiling()

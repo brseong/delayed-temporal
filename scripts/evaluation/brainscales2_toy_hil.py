@@ -12,6 +12,7 @@ from time import monotonic, perf_counter, sleep
 from typing import Any, Callable
 import argparse
 import csv
+import hashlib
 import json
 import os
 import platform
@@ -22,7 +23,7 @@ import sys
 import torch
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_POOL_REPLICA_SAMPLE_BUDGET = 256
+DEFAULT_POOL_REPLICA_SAMPLE_BUDGET = 128
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
@@ -182,6 +183,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-fan-in", type=int, default=4)
     parser.add_argument("--raw-time-scale-s", type=float)
     parser.add_argument("--condition-worker-config", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--pool-chunk-worker-config", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--condition-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--prepare-first-hidden", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--first-hidden-cache", type=Path, help=argparse.SUPPRESS)
@@ -203,6 +205,7 @@ _WORKER_PATH_FIELDS = {
     "hagen_calibration",
     "spiking_calibration",
     "condition_worker_config",
+    "pool_chunk_worker_config",
     "first_hidden_cache",
 }
 
@@ -488,6 +491,17 @@ def _run_temporal_pool(
                 "effective_pool_sample_chunk_size": effective_chunk_size,
                 "pool_replica_sample_budget": args.pool_replica_sample_budget,
             },
+        )
+
+    if args.pool_backend == "hardware" and getattr(args, "condition_worker", False):
+        return with_chunk_metadata(
+            _run_isolated_pool_chunks(
+                args,
+                hidden_uint5,
+                pool_config,
+                spiking_config,
+                effective_chunk_size,
+            )
         )
 
     if (
@@ -804,14 +818,20 @@ def _serialize_worker_config(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _terminate_worker_process_group(
-    process: subprocess.Popen[str], *, grace_s: float = 5.0
+def _terminate_worker_process(
+    process: subprocess.Popen[str],
+    *,
+    process_group: bool,
+    grace_s: float = 5.0,
 ) -> None:
-    """Terminate exactly one isolated worker process group."""
+    """Terminate one worker or its explicitly isolated process group."""
     if process.poll() is not None:
         return
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        if process_group:
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.send_signal(signal.SIGTERM)
     except ProcessLookupError:
         return
     try:
@@ -820,7 +840,10 @@ def _terminate_worker_process_group(
     except subprocess.TimeoutExpired:
         pass
     try:
-        os.killpg(process.pid, signal.SIGKILL)
+        if process_group:
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
     except ProcessLookupError:
         return
     process.wait()
@@ -833,6 +856,7 @@ def _run_streamed_worker_command(
     check: bool,
     idle_timeout_s: float,
     attempt_log_path: Path,
+    isolate_process_group: bool,
 ) -> subprocess.CompletedProcess[str]:
     """Stream a child worker while enforcing a no-output timeout."""
     process = subprocess.Popen(
@@ -842,10 +866,10 @@ def _run_streamed_worker_command(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
-        start_new_session=True,
+        start_new_session=isolate_process_group,
     )
     if process.stdout is None:
-        _terminate_worker_process_group(process)
+        _terminate_worker_process(process, process_group=isolate_process_group)
         raise RuntimeError("condition worker stdout pipe was not created")
 
     messages: Queue[str | None] = Queue()
@@ -866,7 +890,10 @@ def _run_streamed_worker_command(
                 idle_s = monotonic() - last_output_at
                 remaining_s = idle_timeout_s - idle_s
                 if remaining_s <= 0:
-                    _terminate_worker_process_group(process)
+                    _terminate_worker_process(
+                        process,
+                        process_group=isolate_process_group,
+                    )
                     raise subprocess.TimeoutExpired(command, idle_timeout_s)
                 try:
                     line = messages.get(timeout=min(30.0, remaining_s))
@@ -886,7 +913,7 @@ def _run_streamed_worker_command(
                 attempt_log.flush()
         returncode = process.wait()
     except BaseException:
-        _terminate_worker_process_group(process)
+        _terminate_worker_process(process, process_group=isolate_process_group)
         raise
     finally:
         process.stdout.close()
@@ -902,6 +929,7 @@ def _run_worker_command_with_retries(
     max_attempts: int,
     retry_backoff_s: float,
     idle_timeout_s: float,
+    isolate_process_group: bool = True,
     runner: Callable[..., Any] | None = None,
     sleeper: Callable[[float], None] = sleep,
 ) -> dict[str, Any]:
@@ -923,6 +951,7 @@ def _run_worker_command_with_retries(
                     check=True,
                     idle_timeout_s=idle_timeout_s,
                     attempt_log_path=attempt_log_path,
+                    isolate_process_group=isolate_process_group,
                 )
             else:
                 runner(command, cwd=REPOSITORY_ROOT, check=True)
@@ -981,6 +1010,164 @@ def _run_worker_command_with_retries(
         _json_write(status_path, status)
         return status
     raise AssertionError("unreachable worker retry state")
+
+
+def _tensor_sha256(value: torch.Tensor) -> str:
+    contiguous = value.detach().cpu().contiguous()
+    return hashlib.sha256(contiguous.numpy().tobytes()).hexdigest()
+
+
+def _load_pool_chunk_result(path: Path) -> ToyPoolResult:
+    result = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(result, ToyPoolResult):
+        raise TypeError(f"pool chunk result at {path} has an invalid type")
+    return result
+
+
+def _launch_pool_chunk_worker(
+    args: argparse.Namespace,
+    chunk_dir: Path,
+    hidden_chunk: torch.Tensor,
+    pool_config: ToyPoolConfig,
+    spiking_config: BrainScaleS2PoolConfig,
+) -> ToyPoolResult:
+    """Run or resume one physical sample chunk in its own process."""
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    input_path = chunk_dir / "pool_chunk_input.pt"
+    result_path = chunk_dir / "pool_chunk_result.pt"
+    config_path = chunk_dir / "pool_chunk_config.json"
+    payload = {
+        "schema_version": 1,
+        "code_revision": _git_revision(),
+        "hidden_sha256": _tensor_sha256(hidden_chunk),
+        "pool_config": asdict(pool_config),
+        "spiking_config": spiking_config.to_manifest_dict(),
+        "input_file": input_path.name,
+        "result_file": result_path.name,
+    }
+    same_config = False
+    if config_path.is_file():
+        try:
+            same_config = json.loads(config_path.read_text(encoding="utf-8")) == payload
+        except (OSError, json.JSONDecodeError):
+            same_config = False
+    if same_config and result_path.is_file():
+        try:
+            result = _load_pool_chunk_result(result_path)
+        except (OSError, RuntimeError, TypeError):
+            pass
+        else:
+            print(f"  Reusing completed pool chunk {chunk_dir.name}", flush=True)
+            return result
+
+    result_path.unlink(missing_ok=True)
+    torch.save(hidden_chunk.detach().cpu().to(torch.int32), input_path)
+    _json_write(config_path, payload)
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--output-dir",
+        str(chunk_dir.resolve()),
+        "--pool-chunk-worker-config",
+        str(config_path.resolve()),
+    ]
+    _run_worker_command_with_retries(
+        command,
+        chunk_dir,
+        max_attempts=args.condition_worker_max_attempts,
+        retry_backoff_s=args.condition_worker_retry_backoff_s,
+        idle_timeout_s=args.condition_worker_idle_timeout_s,
+        isolate_process_group=False,
+    )
+    if not result_path.is_file():
+        raise RuntimeError(f"pool chunk worker {chunk_dir.name} missed its result")
+    return _load_pool_chunk_result(result_path)
+
+
+def _run_isolated_pool_chunks(
+    args: argparse.Namespace,
+    hidden_uint5: torch.Tensor,
+    pool_config: ToyPoolConfig,
+    spiking_config: BrainScaleS2PoolConfig,
+    effective_chunk_size: int,
+    *,
+    launcher: Callable[
+        [argparse.Namespace, Path, torch.Tensor, ToyPoolConfig, BrainScaleS2PoolConfig],
+        ToyPoolResult,
+    ]
+    | None = None,
+) -> ToyPoolResult:
+    """Execute sample chunks in disposable processes to release native memory."""
+    launch = launcher or _launch_pool_chunk_worker
+    chunk_root = args.output_dir / "pool_chunks"
+    results: list[ToyPoolResult] = []
+    worker_dirs: list[str] = []
+    for start in range(0, hidden_uint5.shape[0], effective_chunk_size):
+        stop = min(start + effective_chunk_size, hidden_uint5.shape[0])
+        chunk_dir = chunk_root / f"chunk_{start:06d}_{stop:06d}"
+        print(
+            f"  isolated pool sample chunk [{start}:{stop}) / "
+            f"{hidden_uint5.shape[0]}",
+            flush=True,
+        )
+        results.append(
+            launch(
+                args,
+                chunk_dir,
+                hidden_uint5[start:stop],
+                pool_config,
+                spiking_config,
+            )
+        )
+        worker_dirs.append(str(chunk_dir.relative_to(args.output_dir)))
+    joined = concatenate_toy_pool_results(results)
+    worker_status = {
+        worker_dir: json.loads(
+            (args.output_dir / worker_dir / "worker_status.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        for worker_dir in worker_dirs
+        if (args.output_dir / worker_dir / "worker_status.json").is_file()
+    }
+    return replace(
+        joined,
+        metadata={
+            **joined.metadata,
+            "chunk_process_isolation": True,
+            "chunk_worker_dirs": worker_dirs,
+            "chunk_worker_status": worker_status,
+        },
+    )
+
+
+def pool_chunk_worker_phase(args: argparse.Namespace) -> None:
+    """Execute exactly one serialized hardware pool chunk."""
+    config_path = args.pool_chunk_worker_config.resolve()
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != 1:
+        raise ValueError("unsupported pool chunk worker schema")
+    input_path = config_path.parent / payload["input_file"]
+    result_path = config_path.parent / payload["result_file"]
+    hidden_uint5 = torch.load(input_path, map_location="cpu", weights_only=True)
+    if _tensor_sha256(hidden_uint5) != payload["hidden_sha256"]:
+        raise ValueError("pool chunk input checksum mismatch")
+    pool_config = ToyPoolConfig(**payload["pool_config"])
+    spiking_payload = dict(payload["spiking_config"])
+    for key in ("pool_sizes", "placements", "routings"):
+        spiking_payload[key] = tuple(spiking_payload[key])
+    if spiking_payload["calibration_path"] is not None:
+        spiking_payload["calibration_path"] = Path(spiking_payload["calibration_path"])
+    spiking_config = BrainScaleS2PoolConfig(**spiking_payload)
+    result = GroupedHardwarePoolBackend().run_uint5(
+        hidden_uint5,
+        pool_config,
+        spiking_config,
+    )
+    temporary_path = result_path.with_suffix(result_path.suffix + ".tmp")
+    torch.save(result, temporary_path)
+    os.replace(temporary_path, result_path)
+    print(f"Wrote isolated pool chunk to {result_path}", flush=True)
 
 
 def _run_condition_subprocess(
@@ -1292,7 +1479,9 @@ def probe_phase(args: argparse.Namespace) -> None:
 def main() -> None:
     args = _apply_condition_worker_config(parse_args())
     _validate_architecture(args)
-    if args.prepare_first_hidden:
+    if args.pool_chunk_worker_config is not None:
+        pool_chunk_worker_phase(args)
+    elif args.prepare_first_hidden:
         prepare_first_hidden_phase(args)
     elif (
         args.phase == "hardware-eval"
