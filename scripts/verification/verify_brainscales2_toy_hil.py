@@ -769,8 +769,12 @@ def verify_python311_and_notebook_contract() -> None:
     source = "\n".join(
         "".join(cell.get("source", [])) for cell in payload["cells"]
     )
-    assert "RUN_HARDWARE_SMOKE = False" in source
-    assert "RUN_YINYANG_FULL = False" in source
+    assert "RUN_TRAIN = True" in source
+    assert "RUN_HAGEN_PROBE = True" in source
+    assert "RUN_HARDWARE_SMOKE = True" in source
+    assert "RUN_YINYANG_FULL = True" in source
+    assert "RUN_LOCAL_REPLAY = False" in source
+    assert "RUN_MNIST_BENCHMARK = False" in source
     assert "brainscales2_toy_hil.py" in source
     assert "--max-test-samples" in source
     assert "save_nightly_calibration" in source
