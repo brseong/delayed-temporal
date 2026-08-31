@@ -114,7 +114,7 @@ At `M=16`, dedicated placement uses 480 of 512 neuron circuits. The 128-hidden-u
 
 [[utils/hardware/brainscales2/toy_pooling.py#GroupedHardwarePoolBackend]] constructs one grouped-broadcast `Synapse -> LIF` graph for dedicated mapping. Each logical source expands into the operating point's simultaneous fan-in lanes, which project only to that source's replica block; the network path never substitutes the primitive experiment's unreliable independent-input routing condition.
 
-Full hardware evaluation bounds hxtorch memory by slicing only the sample axis before constructing each grouped graph. Each sample chunk performs label-free timing calibration and inference, then [[utils/hardware/brainscales2/toy_pooling.py#concatenate_toy_pool_results]] restores the original sample order while retaining per-chunk calibration metadata; trials, logical units, replicas, coordinates, and miss masks are not merged or averaged away.
+Full hardware evaluation bounds hxtorch memory by slicing only the sample axis before constructing each grouped graph. The requested sample chunk is an upper bound: the effective size also caps `pool_size * samples` at 256 replica-samples, so M=8 and M=16 reduce a requested 64 to 32 and 16. Each chunk calibrates and infers, then [[utils/hardware/brainscales2/toy_pooling.py#concatenate_toy_pool_results]] restores order and provenance.
 
 After temporal decoding, the physical Hagen readout also slices the flattened trial-sample row axis before each PWM call. The concatenated logits retain their original row order, and each row chunk records its calibration, chip, shape, and elapsed-time metadata.
 
@@ -158,7 +158,15 @@ Each logical hidden source must occupy its own simultaneous fan-in lane block an
 
 ### Chunked pool aggregation
 
-Hardware sample chunks must concatenate along the sample axis without altering trial, logical-neuron, replica, coordinate, or miss-mask semantics, and each chunk's calibration provenance must remain explicit.
+Hardware chunks must concatenate on samples without altering trial, neuron, replica, coordinate, or miss-mask semantics.
+
+The effective hardware chunk must not exceed its configured replica-sample budget, and provenance must retain requested and effective sizes.
+
+### Pool-size-aware hardware chunk cap
+
+The physical pool chunk must reduce with pool size so every grouped graph stays below its replica-sample memory budget.
+
+A requested sample chunk remains an upper bound; the effective size is `min(requested, budget // pool_size)` with a minimum of one sample.
 
 ### Hagen output row chunking
 

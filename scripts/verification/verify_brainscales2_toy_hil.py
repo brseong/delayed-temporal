@@ -23,6 +23,7 @@ from scripts.evaluation.brainscales2_toy_hil import (
     _apply_condition_worker_config,
     _load_isolated_condition,
     _run_hagen_output,
+    _run_temporal_pool,
     _run_worker_command_with_retries,
 )
 from utils.hardware.brainscales2.config import BrainScaleS2PoolConfig
@@ -237,6 +238,57 @@ def verify_chunked_pool_aggregation() -> None:
     assert joined.metadata["chunked"] is True
     assert joined.metadata["sample_chunk_count"] == 2
     assert joined.metadata["calibration_strategy"] == "per-sample-chunk"
+
+
+def verify_pool_size_aware_hardware_chunk_cap() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Pool-size-aware hardware chunk cap]]
+    spiking = BrainScaleS2PoolConfig(
+        trials=4,
+        pool_sizes=(8,),
+        placements=("same-quadrant",),
+        routings=("broadcast",),
+    )
+    config = ToyPoolConfig(
+        pool_size=8,
+        logical_neurons=2,
+        inference_trials=2,
+        calibration_trials=4,
+        seed=31,
+        miss_probability=0.0,
+    )
+
+    class RecordingBackend:
+        def __init__(self) -> None:
+            self.sizes: list[int] = []
+            self.delegate = MockToyPoolBackend()
+
+        def run_uint5(
+            self,
+            hidden_uint5: torch.Tensor,
+            pool_config: ToyPoolConfig,
+            spiking_config: BrainScaleS2PoolConfig,
+        ) -> object:
+            self.sizes.append(hidden_uint5.shape[0])
+            return self.delegate.run_uint5(hidden_uint5, pool_config, spiking_config)
+
+    backend = RecordingBackend()
+    hidden = torch.arange(65 * 2, dtype=torch.int32).reshape(65, 2).remainder(32)
+    result = _run_temporal_pool(
+        SimpleNamespace(
+            pool_backend="hardware",
+            pool_sample_chunk_size=64,
+            pool_replica_sample_budget=256,
+        ),
+        backend,
+        hidden,
+        config,
+        spiking,
+    )
+    assert backend.sizes == [32, 32, 1]
+    assert result.decoded_uint5.shape[1] == 65
+    assert result.metadata["requested_pool_sample_chunk_size"] == 64
+    assert result.metadata["effective_pool_sample_chunk_size"] == 32
+    assert result.metadata["pool_replica_sample_budget"] == 256
 
 
 def verify_replay_split_and_reproducibility() -> None:
@@ -658,6 +710,8 @@ def verify_python311_and_notebook_contract() -> None:
     assert "'--input-fan-in', SPIKING_INPUT_FAN_IN" in source
     assert "POOL_SAMPLE_CHUNK_SIZE = 64" in source
     assert "'--pool-sample-chunk-size', POOL_SAMPLE_CHUNK_SIZE" in source
+    assert "POOL_REPLICA_SAMPLE_BUDGET = 256" in source
+    assert "'--pool-replica-sample-budget', POOL_REPLICA_SAMPLE_BUDGET" in source
     assert "HAGEN_ROW_CHUNK_SIZE = 512" in source
     assert "CONDITION_WORKER_MAX_ATTEMPTS = 3" in source
     assert "CONDITION_WORKER_RETRY_BACKOFF_S = 20.0" in source
@@ -689,6 +743,7 @@ def main() -> None:
     verify_grouped_broadcast_fan_in()
     verify_mock_and_all_miss_policy()
     verify_chunked_pool_aggregation()
+    verify_pool_size_aware_hardware_chunk_cap()
     verify_replay_split_and_reproducibility()
     verify_hagen_output_row_chunking()
     verify_hagen_host_tiling()

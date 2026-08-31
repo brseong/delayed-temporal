@@ -22,6 +22,7 @@ import sys
 import torch
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_POOL_REPLICA_SAMPLE_BUDGET = 256
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
@@ -117,6 +118,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pool-trials", type=int, default=8)
     parser.add_argument("--pool-calibration-trials", type=int, default=32)
     parser.add_argument("--pool-sample-chunk-size", type=int, default=64)
+    parser.add_argument(
+        "--pool-replica-sample-budget",
+        type=int,
+        default=DEFAULT_POOL_REPLICA_SAMPLE_BUDGET,
+        help="hardware cap for pool_size times samples in one spiking graph",
+    )
     parser.add_argument("--hagen-row-chunk-size", type=int, default=512)
     parser.add_argument("--condition-worker-max-attempts", type=int, default=3)
     parser.add_argument("--condition-worker-retry-backoff-s", type=float, default=20.0)
@@ -250,6 +257,8 @@ def _validate_architecture(args: argparse.Namespace) -> None:
     architecture = ARCHITECTURES[args.architecture]
     if args.pool_sample_chunk_size <= 0:
         raise ValueError("pool_sample_chunk_size must be positive")
+    if args.pool_replica_sample_budget <= 0:
+        raise ValueError("pool_replica_sample_budget must be positive")
     if args.hagen_row_chunk_size <= 0:
         raise ValueError("hagen_row_chunk_size must be positive")
     if args.condition_worker_max_attempts <= 0:
@@ -452,16 +461,38 @@ def _run_temporal_pool(
     pool_config: ToyPoolConfig,
     spiking_config: BrainScaleS2PoolConfig,
 ) -> Any:
+    requested_chunk_size = args.pool_sample_chunk_size
+    effective_chunk_size = requested_chunk_size
+    if args.pool_backend == "hardware":
+        effective_chunk_size = min(
+            requested_chunk_size,
+            max(1, args.pool_replica_sample_budget // pool_config.pool_size),
+        )
+
+    def with_chunk_metadata(result: Any) -> Any:
+        return replace(
+            result,
+            metadata={
+                **result.metadata,
+                "requested_pool_sample_chunk_size": requested_chunk_size,
+                "effective_pool_sample_chunk_size": effective_chunk_size,
+                "pool_replica_sample_budget": args.pool_replica_sample_budget,
+            },
+        )
+
     if (
         args.pool_backend != "hardware"
-        or hidden_uint5.shape[0] <= args.pool_sample_chunk_size
+        or hidden_uint5.shape[0] <= effective_chunk_size
     ):
-        return temporal_backend.run_uint5(hidden_uint5, pool_config, spiking_config)
+        return with_chunk_metadata(
+            temporal_backend.run_uint5(hidden_uint5, pool_config, spiking_config)
+        )
     results = []
-    for start in range(0, hidden_uint5.shape[0], args.pool_sample_chunk_size):
-        stop = min(start + args.pool_sample_chunk_size, hidden_uint5.shape[0])
+    for start in range(0, hidden_uint5.shape[0], effective_chunk_size):
+        stop = min(start + effective_chunk_size, hidden_uint5.shape[0])
         print(
-            f"  pool sample chunk [{start}:{stop}) / {hidden_uint5.shape[0]}",
+            f"  pool sample chunk [{start}:{stop}) / {hidden_uint5.shape[0]} "
+            f"(effective={effective_chunk_size}, requested={requested_chunk_size})",
             flush=True,
         )
         results.append(
@@ -471,7 +502,7 @@ def _run_temporal_pool(
                 spiking_config,
             )
         )
-    return concatenate_toy_pool_results(results)
+    return with_chunk_metadata(concatenate_toy_pool_results(results))
 
 
 def _run_hagen_output(
@@ -674,6 +705,7 @@ def evaluation_phase(args: argparse.Namespace) -> None:
         "pooling_domain": args.pooling_domain,
         "pool_mapping": args.pool_mapping,
         "pool_sample_chunk_size": args.pool_sample_chunk_size,
+        "pool_replica_sample_budget": args.pool_replica_sample_budget,
         "hagen_row_chunk_size": args.hagen_row_chunk_size,
         "pool_sizes": pool_sizes,
         "placements": placements,
