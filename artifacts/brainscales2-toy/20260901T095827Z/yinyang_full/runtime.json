@@ -1,0 +1,85 @@
+{
+  "condition_process_isolation": true,
+  "condition_workers": {
+    "ttfs_M16_cross-quadrant_dedicated": {
+      "dataset_load_s": 0.3231305480003357,
+      "ttfs_M16_cross-quadrant_dedicated": {
+        "elapsed_s": 1344.4105383959832,
+        "samples": 1000,
+        "trials": 8
+      }
+    },
+    "ttfs_M16_local-pool_dedicated": {
+      "dataset_load_s": 0.3069396079517901,
+      "ttfs_M16_local-pool_dedicated": {
+        "elapsed_s": 1332.395782676991,
+        "samples": 1000,
+        "trials": 8
+      }
+    },
+    "ttfs_M1_cross-quadrant_dedicated": {
+      "dataset_load_s": 0.296632367069833,
+      "ttfs_M1_cross-quadrant_dedicated": {
+        "elapsed_s": 281.4489855079446,
+        "samples": 1000,
+        "trials": 8
+      }
+    },
+    "ttfs_M1_local-pool_dedicated": {
+      "dataset_load_s": 0.3107510980917141,
+      "ttfs_M1_local-pool_dedicated": {
+        "elapsed_s": 283.73532421607524,
+        "samples": 1000,
+        "trials": 8
+      }
+    },
+    "ttfs_M2_cross-quadrant_dedicated": {
+      "dataset_load_s": 0.2837967579253018,
+      "ttfs_M2_cross-quadrant_dedicated": {
+        "elapsed_s": 289.81474149704445,
+        "samples": 1000,
+        "trials": 8
+      }
+    },
+    "ttfs_M2_local-pool_dedicated": {
+      "dataset_load_s": 0.3395414729602635,
+      "ttfs_M2_local-pool_dedicated": {
+        "elapsed_s": 288.69081197399646,
+        "samples": 1000,
+        "trials": 8
+      }
+    },
+    "ttfs_M4_cross-quadrant_dedicated": {
+      "dataset_load_s": 0.275213579996489,
+      "ttfs_M4_cross-quadrant_dedicated": {
+        "elapsed_s": 433.5098648259882,
+        "samples": 1000,
+        "trials": 8
+      }
+    },
+    "ttfs_M4_local-pool_dedicated": {
+      "dataset_load_s": 0.30146779399365187,
+      "ttfs_M4_local-pool_dedicated": {
+        "elapsed_s": 422.15374563005753,
+        "samples": 1000,
+        "trials": 8
+      }
+    },
+    "ttfs_M8_cross-quadrant_dedicated": {
+      "dataset_load_s": 0.30847254197578877,
+      "ttfs_M8_cross-quadrant_dedicated": {
+        "elapsed_s": 719.5606619820464,
+        "samples": 1000,
+        "trials": 8
+      }
+    },
+    "ttfs_M8_local-pool_dedicated": {
+      "dataset_load_s": 0.30771568103227764,
+      "ttfs_M8_local-pool_dedicated": {
+        "elapsed_s": 709.4751034569927,
+        "samples": 1000,
+        "trials": 8
+      }
+    }
+  }
+}

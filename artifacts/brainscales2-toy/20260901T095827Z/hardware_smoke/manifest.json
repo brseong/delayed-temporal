@@ -1,0 +1,615 @@
+{
+  "activation": "relu",
+  "architecture": "yy-30",
+  "claims": {
+    "hagen_converting_relu_baseline": false,
+    "host_free_latency_or_energy": false,
+    "host_mediated": true,
+    "implicit_relu_continuous_on_chip": false,
+    "implicit_relu_host_mediated": true,
+    "replay_is_hardware_evidence": false,
+    "sigmoid_host_mediated_adapter": false,
+    "sigmoid_physical_subcircuit": false,
+    "transformer_hardware_execution": false
+  },
+  "conditions": [
+    {
+      "key": "ttfs_M1_local-pool_dedicated",
+      "mapping": "dedicated",
+      "physical_coordinates": [
+        [
+          0
+        ],
+        [
+          128
+        ],
+        [
+          256
+        ],
+        [
+          384
+        ],
+        [
+          1
+        ],
+        [
+          129
+        ],
+        [
+          257
+        ],
+        [
+          385
+        ],
+        [
+          2
+        ],
+        [
+          130
+        ],
+        [
+          258
+        ],
+        [
+          386
+        ],
+        [
+          3
+        ],
+        [
+          131
+        ],
+        [
+          259
+        ],
+        [
+          387
+        ],
+        [
+          4
+        ],
+        [
+          132
+        ],
+        [
+          260
+        ],
+        [
+          388
+        ],
+        [
+          5
+        ],
+        [
+          133
+        ],
+        [
+          261
+        ],
+        [
+          389
+        ],
+        [
+          6
+        ],
+        [
+          134
+        ],
+        [
+          262
+        ],
+        [
+          390
+        ],
+        [
+          7
+        ],
+        [
+          135
+        ]
+      ],
+      "placement": "local-pool",
+      "pool_metadata": {
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "calibration_strategy": "inline-separate",
+        "calibration_trials": 4,
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "effective_pool_sample_chunk_size": 64,
+        "grouped_broadcast": true,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "phase": "inference",
+        "pool_replica_sample_budget": 128,
+        "raw_batch_count": 24,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_pool_sample_chunk_size": 64,
+        "response_delay_s": 7.0668241648105815e-06,
+        "timing_calibration": {
+          "backend": "hardware",
+          "calibration_code_count": 11,
+          "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+          "calibration_miss_rate": 0.578030303030303,
+          "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+          "calibration_trials": 4,
+          "chip_identifier": [
+            "hxcube7fpga0chip57_1"
+          ],
+          "grouped_broadcast": true,
+          "hxtorch_version": "unknown",
+          "input_fan_in": 4,
+          "phase": "timing-calibration",
+          "raw_batch_count": 44,
+          "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data"
+        }
+      },
+      "pool_size": 1,
+      "pooling_domain": "ttfs",
+      "pwm_metadata": {
+        "first": {
+          "activation": "relu",
+          "activation_adapter": "implicit-lower-bound-host",
+          "activation_shift": 2,
+          "avg": 1,
+          "backend": "hagen-hardware",
+          "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/hagen_cocolist.pbin",
+          "calibration_sha256": "776c1c6077aab075fa917971539528f6e51385f374e2575fc96627cabd1af39d",
+          "chip_identifier": [
+            "hxcube7fpga0chip57_1"
+          ],
+          "converting_relu": null,
+          "elapsed_s": 4.007967590005137,
+          "hagen_hidden_shift": 2,
+          "hagen_hidden_shift_used": true,
+          "host_accumulated": false,
+          "host_mediated_activation": true,
+          "host_mediated_lower_bound": true,
+          "hxtorch_version": "unknown",
+          "input_shape": [
+            12,
+            5
+          ],
+          "integer_reference_hidden_shift": 6,
+          "lower_bound_clamped_values": 127,
+          "lower_bound_v": 0.0,
+          "output_shape": [
+            12,
+            30
+          ],
+          "raw_preactivation_maximum": 49.0,
+          "raw_preactivation_minimum": -77.0,
+          "relu_boundary": "implicit-lower-bound-host",
+          "tile_schedule": [],
+          "tiling": "high-level",
+          "upper_bound_clamped_values": 0,
+          "upper_bound_v": 31.0
+        },
+        "output": {
+          "avg": 1,
+          "backend": "hagen-hardware",
+          "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/hagen_cocolist.pbin",
+          "calibration_sha256": "776c1c6077aab075fa917971539528f6e51385f374e2575fc96627cabd1af39d",
+          "chip_identifier": [
+            "hxcube7fpga0chip57_1"
+          ],
+          "converting_relu": null,
+          "elapsed_s": 3.8471867709886283,
+          "hagen_output_shift_applied": 0,
+          "host_accumulated": false,
+          "host_mediated_lower_bound": false,
+          "hxtorch_version": "unknown",
+          "input_shape": [
+            24,
+            31
+          ],
+          "integer_reference_output_shift": 3,
+          "output_shape": [
+            24,
+            3
+          ],
+          "relu_boundary": null,
+          "tile_schedule": [],
+          "tiling": "high-level"
+        }
+      }
+    },
+    {
+      "key": "ttfs_M4_local-pool_dedicated",
+      "mapping": "dedicated",
+      "physical_coordinates": [
+        [
+          0,
+          1,
+          2,
+          3
+        ],
+        [
+          128,
+          129,
+          130,
+          131
+        ],
+        [
+          256,
+          257,
+          258,
+          259
+        ],
+        [
+          384,
+          385,
+          386,
+          387
+        ],
+        [
+          4,
+          5,
+          6,
+          7
+        ],
+        [
+          132,
+          133,
+          134,
+          135
+        ],
+        [
+          260,
+          261,
+          262,
+          263
+        ],
+        [
+          388,
+          389,
+          390,
+          391
+        ],
+        [
+          8,
+          9,
+          10,
+          11
+        ],
+        [
+          136,
+          137,
+          138,
+          139
+        ],
+        [
+          264,
+          265,
+          266,
+          267
+        ],
+        [
+          392,
+          393,
+          394,
+          395
+        ],
+        [
+          12,
+          13,
+          14,
+          15
+        ],
+        [
+          140,
+          141,
+          142,
+          143
+        ],
+        [
+          268,
+          269,
+          270,
+          271
+        ],
+        [
+          396,
+          397,
+          398,
+          399
+        ],
+        [
+          16,
+          17,
+          18,
+          19
+        ],
+        [
+          144,
+          145,
+          146,
+          147
+        ],
+        [
+          272,
+          273,
+          274,
+          275
+        ],
+        [
+          400,
+          401,
+          402,
+          403
+        ],
+        [
+          20,
+          21,
+          22,
+          23
+        ],
+        [
+          148,
+          149,
+          150,
+          151
+        ],
+        [
+          276,
+          277,
+          278,
+          279
+        ],
+        [
+          404,
+          405,
+          406,
+          407
+        ],
+        [
+          24,
+          25,
+          26,
+          27
+        ],
+        [
+          152,
+          153,
+          154,
+          155
+        ],
+        [
+          280,
+          281,
+          282,
+          283
+        ],
+        [
+          408,
+          409,
+          410,
+          411
+        ],
+        [
+          28,
+          29,
+          30,
+          31
+        ],
+        [
+          156,
+          157,
+          158,
+          159
+        ]
+      ],
+      "placement": "local-pool",
+      "pool_metadata": {
+        "backend": "hardware",
+        "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+        "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+        "calibration_strategy": "inline-separate",
+        "calibration_trials": 4,
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "effective_pool_sample_chunk_size": 32,
+        "grouped_broadcast": true,
+        "hxtorch_version": "unknown",
+        "input_fan_in": 4,
+        "phase": "inference",
+        "pool_replica_sample_budget": 128,
+        "raw_batch_count": 24,
+        "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data",
+        "requested_pool_sample_chunk_size": 64,
+        "response_delay_s": 7.1472732886659016e-06,
+        "timing_calibration": {
+          "backend": "hardware",
+          "calibration_code_count": 11,
+          "calibration_loader": "hxtorch.spiking.ExecutionInstance.load_calib",
+          "calibration_miss_rate": 0.5835227272727272,
+          "calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+          "calibration_trials": 4,
+          "chip_identifier": [
+            "hxcube7fpga0chip57_1"
+          ],
+          "grouped_broadcast": true,
+          "hxtorch_version": "unknown",
+          "input_fan_in": 4,
+          "phase": "timing-calibration",
+          "raw_batch_count": 44,
+          "raw_spike_api": "_hxtorch_spiking.SpikeHandle.get_data"
+        }
+      },
+      "pool_size": 4,
+      "pooling_domain": "ttfs",
+      "pwm_metadata": {
+        "first": {
+          "activation": "relu",
+          "activation_adapter": "implicit-lower-bound-host",
+          "activation_shift": 2,
+          "avg": 1,
+          "backend": "hagen-hardware",
+          "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/hagen_cocolist.pbin",
+          "calibration_sha256": "776c1c6077aab075fa917971539528f6e51385f374e2575fc96627cabd1af39d",
+          "chip_identifier": [
+            "hxcube7fpga0chip57_1"
+          ],
+          "converting_relu": null,
+          "elapsed_s": 4.007967590005137,
+          "hagen_hidden_shift": 2,
+          "hagen_hidden_shift_used": true,
+          "host_accumulated": false,
+          "host_mediated_activation": true,
+          "host_mediated_lower_bound": true,
+          "hxtorch_version": "unknown",
+          "input_shape": [
+            12,
+            5
+          ],
+          "integer_reference_hidden_shift": 6,
+          "lower_bound_clamped_values": 127,
+          "lower_bound_v": 0.0,
+          "output_shape": [
+            12,
+            30
+          ],
+          "raw_preactivation_maximum": 49.0,
+          "raw_preactivation_minimum": -77.0,
+          "relu_boundary": "implicit-lower-bound-host",
+          "tile_schedule": [],
+          "tiling": "high-level",
+          "upper_bound_clamped_values": 0,
+          "upper_bound_v": 31.0
+        },
+        "output": {
+          "avg": 1,
+          "backend": "hagen-hardware",
+          "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/hagen_cocolist.pbin",
+          "calibration_sha256": "776c1c6077aab075fa917971539528f6e51385f374e2575fc96627cabd1af39d",
+          "chip_identifier": [
+            "hxcube7fpga0chip57_1"
+          ],
+          "converting_relu": null,
+          "elapsed_s": 3.9545670630177483,
+          "hagen_output_shift_applied": 0,
+          "host_accumulated": false,
+          "host_mediated_lower_bound": false,
+          "hxtorch_version": "unknown",
+          "input_shape": [
+            24,
+            31
+          ],
+          "integer_reference_output_shift": 3,
+          "output_shape": [
+            24,
+            3
+          ],
+          "relu_boundary": null,
+          "tile_schedule": [],
+          "tiling": "high-level"
+        }
+      }
+    }
+  ],
+  "conversion": {
+    "activation": "relu",
+    "architecture": "yy-30",
+    "calibration_samples": 1000,
+    "first_weight_scale": 0.003943761433934896,
+    "hidden_saturation_rate": 0.0,
+    "hidden_scale": 0.25240073177183336,
+    "hidden_shift": 6,
+    "input_scale": 0.03225806451612903,
+    "output_saturation_rate": 0.0,
+    "output_shift": 3,
+    "parameter_sha256_after_conversion": "32abff40fcf65764b4ef573492dde296b6cdb0732a371c4c0431ce3d2eb9d100",
+    "second_weight_scale": 0.057280193604225205,
+    "source_parameter_sha256": "32abff40fcf65764b4ef573492dde296b6cdb0732a371c4c0431ce3d2eb9d100"
+  },
+  "dataset": {
+    "calibration_seed": 41,
+    "calibration_size": 1000,
+    "generator": "balanced-yin-yang-rejection-v1",
+    "test_seed": 40,
+    "test_size": 1000,
+    "train_seed": 42,
+    "train_size": 5000
+  },
+  "environment": {
+    "created_at": "2026-09-01T10:00:53.258797+00:00",
+    "ebrains_release": null,
+    "git_revision": "2384cb56e6e0a70811684571c0c692e845f37e10",
+    "platform": "Linux-6.1.0-52-amd64-x86_64-with-glibc2.39",
+    "python": "3.11.10",
+    "torch": "2.5.1"
+  },
+  "event_csv_coverage": {
+    "full_raw_tensor": "intermediates.pt",
+    "sample_limit_per_condition": 128,
+    "trial_limit_per_condition": 2
+  },
+  "float_parameter_sha256": "32abff40fcf65764b4ef573492dde296b6cdb0732a371c4c0431ce3d2eb9d100",
+  "hagen_calibration_sha256": "776c1c6077aab075fa917971539528f6e51385f374e2575fc96627cabd1af39d",
+  "hagen_row_chunk_size": 512,
+  "phase": "hardware-smoke",
+  "placements": [
+    "local-pool"
+  ],
+  "pool_backend": "hardware",
+  "pool_calibration_trial_chunk_size": 4,
+  "pool_mapping": "dedicated",
+  "pool_replica_sample_budget": 128,
+  "pool_sample_chunk_size": 64,
+  "pool_sizes": [
+    1,
+    4
+  ],
+  "pooling_domain": "ttfs",
+  "pwm_backend": "hagen-hardware",
+  "relu_boundary": "implicit-lower-bound-host",
+  "schema_version": 1,
+  "spiking_calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+  "spiking_config": {
+    "allow_environment_calibration": false,
+    "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/spiking_cocolist.pbin",
+    "dt_s": 1e-06,
+    "encoding": "identity",
+    "i_synin_gm": 500.0,
+    "input_early_s": 5e-06,
+    "input_fan_in": 4,
+    "input_late_s": 2.5e-05,
+    "inter_batch_wait_s": 5e-05,
+    "leak": 80.0,
+    "mock_local_std_s": 8e-07,
+    "mock_miss_probability": 0.01,
+    "mock_response_delay_s": 5e-06,
+    "mock_shared_std_s": 2.5e-07,
+    "mock_static_std_s": 5e-07,
+    "observation_deadline_s": 6e-05,
+    "placements": [
+      "same-quadrant"
+    ],
+    "pool_sizes": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "project_tau_s": 1.0,
+    "raw_time_scale_s": null,
+    "refractory_time_s": 1e-06,
+    "reset": 80.0,
+    "routings": [
+      "broadcast"
+    ],
+    "seed": 0,
+    "synapse_dac_bias": 600.0,
+    "synaptic_weight": 63.0,
+    "tau_mem_s": 2e-05,
+    "tau_syn_s": 1e-06,
+    "threshold": 125.0,
+    "trials": 8
+  },
+  "task": "yinyang",
+  "test_samples": 12
+}

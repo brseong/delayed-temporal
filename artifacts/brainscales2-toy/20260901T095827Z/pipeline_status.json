@@ -1,0 +1,46 @@
+{
+  "checkpoint-ready": {
+    "details": {
+      "checkpoint": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/checkpoint/checkpoint.pt",
+      "converted_checkpoint": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/checkpoint/converted_checkpoint.pt"
+    },
+    "status": "passed"
+  },
+  "hagen-probe": {
+    "details": {
+      "normalized_mse": 0.16225430640709912,
+      "saturation_rate": 0.0,
+      "selected_shift": 2
+    },
+    "status": "passed"
+  },
+  "hardware-client-calibration": {
+    "details": {
+      "hagen_calibration": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/hagen_cocolist.pbin",
+      "spiking_calibration": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/spiking_cocolist.pbin"
+    },
+    "status": "passed"
+  },
+  "hardware-smoke": {
+    "details": {
+      "conditions": 2,
+      "maximum_multi_spike_rate": 0.0,
+      "maximum_neuron_miss_rate": 0.48750001192092896,
+      "pool_sizes": [
+        1,
+        4
+      ]
+    },
+    "status": "passed"
+  },
+  "train-convert": {
+    "details": {
+      "checkpoint_dir": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/checkpoint"
+    },
+    "status": "passed"
+  },
+  "yinyang-full": {
+    "details": {},
+    "status": "passed"
+  }
+}

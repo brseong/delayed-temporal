@@ -1,0 +1,181 @@
+{
+  "bundle_parent_commit": "bc4e25c908e4c3ef984b0f3634e324c3d76685f4",
+  "committed_files": [
+    {
+      "path": "pipeline_status.json",
+      "sha256": "a490ec81b161a680dbc4c85cff8ca6e315cca49b5614cb020672ea1667869706",
+      "size_bytes": 1383
+    },
+    {
+      "path": "checkpoint/checkpoint.pt",
+      "sha256": "78c98265b68d8765ff6a13999f0a20566607e8d94c260c4a63f737a11ab15fac",
+      "size_bytes": 3496
+    },
+    {
+      "path": "checkpoint/checkpoint_seed0.pt",
+      "sha256": "5d38eecd91d0861db18e54c506720f898e5927003b1a6b2f2b7f17b7ab4dab5d",
+      "size_bytes": 3608
+    },
+    {
+      "path": "checkpoint/checkpoint_seed1.pt",
+      "sha256": "7e038d641e9467ed691fd5c23c73438f44809a2e736b97db930bcb8da56e138b",
+      "size_bytes": 3608
+    },
+    {
+      "path": "checkpoint/checkpoint_seed2.pt",
+      "sha256": "abe10f84e9f094b4de78ec688ca941db5d6839f3930f0a7eb878bde27317a2ff",
+      "size_bytes": 3608
+    },
+    {
+      "path": "checkpoint/checkpoint_seed3.pt",
+      "sha256": "27f7211d027cfb1aaa13f11c8acfcfac657a677ada3b99b7c6fa17de6fc5db05",
+      "size_bytes": 3608
+    },
+    {
+      "path": "checkpoint/checkpoint_seed4.pt",
+      "sha256": "44651f85f67988d864c0c7288a01db5d08019bd6bd90746c72447d9ce4645243",
+      "size_bytes": 3608
+    },
+    {
+      "path": "checkpoint/conversion.json",
+      "sha256": "0bf1056a5e6ea6ef5349a3dfe4721537db26105d840b2bf9ae3b109be41fb687",
+      "size_bytes": 566
+    },
+    {
+      "path": "checkpoint/converted_checkpoint.pt",
+      "sha256": "1e9d6000d4c9c6398351651452019c08715d89f2bf8e4f9f96296d94594f761d",
+      "size_bytes": 2406
+    },
+    {
+      "path": "checkpoint/training_metrics.csv",
+      "sha256": "31b6fe79ac07a78b7f45dd2af3a895e45c48beb3df0fa404683f79ef166a2082",
+      "size_bytes": 1044
+    },
+    {
+      "path": "calibration/hagen_cocolist.pbin",
+      "sha256": "776c1c6077aab075fa917971539528f6e51385f374e2575fc96627cabd1af39d",
+      "size_bytes": 252727
+    },
+    {
+      "path": "calibration/spiking_cocolist.pbin",
+      "sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+      "size_bytes": 253147
+    },
+    {
+      "path": "hagen_probe/hagen_probe.json",
+      "sha256": "7c518168687d0dcd22e63465234eecc5fae3d177494270cd823458e120ef3128",
+      "size_bytes": 10327
+    },
+    {
+      "path": "hardware_smoke/accuracy_vs_pool.png",
+      "sha256": "68abb122c8eed2f38534cd0a773f3ce47582a3038653f6b6217868e0854582ea",
+      "size_bytes": 51768
+    },
+    {
+      "path": "hardware_smoke/confusion_matrix.png",
+      "sha256": "8cce896c1846df0df4ddc4751e516cfd9bee1842e74bb6eeeaef28be61f6b8f4",
+      "size_bytes": 24197
+    },
+    {
+      "path": "hardware_smoke/events.csv",
+      "sha256": "52524cdb4e2a099f31870933af9bcb1555fdf6b075d9619593232351638214cb",
+      "size_bytes": 272709
+    },
+    {
+      "path": "hardware_smoke/intermediates.pt",
+      "sha256": "a89d82cf4ee1b5c3dfefff42af7f4a1c2131f5d953aee53c8429047aacc1aa7c",
+      "size_bytes": 103920
+    },
+    {
+      "path": "hardware_smoke/manifest.json",
+      "sha256": "ea52158c8609dbfe6d9dfa8260e194df7ade743dbccfc70b12ee25f1183e6e30",
+      "size_bytes": 15194
+    },
+    {
+      "path": "hardware_smoke/metrics.csv",
+      "sha256": "79f3494e2bfb9e5b656a1c7825faddea5174a62c7b76e8a7c1fffc73d880c8ab",
+      "size_bytes": 828
+    },
+    {
+      "path": "hardware_smoke/predictions.csv",
+      "sha256": "eba55be65c283d9e5d13eed4ecb06cfaae38cedeec953bb9ac77cc19c9764139",
+      "size_bytes": 4554
+    },
+    {
+      "path": "hardware_smoke/runtime.json",
+      "sha256": "5d7d0bf5cfb259b72f37406a8c16390b3f24d5d19e2252d1d2572f8a8a482209",
+      "size_bytes": 267
+    },
+    {
+      "path": "hardware_smoke/variance_vs_inverse_pool.png",
+      "sha256": "b5df6a35924eca845bdb7b05ad4fe403b9eb70104f225dc738c496c9bdac0846",
+      "size_bytes": 52734
+    },
+    {
+      "path": "yinyang_full/accuracy_vs_pool.png",
+      "sha256": "eed6a32d93ec29bc340850fc1809e2b3bb2484418d15a0f8aaa87a8085b8243e",
+      "size_bytes": 74668
+    },
+    {
+      "path": "yinyang_full/confusion_matrix.png",
+      "sha256": "e996c144b81cb2665de117ae64430a91c33f48e6c4f297a9754562bc3d70e33a",
+      "size_bytes": 23124
+    },
+    {
+      "path": "yinyang_full/events.csv.gz",
+      "sha256": "ef0e52beaef6fe9c7b52f610b4106442549a0cdc2503c211203914a21c29a01f",
+      "size_bytes": 3372622
+    },
+    {
+      "path": "yinyang_full/manifest.json",
+      "sha256": "99f219ebe654ba3f53132f9e5ae8aafd4bb11add21d8d4651c4237db3e2b13fd",
+      "size_bytes": 1228613
+    },
+    {
+      "path": "yinyang_full/metrics.csv",
+      "sha256": "71b489d7979421ca07e9a92ce9f953ecb97d37eeb805b9440b105c17486fbecc",
+      "size_bytes": 3368
+    },
+    {
+      "path": "yinyang_full/predictions.csv",
+      "sha256": "c3b69a828c89f077053bebe124d2a6fafeaba6b27ba095b54ab774d1a537d733",
+      "size_bytes": 5266608
+    },
+    {
+      "path": "yinyang_full/runtime.json",
+      "sha256": "ff2375b9ed17a7ee16b93ac8a8163c7bb50bb430a2b4ef85ef2e77ca31e4ed11",
+      "size_bytes": 2340
+    },
+    {
+      "path": "yinyang_full/variance_vs_inverse_pool.png",
+      "sha256": "44367c66605fe894db04c58801a0651a9e3fe4573c7a346af3a9c6757d3ee2db",
+      "size_bytes": 65851
+    }
+  ],
+  "excluded_outputs": [
+    {
+      "path": "yinyang_full/events.csv",
+      "reason": "stored as deterministic gzip in the committed bundle",
+      "represented_by": "yinyang_full/events.csv.gz",
+      "sha256": "73e3d603199ff85d2e47ee50503ea1c1c235b219a3191bbcc225a4c67c277a55",
+      "size_bytes": 37784263
+    },
+    {
+      "path": "yinyang_full/intermediates.pt",
+      "reason": "oversized lossless tensor exceeds the GitHub single-file limit",
+      "sha256": "bfb0c60863dfbc13bc1c3ddae89c3b4eb7dbdcff8a451fa7893f5856ffeb8f15",
+      "size_bytes": 287714120
+    },
+    {
+      "aggregate_algorithm": "sha256(path NUL size NUL file_sha256) in sorted path order",
+      "aggregate_sha256": "4da8640a22feb7fda5a40a0fc6ecf611bdd4f665cbc62b43a3439c854e002aaa",
+      "file_count": 2985,
+      "path": "yinyang_full/condition_workers",
+      "reason": "resumable worker chunks are too large and redundant with the aggregate artifacts",
+      "size_bytes": 694359946
+    }
+  ],
+  "run_id": "20260901T095827Z",
+  "schema_version": 1,
+  "source_git_revision": "2384cb56e6e0a70811684571c0c692e845f37e10"
+}

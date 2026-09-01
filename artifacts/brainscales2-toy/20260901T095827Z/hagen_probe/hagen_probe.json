@@ -1,0 +1,319 @@
+{
+  "config": {
+    "allow_environment_calibration": false,
+    "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/hagen_cocolist.pbin",
+    "hidden_shift": 1,
+    "mode": "hardware",
+    "num_sends": null,
+    "tile_size": 128,
+    "tiling": "auto",
+    "wait_between_events": 5
+  },
+  "elapsed_s": 30.67384788498748,
+  "hidden_shift_calibration": {
+    "candidates": [
+      {
+        "activation": "relu",
+        "metadata": {
+          "activation_shift": 0,
+          "avg": 1,
+          "backend": "hagen-hardware",
+          "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/hagen_cocolist.pbin",
+          "calibration_sha256": "776c1c6077aab075fa917971539528f6e51385f374e2575fc96627cabd1af39d",
+          "chip_identifier": [
+            "hxcube7fpga0chip57_1"
+          ],
+          "converting_relu": null,
+          "elapsed_s": 4.1856348449364305,
+          "host_accumulated": false,
+          "host_mediated_lower_bound": true,
+          "hxtorch_version": "unknown",
+          "input_shape": [
+            128,
+            5
+          ],
+          "lower_bound_clamped_values": 1556,
+          "lower_bound_v": 0.0,
+          "output_shape": [
+            128,
+            30
+          ],
+          "raw_preactivation_maximum": 63.0,
+          "raw_preactivation_minimum": -81.0,
+          "relu_boundary": "implicit-lower-bound-host",
+          "tile_schedule": [],
+          "tiling": "high-level",
+          "upper_bound_clamped_values": 171,
+          "upper_bound_v": 31.0
+        },
+        "normalized_mse": 2.2604658171577365,
+        "saturation_rate": 0.05364583432674408,
+        "score": 6.625049249832145,
+        "shift": 0,
+        "shift_used": true
+      },
+      {
+        "activation": "relu",
+        "metadata": {
+          "activation_shift": 1,
+          "avg": 1,
+          "backend": "hagen-hardware",
+          "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/hagen_cocolist.pbin",
+          "calibration_sha256": "776c1c6077aab075fa917971539528f6e51385f374e2575fc96627cabd1af39d",
+          "chip_identifier": [
+            "hxcube7fpga0chip57_1"
+          ],
+          "converting_relu": null,
+          "elapsed_s": 4.0607579700881615,
+          "host_accumulated": false,
+          "host_mediated_lower_bound": true,
+          "hxtorch_version": "unknown",
+          "input_shape": [
+            128,
+            5
+          ],
+          "lower_bound_clamped_values": 1349,
+          "lower_bound_v": 0.0,
+          "output_shape": [
+            128,
+            30
+          ],
+          "raw_preactivation_maximum": 63.0,
+          "raw_preactivation_minimum": -80.0,
+          "relu_boundary": "implicit-lower-bound-host",
+          "tile_schedule": [],
+          "tiling": "high-level",
+          "upper_bound_clamped_values": 1,
+          "upper_bound_v": 31.0
+        },
+        "normalized_mse": 0.17657917290612385,
+        "saturation_rate": 0.0002604166802484542,
+        "score": 0.17657917290612385,
+        "shift": 1,
+        "shift_used": true
+      },
+      {
+        "activation": "relu",
+        "metadata": {
+          "activation_shift": 2,
+          "avg": 1,
+          "backend": "hagen-hardware",
+          "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/hagen_cocolist.pbin",
+          "calibration_sha256": "776c1c6077aab075fa917971539528f6e51385f374e2575fc96627cabd1af39d",
+          "chip_identifier": [
+            "hxcube7fpga0chip57_1"
+          ],
+          "converting_relu": null,
+          "elapsed_s": 4.142755731008947,
+          "host_accumulated": false,
+          "host_mediated_lower_bound": true,
+          "hxtorch_version": "unknown",
+          "input_shape": [
+            128,
+            5
+          ],
+          "lower_bound_clamped_values": 1218,
+          "lower_bound_v": 0.0,
+          "output_shape": [
+            128,
+            30
+          ],
+          "raw_preactivation_maximum": 64.0,
+          "raw_preactivation_minimum": -87.0,
+          "relu_boundary": "implicit-lower-bound-host",
+          "tile_schedule": [],
+          "tiling": "high-level",
+          "upper_bound_clamped_values": 0,
+          "upper_bound_v": 31.0
+        },
+        "normalized_mse": 0.16225430640709912,
+        "saturation_rate": 0.0,
+        "score": 0.16225430640709912,
+        "shift": 2,
+        "shift_used": true
+      },
+      {
+        "activation": "relu",
+        "metadata": {
+          "activation_shift": 3,
+          "avg": 1,
+          "backend": "hagen-hardware",
+          "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/hagen_cocolist.pbin",
+          "calibration_sha256": "776c1c6077aab075fa917971539528f6e51385f374e2575fc96627cabd1af39d",
+          "chip_identifier": [
+            "hxcube7fpga0chip57_1"
+          ],
+          "converting_relu": null,
+          "elapsed_s": 4.164563652011566,
+          "host_accumulated": false,
+          "host_mediated_lower_bound": true,
+          "hxtorch_version": "unknown",
+          "input_shape": [
+            128,
+            5
+          ],
+          "lower_bound_clamped_values": 942,
+          "lower_bound_v": 0.0,
+          "output_shape": [
+            128,
+            30
+          ],
+          "raw_preactivation_maximum": 63.0,
+          "raw_preactivation_minimum": -82.0,
+          "relu_boundary": "implicit-lower-bound-host",
+          "tile_schedule": [],
+          "tiling": "high-level",
+          "upper_bound_clamped_values": 0,
+          "upper_bound_v": 31.0
+        },
+        "normalized_mse": 0.48357019749666263,
+        "saturation_rate": 0.0,
+        "score": 0.48357019749666263,
+        "shift": 3,
+        "shift_used": true
+      },
+      {
+        "activation": "relu",
+        "metadata": {
+          "activation_shift": 4,
+          "avg": 1,
+          "backend": "hagen-hardware",
+          "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/hagen_cocolist.pbin",
+          "calibration_sha256": "776c1c6077aab075fa917971539528f6e51385f374e2575fc96627cabd1af39d",
+          "chip_identifier": [
+            "hxcube7fpga0chip57_1"
+          ],
+          "converting_relu": null,
+          "elapsed_s": 4.151641248958185,
+          "host_accumulated": false,
+          "host_mediated_lower_bound": true,
+          "hxtorch_version": "unknown",
+          "input_shape": [
+            128,
+            5
+          ],
+          "lower_bound_clamped_values": 452,
+          "lower_bound_v": 0.0,
+          "output_shape": [
+            128,
+            30
+          ],
+          "raw_preactivation_maximum": 69.0,
+          "raw_preactivation_minimum": -81.0,
+          "relu_boundary": "implicit-lower-bound-host",
+          "tile_schedule": [],
+          "tiling": "high-level",
+          "upper_bound_clamped_values": 0,
+          "upper_bound_v": 31.0
+        },
+        "normalized_mse": 0.70474387590764,
+        "saturation_rate": 0.0,
+        "score": 0.70474387590764,
+        "shift": 4,
+        "shift_used": true
+      }
+    ],
+    "selected": {
+      "activation": "relu",
+      "metadata": {
+        "activation_shift": 2,
+        "avg": 1,
+        "backend": "hagen-hardware",
+        "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/hagen_cocolist.pbin",
+        "calibration_sha256": "776c1c6077aab075fa917971539528f6e51385f374e2575fc96627cabd1af39d",
+        "chip_identifier": [
+          "hxcube7fpga0chip57_1"
+        ],
+        "converting_relu": null,
+        "elapsed_s": 4.142755731008947,
+        "host_accumulated": false,
+        "host_mediated_lower_bound": true,
+        "hxtorch_version": "unknown",
+        "input_shape": [
+          128,
+          5
+        ],
+        "lower_bound_clamped_values": 1218,
+        "lower_bound_v": 0.0,
+        "output_shape": [
+          128,
+          30
+        ],
+        "raw_preactivation_maximum": 64.0,
+        "raw_preactivation_minimum": -87.0,
+        "relu_boundary": "implicit-lower-bound-host",
+        "tile_schedule": [],
+        "tiling": "high-level",
+        "upper_bound_clamped_values": 0,
+        "upper_bound_v": 31.0
+      },
+      "normalized_mse": 0.16225430640709912,
+      "saturation_rate": 0.0,
+      "score": 0.16225430640709912,
+      "shift": 2,
+      "shift_used": true
+    }
+  },
+  "probes": [
+    {
+      "avg": 1,
+      "backend": "hagen-hardware",
+      "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/hagen_cocolist.pbin",
+      "calibration_sha256": "776c1c6077aab075fa917971539528f6e51385f374e2575fc96627cabd1af39d",
+      "chip_identifier": [
+        "hxcube7fpga0chip57_1"
+      ],
+      "converting_relu": null,
+      "elapsed_s": 3.9140950120054185,
+      "features": 5,
+      "host_accumulated": false,
+      "host_mediated_lower_bound": false,
+      "hxtorch_version": "unknown",
+      "input_shape": [
+        2,
+        5
+      ],
+      "maximum": 20.0,
+      "minimum": -32.0,
+      "output_shape": [
+        2,
+        30
+      ],
+      "relu_boundary": null,
+      "saturation_rate": 0.0,
+      "success": true,
+      "tile_schedule": [],
+      "tiling": "high-level"
+    },
+    {
+      "avg": 1,
+      "backend": "hagen-hardware",
+      "calibration_path": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-toy/20260901T095827Z/calibration/hagen_cocolist.pbin",
+      "calibration_sha256": "776c1c6077aab075fa917971539528f6e51385f374e2575fc96627cabd1af39d",
+      "chip_identifier": [
+        "hxcube7fpga0chip57_1"
+      ],
+      "converting_relu": null,
+      "elapsed_s": 3.6766525129787624,
+      "features": 5,
+      "host_accumulated": false,
+      "host_mediated_lower_bound": false,
+      "hxtorch_version": "unknown",
+      "input_shape": [
+        2,
+        5
+      ],
+      "maximum": 18.0,
+      "minimum": -29.0,
+      "output_shape": [
+        2,
+        30
+      ],
+      "relu_boundary": null,
+      "saturation_rate": 0.0,
+      "success": true,
+      "tile_schedule": [],
+      "tiling": "high-level"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "dataset_load_s": 0.30677793896757066,
+  "ttfs_M1_local-pool_dedicated": {
+    "elapsed_s": 7.573350953985937,
+    "samples": 12,
+    "trials": 2
+  },
+  "ttfs_M4_local-pool_dedicated": {
+    "elapsed_s": 7.850020569982007,
+    "samples": 12,
+    "trials": 2
+  }
+}

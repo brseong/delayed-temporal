@@ -1,0 +1,15 @@
+{
+  "activation": "relu",
+  "architecture": "yy-30",
+  "calibration_samples": 1000,
+  "first_weight_scale": 0.003943761433934896,
+  "hidden_saturation_rate": 0.0,
+  "hidden_scale": 0.25240073177183336,
+  "hidden_shift": 6,
+  "input_scale": 0.03225806451612903,
+  "output_saturation_rate": 0.0,
+  "output_shift": 3,
+  "parameter_sha256_after_conversion": "32abff40fcf65764b4ef573492dde296b6cdb0732a371c4c0431ce3d2eb9d100",
+  "second_weight_scale": 0.057280193604225205,
+  "source_parameter_sha256": "32abff40fcf65764b4ef573492dde296b6cdb0732a371c4c0431ce3d2eb9d100"
+}
