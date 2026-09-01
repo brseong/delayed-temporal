@@ -86,7 +86,9 @@ Float training ends before conversion; parameter hashes prove that range calibra
 
 [[utils/hardware/brainscales2/toy.py#ToyMLP]] defines one-hidden-layer Yin-Yang and MNIST classifiers. Yin-Yang uses `4-30-3`; MNIST uses `784-30-10` for dedicated pools and `784-128-10` for time-multiplexed pools.
 
-[[utils/hardware/brainscales2/toy.py#convert_float_model]] maps inputs and hidden activations to UInt5, affine coefficients to signed int6, and readout values to Int8. Biases become weights on a constant UInt5 lane, and unlabeled calibration activations select the integer shifts.
+`ToyMLP` supports a separately trained `relu` primary model and a separately trained bounded-positive `sigmoid` control. Checkpoints and conversion manifests store that activation, so changing `--activation` cannot silently reinterpret a ReLU checkpoint as sigmoid.
+
+[[utils/hardware/brainscales2/toy.py#convert_float_model]] maps inputs and hidden activations to UInt5, affine coefficients to signed int6, and readout values to Int8. Biases become weights on a constant UInt5 lane; ReLU uses an unlabeled-calibration integer shift, while sigmoid has its fixed `[0,1] -> [0,31]` decoding scale.
 
 [[utils/hardware/brainscales2/toy.py#ConvertedToyModel]] is the pure-PyTorch integer reference. It exposes the hidden UInt5 tensor as the only physical TTFS insertion point and consumes the pooled UInt5 tensor in the unchanged second affine layer.
 
@@ -98,13 +100,15 @@ The host switches between Hagen PWM execution and spiking LIF execution, so meas
 
 The formal default does not invoke Hagen `ConvertingReLU`. It scales the cached raw first PWM preactivation into a [[utils/transforms/types.py#Potential]] with $V_{lb}=0$ and upper UInt5 bound 31, applies that declared bound in the adapter, and passes the resulting UInt5 values to the reused TTFS encoder. This is an explicit host-mediated Hagen-to-spiking representation boundary because the two modes are released and reinitialized separately; it must not be described as a continuous on-chip lower clamp. `--relu-boundary hagen-converting-relu` remains only as an explicit-Hagen baseline, and both choices record their clamp counts and provenance in manifests.
 
+The sigmoid control runs `Hagen raw affine -> host sigmoid -> UInt5 Potential -> TTFS pool`. It intentionally does not claim that the public hxtorch graph realizes the paper's $\phi_{\mathrm{NL}}$ and constant-reference $\psi_{\mathrm{ED}}$ circuit: `sigmoid_physical_subcircuit=false` and host-adapter scale/range metadata are required in every artifact. The same pooled UInt5 rail and physical LIF graph are therefore exercised, while activation-circuit evidence remains out of scope.
+
 The integer reference shift applies to its int32 accumulator, whereas physical Hagen output is already Int8. A separate Hagen hidden shift defaults to one and the probe recommends it from unlabeled calibration activations; physical output logits receive no second software shift.
 
 For inputs wider than one signed Hagen array, the adapter first probes the high-level `Linear` path. Its explicit `host-128` fallback runs 128-input analog MAC tiles, sums partial Int8 values on the host, and records that host accumulation rather than presenting it as one on-chip matrix operation.
 
 TTFS-domain pooling runs Hagen with `avg=1` and assigns `M` LIF replicas to each logical hidden unit. Potential-domain pooling is an alternative method that runs Hagen with `avg=M` and one downstream LIF; it is not mixed into the primary TTFS estimator.
 
-An all-miss logical pool decodes to zero after ReLU. Artifacts retain the all-miss mask and also report accuracy on samples without any all-miss hidden activation, preventing silent sample deletion or fabricated deadline spikes.
+An all-miss logical pool decodes to zero on the positive UInt5 rail. Artifacts retain the all-miss mask and also report accuracy on samples without any all-miss hidden activation, preventing silent sample deletion or fabricated deadline spikes.
 
 ### Network pool placement
 
@@ -149,6 +153,10 @@ These test specifications protect the conversion and network-level hardware boun
 ### Host-mediated implicit ReLU boundary
 
 The default hidden boundary must lower raw PWM values through the declared $V_{lb}=0$ Potential range without calling `ConvertingReLU`, retain UInt5 upper saturation, and label the result as host-mediated rather than continuous on-chip activation.
+
+### Sigmoid host activation adapter
+
+The bounded sigmoid control must require a separately labeled checkpoint, quantize its host sigmoid output to the same UInt5 rail, and record that no physical sigmoid subcircuit was executed.
 
 ### Deterministic datasets and frozen conversion
 

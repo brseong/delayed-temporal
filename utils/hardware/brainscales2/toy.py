@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 TaskName = Literal["yinyang", "mnist"]
 ArchitectureName = Literal["yy-30", "mnist-30", "mnist-128"]
+ToyActivation = Literal["relu", "sigmoid"]
 
 
 @dataclass(frozen=True)
@@ -55,11 +56,23 @@ class ToyDatasetBundle:
 
 
 class ToyMLP(nn.Module):
-    """Bias-bearing float ANN whose parameters are frozen before conversion."""
+    """Bias-bearing float ANN whose parameters are frozen before conversion.
 
-    def __init__(self, architecture: ToyArchitecture) -> None:
+    ``sigmoid`` is a separate, bounded-positive control network.  It is not a
+    post-hoc replacement for a trained ReLU checkpoint: the activation name is
+    recorded with the checkpoint and conversion contract.
+    """
+
+    def __init__(
+        self,
+        architecture: ToyArchitecture,
+        activation: ToyActivation = "relu",
+    ) -> None:
         super().__init__()
+        if activation not in ("relu", "sigmoid"):
+            raise ValueError(f"unsupported toy activation: {activation}")
         self.architecture = architecture
+        self.activation: ToyActivation = activation
         self.hidden = nn.Linear(
             architecture.input_features,
             architecture.hidden_features,
@@ -72,7 +85,10 @@ class ToyMLP(nn.Module):
         )
 
     def hidden_activation(self, value: torch.Tensor) -> torch.Tensor:
-        return torch.relu(self.hidden(value))
+        preactivation = self.hidden(value)
+        if self.activation == "relu":
+            return torch.relu(preactivation)
+        return torch.sigmoid(preactivation)
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         return self.output(self.hidden_activation(value))
@@ -268,6 +284,8 @@ def train_float_model(
     architecture: ToyArchitecture,
     dataset: ToyDatasetBundle,
     config: TrainingConfig,
+    *,
+    activation: ToyActivation = "relu",
 ) -> tuple[ToyMLP, list[dict[str, float | int]]]:
     """Train only the float ANN and return epoch-level validation metrics."""
     if architecture.task != dataset.task:
@@ -277,7 +295,7 @@ def train_float_model(
     # deterministic for the preregistered toy training runs.
     torch.set_num_threads(1)
     torch.manual_seed(config.seed)
-    model = ToyMLP(architecture)
+    model = ToyMLP(architecture, activation=activation)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,
@@ -343,6 +361,7 @@ class ConversionManifest:
     """Frozen post-training conversion choices and range statistics."""
 
     architecture: ArchitectureName
+    activation: ToyActivation
     source_parameter_sha256: str
     input_scale: float
     hidden_shift: int
@@ -402,11 +421,27 @@ class ConvertedToyModel:
             raise ValueError("input tensor does not match converted architecture")
         return torch.round(value / self.manifest.input_scale).clamp(0, 31).to(torch.int32)
 
+    def hidden_uint5_from_accumulator(self, accumulator: torch.Tensor) -> torch.Tensor:
+        """Apply the frozen positive hidden-boundary adapter to an Int MAC sum."""
+        if self.manifest.activation == "relu":
+            hidden = torch.round(
+                accumulator.to(torch.float64) / (2 ** self.manifest.hidden_shift)
+            )
+        elif self.manifest.activation == "sigmoid":
+            # The float preactivation scale belongs to the first quantized affine.
+            # The resulting code is a bounded [0, 1] activation on the same UInt5
+            # rail consumed by the TTFS encoder and output MAC.
+            hidden = torch.round(
+                31.0 * torch.sigmoid(accumulator.to(torch.float64) * self.first.scale)
+            )
+        else:  # Defensive guard for hand-written/old serialized payloads.
+            raise ValueError(f"unsupported converted activation: {self.manifest.activation}")
+        return hidden.clamp(0, 31).to(torch.int32)
+
     def hidden_from_input(self, value: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         input_uint5 = self.encode_input(value)
         accumulator = self._augment_uint5(input_uint5) @ self.first.weight_with_bias.T.to(torch.int32)
-        hidden = torch.round(accumulator.to(torch.float64) / (2 ** self.manifest.hidden_shift))
-        hidden = hidden.clamp(0, 31).to(torch.int32)
+        hidden = self.hidden_uint5_from_accumulator(accumulator)
         return input_uint5, accumulator, hidden
 
     def output_from_hidden(self, hidden_uint5: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -487,12 +522,28 @@ def convert_float_model(
     first_accumulator = ConvertedToyModel._augment_uint5(input_uint5) @ first.weight_with_bias.T.to(torch.int32)
     with torch.no_grad():
         target_hidden = model.hidden_activation(calibration_x).detach().cpu()
-    hidden_shift, hidden_scale, hidden_saturation = _select_hidden_shift(
-        first_accumulator,
-        target_hidden,
-        first.scale,
-    )
-    hidden_uint5 = torch.round(first_accumulator.to(torch.float64) / (2 ** hidden_shift)).clamp(0, 31).to(torch.int32)
+    if model.activation == "relu":
+        hidden_shift, hidden_scale, hidden_saturation = _select_hidden_shift(
+            first_accumulator,
+            target_hidden,
+            first.scale,
+        )
+        hidden_uint5 = torch.round(
+            first_accumulator.to(torch.float64) / (2 ** hidden_shift)
+        ).clamp(0, 31).to(torch.int32)
+    elif model.activation == "sigmoid":
+        # A sigmoid already has a fixed physical/value range [0, 1].  Its UInt5
+        # decoding scale is therefore 1/31, rather than a ReLU shift selected from
+        # calibration activations.  ``hidden_shift=0`` is retained for a uniform
+        # checkpoint schema but is intentionally not used by this boundary.
+        hidden_shift = 0
+        hidden_scale = 1.0 / 31.0
+        hidden_uint5 = torch.round(
+            31.0 * torch.sigmoid(first_accumulator.to(torch.float64) * first.scale)
+        ).clamp(0, 31).to(torch.int32)
+        hidden_saturation = float((hidden_uint5 >= 31).to(torch.float64).mean())
+    else:
+        raise ValueError(f"unsupported toy activation: {model.activation}")
     second = _quantize_coefficients(
         model.output.weight,
         model.output.bias,
@@ -505,6 +556,7 @@ def convert_float_model(
         raise RuntimeError("post-training conversion mutated float ANN parameters")
     manifest = ConversionManifest(
         architecture=model.architecture.name,
+        activation=model.activation,
         source_parameter_sha256=source_hash,
         input_scale=input_scale,
         hidden_shift=hidden_shift,
@@ -537,7 +589,10 @@ def deserialize_converted_model(payload: dict[str, Any]) -> ConvertedToyModel:
     architecture = ARCHITECTURES[payload["architecture"]]
     first = QuantizedAffine(payload["first_weight_with_bias"], float(payload["first_scale"]))
     second = QuantizedAffine(payload["second_weight_with_bias"], float(payload["second_scale"]))
-    manifest = ConversionManifest(**payload["manifest"])
+    manifest_payload = dict(payload["manifest"])
+    # Conversion files created before the sigmoid control existed are ReLU files.
+    manifest_payload.setdefault("activation", "relu")
+    manifest = ConversionManifest(**manifest_payload)
     return ConvertedToyModel(architecture, first, second, manifest)
 
 

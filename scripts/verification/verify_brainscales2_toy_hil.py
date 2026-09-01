@@ -468,6 +468,32 @@ def verify_host_mediated_implicit_relu_boundary() -> None:
     assert metadata["upper_bound_clamped_values"] == 1
 
 
+def verify_sigmoid_host_activation_adapter() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Sigmoid host activation adapter]]
+    model, _, calibration_x = _converted_fixture()
+    sigmoid_model = ToyMLP(model.architecture, activation="sigmoid")
+    sigmoid_model.load_state_dict(model.state_dict())
+    converted = convert_float_model(sigmoid_model, calibration_x)
+    forward = converted.forward(calibration_x[:8])
+    assert converted.manifest.activation == "sigmoid"
+    assert converted.manifest.hidden_shift == 0
+    assert converted.manifest.hidden_scale == 1.0 / 31.0
+    assert int(forward.hidden_uint5.min()) >= 0
+    assert int(forward.hidden_uint5.max()) <= 31
+    restored = deserialize_converted_model(serialize_converted_model(converted))
+    assert restored.manifest.activation == "sigmoid"
+    torch.testing.assert_close(restored.forward(calibration_x[:8]).hidden_uint5, forward.hidden_uint5)
+
+    hidden, metadata = HagenPWMBackend._host_sigmoid_uint5(  # noqa: SLF001
+        torch.tensor([[-20.0, 0.0, 20.0]]),
+        input_scale=1.0,
+    )
+    torch.testing.assert_close(hidden, torch.tensor([[0, 16, 31]], dtype=torch.int32))
+    assert metadata["activation_adapter"] == "host-sigmoid-uint5"
+    assert metadata["host_mediated_activation"] is True
+    assert metadata["sigmoid_physical_subcircuit"] is False
+
+
 def verify_condition_process_isolation_contract() -> None:
     # @lat: [[hardware#Toy ANN2SNN Verification#Condition process isolation]]
     with TemporaryDirectory() as directory:
@@ -790,6 +816,8 @@ def verify_python311_and_notebook_contract() -> None:
     assert "'--input-fan-in', SPIKING_INPUT_FAN_IN" in source
     assert "RELU_BOUNDARY = 'implicit-lower-bound-host'" in source
     assert "'--relu-boundary', RELU_BOUNDARY" in source
+    assert "TOY_ACTIVATION = 'relu'" in source
+    assert "'--activation', TOY_ACTIVATION" in source
     assert "POOL_SAMPLE_CHUNK_SIZE = 64" in source
     assert "'--pool-sample-chunk-size', POOL_SAMPLE_CHUNK_SIZE" in source
     assert "POOL_REPLICA_SAMPLE_BUDGET = 128" in source
@@ -831,6 +859,7 @@ def main() -> None:
     verify_hagen_output_row_chunking()
     verify_hagen_host_tiling()
     verify_host_mediated_implicit_relu_boundary()
+    verify_sigmoid_host_activation_adapter()
     verify_condition_process_isolation_contract()
     verify_transient_worker_retry()
     verify_metrics_and_artifact_schema()

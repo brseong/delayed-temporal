@@ -90,6 +90,15 @@ def parse_args() -> argparse.Namespace:
         default="yy-30",
     )
     parser.add_argument(
+        "--activation",
+        choices=("relu", "sigmoid"),
+        default="relu",
+        help=(
+            "hidden activation trained into the checkpoint; sigmoid uses an explicit "
+            "host UInt5 adapter between Hagen and the TTFS pool"
+        ),
+    )
+    parser.add_argument(
         "--pwm-backend",
         choices=("torch", "hagen-mock", "hagen-hardware"),
         default="torch",
@@ -322,7 +331,13 @@ def _load_float_checkpoint(args: argparse.Namespace) -> ToyMLP:
         )
     payload = torch.load(path, map_location="cpu", weights_only=False)
     architecture = ARCHITECTURES[payload["architecture"]]
-    model = ToyMLP(architecture)
+    checkpoint_activation = payload.get("activation", "relu")
+    if checkpoint_activation != args.activation:
+        raise ValueError(
+            "checkpoint activation does not match --activation: "
+            f"{checkpoint_activation} != {args.activation}"
+        )
+    model = ToyMLP(architecture, activation=checkpoint_activation)
     model.load_state_dict(payload["state_dict"])
     expected = payload.get("parameter_sha256")
     actual = parameter_sha256(model)
@@ -343,6 +358,8 @@ def _load_or_convert(
         )
         if converted.manifest.source_parameter_sha256 != parameter_sha256(model):
             raise RuntimeError("converted checkpoint does not belong to the float checkpoint")
+        if converted.manifest.activation != model.activation:
+            raise RuntimeError("converted checkpoint activation does not match float checkpoint")
         return converted
     converted = convert_float_model(model, calibration_x)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -366,7 +383,12 @@ def train_phase(args: argparse.Namespace) -> None:
     for seed in args.train_seeds:
         config = _training_config(args, seed)
         started = perf_counter()
-        model, history = train_float_model(architecture, dataset, config)
+        model, history = train_float_model(
+            architecture,
+            dataset,
+            config,
+            activation=args.activation,
+        )
         with torch.no_grad():
             test = classification_metrics(model(dataset.test_x), dataset.test_y)
         digest = parameter_sha256(model)
@@ -384,6 +406,7 @@ def train_phase(args: argparse.Namespace) -> None:
         payload = {
             "schema_version": 1,
             "architecture": architecture.name,
+            "activation": args.activation,
             "seed": seed,
             "training_config": asdict(config),
             "dataset": dataset.metadata,
@@ -621,7 +644,9 @@ def evaluation_phase(args: argparse.Namespace) -> None:
             raise ValueError("shared first-hidden cache does not match the evaluation shape")
         if cached.get("source_parameter_sha256") != parameter_sha256(model):
             raise ValueError("shared first-hidden cache belongs to a different checkpoint")
-        if cached.get("relu_boundary") != args.relu_boundary:
+        if cached.get("activation", "relu") != args.activation:
+            raise ValueError("shared first-hidden cache uses a different activation")
+        if args.activation == "relu" and cached.get("relu_boundary") != args.relu_boundary:
             raise ValueError("shared first-hidden cache uses a different ReLU boundary")
         first_cache[cached_avg] = (cached_hidden, cached["metadata"])
 
@@ -644,6 +669,7 @@ def evaluation_phase(args: argparse.Namespace) -> None:
                         input_uint5,
                         avg=hagen_avg,
                         relu_boundary=args.relu_boundary,
+                        activation=args.activation,
                     )
                     first_hidden = first.value
                     first_metadata = first.metadata
@@ -729,6 +755,7 @@ def evaluation_phase(args: argparse.Namespace) -> None:
         "phase": args.phase,
         "task": args.task,
         "architecture": args.architecture,
+        "activation": args.activation,
         "dataset": dataset.metadata,
         "test_samples": test_x.shape[0],
         "pwm_backend": args.pwm_backend,
@@ -774,11 +801,17 @@ def evaluation_phase(args: argparse.Namespace) -> None:
             "replay_is_hardware_evidence": False,
             "implicit_relu_continuous_on_chip": False,
             "implicit_relu_host_mediated": (
+                args.activation == "relu"
+                and
                 args.relu_boundary == "implicit-lower-bound-host"
             ),
             "hagen_converting_relu_baseline": (
+                args.activation == "relu"
+                and
                 args.relu_boundary == "hagen-converting-relu"
             ),
+            "sigmoid_physical_subcircuit": False,
+            "sigmoid_host_mediated_adapter": args.activation == "sigmoid",
         },
     }
     metrics = write_toy_artifacts(
@@ -1254,9 +1287,11 @@ def prepare_first_hidden_phase(args: argparse.Namespace) -> None:
         input_uint5,
         avg=args.condition_hagen_avg,
         relu_boundary=args.relu_boundary,
+        activation=args.activation,
     )
     payload = {
         "hagen_avg": args.condition_hagen_avg,
+        "activation": args.activation,
         "relu_boundary": args.relu_boundary,
         "first_hidden": first.value.to(torch.int32),
         "metadata": first.metadata,
@@ -1470,6 +1505,7 @@ def probe_phase(args: argparse.Namespace) -> None:
         calibration_input,
         calibration_target,
         relu_boundary=args.relu_boundary,
+        activation=args.activation,
     )
     payload["elapsed_s"] = perf_counter() - started
     _json_write(args.output_dir / "hagen_probe.json", payload)

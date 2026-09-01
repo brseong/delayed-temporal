@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 import torch
 
-from .toy import ConvertedToyModel, QuantizedAffine
+from .toy import ConvertedToyModel, QuantizedAffine, ToyActivation
 from utils.transforms.types import Potential, PotentialBounds
 
 
@@ -324,6 +324,46 @@ class HagenPWMBackend:
             "raw_preactivation_maximum": float(raw_preactivation.max()),
         }
 
+    @staticmethod
+    def _host_sigmoid_uint5(
+        raw_preactivation: torch.Tensor,
+        *,
+        input_scale: float,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Quantize a host sigmoid control onto the existing UInt5 TTFS rail.
+
+        Public hxtorch exposes the Hagen MAC and the spiking graph as separate
+        execution modes, and exposes no physical sigmoid/``phi_NL``-to-``psi_ED``
+        composition.  This adapter is deliberately explicit about that boundary:
+        it is useful for a network-level bounded-activation control, not evidence
+        of a continuous on-chip sigmoid circuit.
+        """
+        preactivation = raw_preactivation.detach().to(torch.float64) * input_scale
+        activation = torch.sigmoid(preactivation)
+        potential = Potential(
+            torch.round(31.0 * activation).to(torch.float32),
+            PotentialBounds(0.0, 31.0),
+        )
+        bounded = potential.domain.clamp(potential.value).to(torch.int32)
+        return bounded, {
+            "activation": "sigmoid",
+            "activation_adapter": "host-sigmoid-uint5",
+            "host_mediated_activation": True,
+            "sigmoid_physical_subcircuit": False,
+            "sigmoid_input_scale": input_scale,
+            "lower_bound_v": 0.0,
+            "upper_bound_v": 31.0,
+            "raw_preactivation_minimum": float(raw_preactivation.min()),
+            "raw_preactivation_maximum": float(raw_preactivation.max()),
+            "scaled_preactivation_minimum": float(preactivation.min()),
+            "scaled_preactivation_maximum": float(preactivation.max()),
+            "uint5_zero_code_rate": float((bounded == 0).to(torch.float64).mean()),
+            "uint5_full_scale_rate": float((bounded == 31).to(torch.float64).mean()),
+            "relu_boundary": None,
+            "converting_relu": None,
+            "host_mediated_lower_bound": False,
+        }
+
     def first_layer(
         self,
         converted: ConvertedToyModel,
@@ -331,18 +371,41 @@ class HagenPWMBackend:
         *,
         avg: int = 1,
         relu_boundary: ReLUBoundary = "implicit-lower-bound-host",
+        activation: ToyActivation | None = None,
     ) -> HagenResult:
-        """Execute first PWM affine and apply the selected hidden ReLU boundary."""
+        """Execute first PWM affine and apply the frozen hidden boundary adapter."""
+        resolved_activation = activation or converted.manifest.activation
+        if resolved_activation != converted.manifest.activation:
+            raise ValueError(
+                "requested hidden activation does not match the converted checkpoint: "
+                f"{resolved_activation} != {converted.manifest.activation}"
+            )
         augmented = self._augment(input_uint5)
-        hidden, metadata = self._execute(
-            augmented,
-            converted.first,
-            avg=avg,
-            relu_boundary=relu_boundary,
-            activation_shift=self.config.hidden_shift,
-        )
+        if resolved_activation == "relu":
+            hidden, metadata = self._execute(
+                augmented,
+                converted.first,
+                avg=avg,
+                relu_boundary=relu_boundary,
+                activation_shift=self.config.hidden_shift,
+            )
+            metadata["activation"] = "relu"
+            metadata["activation_adapter"] = relu_boundary
+            metadata["host_mediated_activation"] = (
+                relu_boundary == "implicit-lower-bound-host"
+            )
+        elif resolved_activation == "sigmoid":
+            raw, metadata = self._execute(augmented, converted.first, avg=avg)
+            hidden, sigmoid_metadata = self._host_sigmoid_uint5(
+                raw,
+                input_scale=converted.first.scale,
+            )
+            metadata.update(sigmoid_metadata)
+        else:
+            raise ValueError(f"unsupported hidden activation: {resolved_activation}")
         metadata["integer_reference_hidden_shift"] = converted.manifest.hidden_shift
         metadata["hagen_hidden_shift"] = self.config.hidden_shift
+        metadata["hagen_hidden_shift_used"] = resolved_activation == "relu"
         return HagenResult(hidden.detach().cpu().to(torch.int32), metadata)
 
     def output_layer(
@@ -368,22 +431,37 @@ class HagenPWMBackend:
         *,
         candidates: tuple[int, ...] = (0, 1, 2, 3, 4),
         relu_boundary: ReLUBoundary = "implicit-lower-bound-host",
+        activation: ToyActivation | None = None,
     ) -> dict[str, Any]:
-        """Select a label-free hidden-boundary scale against converted activations."""
+        """Select a label-free ReLU shift or validate the fixed sigmoid adapter."""
         if input_uint5.shape[0] != target_hidden_uint5.shape[0]:
             raise ValueError("shift calibration inputs and targets must share samples")
+        resolved_activation = activation or converted.manifest.activation
+        if resolved_activation != converted.manifest.activation:
+            raise ValueError("hidden activation does not match converted checkpoint")
         augmented = self._augment(input_uint5)
         rows: list[dict[str, Any]] = []
         target = target_hidden_uint5.to(torch.float64)
         scale = float(target.square().mean()) + 1.0e-12
-        for shift in candidates:
-            output, metadata = self._execute(
-                augmented,
-                converted.first,
-                avg=1,
-                relu_boundary=relu_boundary,
-                activation_shift=shift,
-            )
+        # Sigmoid uses the frozen first-affine scale, so there is no arbitrary
+        # bit shift to sweep.  Keep the common payload schema for the notebook.
+        candidate_shifts = candidates if resolved_activation == "relu" else (self.config.hidden_shift,)
+        for shift in candidate_shifts:
+            if resolved_activation == "relu":
+                output, metadata = self._execute(
+                    augmented,
+                    converted.first,
+                    avg=1,
+                    relu_boundary=relu_boundary,
+                    activation_shift=shift,
+                )
+            else:
+                raw, metadata = self._execute(augmented, converted.first, avg=1)
+                output, sigmoid_metadata = self._host_sigmoid_uint5(
+                    raw,
+                    input_scale=converted.first.scale,
+                )
+                metadata.update(sigmoid_metadata)
             output = output.to(torch.float64)
             mse = float((output - target).square().mean()) / scale
             saturation = float((output >= 31).float().mean())
@@ -393,6 +471,8 @@ class HagenPWMBackend:
                     "normalized_mse": mse,
                     "saturation_rate": saturation,
                     "score": mse + max(0.0, saturation - 0.01) * 100.0,
+                    "activation": resolved_activation,
+                    "shift_used": resolved_activation == "relu",
                     "metadata": metadata,
                 }
             )
