@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -46,11 +47,15 @@ from utils.hardware.brainscales2.toy_artifacts import (
 from utils.hardware.brainscales2.toy_pooling import (
     _configure_grouped_synapse_weights,
     _grouped_input_channel_slice,
+    GroupedHardwarePoolBackend,
     MockToyPoolBackend,
     ReplayToyPoolBackend,
     TimingCalibration,
+    TimingCalibrationObservation,
     ToyPoolConfig,
     ToyPoolResult,
+    calibrate_timing,
+    concatenate_timing_calibration_observations,
     concatenate_toy_pool_results,
     decode_pool_observations,
     resolve_grouped_physical_coordinates,
@@ -242,6 +247,95 @@ def verify_chunked_pool_aggregation() -> None:
     assert joined.metadata["calibration_strategy"] == "per-sample-chunk"
 
 
+def verify_shared_split_timing_calibration() -> None:
+    coordinates = resolve_grouped_physical_coordinates(
+        2, 2, "local-pool", "dedicated"
+    )
+    code_times = torch.tensor([5.0e-6, 15.0e-6, 25.0e-6], dtype=torch.float64)
+    offsets = torch.tensor(
+        [[0.2e-6, -0.2e-6], [0.4e-6, -0.4e-6]], dtype=torch.float64
+    )
+
+    def observation(trials: int, marker: str) -> TimingCalibrationObservation:
+        first = (
+            code_times.reshape(1, -1, 1, 1)
+            + 5.0e-6
+            + offsets.reshape(1, 1, 2, 2)
+        ).repeat(trials, 1, 1, 1)
+        return TimingCalibrationObservation(
+            first_spike_s=first,
+            nominal_input_s=code_times,
+            physical_coordinates=coordinates,
+            metadata={"marker": marker},
+        )
+
+    joined = concatenate_timing_calibration_observations(
+        [observation(2, "first"), observation(3, "second")]
+    )
+    timing = calibrate_timing(joined.first_spike_s, joined.nominal_input_s)
+    assert joined.first_spike_s.shape == (5, 3, 2, 2)
+    assert joined.metadata["calibration_strategy"] == "shared-split"
+    assert joined.metadata["calibration_chunk_count"] == 2
+    assert timing.calibration_trials == 5
+    torch.testing.assert_close(timing.neuron_offset_s, offsets)
+    assert abs(timing.response_delay_s - 5.0e-6) < 1.0e-12
+
+
+def verify_m16_calibration_inference_batch_separation() -> None:
+    spiking = BrainScaleS2PoolConfig(
+        trials=8,
+        pool_sizes=(16,),
+        placements=("same-quadrant",),
+        routings=("broadcast",),
+        input_fan_in=4,
+    )
+    config = ToyPoolConfig(
+        pool_size=16,
+        logical_neurons=30,
+        inference_trials=8,
+        calibration_trials=4,
+    )
+
+    class RecordingHardwareBackend(GroupedHardwarePoolBackend):
+        def __init__(self) -> None:
+            self.batch_counts: list[int] = []
+
+        def _run_inputs(
+            self,
+            inputs: torch.Tensor,
+            pool_config: ToyPoolConfig,
+            spiking_config: BrainScaleS2PoolConfig,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, object]]:
+            self.batch_counts.append(inputs.shape[1])
+            coordinates = resolve_grouped_physical_coordinates(
+                pool_config.logical_neurons,
+                pool_config.pool_size,
+                pool_config.placement,
+                pool_config.mapping,
+            )
+            output_neurons = coordinates.numel()
+            first = torch.full(
+                (inputs.shape[1], output_neurons), 15.0e-6, dtype=torch.float64
+            )
+            count = torch.ones_like(first, dtype=torch.int64)
+            return first, count, coordinates, {"backend": "recording"}
+
+    backend = RecordingHardwareBackend()
+    observation = backend.observe_timing_calibration(config, spiking)
+    timing = calibrate_timing(
+        observation.first_spike_s, observation.nominal_input_s
+    )
+    result = backend.run_uint5(
+        torch.zeros((8, 30), dtype=torch.int32),
+        config,
+        spiking,
+        timing_calibration=timing,
+    )
+    assert backend.batch_counts == [44, 64]
+    assert result.first_spike_s.shape == (8, 8, 30, 16)
+    assert result.metadata["calibration_strategy"] == "shared-split"
+
+
 def verify_pool_size_aware_hardware_chunk_cap() -> None:
     # @lat: [[hardware#Toy ANN2SNN Verification#Pool-size-aware hardware chunk cap]]
     spiking = BrainScaleS2PoolConfig(
@@ -319,6 +413,8 @@ def verify_pool_chunk_process_isolation() -> None:
         hidden_chunk: torch.Tensor,
         pool_config: ToyPoolConfig,
         spiking_config: BrainScaleS2PoolConfig,
+        timing_calibration: TimingCalibration,
+        timing_calibration_path: Path,
     ) -> ToyPoolResult:
         chunk_dir.mkdir(parents=True)
         launched.append((chunk_dir.name, hidden_chunk.shape[0]))
@@ -326,17 +422,69 @@ def verify_pool_chunk_process_isolation() -> None:
             json.dumps({"status": "passed", "attempts": [{"attempt": 1}]}),
             encoding="utf-8",
         )
-        return backend.run_uint5(hidden_chunk, pool_config, spiking_config)
+        result = backend.run_uint5(hidden_chunk, pool_config, spiking_config)
+        return replace(
+            result,
+            metadata={**result.metadata, "calibration_strategy": "shared-split"},
+        )
+
+    calibration_launches: list[tuple[str, int]] = []
+
+    def launch_calibration(
+        args: SimpleNamespace,
+        chunk_dir: Path,
+        pool_config: ToyPoolConfig,
+        spiking_config: BrainScaleS2PoolConfig,
+    ) -> TimingCalibrationObservation:
+        chunk_dir.mkdir(parents=True)
+        calibration_launches.append((chunk_dir.name, pool_config.calibration_trials))
+        (chunk_dir / "worker_status.json").write_text(
+            json.dumps({"status": "passed", "attempts": [{"attempt": 1}]}),
+            encoding="utf-8",
+        )
+        code_times = torch.linspace(
+            spiking_config.input_late_s,
+            spiking_config.input_early_s,
+            11,
+            dtype=torch.float64,
+        )
+        coordinates = resolve_grouped_physical_coordinates(
+            pool_config.logical_neurons,
+            pool_config.pool_size,
+            pool_config.placement,
+            pool_config.mapping,
+        )
+        first = (
+            code_times.reshape(1, -1, 1, 1) + 5.0e-6
+        ).repeat(
+            pool_config.calibration_trials,
+            1,
+            pool_config.logical_neurons,
+            pool_config.pool_size,
+        )
+        return TimingCalibrationObservation(
+            first_spike_s=first,
+            nominal_input_s=code_times,
+            physical_coordinates=coordinates,
+        )
 
     with TemporaryDirectory() as directory:
         result = _run_isolated_pool_chunks(
-            SimpleNamespace(output_dir=Path(directory)),
+            SimpleNamespace(
+                output_dir=Path(directory),
+                pool_calibration_trial_chunk_size=2,
+            ),
             hidden,
             config,
             spiking,
             16,
             launcher=launch,
+            calibration_launcher=launch_calibration,
         )
+    assert calibration_launches == [
+        ("trials_0000_0002", 2),
+        ("trials_0002_0004", 2),
+    ]
     assert launched == [
         ("chunk_000000_000016", 16),
         ("chunk_000016_000032", 16),
@@ -346,6 +494,8 @@ def verify_pool_chunk_process_isolation() -> None:
     assert result.metadata["chunk_process_isolation"] is True
     assert len(result.metadata["chunk_worker_dirs"]) == 3
     assert len(result.metadata["chunk_worker_status"]) == 3
+    assert result.metadata["calibration_strategy"] == "shared-split"
+    assert result.metadata["shared_timing_calibration"]["calibration_trials"] == 4
 
 
 def verify_replay_split_and_reproducibility() -> None:
@@ -822,6 +972,11 @@ def verify_python311_and_notebook_contract() -> None:
     assert "'--pool-sample-chunk-size', POOL_SAMPLE_CHUNK_SIZE" in source
     assert "POOL_REPLICA_SAMPLE_BUDGET = 128" in source
     assert "'--pool-replica-sample-budget', POOL_REPLICA_SAMPLE_BUDGET" in source
+    assert "POOL_CALIBRATION_TRIAL_CHUNK_SIZE = 4" in source
+    assert (
+        "'--pool-calibration-trial-chunk-size', "
+        "POOL_CALIBRATION_TRIAL_CHUNK_SIZE"
+    ) in source
     assert "HAGEN_ROW_CHUNK_SIZE = 512" in source
     assert "CONDITION_WORKER_MAX_ATTEMPTS = 3" in source
     assert "CONDITION_WORKER_RETRY_BACKOFF_S = 20.0" in source
@@ -853,6 +1008,8 @@ def main() -> None:
     verify_grouped_broadcast_fan_in()
     verify_mock_and_all_miss_policy()
     verify_chunked_pool_aggregation()
+    verify_shared_split_timing_calibration()
+    verify_m16_calibration_inference_batch_separation()
     verify_pool_size_aware_hardware_chunk_cap()
     verify_pool_chunk_process_isolation()
     verify_replay_split_and_reproducibility()

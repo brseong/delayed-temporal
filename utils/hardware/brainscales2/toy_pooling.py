@@ -72,6 +72,30 @@ class TimingCalibration:
 
 
 @dataclass(frozen=True)
+class TimingCalibrationObservation:
+    """Raw calibration events acquired by one disposable hardware worker."""
+
+    first_spike_s: torch.Tensor
+    nominal_input_s: torch.Tensor
+    physical_coordinates: torch.Tensor
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.first_spike_s.ndim != 4:
+            raise ValueError(
+                "calibration observations must have shape "
+                "[trial, code, logical, replica]"
+            )
+        if (
+            self.nominal_input_s.ndim != 1
+            or self.nominal_input_s.numel() != self.first_spike_s.shape[1]
+        ):
+            raise ValueError("calibration code times do not match observations")
+        if self.physical_coordinates.shape != self.first_spike_s.shape[2:]:
+            raise ValueError("calibration coordinates do not match observations")
+
+
+@dataclass(frozen=True)
 class ToyPoolResult:
     """Raw and decoded hidden observations for one network condition."""
 
@@ -136,13 +160,18 @@ def concatenate_toy_pool_results(
             }
         )
         sample_start = sample_stop
+    calibration_strategies = {
+        result.metadata.get("calibration_strategy", "per-sample-chunk")
+        for result in results
+    }
+    if len(calibration_strategies) != 1:
+        raise ValueError("pool result chunks use different timing calibrations")
     metadata = dict(reference.metadata)
-    metadata.pop("response_delay_s", None)
     metadata.update(
         {
             "chunked": len(results) > 1,
             "sample_chunk_count": len(results),
-            "calibration_strategy": "per-sample-chunk",
+            "calibration_strategy": next(iter(calibration_strategies)),
             "sample_chunks": sample_chunks,
         }
     )
@@ -165,6 +194,50 @@ def concatenate_toy_pool_results(
         placement=reference.placement,
         mapping=reference.mapping,
         metadata=metadata,
+    )
+
+
+def concatenate_timing_calibration_observations(
+    observations: list[TimingCalibrationObservation],
+) -> TimingCalibrationObservation:
+    """Join calibration-trial chunks without mixing codes or placements."""
+    if not observations:
+        raise ValueError("at least one calibration observation is required")
+    reference = observations[0]
+    chunks: list[dict[str, Any]] = []
+    trial_start = 0
+    for observation in observations:
+        if (
+            observation.first_spike_s.shape[1:] != reference.first_spike_s.shape[1:]
+            or not torch.equal(
+                observation.nominal_input_s, reference.nominal_input_s
+            )
+            or not torch.equal(
+                observation.physical_coordinates,
+                reference.physical_coordinates,
+            )
+        ):
+            raise ValueError("calibration chunks do not share one physical condition")
+        trial_stop = trial_start + observation.first_spike_s.shape[0]
+        chunks.append(
+            {
+                "trial_start": trial_start,
+                "trial_stop": trial_stop,
+                "metadata": observation.metadata,
+            }
+        )
+        trial_start = trial_stop
+    return TimingCalibrationObservation(
+        first_spike_s=torch.cat(
+            [observation.first_spike_s for observation in observations], dim=0
+        ),
+        nominal_input_s=reference.nominal_input_s,
+        physical_coordinates=reference.physical_coordinates,
+        metadata={
+            "calibration_strategy": "shared-split",
+            "calibration_chunk_count": len(observations),
+            "calibration_chunks": chunks,
+        },
     )
 
 
@@ -584,15 +657,14 @@ class GroupedHardwarePoolBackend:
             return False
         return True
 
-    def run_uint5(
+    def _run_inputs(
         self,
-        hidden_uint5: torch.Tensor,
+        inputs: torch.Tensor,
         config: ToyPoolConfig,
         spiking_config: BrainScaleS2PoolConfig,
-    ) -> ToyPoolResult:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Execute one bounded raw-event graph and release hardware afterward."""
         spiking_config.require_reproducible_calibration()
-        if hidden_uint5.shape[1] != config.logical_neurons:
-            raise ValueError("hidden activation count does not match pool config")
         try:
             hxtorch = import_module("hxtorch")
             hxsnn = import_module("hxtorch.spiking")
@@ -616,50 +688,11 @@ class GroupedHardwarePoolBackend:
             if config.mapping == "dedicated"
             else spiking_config.input_fan_in
         )
-        code_values = torch.linspace(0.0, 31.0, 11)
-        code_times = _nominal_uint5_times(code_values, spiking_config)
-        nominal = _nominal_uint5_times(hidden_uint5, spiking_config)
-
-        calibration_batches = config.calibration_trials * code_times.numel()
-        if config.mapping == "dedicated":
-            inference_entries = config.inference_trials * hidden_uint5.shape[0]
-        else:
-            inference_entries = (
-                config.inference_trials * hidden_uint5.shape[0] * config.logical_neurons
-            )
-        total_batches = calibration_batches + inference_entries
-        inputs = torch.zeros(
-            (spiking_config.runtime_steps, total_batches, input_channels),
-            dtype=torch.float32,
-        )
-        batch = 0
-        for _ in range(config.calibration_trials):
-            for time_s in code_times:
-                step = int(round(float(time_s) / spiking_config.dt_s))
-                inputs[step, batch, :] = 1.0
-                batch += 1
-        if config.mapping == "dedicated":
-            for _ in range(config.inference_trials):
-                for sample in range(hidden_uint5.shape[0]):
-                    for logical in range(config.logical_neurons):
-                        step = int(round(float(nominal[sample, logical]) / spiking_config.dt_s))
-                        input_lanes = _grouped_input_channel_slice(
-                            logical, config, spiking_config.input_fan_in
-                        )
-                        inputs[step, batch, input_lanes] = 1.0
-                    batch += 1
-        else:
-            for _ in range(config.inference_trials):
-                for sample in range(hidden_uint5.shape[0]):
-                    for logical in range(config.logical_neurons):
-                        step = int(round(float(nominal[sample, logical]) / spiking_config.dt_s))
-                        input_lanes = _grouped_input_channel_slice(
-                            logical, config, spiking_config.input_fan_in
-                        )
-                        inputs[step, batch, input_lanes] = 1.0
-                        batch += 1
-        if batch != total_batches:
-            raise RuntimeError("grouped input construction lost batch entries")
+        if inputs.ndim != 3 or inputs.shape[0] != spiking_config.runtime_steps:
+            raise ValueError("hardware inputs must have shape [time, batch, input]")
+        if inputs.shape[2] != input_channels:
+            raise ValueError("hardware input channel count does not match mapping")
+        total_batches = inputs.shape[1]
 
         initialized = False
         try:
@@ -719,52 +752,15 @@ class GroupedHardwarePoolBackend:
                 raw_time_scale_s=spiking_config.raw_time_scale_s,
                 deadline_s=spiking_config.observation_deadline_s,
             )
-            calibration_raw = first[:calibration_batches]
-            if config.mapping == "dedicated":
-                calibration_first = calibration_raw.reshape(
-                    config.calibration_trials,
-                    code_times.numel(),
-                    config.logical_neurons,
-                    config.pool_size,
-                )
-                inference_first = first[calibration_batches:].reshape(
-                    config.inference_trials,
-                    hidden_uint5.shape[0],
-                    config.logical_neurons,
-                    config.pool_size,
-                )
-                inference_count = count[calibration_batches:].reshape(inference_first.shape)
-            else:
-                base_calibration = calibration_raw.reshape(
-                    config.calibration_trials,
-                    code_times.numel(),
-                    1,
-                    config.pool_size,
-                )
-                calibration_first = base_calibration.repeat(
-                    1, 1, config.logical_neurons, 1
-                )
-                inference_first = first[calibration_batches:].reshape(
-                    config.inference_trials,
-                    hidden_uint5.shape[0],
-                    config.logical_neurons,
-                    config.pool_size,
-                )
-                inference_count = count[calibration_batches:].reshape(inference_first.shape)
-            timing = calibrate_timing(calibration_first, code_times)
             chip_identifier = None
             get_identifier = getattr(hxtorch, "get_unique_identifier", None)
             if callable(get_identifier):
                 chip_identifier = [str(value) for value in get_identifier()]
-            return decode_pool_observations(
-                inference_first,
-                nominal,
-                timing,
+            return (
+                first,
+                count,
                 coordinates,
-                config,
-                spiking_config,
-                spike_count=inference_count,
-                metadata={
+                {
                     "backend": "hardware",
                     "hxtorch_version": getattr(hxtorch, "__version__", "unknown"),
                     "chip_identifier": chip_identifier,
@@ -775,8 +771,148 @@ class GroupedHardwarePoolBackend:
                     "input_fan_in": spiking_config.input_fan_in,
                     "raw_spike_api": raw_api,
                     "grouped_broadcast": True,
+                    "raw_batch_count": total_batches,
                 },
             )
         finally:
             if initialized:
                 hxtorch.release_hardware()
+
+    def observe_timing_calibration(
+        self,
+        config: ToyPoolConfig,
+        spiking_config: BrainScaleS2PoolConfig,
+    ) -> TimingCalibrationObservation:
+        """Acquire only calibration events so peak batch memory stays bounded."""
+        code_values = torch.linspace(0.0, 31.0, 11)
+        code_times = _nominal_uint5_times(code_values, spiking_config)
+        input_channels = (
+            config.logical_neurons * spiking_config.input_fan_in
+            if config.mapping == "dedicated"
+            else spiking_config.input_fan_in
+        )
+        calibration_batches = config.calibration_trials * code_times.numel()
+        inputs = torch.zeros(
+            (spiking_config.runtime_steps, calibration_batches, input_channels),
+            dtype=torch.float32,
+        )
+        batch = 0
+        for _ in range(config.calibration_trials):
+            for time_s in code_times:
+                step = int(round(float(time_s) / spiking_config.dt_s))
+                inputs[step, batch, :] = 1.0
+                batch += 1
+        first, _, coordinates, metadata = self._run_inputs(
+            inputs, config, spiking_config
+        )
+        if config.mapping == "dedicated":
+            calibration_first = first.reshape(
+                config.calibration_trials,
+                code_times.numel(),
+                config.logical_neurons,
+                config.pool_size,
+            )
+        else:
+            calibration_first = first.reshape(
+                config.calibration_trials,
+                code_times.numel(),
+                1,
+                config.pool_size,
+            ).repeat(1, 1, config.logical_neurons, 1)
+        return TimingCalibrationObservation(
+            first_spike_s=calibration_first,
+            nominal_input_s=code_times,
+            physical_coordinates=coordinates,
+            metadata={
+                **metadata,
+                "phase": "timing-calibration",
+                "calibration_trials": config.calibration_trials,
+                "calibration_code_count": code_times.numel(),
+                "calibration_miss_rate": float(
+                    (~torch.isfinite(calibration_first)).to(torch.float64).mean()
+                ),
+            },
+        )
+
+    def run_uint5(
+        self,
+        hidden_uint5: torch.Tensor,
+        config: ToyPoolConfig,
+        spiking_config: BrainScaleS2PoolConfig,
+        *,
+        timing_calibration: TimingCalibration | None = None,
+    ) -> ToyPoolResult:
+        """Run inference alone, optionally reusing a shared timing calibration."""
+        if hidden_uint5.ndim != 2 or hidden_uint5.shape[1] != config.logical_neurons:
+            raise ValueError("hidden activation count does not match pool config")
+        calibration_metadata: dict[str, Any]
+        if timing_calibration is None:
+            observation = self.observe_timing_calibration(config, spiking_config)
+            timing_calibration = calibrate_timing(
+                observation.first_spike_s, observation.nominal_input_s
+            )
+            calibration_strategy = "inline-separate"
+            calibration_metadata = observation.metadata
+        else:
+            calibration_strategy = "shared-split"
+            calibration_metadata = {}
+
+        nominal = _nominal_uint5_times(hidden_uint5, spiking_config)
+        input_channels = (
+            config.logical_neurons * spiking_config.input_fan_in
+            if config.mapping == "dedicated"
+            else spiking_config.input_fan_in
+        )
+        if config.mapping == "dedicated":
+            inference_entries = config.inference_trials * hidden_uint5.shape[0]
+        else:
+            inference_entries = (
+                config.inference_trials * hidden_uint5.shape[0] * config.logical_neurons
+            )
+        inputs = torch.zeros(
+            (spiking_config.runtime_steps, inference_entries, input_channels),
+            dtype=torch.float32,
+        )
+        batch = 0
+        for _ in range(config.inference_trials):
+            for sample in range(hidden_uint5.shape[0]):
+                for logical in range(config.logical_neurons):
+                    step = int(
+                        round(float(nominal[sample, logical]) / spiking_config.dt_s)
+                    )
+                    input_lanes = _grouped_input_channel_slice(
+                        logical, config, spiking_config.input_fan_in
+                    )
+                    inputs[step, batch, input_lanes] = 1.0
+                    if config.mapping == "time-multiplexed":
+                        batch += 1
+                if config.mapping == "dedicated":
+                    batch += 1
+        if batch != inference_entries:
+            raise RuntimeError("grouped inference construction lost batch entries")
+
+        first, count, coordinates, metadata = self._run_inputs(
+            inputs, config, spiking_config
+        )
+        inference_first = first.reshape(
+            config.inference_trials,
+            hidden_uint5.shape[0],
+            config.logical_neurons,
+            config.pool_size,
+        )
+        inference_count = count.reshape(inference_first.shape)
+        return decode_pool_observations(
+            inference_first,
+            nominal,
+            timing_calibration,
+            coordinates,
+            config,
+            spiking_config,
+            spike_count=inference_count,
+            metadata={
+                **metadata,
+                "phase": "inference",
+                "calibration_strategy": calibration_strategy,
+                "timing_calibration": calibration_metadata,
+            },
+        )

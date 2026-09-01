@@ -122,6 +122,8 @@ At `M=16`, dedicated placement uses 480 of 512 neuron circuits. The 128-hidden-u
 
 Full hardware evaluation slices samples and caps `pool_size * samples` at 128 replica-samples, so M=8 and M=16 use 16 and 8 samples. Every chunk runs in a disposable child process to release native hxtorch memory under the 2 GB EBRAINS limit, then [[utils/hardware/brainscales2/toy_pooling.py#concatenate_toy_pool_results]] restores order and provenance.
 
+Timing calibration is acquired once per physical condition in disposable four-trial workers. Their raw events are concatenated before offset estimation, and every inference chunk reuses the same checksummed calibration; calibration and inference batches never coexist in one M=16 graph.
+
 After temporal decoding, the physical Hagen readout also slices the flattened trial-sample row axis before each PWM call. The concatenated logits retain their original row order, and each row chunk records its calibration, chip, shape, and elapsed-time metadata.
 
 Formal multi-condition runs materialize each required physical Hagen hidden tensor once, then execute every placement and pool size in a fresh child process. Completed worker directories are resumable, and the parent rebuilds the combined artifact so process isolation does not change paired inputs or the result schema.
@@ -174,7 +176,7 @@ Each logical hidden source must occupy its own simultaneous fan-in lane block an
 
 Hardware chunks must concatenate on samples without altering trial, neuron, replica, coordinate, or miss-mask semantics.
 
-The effective hardware chunk must not exceed its configured replica-sample budget, and provenance must retain requested and effective sizes.
+The effective hardware chunk must not exceed its configured replica-sample budget, and provenance must retain requested and effective sizes. Split calibration trials must preserve code order and coordinates, produce one shared offset estimate, and remain resumable independently of inference chunks.
 
 ### Pool-size-aware hardware chunk cap
 

@@ -24,6 +24,7 @@ import torch
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_POOL_REPLICA_SAMPLE_BUDGET = 128
+DEFAULT_POOL_CALIBRATION_TRIAL_CHUNK_SIZE = 4
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
@@ -55,8 +56,12 @@ from utils.hardware.brainscales2.toy_pooling import (
     GroupedHardwarePoolBackend,
     MockToyPoolBackend,
     ReplayToyPoolBackend,
+    TimingCalibration,
+    TimingCalibrationObservation,
     ToyPoolConfig,
     ToyPoolResult,
+    calibrate_timing,
+    concatenate_timing_calibration_observations,
     concatenate_toy_pool_results,
 )
 
@@ -127,6 +132,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pool-sizes", type=int, nargs="+", default=[1, 2, 4, 8, 16])
     parser.add_argument("--pool-trials", type=int, default=8)
     parser.add_argument("--pool-calibration-trials", type=int, default=32)
+    parser.add_argument(
+        "--pool-calibration-trial-chunk-size",
+        type=int,
+        default=DEFAULT_POOL_CALIBRATION_TRIAL_CHUNK_SIZE,
+        help="calibration trials per disposable hardware worker",
+    )
     parser.add_argument("--pool-sample-chunk-size", type=int, default=64)
     parser.add_argument(
         "--pool-replica-sample-budget",
@@ -247,17 +258,21 @@ def _git_revision() -> str | None:
         return None
 
 
-def _json_write(path: Path, payload: dict[str, Any]) -> None:
-    def normalize(value: Any) -> Any:
-        if isinstance(value, Path):
-            return str(value)
-        if isinstance(value, dict):
-            return {str(key): normalize(child) for key, child in value.items()}
-        if isinstance(value, (tuple, list)):
-            return [normalize(child) for child in value]
-        return value
+def _json_normalize(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_normalize(child) for key, child in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_normalize(child) for child in value]
+    return value
 
-    path.write_text(json.dumps(normalize(payload), indent=2, sort_keys=True), encoding="utf-8")
+
+def _json_write(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(
+        json.dumps(_json_normalize(payload), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -281,6 +296,8 @@ def _validate_architecture(args: argparse.Namespace) -> None:
         raise ValueError("pool_sample_chunk_size must be positive")
     if args.pool_replica_sample_budget <= 0:
         raise ValueError("pool_replica_sample_budget must be positive")
+    if args.pool_calibration_trial_chunk_size <= 0:
+        raise ValueError("pool_calibration_trial_chunk_size must be positive")
     if args.hagen_row_chunk_size <= 0:
         raise ValueError("hagen_row_chunk_size must be positive")
     if args.condition_worker_max_attempts <= 0:
@@ -765,6 +782,7 @@ def evaluation_phase(args: argparse.Namespace) -> None:
         "pool_mapping": args.pool_mapping,
         "pool_sample_chunk_size": args.pool_sample_chunk_size,
         "pool_replica_sample_budget": args.pool_replica_sample_budget,
+        "pool_calibration_trial_chunk_size": args.pool_calibration_trial_chunk_size,
         "hagen_row_chunk_size": args.hagen_row_chunk_size,
         "pool_sizes": pool_sizes,
         "placements": placements,
@@ -1050,11 +1068,91 @@ def _tensor_sha256(value: torch.Tensor) -> str:
     return hashlib.sha256(contiguous.numpy().tobytes()).hexdigest()
 
 
+def _timing_calibration_sha256(calibration: TimingCalibration) -> str:
+    digest = hashlib.sha256()
+    digest.update(repr(float(calibration.response_delay_s)).encode("ascii"))
+    digest.update(str(int(calibration.calibration_trials)).encode("ascii"))
+    digest.update(
+        calibration.neuron_offset_s.detach().cpu().contiguous().numpy().tobytes()
+    )
+    return digest.hexdigest()
+
+
+def _load_timing_calibration(path: Path) -> TimingCalibration:
+    calibration = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(calibration, TimingCalibration):
+        raise TypeError(f"timing calibration at {path} has an invalid type")
+    return calibration
+
+
+def _load_timing_observation(path: Path) -> TimingCalibrationObservation:
+    observation = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(observation, TimingCalibrationObservation):
+        raise TypeError(f"timing observation at {path} has an invalid type")
+    return observation
+
+
 def _load_pool_chunk_result(path: Path) -> ToyPoolResult:
     result = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(result, ToyPoolResult):
         raise TypeError(f"pool chunk result at {path} has an invalid type")
     return result
+
+
+def _launch_pool_calibration_worker(
+    args: argparse.Namespace,
+    chunk_dir: Path,
+    pool_config: ToyPoolConfig,
+    spiking_config: BrainScaleS2PoolConfig,
+) -> TimingCalibrationObservation:
+    """Run or resume a bounded calibration-trial chunk in its own process."""
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    result_path = chunk_dir / "calibration_observation.pt"
+    config_path = chunk_dir / "pool_chunk_config.json"
+    payload = _json_normalize({
+        "schema_version": 2,
+        "worker_kind": "timing-calibration",
+        "code_revision": _git_revision(),
+        "pool_config": asdict(pool_config),
+        "spiking_config": spiking_config.to_manifest_dict(),
+        "result_file": result_path.name,
+    })
+    same_config = False
+    if config_path.is_file():
+        try:
+            same_config = json.loads(config_path.read_text(encoding="utf-8")) == payload
+        except (OSError, json.JSONDecodeError):
+            same_config = False
+    if same_config and result_path.is_file():
+        try:
+            observation = _load_timing_observation(result_path)
+        except (OSError, RuntimeError, TypeError):
+            pass
+        else:
+            print(f"  Reusing calibration chunk {chunk_dir.name}", flush=True)
+            return observation
+
+    result_path.unlink(missing_ok=True)
+    _json_write(config_path, payload)
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--output-dir",
+        str(chunk_dir.resolve()),
+        "--pool-chunk-worker-config",
+        str(config_path.resolve()),
+    ]
+    _run_worker_command_with_retries(
+        command,
+        chunk_dir,
+        max_attempts=args.condition_worker_max_attempts,
+        retry_backoff_s=args.condition_worker_retry_backoff_s,
+        idle_timeout_s=args.condition_worker_idle_timeout_s,
+        isolate_process_group=False,
+    )
+    if not result_path.is_file():
+        raise RuntimeError(f"calibration worker {chunk_dir.name} missed its result")
+    return _load_timing_observation(result_path)
 
 
 def _launch_pool_chunk_worker(
@@ -1063,21 +1161,28 @@ def _launch_pool_chunk_worker(
     hidden_chunk: torch.Tensor,
     pool_config: ToyPoolConfig,
     spiking_config: BrainScaleS2PoolConfig,
+    timing_calibration: TimingCalibration,
+    timing_calibration_path: Path,
 ) -> ToyPoolResult:
     """Run or resume one physical sample chunk in its own process."""
     chunk_dir.mkdir(parents=True, exist_ok=True)
     input_path = chunk_dir / "pool_chunk_input.pt"
     result_path = chunk_dir / "pool_chunk_result.pt"
     config_path = chunk_dir / "pool_chunk_config.json"
-    payload = {
-        "schema_version": 1,
+    payload = _json_normalize({
+        "schema_version": 2,
+        "worker_kind": "inference",
         "code_revision": _git_revision(),
         "hidden_sha256": _tensor_sha256(hidden_chunk),
+        "timing_calibration_file": str(timing_calibration_path.resolve()),
+        "timing_calibration_sha256": _timing_calibration_sha256(
+            timing_calibration
+        ),
         "pool_config": asdict(pool_config),
         "spiking_config": spiking_config.to_manifest_dict(),
         "input_file": input_path.name,
         "result_file": result_path.name,
-    }
+    })
     same_config = False
     if config_path.is_file():
         try:
@@ -1117,6 +1222,100 @@ def _launch_pool_chunk_worker(
     return _load_pool_chunk_result(result_path)
 
 
+def _run_shared_timing_calibration(
+    args: argparse.Namespace,
+    pool_config: ToyPoolConfig,
+    spiking_config: BrainScaleS2PoolConfig,
+    *,
+    launcher: Callable[
+        [argparse.Namespace, Path, ToyPoolConfig, BrainScaleS2PoolConfig],
+        TimingCalibrationObservation,
+    ]
+    | None = None,
+) -> tuple[TimingCalibration, Path, dict[str, Any]]:
+    """Acquire one resumable split calibration for all inference chunks."""
+    launch = launcher or _launch_pool_calibration_worker
+    calibration_root = args.output_dir / "pool_calibration"
+    calibration_root.mkdir(parents=True, exist_ok=True)
+    timing_path = calibration_root / "timing_calibration.pt"
+    manifest_path = calibration_root / "calibration_manifest.json"
+    effective_chunk_size = min(
+        args.pool_calibration_trial_chunk_size,
+        pool_config.calibration_trials,
+    )
+    expected = _json_normalize({
+        "schema_version": 1,
+        "code_revision": _git_revision(),
+        "pool_config": asdict(pool_config),
+        "spiking_config": spiking_config.to_manifest_dict(),
+        "requested_trial_chunk_size": args.pool_calibration_trial_chunk_size,
+        "effective_trial_chunk_size": effective_chunk_size,
+    })
+    if manifest_path.is_file() and timing_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            calibration = _load_timing_calibration(timing_path)
+        except (OSError, RuntimeError, TypeError, json.JSONDecodeError):
+            pass
+        else:
+            if (
+                manifest.get("configuration") == expected
+                and manifest.get("timing_calibration_sha256")
+                == _timing_calibration_sha256(calibration)
+            ):
+                print("  Reusing shared timing calibration", flush=True)
+                return calibration, timing_path, manifest
+
+    observations: list[TimingCalibrationObservation] = []
+    worker_dirs: list[str] = []
+    for start in range(0, pool_config.calibration_trials, effective_chunk_size):
+        stop = min(start + effective_chunk_size, pool_config.calibration_trials)
+        chunk_dir = calibration_root / f"trials_{start:04d}_{stop:04d}"
+        print(
+            f"  isolated calibration trials [{start}:{stop}) / "
+            f"{pool_config.calibration_trials}",
+            flush=True,
+        )
+        observations.append(
+            launch(
+                args,
+                chunk_dir,
+                replace(pool_config, calibration_trials=stop - start),
+                spiking_config,
+            )
+        )
+        worker_dirs.append(str(chunk_dir.relative_to(args.output_dir)))
+    joined = concatenate_timing_calibration_observations(observations)
+    calibration = calibrate_timing(
+        joined.first_spike_s,
+        joined.nominal_input_s,
+    )
+    temporary_path = timing_path.with_suffix(timing_path.suffix + ".tmp")
+    torch.save(calibration, temporary_path)
+    os.replace(temporary_path, timing_path)
+    worker_status = {
+        worker_dir: json.loads(
+            (args.output_dir / worker_dir / "worker_status.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        for worker_dir in worker_dirs
+        if (args.output_dir / worker_dir / "worker_status.json").is_file()
+    }
+    manifest = {
+        "configuration": expected,
+        "timing_calibration_sha256": _timing_calibration_sha256(calibration),
+        "response_delay_s": calibration.response_delay_s,
+        "calibration_trials": calibration.calibration_trials,
+        "physical_coordinates": joined.physical_coordinates.tolist(),
+        "calibration_observation": joined.metadata,
+        "calibration_worker_dirs": worker_dirs,
+        "calibration_worker_status": worker_status,
+    }
+    _json_write(manifest_path, manifest)
+    return calibration, timing_path, manifest
+
+
 def _run_isolated_pool_chunks(
     args: argparse.Namespace,
     hidden_uint5: torch.Tensor,
@@ -1125,13 +1324,32 @@ def _run_isolated_pool_chunks(
     effective_chunk_size: int,
     *,
     launcher: Callable[
-        [argparse.Namespace, Path, torch.Tensor, ToyPoolConfig, BrainScaleS2PoolConfig],
+        [
+            argparse.Namespace,
+            Path,
+            torch.Tensor,
+            ToyPoolConfig,
+            BrainScaleS2PoolConfig,
+            TimingCalibration,
+            Path,
+        ],
         ToyPoolResult,
     ]
     | None = None,
+    calibration_launcher: Callable[
+        [argparse.Namespace, Path, ToyPoolConfig, BrainScaleS2PoolConfig],
+        TimingCalibrationObservation,
+    ]
+    | None = None,
 ) -> ToyPoolResult:
-    """Execute sample chunks in disposable processes to release native memory."""
+    """Share split calibration, then isolate every inference sample chunk."""
     launch = launcher or _launch_pool_chunk_worker
+    timing, timing_path, calibration_manifest = _run_shared_timing_calibration(
+        args,
+        pool_config,
+        spiking_config,
+        launcher=calibration_launcher,
+    )
     chunk_root = args.output_dir / "pool_chunks"
     results: list[ToyPoolResult] = []
     worker_dirs: list[str] = []
@@ -1150,6 +1368,8 @@ def _run_isolated_pool_chunks(
                 hidden_uint5[start:stop],
                 pool_config,
                 spiking_config,
+                timing,
+                timing_path,
             )
         )
         worker_dirs.append(str(chunk_dir.relative_to(args.output_dir)))
@@ -1170,21 +1390,22 @@ def _run_isolated_pool_chunks(
             "chunk_process_isolation": True,
             "chunk_worker_dirs": worker_dirs,
             "chunk_worker_status": worker_status,
+            "calibration_strategy": "shared-split",
+            "shared_timing_calibration": {
+                "file": str(timing_path.relative_to(args.output_dir)),
+                **calibration_manifest,
+            },
         },
     )
 
 
 def pool_chunk_worker_phase(args: argparse.Namespace) -> None:
-    """Execute exactly one serialized hardware pool chunk."""
+    """Execute one serialized calibration or inference hardware chunk."""
     config_path = args.pool_chunk_worker_config.resolve()
     payload = json.loads(config_path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != 1:
+    if payload.get("schema_version") != 2:
         raise ValueError("unsupported pool chunk worker schema")
-    input_path = config_path.parent / payload["input_file"]
     result_path = config_path.parent / payload["result_file"]
-    hidden_uint5 = torch.load(input_path, map_location="cpu", weights_only=True)
-    if _tensor_sha256(hidden_uint5) != payload["hidden_sha256"]:
-        raise ValueError("pool chunk input checksum mismatch")
     pool_config = ToyPoolConfig(**payload["pool_config"])
     spiking_payload = dict(payload["spiking_config"])
     for key in ("pool_sizes", "placements", "routings"):
@@ -1192,15 +1413,32 @@ def pool_chunk_worker_phase(args: argparse.Namespace) -> None:
     if spiking_payload["calibration_path"] is not None:
         spiking_payload["calibration_path"] = Path(spiking_payload["calibration_path"])
     spiking_config = BrainScaleS2PoolConfig(**spiking_payload)
-    result = GroupedHardwarePoolBackend().run_uint5(
-        hidden_uint5,
-        pool_config,
-        spiking_config,
-    )
+    backend = GroupedHardwarePoolBackend()
+    if payload.get("worker_kind") == "timing-calibration":
+        result = backend.observe_timing_calibration(pool_config, spiking_config)
+        description = "calibration observation"
+    elif payload.get("worker_kind") == "inference":
+        input_path = config_path.parent / payload["input_file"]
+        hidden_uint5 = torch.load(input_path, map_location="cpu", weights_only=True)
+        if _tensor_sha256(hidden_uint5) != payload["hidden_sha256"]:
+            raise ValueError("pool chunk input checksum mismatch")
+        timing_path = Path(payload["timing_calibration_file"])
+        timing = _load_timing_calibration(timing_path)
+        if _timing_calibration_sha256(timing) != payload["timing_calibration_sha256"]:
+            raise ValueError("pool chunk timing calibration checksum mismatch")
+        result = backend.run_uint5(
+            hidden_uint5,
+            pool_config,
+            spiking_config,
+            timing_calibration=timing,
+        )
+        description = "pool inference chunk"
+    else:
+        raise ValueError("unsupported pool chunk worker kind")
     temporary_path = result_path.with_suffix(result_path.suffix + ".tmp")
     torch.save(result, temporary_path)
     os.replace(temporary_path, result_path)
-    print(f"Wrote isolated pool chunk to {result_path}", flush=True)
+    print(f"Wrote isolated {description} to {result_path}", flush=True)
 
 
 def _run_condition_subprocess(
