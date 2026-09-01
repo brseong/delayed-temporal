@@ -144,6 +144,8 @@ Network artifacts join float, ideal-converted, and physical predictions with com
 
 [[utils/hardware/brainscales2/toy_artifacts.py#write_toy_artifacts]] writes conversion and run manifests, predictions, accuracy and NLL drops, paired recovery intervals, miss metrics, raw timing tensors, and accuracy, confusion, and variance figures. `intermediates.pt` remains lossless; `events.csv` records a deterministic sample/trial subset to avoid duplicating millions of tensor entries.
 
+Accepted physical runs use a per-run Git allowlist. The committed bundle keeps checkpoints, calibration, manifests, metrics, predictions, figures, and compressed event extracts; oversized lossless tensors and worker chunks remain external and are represented by size and SHA-256 in `artifact_inventory.json`.
+
 [[scripts/evaluation/brainscales2_toy_hil.py#main]] separates train, convert, local evaluation, Hagen probe, hardware smoke, and full hardware phases. MNIST hardware evaluation defaults to a 128-sample runtime benchmark until the caller explicitly sets a formal sample count.
 
 The EBRAINS notebook defaults to a one-pass Yin-Yang acceptance pipeline: train, convert, Hagen probe, hardware smoke, and full evaluation. It configures the shared client from a writable `/tmp` checkout, pins both calibrations, applies the probe-selected shift, and blocks formal execution unless same-run smoke passes. Failures stop later stages and enter `pipeline_status.json`.
