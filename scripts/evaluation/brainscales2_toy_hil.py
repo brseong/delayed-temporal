@@ -119,6 +119,17 @@ def parse_args() -> argparse.Namespace:
         default="ttfs",
     )
     parser.add_argument(
+        "--temporal-pool-estimator",
+        choices=(
+            "valid-mean",
+            "mean",
+            "raw-max",
+            "analytic-corrected-max",
+            "empirical-corrected-max",
+        ),
+        default="valid-mean",
+    )
+    parser.add_argument(
         "--pool-mapping",
         choices=("dedicated", "time-multiplexed"),
         default="dedicated",
@@ -765,6 +776,7 @@ def evaluation_phase(args: argparse.Namespace) -> None:
                 inference_trials=pool_trials,
                 calibration_trials=calibration_trials,
                 seed=args.seed + effective_pool_size,
+                estimator=args.temporal_pool_estimator,
             )
             print(
                 "Running",
@@ -845,6 +857,7 @@ def evaluation_phase(args: argparse.Namespace) -> None:
         "pwm_backend": args.pwm_backend,
         "pool_backend": args.pool_backend,
         "pooling_domain": args.pooling_domain,
+        "temporal_pool_estimator": args.temporal_pool_estimator,
         "relu_boundary": args.relu_boundary,
         "pool_mapping": args.pool_mapping,
         "pool_sample_chunk_size": args.pool_sample_chunk_size,

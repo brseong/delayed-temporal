@@ -214,6 +214,85 @@ def verify_mock_and_all_miss_policy() -> None:
     assert int(decoded.decoded_uint5.sum()) == 0
 
 
+def verify_mean_and_corrected_max_estimators() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Max estimator attribution]]
+    spiking = BrainScaleS2PoolConfig(
+        input_early_s=5.0e-6,
+        input_late_s=25.0e-6,
+        pool_sizes=(2,),
+        placements=("same-quadrant",),
+        routings=("broadcast",),
+    )
+    width = spiking.input_late_s - spiking.input_early_s
+    code = torch.tensor([0.0, 10.0, 20.0], dtype=torch.float64)
+    nominal_codes = spiking.input_late_s - code / 31.0 * width
+    nominal = nominal_codes[1].reshape(1, 1)
+    coordinates = resolve_grouped_physical_coordinates(
+        1, 2, "local-pool", "dedicated"
+    )
+
+    one_miss = torch.tensor(
+        [[[[float(nominal), torch.nan]]]], dtype=torch.float64
+    )
+    identity_calibration = TimingCalibration(
+        response_delay_s=0.0,
+        neuron_offset_s=torch.zeros((1, 2), dtype=torch.float64),
+        calibration_trials=4,
+        nominal_code_time_s=nominal_codes,
+        raw_max_expected_time_s=nominal_codes,
+        analytic_max_correction_s=torch.zeros(3, dtype=torch.float64),
+    )
+    decoded: dict[str, int] = {}
+    for estimator in ("mean", "raw-max"):
+        result = decode_pool_observations(
+            one_miss,
+            nominal,
+            identity_calibration,
+            coordinates,
+            ToyPoolConfig(
+                pool_size=2,
+                logical_neurons=1,
+                inference_trials=1,
+                calibration_trials=4,
+                estimator=estimator,
+            ),
+            spiking,
+        )
+        decoded[estimator] = int(result.decoded_uint5[0, 0, 0])
+    assert decoded["mean"] == 5
+    assert decoded["raw-max"] == 10
+
+    early_bias = 2.0e-6
+    biased = torch.tensor(
+        [[[[float(nominal - early_bias), float(nominal + 1.0e-6)]]]],
+        dtype=torch.float64,
+    )
+    corrected_calibration = TimingCalibration(
+        response_delay_s=0.0,
+        neuron_offset_s=torch.zeros((1, 2), dtype=torch.float64),
+        calibration_trials=4,
+        nominal_code_time_s=nominal_codes,
+        raw_max_expected_time_s=nominal_codes - early_bias,
+        analytic_max_correction_s=torch.full((3,), early_bias, dtype=torch.float64),
+    )
+    for estimator in ("analytic-corrected-max", "empirical-corrected-max"):
+        result = decode_pool_observations(
+            biased,
+            nominal,
+            corrected_calibration,
+            coordinates,
+            ToyPoolConfig(
+                pool_size=2,
+                logical_neurons=1,
+                inference_trials=1,
+                calibration_trials=4,
+                estimator=estimator,
+            ),
+            spiking,
+        )
+        assert int(result.decoded_uint5[0, 0, 0]) == 10
+
+
 def verify_chunked_pool_aggregation() -> None:
     # @lat: [[hardware#Toy ANN2SNN Verification#Chunked pool aggregation]]
     spiking = BrainScaleS2PoolConfig(
@@ -1175,6 +1254,7 @@ def main() -> None:
     verify_grouped_placement()
     verify_grouped_broadcast_fan_in()
     verify_mock_and_all_miss_policy()
+    verify_mean_and_corrected_max_estimators()
     verify_chunked_pool_aggregation()
     verify_shared_split_timing_calibration()
     verify_m16_calibration_inference_batch_separation()

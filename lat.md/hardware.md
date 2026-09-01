@@ -212,6 +212,16 @@ Retries use increasing backoff, and a recovered worker returns normally to condi
 
 Seeded mock observations must reproduce exactly, normal timing must decode near its UInt5 source, and an all-miss pool must become zero while retaining its miss mask.
 
+### Max estimator attribution
+
+Temporal pooling separates drop-aware activation mean, raw maximum, finite-$M$ deadline-corrected maximum, and calibration-curve-corrected maximum before the frozen integer readout.
+
+`mean` maps every missed replica to UInt5 zero before averaging. `raw-max` maps TTFS earliest-event selection to activation maximum, so its pooled miss probability decreases while its order-statistic bias remains.
+
+`analytic-corrected-max` estimates the delivered residual scale and codewise deadline tail only from calibration events, then adds the finite-$M$ conditional earliest-time offset. `empirical-corrected-max` monotonically inverts the codewise calibration response without labels.
+
+All four estimators consume the same raw-event tensor, retain all-miss-to-zero semantics, and run through the same frozen readout. Replay results remain rough model-selection evidence; hardware acceptance requires an independent calibration acquisition and evaluation events.
+
 ### Held-out hardware replay
 
 Replay must derive calibration from the first trial half, sample only the held-out half, reproduce from its seed, and identify itself as rough modeling rather than physical network evidence.

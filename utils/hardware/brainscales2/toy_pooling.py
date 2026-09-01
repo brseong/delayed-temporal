@@ -27,6 +27,13 @@ from .encoding import encode_potential_for_brainscales2
 
 NetworkPlacement = Literal["local-pool", "cross-quadrant"]
 PoolMapping = Literal["dedicated", "time-multiplexed"]
+PoolEstimator = Literal[
+    "valid-mean",
+    "mean",
+    "raw-max",
+    "analytic-corrected-max",
+    "empirical-corrected-max",
+]
 
 
 @dataclass(frozen=True)
@@ -44,6 +51,7 @@ class ToyPoolConfig:
     shared_std_s: float = 0.25e-6
     static_std_s: float = 0.5e-6
     miss_probability: float = 0.01
+    estimator: PoolEstimator = "valid-mean"
 
     def __post_init__(self) -> None:
         if not 1 <= self.pool_size <= 128:
@@ -60,6 +68,14 @@ class ToyPoolConfig:
             raise ValueError("pool trial counts must be positive")
         if not 0.0 <= self.miss_probability <= 1.0:
             raise ValueError("miss_probability must lie in [0, 1]")
+        if self.estimator not in (
+            "valid-mean",
+            "mean",
+            "raw-max",
+            "analytic-corrected-max",
+            "empirical-corrected-max",
+        ):
+            raise ValueError("unsupported temporal pool estimator")
 
 
 @dataclass(frozen=True)
@@ -69,6 +85,9 @@ class TimingCalibration:
     response_delay_s: float
     neuron_offset_s: torch.Tensor
     calibration_trials: int
+    nominal_code_time_s: torch.Tensor | None = None
+    raw_max_expected_time_s: torch.Tensor | None = None
+    analytic_max_correction_s: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -374,11 +393,54 @@ def _nanmean(value: torch.Tensor, dim: int | tuple[int, ...]) -> torch.Tensor:
     )
 
 
+def _nanmin(value: torch.Tensor, dim: int) -> torch.Tensor:
+    finite = torch.isfinite(value)
+    minimum = torch.where(finite, value, torch.inf).amin(dim=dim)
+    return torch.where(finite.any(dim=dim), minimum, torch.nan)
+
+
+def _finite_m_deadline_correction(
+    corrected: torch.Tensor,
+    nominal_input_s: torch.Tensor,
+) -> torch.Tensor:
+    """Estimate the finite-M earliest-event bias from calibration-only events."""
+    residual = corrected - nominal_input_s.reshape(1, -1, 1, 1)
+    finite_residual = residual[torch.isfinite(residual)]
+    sigma = (
+        finite_residual.std(unbiased=False)
+        if finite_residual.numel() > 1
+        else torch.zeros((), dtype=corrected.dtype)
+    )
+    misses = (~torch.isfinite(corrected)).sum(dim=(0, 2, 3)).to(corrected.dtype)
+    observations = corrected.shape[0] * corrected.shape[2] * corrected.shape[3]
+    miss_probability = (misses + 0.5) / (observations + 1.0)
+    delivered_probability = (1.0 - miss_probability).clamp(1.0e-6, 1.0 - 1.0e-6)
+    normal = torch.distributions.Normal(
+        torch.zeros((), dtype=corrected.dtype),
+        torch.ones((), dtype=corrected.dtype),
+    )
+    deadline = normal.icdf(delivered_probability).clamp(-6.0, 6.0)
+    corrections = torch.empty_like(deadline)
+    replicas = corrected.shape[-1]
+    for index, limit in enumerate(deadline):
+        grid = torch.linspace(-8.0, float(limit), 4097, dtype=corrected.dtype)
+        phi = torch.exp(-0.5 * grid.square()) / math.sqrt(2.0 * math.pi)
+        cdf = normal.cdf(grid)
+        numerator = torch.trapezoid(
+            grid * replicas * (1.0 - cdf).pow(replicas - 1) * phi,
+            grid,
+        )
+        denominator = 1.0 - (1.0 - normal.cdf(limit)).pow(replicas)
+        mean_minimum = numerator / denominator.clamp_min(1.0e-12)
+        corrections[index] = -sigma * mean_minimum
+    return corrections
+
+
 def calibrate_timing(
     first_spike_s: torch.Tensor,
     nominal_input_s: torch.Tensor,
 ) -> TimingCalibration:
-    """Estimate response delay and persistent offsets without evaluation events."""
+    """Estimate mean, raw-max, and max-bias calibration without labels."""
     if first_spike_s.ndim != 4:
         raise ValueError("calibration spikes must have shape [trial, code, logical, replica]")
     if nominal_input_s.ndim != 1 or nominal_input_s.numel() != first_spike_s.shape[1]:
@@ -389,10 +451,22 @@ def calibrate_timing(
     offsets = torch.where(torch.isfinite(offsets), offsets, torch.zeros_like(offsets))
     offset_mean = float(offsets.mean())
     offsets = offsets - offset_mean
+    resolved_delay = response_delay + offset_mean
+    corrected = (
+        first_spike_s
+        - offsets.reshape(1, 1, *offsets.shape)
+        - resolved_delay
+    )
+    raw_max_expected = _nanmean(_nanmin(corrected, dim=-1), dim=(0, 2))
     return TimingCalibration(
-        response_delay_s=response_delay + offset_mean,
+        response_delay_s=resolved_delay,
         neuron_offset_s=offsets,
         calibration_trials=first_spike_s.shape[0],
+        nominal_code_time_s=nominal_input_s.detach().clone(),
+        raw_max_expected_time_s=raw_max_expected,
+        analytic_max_correction_s=_finite_m_deadline_correction(
+            corrected, nominal_input_s
+        ),
     )
 
 
@@ -410,6 +484,48 @@ def _nominal_uint5_times(
     return encoding.injected_time_s.reshape(value.shape)
 
 
+def _decode_time_uint5(
+    time_s: torch.Tensor,
+    spiking_config: BrainScaleS2PoolConfig,
+) -> torch.Tensor:
+    width = spiking_config.input_late_s - spiking_config.input_early_s
+    return ((spiking_config.input_late_s - time_s) / width * 31.0).clamp(0.0, 31.0)
+
+
+def _empirical_max_inverse(
+    raw_activation: torch.Tensor,
+    calibration: TimingCalibration,
+    spiking_config: BrainScaleS2PoolConfig,
+) -> torch.Tensor:
+    if calibration.nominal_code_time_s is None or calibration.raw_max_expected_time_s is None:
+        raise RuntimeError("empirical corrected max requires codewise calibration")
+    expected = _decode_time_uint5(
+        calibration.raw_max_expected_time_s, spiking_config
+    )
+    target = _decode_time_uint5(calibration.nominal_code_time_s, spiking_config)
+    valid = torch.isfinite(expected) & torch.isfinite(target)
+    expected = expected[valid]
+    target = target[valid]
+    if expected.numel() < 2:
+        raise RuntimeError("empirical corrected max needs at least two calibration codes")
+    order = target.argsort()
+    expected = expected[order]
+    target = target[order]
+    expected = torch.cummax(expected, dim=0).values
+    flat = raw_activation.reshape(-1).clamp(float(expected[0]), float(expected[-1]))
+    upper = torch.searchsorted(expected.contiguous(), flat, right=False)
+    upper = upper.clamp(1, expected.numel() - 1)
+    lower = upper - 1
+    span = expected[upper] - expected[lower]
+    fraction = torch.where(
+        span.abs() > 1.0e-12,
+        (flat - expected[lower]) / span,
+        torch.zeros_like(flat),
+    )
+    corrected = target[lower] + fraction * (target[upper] - target[lower])
+    return corrected.reshape(raw_activation.shape).clamp(0.0, 31.0)
+
+
 def decode_pool_observations(
     first_spike_s: torch.Tensor,
     nominal_input_s: torch.Tensor,
@@ -421,7 +537,7 @@ def decode_pool_observations(
     spike_count: torch.Tensor | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> ToyPoolResult:
-    """Apply calibrated mean pooling, inverse identity code, and all-miss zero."""
+    """Decode one declared mean/max estimator and map every all-miss pool to zero."""
     offsets = calibration.neuron_offset_s
     if offsets.shape != coordinates.shape:
         raise ValueError("calibration offsets and physical coordinates must match")
@@ -430,14 +546,34 @@ def decode_pool_observations(
         - offsets.reshape(1, 1, *offsets.shape)
         - calibration.response_delay_s
     )
-    pooled = _nanmean(corrected, dim=-1)
-    all_miss = ~torch.isfinite(pooled)
-    width = spiking_config.input_late_s - spiking_config.input_early_s
-    decoded = (
-        (spiking_config.input_late_s - pooled) / width * 31.0
-    ).clamp(0.0, 31.0)
-    decoded = torch.where(all_miss, torch.zeros_like(decoded), torch.round(decoded))
     fired = torch.isfinite(first_spike_s)
+    all_miss = ~fired.any(dim=-1)
+    if config.estimator == "valid-mean":
+        pooled = _nanmean(corrected, dim=-1)
+        decoded = _decode_time_uint5(pooled, spiking_config)
+    elif config.estimator == "mean":
+        replica_activation = _decode_time_uint5(corrected, spiking_config)
+        replica_activation = torch.where(
+            fired, replica_activation, torch.zeros_like(replica_activation)
+        )
+        decoded = replica_activation.mean(dim=-1)
+        width = spiking_config.input_late_s - spiking_config.input_early_s
+        pooled = spiking_config.input_late_s - decoded / 31.0 * width
+    else:
+        pooled = _nanmin(corrected, dim=-1)
+        decoded = _decode_time_uint5(pooled, spiking_config)
+        if config.estimator == "analytic-corrected-max":
+            if calibration.nominal_code_time_s is None or calibration.analytic_max_correction_s is None:
+                raise RuntimeError("analytic corrected max requires deadline calibration")
+            nearest = (
+                nominal_input_s.unsqueeze(-1) - calibration.nominal_code_time_s
+            ).abs().argmin(dim=-1)
+            correction = calibration.analytic_max_correction_s[nearest].unsqueeze(0)
+            pooled = pooled + correction
+            decoded = _decode_time_uint5(pooled, spiking_config)
+        elif config.estimator == "empirical-corrected-max":
+            decoded = _empirical_max_inverse(decoded, calibration, spiking_config)
+    decoded = torch.where(all_miss, torch.zeros_like(decoded), torch.round(decoded))
     if spike_count is None:
         spike_count = fired.to(torch.int64)
     return ToyPoolResult(
@@ -455,6 +591,7 @@ def decode_pool_observations(
         metadata={
             "response_delay_s": calibration.response_delay_s,
             "calibration_trials": calibration.calibration_trials,
+            "estimator": config.estimator,
             **(metadata or {}),
         },
     )
@@ -627,6 +764,9 @@ class ReplayToyPoolBackend:
             response_delay_s=calibration.response_delay_s,
             neuron_offset_s=source_offsets.reshape(1, -1).repeat(logical, 1),
             calibration_trials=split,
+            nominal_code_time_s=calibration.nominal_code_time_s,
+            raw_max_expected_time_s=calibration.raw_max_expected_time_s,
+            analytic_max_correction_s=calibration.analytic_max_correction_s,
         )
         return decode_pool_observations(
             first,
