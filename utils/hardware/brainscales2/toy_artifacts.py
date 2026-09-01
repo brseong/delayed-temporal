@@ -25,7 +25,11 @@ class ToyConditionEvaluation:
     pool_size: int
     pooling_domain: PoolingDomain
     pool_result: ToyPoolResult
+    nominal_hidden_uint5: torch.Tensor
     logits: torch.Tensor
+    oracle_miss_repair_logits: torch.Tensor
+    torch_readout_logits: torch.Tensor
+    torch_oracle_miss_repair_logits: torch.Tensor
     pwm_metadata: dict[str, Any]
 
     def __post_init__(self) -> None:
@@ -33,6 +37,16 @@ class ToyConditionEvaluation:
             raise ValueError("condition logits must have shape [trial, sample, class]")
         if self.logits.shape[:2] != self.pool_result.decoded_uint5.shape[:2]:
             raise ValueError("condition logits do not match pool trials and samples")
+        expected_hidden = self.pool_result.decoded_uint5.shape[1:]
+        if self.nominal_hidden_uint5.shape != expected_hidden:
+            raise ValueError("nominal hidden activations must have shape [sample, hidden]")
+        for name, logits in (
+            ("oracle miss repair", self.oracle_miss_repair_logits),
+            ("torch readout", self.torch_readout_logits),
+            ("torch oracle miss repair", self.torch_oracle_miss_repair_logits),
+        ):
+            if logits.shape != self.logits.shape:
+                raise ValueError(f"{name} logits must match condition logits")
 
 
 def _json_value(value: Any) -> Any:
@@ -107,6 +121,100 @@ def _paired_accuracy_ci(
     return float(interval[0]), float(interval[1])
 
 
+def _masked_rate(value: torch.Tensor, mask: torch.Tensor) -> float:
+    """Return a boolean rate on a declared support, or NaN for empty support."""
+    if value.shape != mask.shape:
+        raise ValueError("rate value and support mask must have identical shapes")
+    return float(value[mask].float().mean()) if bool(mask.any()) else math.nan
+
+
+def _activation_analysis(
+    evaluation: ToyConditionEvaluation,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Stratify misses and non-miss UInt5 errors by the actual pool input code."""
+    result = evaluation.pool_result
+    nominal = evaluation.nominal_hidden_uint5.to(torch.int32)
+    nominal_per_trial = nominal.unsqueeze(0).expand_as(result.decoded_uint5)
+    nominal_per_replica = nominal_per_trial.unsqueeze(-1).expand_as(result.fired)
+    zero_pool = nominal_per_trial == 0
+    positive_pool = nominal_per_trial > 0
+    zero_replica = nominal_per_replica == 0
+    positive_replica = nominal_per_replica > 0
+    nonmiss = ~result.all_miss
+    error = result.decoded_uint5.to(torch.float64) - nominal_per_trial.to(torch.float64)
+
+    aggregate = {
+        "nominal_zero_pool_observations": int(zero_pool.sum()),
+        "nominal_positive_pool_observations": int(positive_pool.sum()),
+        "neuron_miss_rate_nominal_zero": _masked_rate(~result.fired, zero_replica),
+        "neuron_miss_rate_nominal_positive": _masked_rate(
+            ~result.fired, positive_replica
+        ),
+        "all_miss_rate_nominal_zero": _masked_rate(result.all_miss, zero_pool),
+        "all_miss_rate_nominal_positive": _masked_rate(
+            result.all_miss, positive_pool
+        ),
+        "nonmiss_activation_count": int(nonmiss.sum()),
+        "nonmiss_activation_mae_uint5": (
+            float(error[nonmiss].abs().mean()) if bool(nonmiss.any()) else math.nan
+        ),
+        "nonmiss_activation_bias_uint5": (
+            float(error[nonmiss].mean()) if bool(nonmiss.any()) else math.nan
+        ),
+    }
+
+    code_rows: list[dict[str, Any]] = []
+    for code in range(32):
+        pool_support = nominal_per_trial == code
+        replica_support = nominal_per_replica == code
+        code_nonmiss = pool_support & nonmiss
+        code_error = error[code_nonmiss]
+        code_rows.append(
+            {
+                "condition": evaluation.key,
+                "pool_size": evaluation.pool_size,
+                "pooling_domain": evaluation.pooling_domain,
+                "hagen_avg": (
+                    evaluation.pool_size if evaluation.pooling_domain == "potential" else 1
+                ),
+                "temporal_pool_size": result.pool_size,
+                "placement": result.placement,
+                "mapping": result.mapping,
+                "nominal_code": code,
+                "pool_observations": int(pool_support.sum()),
+                "nonmiss_count": int(code_nonmiss.sum()),
+                "all_miss_count": int((pool_support & result.all_miss).sum()),
+                "all_miss_rate": _masked_rate(result.all_miss, pool_support),
+                "replica_observations": int(replica_support.sum()),
+                "neuron_miss_count": int((replica_support & ~result.fired).sum()),
+                "neuron_miss_rate": _masked_rate(~result.fired, replica_support),
+                "activation_mae_uint5": (
+                    float(code_error.abs().mean()) if code_error.numel() else math.nan
+                ),
+                "activation_bias_uint5": (
+                    float(code_error.mean()) if code_error.numel() else math.nan
+                ),
+                "activation_exact_rate": (
+                    float((code_error == 0).float().mean())
+                    if code_error.numel()
+                    else math.nan
+                ),
+            }
+        )
+    return aggregate, code_rows
+
+
+def activation_error_by_code(
+    evaluations: list[ToyConditionEvaluation],
+) -> list[dict[str, Any]]:
+    """Return the complete UInt5 code-conditioned miss and error table."""
+    return [
+        row
+        for evaluation in evaluations
+        for row in _activation_analysis(evaluation)[1]
+    ]
+
+
 def summarize_toy_evaluations(
     labels: torch.Tensor,
     float_logits: torch.Tensor,
@@ -142,7 +250,16 @@ def summarize_toy_evaluations(
     for evaluation in evaluations:
         repeated_labels = labels.reshape(1, -1).expand(evaluation.logits.shape[0], -1)
         correct = evaluation.logits.argmax(dim=-1) == repeated_labels
+        oracle_correct = (
+            evaluation.oracle_miss_repair_logits.argmax(dim=-1) == repeated_labels
+        )
+        torch_correct = evaluation.torch_readout_logits.argmax(dim=-1) == repeated_labels
+        torch_oracle_correct = (
+            evaluation.torch_oracle_miss_repair_logits.argmax(dim=-1)
+            == repeated_labels
+        )
         result = evaluation.pool_result
+        activation_metrics, _ = _activation_analysis(evaluation)
         sample_all_miss = result.all_miss.any(dim=-1)
         valid = ~sample_all_miss
         oracle_accuracy = (
@@ -169,11 +286,38 @@ def summarize_toy_evaluations(
                 "condition": evaluation.key,
                 "pool_size": evaluation.pool_size,
                 "pooling_domain": evaluation.pooling_domain,
+                "hagen_avg": (
+                    evaluation.pool_size if evaluation.pooling_domain == "potential" else 1
+                ),
+                "temporal_pool_size": result.pool_size,
                 "placement": result.placement,
                 "mapping": result.mapping,
                 "trials": evaluation.logits.shape[0],
                 "accuracy": float(correct.float().mean()),
                 "nll": _nll(evaluation.logits, repeated_labels),
+                "oracle_miss_repair_accuracy": float(oracle_correct.float().mean()),
+                "oracle_miss_repair_nll": _nll(
+                    evaluation.oracle_miss_repair_logits, repeated_labels
+                ),
+                "oracle_miss_repair_gain": float(
+                    oracle_correct.float().mean() - correct.float().mean()
+                ),
+                "torch_readout_accuracy": float(torch_correct.float().mean()),
+                "torch_readout_nll": _nll(
+                    evaluation.torch_readout_logits, repeated_labels
+                ),
+                "torch_readout_gain_vs_physical": float(
+                    torch_correct.float().mean() - correct.float().mean()
+                ),
+                "torch_oracle_miss_repair_accuracy": float(
+                    torch_oracle_correct.float().mean()
+                ),
+                "torch_oracle_miss_repair_nll": _nll(
+                    evaluation.torch_oracle_miss_repair_logits, repeated_labels
+                ),
+                "torch_oracle_miss_repair_gain": float(
+                    torch_oracle_correct.float().mean() - torch_correct.float().mean()
+                ),
                 "conversion_drop": float_accuracy - ideal_accuracy,
                 "hardware_drop": ideal_accuracy - float(correct.float().mean()),
                 "recovery_vs_m1": math.nan,
@@ -185,6 +329,7 @@ def summarize_toy_evaluations(
                 "oracle_valid_accuracy": oracle_accuracy,
                 "latency_variance_s2": latency_variance,
                 "multi_spike_rate": float((result.spike_count > 1).float().mean()),
+                **activation_metrics,
             }
         )
     for row in rows:
@@ -255,12 +400,17 @@ def write_toy_artifacts(
         encoding="utf-8",
     )
     _write_rows(output_dir / "metrics.csv", metrics)
+    _write_rows(
+        output_dir / "activation_error_by_code.csv",
+        activation_error_by_code(evaluations),
+    )
 
     prediction_rows: list[dict[str, Any]] = []
     for sample in range(labels.numel()):
         prediction_rows.append(
             {
                 "condition": "float-ann",
+                "analysis_variant": "reference",
                 "trial": 0,
                 "sample": sample,
                 "label": int(labels[sample]),
@@ -272,6 +422,7 @@ def write_toy_artifacts(
         prediction_rows.append(
             {
                 "condition": "ideal-converted",
+                "analysis_variant": "reference",
                 "trial": 0,
                 "sample": sample,
                 "label": int(labels[sample]),
@@ -281,20 +432,31 @@ def write_toy_artifacts(
             }
         )
     for evaluation in evaluations:
-        for trial in range(evaluation.logits.shape[0]):
-            for sample in range(labels.numel()):
-                logits = evaluation.logits[trial, sample]
-                prediction_rows.append(
-                    {
-                        "condition": evaluation.key,
-                        "trial": trial,
-                        "sample": sample,
-                        "label": int(labels[sample]),
-                        "prediction": int(logits.argmax()),
-                        "correct": int(logits.argmax() == labels[sample]),
-                        "logits": json.dumps(logits.tolist()),
-                    }
-                )
+        variants = (
+            ("physical", evaluation.logits),
+            ("physical-oracle-miss-repair", evaluation.oracle_miss_repair_logits),
+            ("torch-readout", evaluation.torch_readout_logits),
+            (
+                "torch-readout-oracle-miss-repair",
+                evaluation.torch_oracle_miss_repair_logits,
+            ),
+        )
+        for analysis_variant, variant_logits in variants:
+            for trial in range(variant_logits.shape[0]):
+                for sample in range(labels.numel()):
+                    logits = variant_logits[trial, sample]
+                    prediction_rows.append(
+                        {
+                            "condition": evaluation.key,
+                            "analysis_variant": analysis_variant,
+                            "trial": trial,
+                            "sample": sample,
+                            "label": int(labels[sample]),
+                            "prediction": int(logits.argmax()),
+                            "correct": int(logits.argmax() == labels[sample]),
+                            "logits": json.dumps(logits.tolist()),
+                        }
+                    )
     _write_rows(output_dir / "predictions.csv", prediction_rows)
 
     event_fields = (
@@ -304,6 +466,7 @@ def write_toy_artifacts(
         "logical_neuron",
         "replica",
         "physical_coordinate",
+        "nominal_activation_uint5",
         "nominal_input_s",
         "first_spike_s",
         "fired",
@@ -332,6 +495,9 @@ def write_toy_artifacts(
                                     "physical_coordinate": int(
                                         result.physical_coordinates[logical, replica]
                                     ),
+                                    "nominal_activation_uint5": int(
+                                        evaluation.nominal_hidden_uint5[sample, logical]
+                                    ),
                                     "nominal_input_s": float(result.nominal_input_s[sample, logical]),
                                     "first_spike_s": (
                                         float(result.first_spike_s[trial, sample, logical, replica])
@@ -352,6 +518,7 @@ def write_toy_artifacts(
             "ideal_hidden_uint5": ideal_hidden_uint5,
             "conditions": {
                 evaluation.key: {
+                    "nominal_hidden_uint5": evaluation.nominal_hidden_uint5,
                     "first_spike_s": evaluation.pool_result.first_spike_s,
                     "fired": evaluation.pool_result.fired,
                     "spike_count": evaluation.pool_result.spike_count,
@@ -361,6 +528,11 @@ def write_toy_artifacts(
                     "all_miss": evaluation.pool_result.all_miss,
                     "physical_coordinates": evaluation.pool_result.physical_coordinates,
                     "logits": evaluation.logits,
+                    "oracle_miss_repair_logits": evaluation.oracle_miss_repair_logits,
+                    "torch_readout_logits": evaluation.torch_readout_logits,
+                    "torch_oracle_miss_repair_logits": (
+                        evaluation.torch_oracle_miss_repair_logits
+                    ),
                 }
                 for evaluation in evaluations
             },

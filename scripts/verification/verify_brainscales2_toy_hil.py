@@ -22,6 +22,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from scripts.evaluation.brainscales2_toy_hil import (
     _aggregate_isolated_conditions,
     _apply_condition_worker_config,
+    _evaluate_readout_ablations,
     _load_isolated_condition,
     _run_hagen_output,
     _run_isolated_pool_chunks,
@@ -41,6 +42,7 @@ from utils.hardware.brainscales2.toy import (
 )
 from utils.hardware.brainscales2.toy_artifacts import (
     ToyConditionEvaluation,
+    activation_error_by_code,
     summarize_toy_evaluations,
     write_toy_artifacts,
 )
@@ -700,7 +702,17 @@ def verify_condition_process_isolation_contract() -> None:
                 pool_size=pool_size,
                 pooling_domain="ttfs",
                 pool_result=result,
+                nominal_hidden_uint5=hidden,
                 logits=baseline_logits.reshape(1, 2, 2).repeat(2, 1, 1),
+                oracle_miss_repair_logits=baseline_logits.reshape(1, 2, 2).repeat(
+                    2, 1, 1
+                ),
+                torch_readout_logits=baseline_logits.reshape(1, 2, 2).repeat(
+                    2, 1, 1
+                ),
+                torch_oracle_miss_repair_logits=baseline_logits.reshape(
+                    1, 2, 2
+                ).repeat(2, 1, 1),
                 pwm_metadata={"first": {"shared": True}, "output": {}},
             )
             worker_dir = output / "condition_workers" / key
@@ -893,7 +905,11 @@ def verify_metrics_and_artifact_schema() -> None:
         pool_size=2,
         pooling_domain="ttfs",
         pool_result=result,
+        nominal_hidden_uint5=hidden,
         logits=logits,
+        oracle_miss_repair_logits=logits,
+        torch_readout_logits=logits,
+        torch_oracle_miss_repair_logits=logits,
         pwm_metadata={"backend": "torch"},
     )
     labels = torch.tensor([0, 1])
@@ -916,6 +932,7 @@ def verify_metrics_and_artifact_schema() -> None:
             "manifest.json",
             "runtime.json",
             "metrics.csv",
+            "activation_error_by_code.csv",
             "predictions.csv",
             "events.csv",
             "intermediates.pt",
@@ -924,8 +941,153 @@ def verify_metrics_and_artifact_schema() -> None:
         manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
         assert manifest["schema_version"] == 1
         assert manifest["event_csv_coverage"]["full_raw_tensor"] == "intermediates.pt"
+        with (output / "metrics.csv").open(newline="", encoding="utf-8") as handle:
+            hardware_row = list(csv.DictReader(handle))[-1]
+        assert "neuron_miss_rate_nominal_zero" in hardware_row
+        assert "nonmiss_activation_mae_uint5" in hardware_row
+        assert "oracle_miss_repair_accuracy" in hardware_row
+        assert "torch_readout_accuracy" in hardware_row
+        with (output / "activation_error_by_code.csv").open(
+            newline="", encoding="utf-8"
+        ) as handle:
+            assert len(list(csv.DictReader(handle))) == 32
+        with (output / "predictions.csv").open(newline="", encoding="utf-8") as handle:
+            prediction_variants = {
+                row["analysis_variant"] for row in csv.DictReader(handle)
+            }
+        assert prediction_variants == {
+            "reference",
+            "physical",
+            "physical-oracle-miss-repair",
+            "torch-readout",
+            "torch-readout-oracle-miss-repair",
+        }
+        archive = torch.load(output / "intermediates.pt", weights_only=False)
+        condition = archive["conditions"][evaluation.key]
+        assert condition["nominal_hidden_uint5"].shape == hidden.shape
+        assert condition["torch_readout_logits"].shape == logits.shape
         with (output / "events.csv").open(newline="", encoding="utf-8") as handle:
-            assert len(list(csv.DictReader(handle))) == 2 * 2 * 2 * 2
+            event_rows = list(csv.DictReader(handle))
+        assert len(event_rows) == 2 * 2 * 2 * 2
+        assert "nominal_activation_uint5" in event_rows[0]
+
+
+def verify_hardware_error_attribution() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Hardware error attribution]]
+    nominal = torch.tensor([[0, 5]], dtype=torch.int32)
+    fired = torch.tensor(
+        [[[[False], [True]]], [[[True], [True]]]]
+    )
+    first_spike = torch.where(
+        fired,
+        torch.full(fired.shape, 10.0e-6, dtype=torch.float64),
+        torch.full(fired.shape, torch.nan, dtype=torch.float64),
+    )
+    all_miss = ~fired.any(dim=-1)
+    result = ToyPoolResult(
+        first_spike_s=first_spike,
+        fired=fired,
+        spike_count=fired.to(torch.int64),
+        nominal_input_s=torch.tensor([[25.0e-6, 21.0e-6]], dtype=torch.float64),
+        pooled_first_spike_s=torch.tensor(
+            [[[torch.nan, 10.0e-6]], [[10.0e-6, 10.0e-6]]],
+            dtype=torch.float64,
+        ),
+        decoded_uint5=torch.tensor([[[0, 7]], [[1, 4]]], dtype=torch.int32),
+        all_miss=all_miss,
+        physical_coordinates=torch.tensor([[0], [1]], dtype=torch.int64),
+        pool_size=1,
+        placement="local-pool",
+        mapping="dedicated",
+    )
+    primary = torch.tensor([[[0.0, 2.0]], [[0.0, 2.0]]])
+    physical_oracle = torch.tensor([[[2.0, 0.0]], [[0.0, 2.0]]])
+    torch_readout = torch.tensor([[[2.0, 0.0]], [[0.0, 2.0]]])
+    torch_oracle = torch.tensor([[[2.0, 0.0]], [[2.0, 0.0]]])
+    evaluation = ToyConditionEvaluation(
+        key="potential_M2_local-pool_dedicated",
+        pool_size=2,
+        pooling_domain="potential",
+        pool_result=result,
+        nominal_hidden_uint5=nominal,
+        logits=primary,
+        oracle_miss_repair_logits=physical_oracle,
+        torch_readout_logits=torch_readout,
+        torch_oracle_miss_repair_logits=torch_oracle,
+        pwm_metadata={"first": {"avg": 2}, "output": {"backend": "hagen-mock"}},
+    )
+    labels = torch.tensor([0])
+    row = summarize_toy_evaluations(
+        labels,
+        torch.tensor([[2.0, 0.0]]),
+        torch.tensor([[2.0, 0.0]]),
+        [evaluation],
+        bootstrap_iterations=10,
+    )[-1]
+    assert row["hagen_avg"] == 2
+    assert row["temporal_pool_size"] == 1
+    assert row["neuron_miss_rate_nominal_zero"] == 0.5
+    assert row["neuron_miss_rate_nominal_positive"] == 0.0
+    assert row["all_miss_rate_nominal_zero"] == 0.5
+    assert row["all_miss_rate_nominal_positive"] == 0.0
+    assert abs(row["nonmiss_activation_mae_uint5"] - 4.0 / 3.0) < 1.0e-12
+    assert abs(row["nonmiss_activation_bias_uint5"] - 2.0 / 3.0) < 1.0e-12
+    assert row["oracle_miss_repair_accuracy"] == 0.5
+    assert row["torch_readout_accuracy"] == 0.5
+    assert row["torch_oracle_miss_repair_accuracy"] == 1.0
+    by_code = {item["nominal_code"]: item for item in activation_error_by_code([evaluation])}
+    assert by_code[0]["all_miss_rate"] == 0.5
+    assert by_code[0]["activation_bias_uint5"] == 1.0
+    assert by_code[5]["activation_mae_uint5"] == 1.5
+    assert by_code[5]["activation_bias_uint5"] == 0.5
+
+    class FixtureConverted:
+        architecture = SimpleNamespace(hidden_features=2, output_features=2)
+
+        @staticmethod
+        def output_from_hidden(value: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            logits = value.to(torch.int8)
+            return value.to(torch.int32), logits
+
+    (
+        selected_logits,
+        selected_oracle_logits,
+        torch_logits,
+        torch_oracle_logits,
+        metadata,
+    ) = _evaluate_readout_ablations(
+        SimpleNamespace(),
+        None,
+        FixtureConverted(),  # type: ignore[arg-type]
+        result,
+        torch.tensor([[9, 5]], dtype=torch.int32),
+    )
+    torch.testing.assert_close(selected_logits, torch_logits)
+    torch.testing.assert_close(selected_oracle_logits, torch_oracle_logits)
+    assert selected_oracle_logits[0, 0, 0] == 9
+    assert selected_oracle_logits[1, 0, 0] == 1
+    assert metadata["oracle_repair_policy"] == (
+        "replace-all-miss-position-with-ideal-hidden"
+    )
+
+    class FixtureHagen:
+        config = SimpleNamespace(mode="mock")
+
+        @staticmethod
+        def output_layer(_converted: object, value: torch.Tensor) -> HagenResult:
+            return HagenResult(value.to(torch.float32), {"backend": "hagen-mock"})
+
+    physical, physical_oracle, _, _, physical_metadata = _evaluate_readout_ablations(
+        SimpleNamespace(hagen_row_chunk_size=64),
+        FixtureHagen(),  # type: ignore[arg-type]
+        FixtureConverted(),  # type: ignore[arg-type]
+        result,
+        torch.tensor([[9, 5]], dtype=torch.int32),
+    )
+    assert physical[0, 0, 0] == 0
+    assert physical_oracle[0, 0, 0] == 9
+    assert physical_metadata["physical_oracle_miss_repair_reexecuted"] is True
+    assert physical_metadata["row_segments"]["physical"] == [0, 2]
 
 
 def verify_python311_and_notebook_contract() -> None:
@@ -968,6 +1130,12 @@ def verify_python311_and_notebook_contract() -> None:
     assert "'--relu-boundary', RELU_BOUNDARY" in source
     assert "TOY_ACTIVATION = 'relu'" in source
     assert "'--activation', TOY_ACTIVATION" in source
+    assert "POOLING_DOMAIN = 'potential'" in source
+    assert "'--pooling-domain', POOLING_DOMAIN" in source
+    assert "Smoke did not use Hagen avg=M with one LIF" in source
+    assert "activation_error_by_code.csv" in source
+    assert "oracle_miss_repair_accuracy" in source
+    assert "torch_readout_accuracy" in source
     assert "POOL_SAMPLE_CHUNK_SIZE = 64" in source
     assert "'--pool-sample-chunk-size', POOL_SAMPLE_CHUNK_SIZE" in source
     assert "POOL_REPLICA_SAMPLE_BUDGET = 128" in source
@@ -1020,6 +1188,7 @@ def main() -> None:
     verify_condition_process_isolation_contract()
     verify_transient_worker_retry()
     verify_metrics_and_artifact_schema()
+    verify_hardware_error_attribution()
     verify_python311_and_notebook_contract()
     print("BrainScaleS-2 toy ANN2SNN verification passed")
 

@@ -106,9 +106,13 @@ The integer reference shift applies to its int32 accumulator, whereas physical H
 
 For inputs wider than one signed Hagen array, the adapter first probes the high-level `Linear` path. Its explicit `host-128` fallback runs 128-input analog MAC tiles, sums partial Int8 values on the host, and records that host accumulation rather than presenting it as one on-chip matrix operation.
 
-TTFS-domain pooling runs Hagen with `avg=1` and assigns `M` LIF replicas to each logical hidden unit. Potential-domain pooling is an alternative method that runs Hagen with `avg=M` and one downstream LIF; it is not mixed into the primary TTFS estimator.
+TTFS-domain pooling runs Hagen with `avg=1` and assigns `M` LIF replicas to each logical hidden unit. Potential-domain pooling runs Hagen with `avg=M` and one downstream LIF. The EBRAINS acceptance launcher selects the latter so its reported `M` is explicitly Hagen averaging, while the TTFS-replica path remains a separate selectable control.
 
 An all-miss logical pool decodes to zero on the positive UInt5 rail. Artifacts retain the all-miss mask and also report accuracy on samples without any all-miss hidden activation, preventing silent sample deletion or fabricated deadline spikes.
+
+Every condition retains the actual Hagen UInt5 tensor presented to the LIF stage as its nominal activation. Miss rates are split between nominal code zero and positive support, and non-miss decoded error is reported as UInt5 bias and MAE both overall and for each code from 0 through 31.
+
+Two paired causal controls operate on the same pooled hidden tensor. The miss-repair oracle replaces only all-miss positions with the ideal converted hidden code before the selected readout, while the readout ablation sends the unmodified pooled tensor through the deterministic integer PyTorch second layer. A torch-readout oracle is also retained so miss repair can be compared without analog readout noise.
 
 ### Network pool placement
 
@@ -124,7 +128,7 @@ Full hardware evaluation slices samples and caps `pool_size * samples` at 128 re
 
 Timing calibration is acquired once per physical condition in disposable four-trial workers. Their raw events are concatenated before offset estimation, and every inference chunk reuses the same checksummed calibration; calibration and inference batches never coexist in one M=16 graph.
 
-After temporal decoding, the physical Hagen readout also slices the flattened trial-sample row axis before each PWM call. The concatenated logits retain their original row order, and each row chunk records its calibration, chip, shape, and elapsed-time metadata.
+After temporal decoding, the physical Hagen readout also slices the flattened trial-sample row axis before each PWM call. When any all-miss position exists, original and oracle-repaired rows are concatenated and tagged as separate segments; the logits retain row order, and every chunk records calibration, chip, shape, and elapsed time.
 
 Formal multi-condition runs materialize each required physical Hagen hidden tensor once, then execute every placement and pool size in a fresh child process. Completed worker directories are resumable, and the parent rebuilds the combined artifact so process isolation does not change paired inputs or the result schema.
 
@@ -142,7 +146,7 @@ Synthetic and artifact-replay backends validate accuracy propagation before hard
 
 Network artifacts join float, ideal-converted, and physical predictions with complete intermediate tensors and bounded human-readable event extracts.
 
-[[utils/hardware/brainscales2/toy_artifacts.py#write_toy_artifacts]] writes conversion and run manifests, predictions, accuracy and NLL drops, paired recovery intervals, miss metrics, raw timing tensors, and accuracy, confusion, and variance figures. `intermediates.pt` remains lossless; `events.csv` records a deterministic sample/trial subset to avoid duplicating millions of tensor entries.
+[[utils/hardware/brainscales2/toy_artifacts.py#write_toy_artifacts]] writes conversion and run manifests, prediction variants, accuracy and NLL drops, paired recovery intervals, support-stratified miss metrics, per-code UInt5 error, readout ablations, raw timing tensors, and figures. `intermediates.pt` remains lossless; `events.csv` records a deterministic sample/trial subset.
 
 Accepted physical runs use a per-run Git allowlist. The committed bundle keeps checkpoints, calibration, manifests, metrics, predictions, figures, and compressed event extracts; oversized lossless tensors and worker chunks remain external and are represented by size and SHA-256 in `artifact_inventory.json`.
 
@@ -219,6 +223,10 @@ Host tiling must cover every input column once and agree with an untiled integer
 ### Network artifact contract
 
 Network evaluation must emit the stable manifest, runtime, metrics, predictions, event extract, and complete intermediate tensor files with consistent shapes.
+
+### Hardware error attribution
+
+Each condition must split zero/positive-code misses, report non-miss UInt5 error by code, repair only all-miss positions, and retain physical, torch-readout, and repaired logits.
 
 ### EBRAINS launcher contract
 

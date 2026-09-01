@@ -618,6 +618,71 @@ def _run_hagen_output(
     return HagenResult(combined, metadata)
 
 
+def _evaluate_readout_ablations(
+    args: argparse.Namespace,
+    hagen: HagenPWMBackend | None,
+    converted: ConvertedToyModel,
+    pool_result: ToyPoolResult,
+    ideal_hidden_uint5: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
+    """Evaluate physical/torch readouts before and after position-wise miss repair."""
+    decoded = pool_result.decoded_uint5
+    if ideal_hidden_uint5.shape != decoded.shape[1:]:
+        raise ValueError("ideal hidden tensor does not match pooled hidden activations")
+    repaired = torch.where(
+        pool_result.all_miss,
+        ideal_hidden_uint5.unsqueeze(0).expand_as(decoded),
+        decoded,
+    )
+    flat_hidden = decoded.reshape(-1, converted.architecture.hidden_features)
+    flat_repaired = repaired.reshape(-1, converted.architecture.hidden_features)
+    _, flat_torch_logits = converted.output_from_hidden(flat_hidden)
+    _, flat_torch_oracle_logits = converted.output_from_hidden(flat_repaired)
+
+    physical_oracle_reexecuted = bool(pool_result.all_miss.any()) and hagen is not None
+    if hagen is None:
+        flat_logits = flat_torch_logits
+        flat_oracle_logits = flat_torch_oracle_logits
+        output_metadata: dict[str, Any] = {"backend": "torch"}
+    elif physical_oracle_reexecuted:
+        combined_hidden = torch.cat((flat_hidden, flat_repaired), dim=0)
+        output = _run_hagen_output(args, hagen, converted, combined_hidden)
+        row_count = flat_hidden.shape[0]
+        flat_logits = output.value[:row_count]
+        flat_oracle_logits = output.value[row_count:]
+        output_metadata = {
+            **output.metadata,
+            "row_segments": {
+                "physical": [0, row_count],
+                "physical_oracle_miss_repair": [row_count, 2 * row_count],
+            },
+        }
+    else:
+        output = _run_hagen_output(args, hagen, converted, flat_hidden)
+        flat_logits = output.value
+        flat_oracle_logits = output.value
+        output_metadata = output.metadata
+
+    shape = (
+        decoded.shape[0],
+        decoded.shape[1],
+        converted.architecture.output_features,
+    )
+    output_metadata = {
+        **output_metadata,
+        "physical_oracle_miss_repair_reexecuted": physical_oracle_reexecuted,
+        "torch_readout_ablation": True,
+        "oracle_repair_policy": "replace-all-miss-position-with-ideal-hidden",
+    }
+    return (
+        flat_logits.reshape(shape).to(torch.float32),
+        flat_oracle_logits.reshape(shape).to(torch.float32),
+        flat_torch_logits.reshape(shape).to(torch.float32),
+        flat_torch_oracle_logits.reshape(shape).to(torch.float32),
+        output_metadata,
+    )
+
+
 def _select_test_data(args: argparse.Namespace, dataset: Any) -> tuple[torch.Tensor, torch.Tensor]:
     limit = args.max_test_samples
     if args.phase == "hardware-smoke":
@@ -718,21 +783,19 @@ def evaluation_phase(args: argparse.Namespace) -> None:
                 pool_config,
                 spiking_config,
             )
-            flat_hidden = pool_result.decoded_uint5.reshape(
-                -1, converted.architecture.hidden_features
+            (
+                logits,
+                oracle_miss_repair_logits,
+                torch_readout_logits,
+                torch_oracle_miss_repair_logits,
+                output_metadata,
+            ) = _evaluate_readout_ablations(
+                args,
+                hagen,
+                converted,
+                pool_result,
+                ideal.hidden_uint5,
             )
-            if hagen is None:
-                _, flat_logits = converted.output_from_hidden(flat_hidden)
-                output_metadata = {"backend": "torch"}
-            else:
-                output = _run_hagen_output(args, hagen, converted, flat_hidden)
-                flat_logits = output.value
-                output_metadata = output.metadata
-            logits = flat_logits.reshape(
-                pool_result.decoded_uint5.shape[0],
-                pool_result.decoded_uint5.shape[1],
-                converted.architecture.output_features,
-            ).to(torch.float32)
             key = (
                 f"{args.pooling_domain}_M{effective_pool_size}_"
                 f"{placement}_{args.pool_mapping}"
@@ -748,7 +811,11 @@ def evaluation_phase(args: argparse.Namespace) -> None:
                     pool_size=effective_pool_size,
                     pooling_domain=args.pooling_domain,
                     pool_result=pool_result,
+                    nominal_hidden_uint5=first_hidden,
                     logits=logits,
+                    oracle_miss_repair_logits=oracle_miss_repair_logits,
+                    torch_readout_logits=torch_readout_logits,
+                    torch_oracle_miss_repair_logits=torch_oracle_miss_repair_logits,
                     pwm_metadata={"first": first_metadata, "output": output_metadata},
                 )
             )
@@ -791,11 +858,21 @@ def evaluation_phase(args: argparse.Namespace) -> None:
         "hagen_calibration_sha256": file_sha256(args.hagen_calibration),
         "spiking_calibration_sha256": file_sha256(args.spiking_calibration),
         "spiking_config": spiking_config.to_manifest_dict(),
+        "analyses": {
+            "miss_stratification": "nominal-hidden-uint5-zero-vs-positive",
+            "activation_error_support": "logical-pool-non-miss-only",
+            "activation_error_units": "uint5-code",
+            "oracle_miss_repair": "replace-all-miss-position-with-ideal-hidden",
+            "oracle_readout_backend": args.pwm_backend,
+            "readout_ablation": "same-pooled-hidden-through-integer-torch-readout",
+        },
         "conditions": [
             {
                 "key": item.key,
                 "pool_size": item.pool_size,
                 "pooling_domain": item.pooling_domain,
+                "hagen_avg": item.pool_size if item.pooling_domain == "potential" else 1,
+                "temporal_pool_size": item.pool_result.pool_size,
                 "placement": item.pool_result.placement,
                 "mapping": item.pool_result.mapping,
                 "physical_coordinates": item.pool_result.physical_coordinates,
@@ -1583,7 +1660,13 @@ def _load_isolated_condition(
         pool_size=int(condition_manifest["pool_size"]),
         pooling_domain=condition_manifest["pooling_domain"],
         pool_result=pool_result,
+        nominal_hidden_uint5=tensors["nominal_hidden_uint5"],
         logits=tensors["logits"],
+        oracle_miss_repair_logits=tensors["oracle_miss_repair_logits"],
+        torch_readout_logits=tensors["torch_readout_logits"],
+        torch_oracle_miss_repair_logits=tensors[
+            "torch_oracle_miss_repair_logits"
+        ],
         pwm_metadata=condition_manifest["pwm_metadata"],
     )
     return evaluation, archive, manifest, runtime
