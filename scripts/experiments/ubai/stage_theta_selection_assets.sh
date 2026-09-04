@@ -69,7 +69,13 @@ ssh "$remote_host" "mkdir -p '$remote_assets'"
 if command -v rsync >/dev/null 2>&1; then
     rsync -a --partial --info=progress2 "$stage_root/" "$remote_host:$remote_assets/"
 else
-    scp -rp "$stage_root/." "$remote_host:$remote_assets/"
+    scp -rp \
+        "$stage_root/SHA256SUMS" \
+        "$stage_root/checkpoint-manifest.json" \
+        "$stage_root/checkpoints" \
+        "$stage_root/datasets" \
+        "$stage_root/runtime" \
+        "$remote_host:$remote_assets/"
 fi
 ssh "$remote_host" "cd '$remote_assets' && sha256sum --check SHA256SUMS"
 echo "$remote_host:$remote_assets"
