@@ -67,6 +67,10 @@ if [[ "$benchmark_measure" != "0" ]]; then
     )
 fi
 
+# A plain Ubuntu image has no NVIDIA container metadata, so activate enroot's
+# driver hook explicitly while retaining Slurm's one-device visibility mask.
+export NVIDIA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:?CUDA_VISIBLE_DEVICES is required}"
+
 {
     echo "Slurm identity — job_id: ${SLURM_JOB_ID}, task_id: ${task_index}, node: ${SLURMD_NODENAME}, gpu_family: ${gpu_family}"
     srun \
