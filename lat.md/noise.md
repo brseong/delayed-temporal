@@ -45,6 +45,8 @@ $$
 
 Any sampled event later than this shared endpoint is a deadline miss. The model does not extend the observation window beyond the nominal latest codeword.
 
+The diagnostic deadline-margin sweep may add a non-negative receiver grace $m=k\sigma_t$ after $T_{\mathrm{code}}$. An event inside the grace interval is delivered but its timestamp saturates at the original upper code rail, so bounds and clean operator arithmetic do not change. This is a late-arrival tolerance diagnostic, not a calibrated hardware window.
+
 ## Numerical Precision and Endpoint Caveat
 
 Timing-noise results are interpretable only when the sampling dtype resolves the requested perturbation and nominal codewords are assessed for endpoint placement.
@@ -54,6 +56,8 @@ Timing-noise results are interpretable only when the sampling dtype resolves the
 An event nominally at $T_{\mathrm{obs}}$ has miss probability $0.5$ under any zero-mean continuous Gaussian with $\sigma_t>0$, because every positive perturbation is late. Float32 can conceal this endpoint behavior when $\sigma_t$ is below one ULP; that concealment is numerical quantization, not physical robustness.
 
 Experiments must therefore record the payload dtype, compare $\sigma_t$ with time-value spacing over every exercised code interval, and report whether nominal events occupy the deadline. Sub-ULP sweeps and endpoint-heavy encodings are diagnostic only until empirical sampling agrees with [[utils/transforms/noise.py#gaussian_deadline_miss_probability]].
+
+Each instrumented site records nominal deadline occupancy and the smallest and largest deadline ULP encountered during evaluation. The ViT evaluator reports both this range and $\sigma_t/\mathrm{ULP}$ so precision-limited conditions remain identifiable in saved logs and CSV summaries.
 
 ## Observation-Time Potential Invariant
 
@@ -106,7 +110,9 @@ If a data event is absent, its contribution remains at the reset value. If the r
 
 Static threshold mismatch remains separate from trial-to-trial timing noise.
 
-[[utils/transforms/noise.py#install_device_mismatch]] samples one frozen potential-offset proxy per supported spiking module and installs it with forward pre-hooks. It is not Stanojevic-style neuron-slope perturbation and should not be reported as such.
+[[utils/transforms/noise.py#install_device_mismatch]] samples one frozen potential-offset proxy per supported spiking module from a dedicated seeded generator and installs it with forward pre-hooks. The offset remains fixed within a replica, equal seeds replay the complete draw, and installation does not consume the model's global RNG stream.
+
+This proxy is not Stanojevic-style neuron-slope perturbation and should not be reported as calibrated device mismatch. Timing noise and static mismatch remain separate experiment axes and are not enabled in the same evaluation replica.
 
 ## Static Weight and Bias Perturbation
 
@@ -136,12 +142,15 @@ The event-aware migration is complete across the shared sampler and encoder boun
 
 Affine, multiplication, exponential, exponential-difference/division, activation, softmin, and attention value paths use decorated events and retain noise-off parity references. Verification exercises opening, closing/reference, and internal exp-temporal cases.
 
-The next experimental order is:
+Any new ViT-B/16 noise campaign must consume an `approved` `selection.json` produced by [[evaluation#ViT-B/16 Global Theta Selection]] and use its `selected_theta` as the global operating point. A $	heta=2000$ artifact remains preserved but is marked superseded and excluded from manuscript support whenever the approved value differs; no replacement robustness figure is promoted before the new-theta sweep finishes.
 
-1. run a short ViT smoke evaluation with zero timing noise and confirm checkpoint-level parity;
-2. sweep small $\sigma_t$ values while recording per-site miss rates;
-3. inspect per-site output saturation before selecting the manuscript's operating range;
-4. repeat selected settings across seeds before any hardware comparison.
+The maintained manuscript protocol is:
+
+1. run a short ViT-B/16 smoke evaluation with zero timing noise and confirm checkpoint-level parity;
+2. sweep Gaussian timing noise and static threshold mismatch independently on a fixed 5,000-image subset with replica seeds 0, 1, and 2;
+3. record per-site deadline occupancy, ULP ranges, misses, and output saturation before interpreting the transition;
+4. confirm the clean baseline and three representative points per axis on the full ImageNet validation split;
+5. keep every evaluator process on one physical GPU and report both axes with 95% Student-t confidence intervals.
 
 Every stage keeps the noise-free tensor path as a parity reference. No stage may introduce `gaussian_multiplication_operator`, an operator-specific sampler, or invalid-result propagation.
 
@@ -149,6 +158,6 @@ Every stage keeps the noise-free tensor path as a parity reference. No stage may
 
 Maintained-noise experiments expose per-site event delivery and readout saturation counters so robustness results can be attributed to physical failure modes.
 
-The statistics interface reports event count, deadline misses, output count, and lower/upper rail saturation for each named site. Reconfiguring the Gaussian generator starts a new replica and clears these counters; callers can also clear them explicitly.
+The statistics interface reports event count, deadline misses, nominal deadline events, deadline ULP range, output count, and lower/upper rail saturation for each named site. Reconfiguring the Gaussian generator starts a new replica and clears these counters; callers can also clear them explicitly.
 
 Output saturation is counted from the raw physical readout before its required rail clamp. Both denominators must be reported: event rates use event count, while saturation rates use output count.

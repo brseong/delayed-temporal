@@ -16,41 +16,55 @@ source "$repo_root/scripts/lib/gpu_pool.sh"
 # These environment controls make a long scan reproducible and safely resumable.
 # PYTHON_BIN must name a Python executable; running this script through
 # ``conda run -n dt`` supplies the repository's complete evaluation environment.
-read -r -a cuda_devices <<< "${GPUS:-0 1 2 3 4 5 6 7}"
-read -r -a time_noise_seeds <<< "${TIME_NOISE_SEEDS:-0 1 2}"
+readonly allowed_gpu_list="4 5 6 7"
+read -r -a cuda_devices <<< "${GPUS:-$allowed_gpu_list}"
+read -r -a replica_seeds <<< "${REPLICA_SEEDS:-${TIME_NOISE_SEEDS:-0 1 2}}"
 python_bin="${PYTHON_BIN:-python}"
-scan_tag="${SCAN_TAG:-gaussian_v1}"
-scan_model_label="${SCAN_MODEL_LABEL:-ViT-S}"
+scan_protocol="${SCAN_PROTOCOL:-quick}"
+precision="${PRECISION:-float64}"
+scan_tag="${SCAN_TAG:-vit_base_noise_${scan_protocol}_${precision}_v2}"
+scan_model_label="${SCAN_MODEL_LABEL:-ViT-B/16}"
 force="${FORCE:-0}"
 torch_num_threads="${TORCH_NUM_THREADS:-4}"
+publish_paper_figure="${PUBLISH_PAPER_FIGURE:-0}"
+dry_run="${NOISE_SCAN_DRY_RUN:-0}"
+require_idle_gpus="${REQUIRE_IDLE_GPUS:-1}"
 
 device="cuda"
-# The defaults reproduce the canonical ViT-S sweep. A distinct SCAN_TAG and
-# SCAN_FIGURE_PREFIX let a follow-up architecture reuse the exact protocol
-# without overwriting either the ViT-S logs or its canonical figure.
-model_id="${MODEL_ID:-/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k}"
+# The canonical manuscript protocol evaluates the local timm ViT-B/16 checkpoint.
+model_id="${MODEL_ID:-/data/nas/vit_base_patch16_224.augreg2_in21k_ft_in1k}"
 dataset_id="imagenet-1k"
 batch_size="${BATCH_SIZE:-32}"
-theta=2000
+theta="${THETA:-2000}"
 
 scan_logdir="${SCAN_LOGDIR:-$repo_root/artifacts/logs/noise_scan/$scan_tag}"
 manifest_path="$scan_logdir/expected_runs.tsv"
 raw_csv_path="$scan_logdir/raw_runs.csv"
 summary_csv_path="$scan_logdir/summary.csv"
-figure_prefix="${SCAN_FIGURE_PREFIX:-$repo_root/artifacts/figures/noise_robustness}"
+figure_prefix="${SCAN_FIGURE_PREFIX:-$repo_root/artifacts/figures/noise_robustness_vit_base_${scan_protocol}_${precision}_v2}"
+paper_figure="$repo_root/paper/figures/noise-robustness-vit-base.pdf"
 mkdir -p "$scan_logdir"
 
-# The defaults retain the original eleven-point grids. Explicit environment
-# lists let a tagged follow-up refine only the physically relevant axis without
-# editing this script or rerunning an unrelated static-mismatch grid.
-default_time_noise_std_fracs=(
-    1.000e-06 1.900e-06 2.800e-06 3.700e-06 4.600e-06 5.500e-06
-    6.400e-06 7.300e-06 8.200e-06 9.100e-06 1.000e-05
-)
-default_mismatch_theta_stds=(
-    1.000e-05 1.400e-05 1.800e-05 2.200e-05 2.600e-05 3.000e-05
-    3.400e-05 3.800e-05 4.200e-05 4.600e-05 5.000e-05
-)
+# The quick protocol resolves both transition curves on the fixed 5,000-image
+# subset. The full protocol confirms only three representative conditions per axis.
+if [[ "$scan_protocol" == "quick" ]]; then
+    default_time_noise_std_fracs=(
+        1.000e-10 1.250e-10 1.500e-10 1.750e-10 2.000e-10 2.500e-10
+        3.162e-10 4.000e-10 5.000e-10 6.300e-10 8.000e-10 1.000e-09
+    )
+    default_mismatch_theta_stds=(
+        1.000e-05 1.400e-05 1.800e-05 2.200e-05 2.600e-05 3.000e-05
+        3.400e-05 3.800e-05 4.200e-05 4.600e-05 5.000e-05
+    )
+    evaluation_scope_args=(--quick-test)
+elif [[ "$scan_protocol" == "full" ]]; then
+    default_time_noise_std_fracs=(1.000e-10 2.500e-10 4.000e-10)
+    default_mismatch_theta_stds=(1.000e-05 3.000e-05 5.000e-05)
+    evaluation_scope_args=()
+else
+    echo "SCAN_PROTOCOL must be quick or full" >&2
+    exit 2
+fi
 if [[ -v TIME_NOISE_STD_FRACS ]]; then
     read -r -a time_noise_std_fracs <<< "$TIME_NOISE_STD_FRACS"
 else
@@ -66,16 +80,50 @@ if [[ ${#cuda_devices[@]} -eq 0 ]]; then
     echo "GPUS must contain at least one CUDA device" >&2
     exit 2
 fi
-if [[ ${#time_noise_seeds[@]} -lt 2 ]]; then
-    echo "TIME_NOISE_SEEDS must contain at least two seeds for a confidence interval" >&2
+declare -A seen_gpus=()
+for gpu in "${cuda_devices[@]}"; do
+    if [[ " $allowed_gpu_list " != *" $gpu "* ]]; then
+        echo "GPUS may contain only physical GPUs 4, 5, 6, and 7" >&2
+        exit 2
+    fi
+    if [[ -v "seen_gpus[$gpu]" ]]; then
+        echo "GPUS must not contain duplicate device $gpu" >&2
+        exit 2
+    fi
+    seen_gpus[$gpu]=1
+done
+if [[ ${#replica_seeds[@]} -lt 2 ]]; then
+    echo "REPLICA_SEEDS must contain at least two seeds for confidence intervals" >&2
     exit 2
 fi
+for seed in "${replica_seeds[@]}"; do
+    if [[ ! "$seed" =~ ^[0-9]+$ ]]; then
+        echo "REPLICA_SEEDS must contain non-negative integers" >&2
+        exit 2
+    fi
+done
 if [[ ${#time_noise_std_fracs[@]} -eq 0 ]]; then
     echo "TIME_NOISE_STD_FRACS must contain at least one positive fraction" >&2
     exit 2
 fi
 if [[ "$force" != "0" && "$force" != "1" ]]; then
     echo "FORCE must be 0 or 1" >&2
+    exit 2
+fi
+if [[ "$publish_paper_figure" != "0" && "$publish_paper_figure" != "1" ]]; then
+    echo "PUBLISH_PAPER_FIGURE must be 0 or 1" >&2
+    exit 2
+fi
+if [[ "$dry_run" != "0" && "$dry_run" != "1" ]]; then
+    echo "NOISE_SCAN_DRY_RUN must be 0 or 1" >&2
+    exit 2
+fi
+if [[ "$require_idle_gpus" != "0" && "$require_idle_gpus" != "1" ]]; then
+    echo "REQUIRE_IDLE_GPUS must be 0 or 1" >&2
+    exit 2
+fi
+if [[ "$publish_paper_figure" == "1" && "$scan_protocol" != "quick" ]]; then
+    echo "Only the quick transition scan may publish the manuscript figure" >&2
     exit 2
 fi
 if [[ ! "$torch_num_threads" =~ ^[1-9][0-9]*$ ]]; then
@@ -86,15 +134,16 @@ if [[ ! "$batch_size" =~ ^[1-9][0-9]*$ ]]; then
     echo "BATCH_SIZE must be a positive integer" >&2
     exit 2
 fi
-if [[ "$model_id" = /* && ! -e "$model_id" ]]; then
-    echo "MODEL_ID does not exist: $model_id" >&2
+if [[ "$precision" != "float32" && "$precision" != "float64" ]]; then
+    echo "PRECISION must be float32 or float64 for the manuscript noise scan" >&2
     exit 2
 fi
-
-# Fail before scheduling GPUs if the selected interpreter cannot import the model
-# stack. This avoids producing 45 nearly identical dependency-failure logs.
-if ! "$python_bin" -c "import torch, transformers, datasets, wandb"; then
-    echo "PYTHON_BIN lacks evaluation dependencies; run with 'conda run -n dt bash ...'" >&2
+if [[ ! "$theta" =~ ^[0-9]+([.][0-9]+)?$ ]] || [[ "$theta" == "0" ]]; then
+    echo "THETA must be a positive decimal number" >&2
+    exit 2
+fi
+if [[ "$model_id" = /* && ! -e "$model_id" ]]; then
+    echo "MODEL_ID does not exist: $model_id" >&2
     exit 2
 fi
 
@@ -102,7 +151,7 @@ write_manifest() {
     "${python_bin}" - \
         "$manifest_path" \
         "$scan_tag" \
-        "${time_noise_seeds[*]}" \
+        "${replica_seeds[*]}" \
         "${time_noise_std_fracs[*]}" \
         "${mismatch_theta_stds[*]}" <<'PY'
 import csv
@@ -137,14 +186,15 @@ for fraction in fractions:
             "log_file": f"{run_name}.log",
         })
 for mismatch in mismatches:
-    run_name = f"B_mismatch_{mismatch}"
-    rows.append({
-        "axis": "mismatch",
-        "magnitude": mismatch,
-        "seed": "",
-        "experiment_name": f"{scan_tag}-{run_name}",
-        "log_file": f"{run_name}.log",
-    })
+    for seed in seeds:
+        run_name = f"B_mismatch_{mismatch}_seed_{seed}"
+        rows.append({
+            "axis": "mismatch",
+            "magnitude": mismatch,
+            "seed": seed,
+            "experiment_name": f"{scan_tag}-{run_name}",
+            "log_file": f"{run_name}.log",
+        })
 
 manifest.parent.mkdir(parents=True, exist_ok=True)
 with manifest.open("w", newline="", encoding="utf-8") as handle:
@@ -162,6 +212,33 @@ PY
 # shell code. The resulting file describes one baseline, every Gaussian
 # fraction/seed pair, and each optional static-mismatch magnitude.
 write_manifest
+
+if [[ "$dry_run" == "1" ]]; then
+    echo "Dry run validated GPUs: ${cuda_devices[*]}"
+    echo "Dry run wrote manifest: $manifest_path"
+    exit 0
+fi
+
+if [[ "$require_idle_gpus" == "1" ]]; then
+    for gpu in "${cuda_devices[@]}"; do
+        active_pids="$(
+            nvidia-smi --id="$gpu" --query-compute-apps=pid \
+                --format=csv,noheader,nounits 2>/dev/null
+        )"
+        if [[ -n "$active_pids" ]]; then
+            echo "GPU $gpu is already occupied by compute process(es): $active_pids" >&2
+            echo "Wait for GPUs 4-7 to become idle before starting this scan" >&2
+            exit 2
+        fi
+    done
+fi
+
+# Fail before scheduling GPUs if the selected interpreter cannot import the model
+# stack. This avoids producing many identical dependency-failure logs.
+if ! "$python_bin" -c "import torch, transformers, datasets, wandb"; then
+    echo "PYTHON_BIN lacks evaluation dependencies; run with 'conda run -n dt bash ...'" >&2
+    exit 2
+fi
 
 is_complete_log() {
     local log_path="$1"
@@ -183,7 +260,14 @@ is_complete_log() {
     # precedence so a partially successful process is never reused as completed.
     [[ "$original_size" -eq "$without_nul_size" ]] \
         && grep -Eq '^Accuracy: [0-9]+([.][0-9]+)?$' "$log_path" \
-        && ! grep -q 'Traceback (most recent call last)' "$log_path"
+        && grep -q '^Evaluation metadata — ' "$log_path" \
+        && ! grep -q 'Traceback (most recent call last)' "$log_path" \
+        || return 1
+    case "$(basename "$log_path")" in
+        A_gaussian_*) grep -q '^Gaussian\[' "$log_path" ;;
+        B_mismatch_*) grep -q '^Static threshold mismatch — enabled: True' "$log_path" ;;
+        *) return 0 ;;
+    esac
 }
 
 launch_run() {
@@ -222,7 +306,8 @@ launch_run() {
             --dataset_id "$dataset_id" \
             --batch_size "$batch_size" \
             --theta "$theta" \
-            --quick-test \
+            --precision "$precision" \
+            "${evaluation_scope_args[@]}" \
             --spiking-layernorm \
             --spiking-mlp \
             --spiking-attention \
@@ -244,7 +329,7 @@ launch_run \
 # Timing seeds alter only the dedicated Gaussian generator. The model, data subset,
 # and ordering therefore remain fixed while the stochastic event replica changes.
 for time_noise_std_frac in "${time_noise_std_fracs[@]}"; do
-    for time_noise_seed in "${time_noise_seeds[@]}"; do
+    for time_noise_seed in "${replica_seeds[@]}"; do
         run_name="A_gaussian_frac_${time_noise_std_frac}_seed_${time_noise_seed}"
         launch_run \
             "$run_name" \
@@ -256,15 +341,18 @@ for time_noise_std_frac in "${time_noise_std_fracs[@]}"; do
     done
 done
 
-# Static threshold mismatch remains a separate fixed draw under torch seed 42.
-# It is evaluated once per magnitude and never combined with timing noise.
+# Static threshold mismatch uses its own dedicated seed and is never combined with
+# timing noise. Each replica retains one frozen offset draw for the full evaluation.
 for mismatch_theta_std in "${mismatch_theta_stds[@]}"; do
-    run_name="B_mismatch_${mismatch_theta_std}"
-    launch_run \
-        "$run_name" \
-        "$scan_tag-$run_name" \
-        --mismatch-enabled \
-        --mismatch-theta-std "$mismatch_theta_std"
+    for mismatch_seed in "${replica_seeds[@]}"; do
+        run_name="B_mismatch_${mismatch_theta_std}_seed_${mismatch_seed}"
+        launch_run \
+            "$run_name" \
+            "$scan_tag-$run_name" \
+            --mismatch-enabled \
+            --mismatch-theta-std "$mismatch_theta_std" \
+            --mismatch-seed "$mismatch_seed"
+    done
 done
 
 # Some jobs have already been reaped by gpu_pool_acquire; this wait covers every
@@ -278,3 +366,8 @@ wait || true
     --summary-csv "$summary_csv_path" \
     --figure-prefix "$figure_prefix" \
     --model-label "$scan_model_label"
+
+if [[ "$publish_paper_figure" == "1" ]]; then
+    cp "$figure_prefix.pdf" "$paper_figure"
+    echo "Published validated manuscript figure: $paper_figure"
+fi

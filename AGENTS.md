@@ -10,11 +10,35 @@ The current manuscript is `paper/neurips_2026.tex`. Supporting review translatio
 
 ## Environment
 
+This paper's experiments are split across two execution environments: the local GPU host `baekryun` and the UOS UBAI supercomputing cluster reached through the `gate1`/`gate2` login hosts. Several agents work across both, so confirm which host you are on with `hostname` before running anything. Their execution rules are not interchangeable.
+
+Shared expectations:
+
 - Use Python 3.12 as specified by `.python-version`.
 - Install dependencies with `pip install -r requirements.txt`. The requirements include editable checkouts of Hugging Face Transformers and a SpikingJelly fork.
-- Pretrained ViT checkpoints and ImageNet data are expected outside the repository under `/data/nas/` by the existing experiment scripts.
 - Evaluations may require CUDA, local datasets and checkpoints, W&B credentials, and sufficient GPU memory. Do not assume every full experiment can run in a lightweight development environment.
 - Some scripts activate `./venv/bin/activate`, but a repository-local virtual environment is not guaranteed. Plain `python3` is valid when the active environment already has the dependencies.
+
+### baekryun (local GPU host)
+
+`hostname` returns `baekryun-cuda129`. Jobs run directly with no scheduler, so an agent must check device occupancy itself before launching anything.
+
+- Eight NVIDIA RTX A6000 (49 GB) devices are present as indices 0--7. The maintained sweep scripts restrict themselves to GPUs 4--7 through `allowed_gpu_list` and refuse to start on an occupied device.
+- The maintained interpreter is `/opt/conda/envs/dt/bin/python` (conda environment `dt`), overridable through `PYTHON_BIN`.
+- Pretrained ViT checkpoints and ImageNet data are expected outside the repository under `/data/nas/` by the existing experiment scripts.
+
+### UBAI cluster (gate1/gate2)
+
+The cluster's canonical rules live in `/home1/sizz1997/myubai/wagner2026philtrans/AGENTS.md` on `gate1.hpc`. Follow them whenever work targets the cluster instead of the local GPU host.
+
+- Gate nodes are login nodes. Use them only for SSH and file transfer, `git`, light editing and log inspection, and Slurm commands (`sbatch`, `squeue`, `sinfo`, `scancel`).
+- Never run training, inference, builds, or bulk data processing on a gate node. Heavy processes block other users and are terminated by administrators.
+- Submit every compute job to Slurm with `sbatch`. Allocate a compute node with `srun --pty bash` even for interactive debugging.
+- `enroot` 3.5.0 and the Slurm `pyxis` plugin v0.23.0 exist only on compute nodes; gate nodes have neither.
+- `#SBATCH --container-image` is rejected at submission because the gate `sbatch` does not load `pyxis`. Put container options on the `srun` call inside the job script instead.
+- Home directories are not mounted inside containers by default. Pass `--container-mounts=$HOME:$HOME` or `--container-mount-home`. The container keeps the user's uid/gid and is not root unless `--container-remap-root` is given.
+- The `/enroot` image cache is node-local, so `--container-name` reuse does not survive a different node assignment. Save frequently used images to a squashfs file under the home directory with `--container-save` from inside a submitted job, then reference that path.
+- From `baekryun` the login hosts are reachable as `ssh gate1` and `ssh gate2` once `~/.ssh/config` defines them. SSH keys and host configuration are machine-local setup and must never be committed to this repository.
 
 ## Repository layout
 

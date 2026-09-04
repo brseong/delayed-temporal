@@ -158,25 +158,55 @@ The audited BERT, RoBERTa, and GPT-2 configurations use the same explicit LayerN
 | Normalized dual-rail readout | Temporal exponential difference, `spiking_ln_expdiff=True` |
 | Learned affine | Temporal product when exponential difference is active |
 
+## ViT-B/16 Global Theta Selection
+
+The deterministic selection workflow chooses the smallest accurate global threshold before any new ViT-B/16 robustness result can be treated as manuscript evidence.
+
+[[scripts/evaluation/error_analysis_vit.py#load_evaluation_dataset]] accepts a self-contained Hugging Face dataset artifact through `--evaluation-dataset-path`. It preserves saved order and fingerprints, accumulates top-1 from local correct/total counts, writes a prediction SHA-256 digest, and can disable TensorBoard completely with `--no-tensorboard`.
+
+The preregistered training candidates are $	heta\in\{40,80,160,320,640,1000,1400,2000,2800,4000\}$. Every run uses the seed-0 shuffled ImageNet training subset of exactly 5,000 images, float64, batch size 32, analytic ranges, all maintained ViT spiking paths, and zero timing noise, mismatch, deadline margin, weight noise, and bias noise.
+
+[[scripts/analysis/summarize_theta_selection.py#choose_theta]] selects the smallest candidate whose accuracy is within 0.005 of the best candidate accuracy. A gain above 0.001 from 2,800 to 4,000 requires 5,600 and 8,000; a further gain above 0.001 from 5,600 to 8,000 marks the search range insufficient rather than approving an endpoint.
+
+The selected training condition must replay with the identical correct count and prediction digest. The selected candidate and its immediate available neighbors are then evaluated on the first 5,000 examples of the self-contained validation artifact; selection fails if the chosen value is more than 0.005 below that local validation maximum. Approval additionally requires selected-spiking and dense-reference runs on all 50,000 validation images.
+
+Clamp reports retain the maximum semantic excursion rate and its site as diagnostics. Inactive dual rails named `x_err_neg` or `x_err_pos` and multiplication's `multiplication_result` reset rail are counted separately as structural bookkeeping and cannot change the accuracy-based choice.
+
+UBAI execution benchmarks RTX 3090, A10, RTX 6000 Ada, and RTX A6000 twice with five warm-up and twenty measured batches. [[scripts/analysis/select_ubai_gpu_family.py#choose_family]] rejects OOM, incomplete timing, wrong hardware identity, replica disagreement, and predictions differing from the RTX A6000 reference. It chooses the lowest median seconds per image; families within 5% use current free-GPU capacity as the tie-break.
+
+The UBAI task contract uses one GPU, four CPUs, 64 GB RAM, no `DataParallel`, and immutable condition/data/checkpoint/commit/GPU-family manifests. [[scripts/experiments/ubai/build_theta_selection_manifest.py#main]] creates one row per array index, and completed logs are resumed only after their recorded identity matches that row.
+
+[[scripts/verification/verify_theta_selection.py#main]] covers the 0.5-point boundary, tie behavior, upper-grid guard, replay and validation gates, offline dataset order and fingerprint replay, TensorBoard suppression, GPU-family selection, and one-GPU manifest contract.
+
 ## Noise and Ablation Sweeps
 
 Shell scripts under `scripts/experiments` run isolated sweeps for Gaussian spike-time noise, static mismatch, activation variants, and module-level conversion ablations.
 
-`scripts/experiments/noise_analysis_vit.sh` and `scripts/experiments/noise_scan_vit.sh` sweep Gaussian timing scale for ViT. The fine scan preserves already-completed outputs, schedules one process per GPU, records its expected-run manifest, and resumes only incomplete tagged logs.
+`scripts/experiments/noise_analysis_vit.sh` and `scripts/experiments/noise_scan_vit.sh` sweep Gaussian timing scale for ViT. The maintained fine scan targets ViT-B/16, preserves completed outputs, records its expected-run manifest, and resumes only incomplete tagged logs.
 
-The fine-scan defaults reproduce the canonical ViT-S run. `MODEL_ID` and `BATCH_SIZE` may select a follow-up architecture, while distinct `SCAN_TAG`, `SCAN_FIGURE_PREFIX`, and `SCAN_MODEL_LABEL` values keep that model's artifacts and plotted identity separate from ViT-S.
+The runner accepts only physical GPUs 4 through 7, refuses externally occupied devices by default, and schedules at most one evaluator process per selected GPU, thereby avoiding `DataParallel` and cross-job contention. Its canonical float64 payload resolves the selected tiny timing scales; batch size remains 32 because each affine reference event is shared per layer call. The quick protocol uses the fixed first 5,000 validation images, while the full protocol contains three confirmation points per noise axis.
 
-`TIME_NOISE_STD_FRACS` may replace the default Gaussian grid, and an explicitly empty `MISMATCH_THETA_STDS` omits that independent axis. Gaussian-only refinement manifests remain fully validated and render as one-panel figures rather than fabricating mismatch results.
+`REPLICA_SEEDS` defaults to 0, 1, and 2 for both Gaussian timing and frozen threshold mismatch. `TIME_NOISE_STD_FRACS` and `MISMATCH_THETA_STDS` may replace their grids, and an explicitly empty mismatch list supports Gaussian-only theta analysis without fabricating a second axis.
 
 The scripts pass a dimensionless `time_noise_std_frac`. Each evaluator converts it to one absolute standard deviation using $\sigma_t=r_t(2\theta)$, applies that value at every encoder boundary, and records both values with the seed.
 
-Sweep interpretation is also conditioned on [[noise#Numerical Precision and Endpoint Caveat]]. A float32 result at sub-ULP $\sigma_t$ is a precision-limited implementation diagnostic, not a continuous-Gaussian robustness measurement; float64 reference runs expose endpoint behavior before a range is treated as canonical.
+Sweep interpretation is also conditioned on [[noise#Numerical Precision and Endpoint Caveat]]. Logs and CSVs preserve checkpoint, split, sample count, theta, dtype, absolute timing scale, identity-deadline ULP, per-site ULP range, endpoint occupancy, misses, and saturation counts.
 
-The maintained fine scan evaluates each Gaussian magnitude with timing seeds 0, 1, and 2 while holding the model, 5,000-image subset, and loader seed fixed. Baseline and static threshold mismatch remain single fixed-seed measurements.
+Both stochastic axes use independent dedicated generators while holding the model, validation subset, and loader seed fixed. Gaussian timing advances one stream across event encoders; static mismatch samples one frozen module-offset set per replica.
 
-[[scripts/analysis/summarize_noise_scan.py#summarize_noise_scan]] rejects missing, failed, or parameter-inconsistent logs before publishing raw and aggregate CSV files. Gaussian accuracy uses a 95% Student-t interval across timing seeds; event-miss and saturation rates pool raw denominators across sites and replicas.
+[[scripts/analysis/summarize_noise_scan.py#summarize_noise_scan]] rejects missing, failed, identity-mixed, or parameter-inconsistent logs before publishing raw and aggregate CSV files. Both noise axes use 95% Student-t intervals; Gaussian event, endpoint, and saturation rates pool raw denominators across sites and replicas.
 
-[[scripts/verification/verify_noise_scan_summary.py#verify_noise_scan_summary]] validates manifest constraints, evaluator-log parsing, pooled physical counts, the Student-t interval, artifact rendering, and rejection of Gaussian logs without mechanism statistics using dataset-independent fixtures.
+`scripts/experiments/theta_jitter_analysis_vit.sh` runs Gaussian-only scans for $\theta\in\{40,400,2000\}$ using transition grids scaled by $2000/\theta$. [[scripts/analysis/summarize_theta_noise_scan.py#summarize_theta_noise]] validates their shared identity and produces the appendix CSV and figure.
+
+`scripts/experiments/run_noise_campaign_vit.sh` supervises the publication campaign. It waits until at least one of GPUs 4--7 is idle for two consecutive 60-second samples, fixes that idle subset for one stage, and runs smoke, quick, full, and theta stages in order. A lock rejects duplicate supervisors; every stage remains resumable through its child manifest.
+
+The supervisor keeps generated PDFs under `artifacts/` until all summaries, numerical-resolution checks, seeded verifications, and `lat check` pass. Only then does it install the main and appendix PDFs under `paper/figures/` and rebuild the manuscript.
+
+`scripts/experiments/deadline_margin_sweep_vit.sh` holds ViT-B/16 at $r_t=10^{-10}$ and adaptively sweeps the diagnostic receiver grace in units of $\sigma_t$. Seed zero locates the first 5k condition within one percentage point of clean accuracy; that candidate must also pass the same mean threshold across seeds 0, 1, and 2 before the sweep stops.
+
+[[scripts/verification/verify_theta_noise_summary.py#verify_theta_noise_summary]] checks the three-theta identity contract plus combined CSV and PDF/PNG rendering with dataset-independent fixtures.
+
+[[scripts/verification/verify_noise_scan_summary.py#verify_noise_scan_summary]] validates seeded manifest constraints, evaluator-log parsing, pooled physical counts, both Student-t intervals, artifact rendering, and rejection of Gaussian logs without mechanism statistics. [[scripts/verification/verify_noise_scan_runner.py#verify_noise_scan_runner]] verifies the GPU allowlist and two-axis dry-run manifest without launching a dataset job.
 
 ### Per-Layer ViT GELU Attribution
 
@@ -259,6 +289,8 @@ Central domain construction and tensor membership checks must fail consistently 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_encoder_boundary]] enters through the decorated identity encoder to check noise-off tuples, zero-noise event parity, forced misses, and exact per-site event counters.
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_statistics_contract]] checks strict pre-clamp rail counters, repeated-site accumulation, detached snapshots, disabled instrumentation, and counter clearing without replacing replica RNG state.
+
+[[scripts/verification/verify_gaussian_time_noise.py#verify_static_mismatch_rng_contract]] checks dedicated-seed replay, seed independence, global-RNG preservation, frozen offsets across forwards, non-persistent buffers, and invalid-seed rejection.
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_multiplication_operator]] checks deterministic and zero-noise parity, isolated opening and reference misses, observation-time integration, ideal rails, and seeded output saturation.
 

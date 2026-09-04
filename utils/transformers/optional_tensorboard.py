@@ -29,8 +29,11 @@ class _NoOpSummaryWriter:
         pass
 
 
-def create_summary_writer(*, log_dir: str) -> SummaryWriterLike:
-    """Create TensorBoard's writer, or a no-op equivalent if unavailable."""
+def create_summary_writer(*, log_dir: str, enabled: bool = True) -> SummaryWriterLike:
+    """Create TensorBoard's writer, or a no-op equivalent when disabled/unavailable."""
+
+    if not enabled:
+        return _NoOpSummaryWriter()
 
     try:
         from torch.utils.tensorboard import SummaryWriter

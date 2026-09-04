@@ -1,49 +1,67 @@
 #!/bin/bash
+
+# Run the manuscript appendix theta-sensitivity scan through the maintained,
+# resumable ViT-B Gaussian protocol. Physical GPUs are restricted by the shared
+# runner to 4-7, with one evaluator process per selected GPU.
+
+set -euo pipefail
 trap 'kill -- -$$' SIGINT SIGTERM
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/../.." && pwd)"
 cd "$repo_root"
 
-cuda_devices=(${GPUS:-0 1 2 3 4 5 6 7})   # override with e.g. GPUS="4 5 6 7"
-source ./venv/bin/activate 2>/dev/null
-source "$repo_root/scripts/lib/gpu_pool.sh"
-device="cuda"
-model_id="/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k"
-dataset_id="imagenet-1k"
-backend="spiking"
-batch_size=32   # per-GPU (was 32*8 for 8-way DataParallel; now one job per GPU via the pool)
-time_noise_seed="${TIME_NOISE_SEED:-0}"
+python_bin="${PYTHON_BIN:-python}"
+read -r -a theta_values <<< "${THETA_VALUES:-40 400 2000}"
+scan_root_tag="${SCAN_ROOT_TAG:-vit_base_theta_noise_5k_float64_v2}"
+figure_prefix="${THETA_FIGURE_PREFIX:-$repo_root/artifacts/figures/noise_theta_vit_base_5k_float64_v2}"
+combined_csv="${THETA_SUMMARY_CSV:-$repo_root/artifacts/logs/noise_scan/$scan_root_tag/summary.csv}"
 
-# These fractions stay fixed while theta changes. Each evaluator invocation
-# therefore derives sigma_t = fraction * (2 * theta), preserving the intended
-# relative noise level for every coding-window size in the sweep.
-time_noise_std_fracs=(0 1e-5 2e-5 3e-5 4e-5)
-thetas=(1000 500 200 100 50 20 10 5 2 1)
+base_grid=(
+    1.000e-10 1.250e-10 1.500e-10 1.750e-10 2.000e-10 2.500e-10
+    3.162e-10 4.000e-10 5.000e-10 6.300e-10 8.000e-10 1.000e-09
+)
 
-gpu_pool_init "${cuda_devices[@]}"
-for theta in "${thetas[@]}"; do
-    for time_noise_std_frac in "${time_noise_std_fracs[@]}"; do
-        expr_name="std_frac_${time_noise_std_frac}"
-        gaussian_flag=""
-        if [[ "${time_noise_std_frac}" != "0" ]]; then
-            gaussian_flag="--gaussian-time-noise"
-        fi
+summary_inputs=()
+for theta in "${theta_values[@]}"; do
+    if [[ "$theta" != "40" && "$theta" != "400" && "$theta" != "2000" ]]; then
+        echo "THETA_VALUES may contain only the manuscript values 40, 400, and 2000" >&2
+        exit 2
+    fi
 
-        gpu_pool_acquire; gpu=$GPU_POOL_ACQUIRED
-        echo "Running Gaussian time-noise analysis on GPU ${gpu}: ${expr_name} with theta ${theta}"
-        script="CUDA_VISIBLE_DEVICES=${gpu} python3 scripts/evaluation/error_analysis_vit.py \
-            --experiment_name ${expr_name}_theta_${theta} --device ${device} \
-            --model_id ${model_id} --dataset_id ${dataset_id} \
-            --batch_size ${batch_size} \
-            --spiking-layernorm --spiking-mlp --spiking-attention --model_backend ${backend} \
-            --theta ${theta} --quick-test ${gaussian_flag} \
-            --time-noise-std-frac ${time_noise_std_frac} \
-            --time-noise-mean 0.0 --time-noise-seed ${time_noise_seed}"
-        echo $script
-        eval $script &
-        gpu_pool_register $! "$gpu"
-    done
+    case "$theta" in
+        40) scale="50" ;;
+        400) scale="5" ;;
+        2000) scale="1" ;;
+    esac
+    scaled_grid="$($python_bin - "$scale" "${base_grid[@]}" <<'PY'
+import sys
+
+scale = float(sys.argv[1])
+print(" ".join(f"{float(value) * scale:.7g}" for value in sys.argv[2:]))
+PY
+)"
+
+    child_tag="${scan_root_tag}_theta_${theta}"
+    child_logdir="$repo_root/artifacts/logs/noise_scan/$child_tag"
+    THETA="$theta" \
+    SCAN_PROTOCOL=quick \
+    SCAN_TAG="$child_tag" \
+    SCAN_MODEL_LABEL="ViT-B/16, theta=$theta" \
+    SCAN_FIGURE_PREFIX="$repo_root/artifacts/figures/${child_tag}" \
+    TIME_NOISE_STD_FRACS="$scaled_grid" \
+    MISMATCH_THETA_STDS="" \
+    PUBLISH_PAPER_FIGURE=0 \
+    bash "$repo_root/scripts/experiments/noise_scan_vit.sh"
+    summary_inputs+=("${theta}=${child_logdir}/summary.csv")
 done
 
-wait
+"$python_bin" scripts/analysis/summarize_theta_noise_scan.py \
+    --input "${summary_inputs[@]}" \
+    --output-csv "$combined_csv" \
+    --figure-prefix "$figure_prefix"
+
+if [[ "${PUBLISH_PAPER_FIGURE:-0}" == "1" ]]; then
+    cp "$figure_prefix.pdf" "$repo_root/paper/figures/noise-theta-vit-base.pdf"
+    echo "Published validated appendix figure: paper/figures/noise-theta-vit-base.pdf"
+fi
