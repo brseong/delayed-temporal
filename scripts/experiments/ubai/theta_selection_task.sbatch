@@ -72,7 +72,7 @@ fi
     srun \
         --ntasks=1 \
         --container-image="$THETA_CONTAINER_IMAGE" \
-        --container-mounts="$THETA_REMOTE_REPO:/data/delayed-temporal,$runtime_parent/dt:/opt/conda/envs/dt,$THETA_REMOTE_ASSETS:/data/ubai-assets" \
+        --container-mounts="$THETA_REMOTE_REPO:/data/delayed-temporal,$THETA_REMOTE_ASSETS/source-checkouts/transformers:/data/delayed-temporal/src/transformers,$THETA_REMOTE_ASSETS/source-checkouts/spikingjelly:/data/delayed-temporal/src/spikingjelly,$runtime_parent/dt:/opt/conda/envs/dt,$THETA_REMOTE_ASSETS:/data/ubai-assets" \
         --container-workdir=/data/delayed-temporal \
         /usr/bin/env \
         PYTHONPATH=/data/delayed-temporal:/data/delayed-temporal/src/transformers/src:/data/delayed-temporal/src/spikingjelly \

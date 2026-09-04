@@ -20,7 +20,11 @@ environment_root="${THETA_ENV_ROOT:-/opt/conda/envs/dt}"
 checkpoint_source="${THETA_CHECKPOINT_SOURCE:-/data/nas/vit_base_patch16_224.augreg2_in21k_ft_in1k}"
 dataset_cache="${THETA_DATASET_CACHE:-/data/nas/datasets}"
 
-mkdir -p "$stage_root/datasets" "$stage_root/checkpoints" "$stage_root/runtime"
+mkdir -p \
+    "$stage_root/datasets" \
+    "$stage_root/checkpoints" \
+    "$stage_root/runtime" \
+    "$stage_root/source-checkouts"
 dataset_root="$stage_root/datasets/imagenet_theta_selection_v1"
 if [[ ! -f "$dataset_root/manifest.json" ]]; then
     if [[ -e "$dataset_root" ]]; then
@@ -59,6 +63,21 @@ if [[ ! -f "$environment_archive" ]]; then
     fi
 fi
 
+for checkout in transformers spikingjelly; do
+    source_checkout="$repo_root/src/$checkout"
+    target_checkout="$stage_root/source-checkouts/$checkout"
+    if [[ ! -d "$target_checkout" ]]; then
+        mkdir -p "$target_checkout"
+        (
+            cd "$source_checkout"
+            tar --exclude=.git -cf - .
+        ) | (
+            cd "$target_checkout"
+            tar -xf -
+        )
+    fi
+done
+
 (
     cd "$stage_root"
     find . -type f ! -name SHA256SUMS -print0 \
@@ -72,6 +91,11 @@ if (( stage_bytes > 30 * 1024 * 1024 * 1024 )); then
     exit 2
 fi
 
+if [[ "${THETA_SKIP_TRANSFER:-0}" == "1" ]]; then
+    echo "$stage_root"
+    exit 0
+fi
+
 ssh "$remote_host" "mkdir -p '$remote_assets'"
 if command -v rsync >/dev/null 2>&1; then
     rsync -a --partial --info=progress2 "$stage_root/" "$remote_host:$remote_assets/"
@@ -82,6 +106,7 @@ else
         "$stage_root/checkpoints" \
         "$stage_root/datasets" \
         "$stage_root/runtime" \
+        "$stage_root/source-checkouts" \
         "$remote_host:$remote_assets/"
 fi
 ssh "$remote_host" "cd '$remote_assets' && sha256sum --check SHA256SUMS"

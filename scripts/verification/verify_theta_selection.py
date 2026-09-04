@@ -202,6 +202,21 @@ def verify_manifest_contract() -> None:
     assert "#SBATCH --gres=gpu:1" in task_script
     assert "DataParallel" not in task_script
 
+    with tempfile.TemporaryDirectory() as directory:
+        manifest_path = Path(directory) / "manifest.tsv"
+        with manifest_path.open("w", newline="", encoding="utf-8") as handle:
+            import csv
+
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=tuple(rows[0]),
+                dialect="excel-tab",
+                lineterminator="\n",
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+        assert b"\r" not in manifest_path.read_bytes()
+
 
 def verify_gpu_selection() -> None:
     reference = [
