@@ -21,7 +21,8 @@ set -euo pipefail
 mkdir -p "$THETA_OUTPUT_DIR"
 runtime_parent="${SLURM_TMPDIR:-/tmp}/theta-reducer-runtime-${SLURM_JOB_ID}"
 mkdir -p "$runtime_parent"
-tar --zstd -xf "$THETA_ENV_ARCHIVE" -C "$runtime_parent"
+zstd --decompress --stdout "$THETA_ENV_ARCHIVE" \
+    | tar -xf - -C "$runtime_parent"
 test -x "$runtime_parent/dt/bin/python"
 to_container_path() {
     case "$1" in

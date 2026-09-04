@@ -18,7 +18,8 @@ set -euo pipefail
 task_index="${SLURM_ARRAY_TASK_ID:?array task id is required}"
 runtime_parent="${SLURM_TMPDIR:-/tmp}/theta-runtime-${SLURM_JOB_ID}-${task_index}"
 mkdir -p "$runtime_parent"
-tar --zstd -xf "$THETA_ENV_ARCHIVE" -C "$runtime_parent"
+zstd --decompress --stdout "$THETA_ENV_ARCHIVE" \
+    | tar -xf - -C "$runtime_parent"
 test -x "$runtime_parent/dt/bin/python"
 line_number="$((task_index + 2))"
 row="$(sed -n "${line_number}p" "$THETA_MANIFEST")"
