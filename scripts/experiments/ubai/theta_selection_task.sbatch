@@ -71,6 +71,7 @@ fi
     echo "Slurm identity — job_id: ${SLURM_JOB_ID}, task_id: ${task_index}, node: ${SLURMD_NODENAME}, gpu_family: ${gpu_family}"
     srun \
         --ntasks=1 \
+        --gres=gpu:1 \
         --container-image="$THETA_CONTAINER_IMAGE" \
         --container-mounts="$THETA_REMOTE_REPO:/data/delayed-temporal,$THETA_REMOTE_ASSETS/source-checkouts/transformers:/data/delayed-temporal/src/transformers,$THETA_REMOTE_ASSETS/source-checkouts/spikingjelly:/data/delayed-temporal/src/spikingjelly,$runtime_parent/dt:/opt/conda/envs/dt,$THETA_REMOTE_ASSETS:/data/ubai-assets" \
         --container-workdir=/data/delayed-temporal \
