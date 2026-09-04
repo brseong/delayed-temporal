@@ -14,7 +14,9 @@ if [[ "${1:-}" == "--submit" ]]; then
 fi
 
 tag="vit_base_sigma_margin_5k_float64_v1"
-remote_repo="${THETA_REMOTE_REPO:-/home1/sizz1997/myubai/delayed-temporal}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+default_repo="$(cd -- "$script_dir/../../.." && pwd)"
+remote_repo="${THETA_REMOTE_REPO:-$default_repo}"
 remote_assets="${THETA_REMOTE_ASSETS:-/home1/sizz1997/myubai/delayed-temporal-assets/theta-selection-v1}"
 theta_result_root="${THETA_RESULT_ROOT:-$remote_assets/results/vit_base_theta_selection_float64_v1}"
 result_root="${SIGMA_MARGIN_RESULT_ROOT:-$remote_assets/results/$tag}"
