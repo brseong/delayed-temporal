@@ -154,6 +154,26 @@ The maintained manuscript protocol is:
 
 Every stage keeps the noise-free tensor path as a parity reference. No stage may introduce `gaussian_multiplication_operator`, an operator-specific sampler, or invalid-result propagation.
 
+## Sigma and Deadline-Margin Grid
+
+The follow-up ViT-B/16 diagnostic separates timing-error scale from the receiver's late-arrival grace after the global threshold has been approved.
+
+The experiment fixes the `approved` threshold from [[evaluation#ViT-B/16 Global Theta Selection]] and defines
+
+$$
+\sigma_t=r_t(2\theta^*),\qquad k=\frac{m}{\sigma_t},\qquad m=k\sigma_t.
+$$
+
+It evaluates the existing 12-point $r_t$ grid against $k\in\{0,0.5,1,1.5,2,2.5,3,4,5,6,8,10,12\}$ on the fixed first 5,000 validation images. Every stochastic cell uses seeds 0, 1, and 2; clean spiking and dense references are deterministic singletons. Static mismatch, calibration, learned-parameter noise, and a second theta axis remain disabled.
+
+[[scripts/experiments/ubai/build_sigma_margin_manifest.py#main]] validates the approved theta evidence and produces 470 immutable conditions bound to the data, checkpoint, source commit, and selected GPU family. UBAI jobs use one GPU each with at most eight concurrent array tasks, while resume submission includes only logs that fail the complete identity check.
+
+[[scripts/analysis/summarize_sigma_margin_sweep.py#build_frontier]] defines recovery at each $r_t$ as the smallest preregistered $k$ whose three-seed mean is within one percentage point of the clean spiking baseline. Failure to recover at $k=12$ is retained as `unrecovered`, and later nonmonotonic cells are reported rather than removed.
+
+The result set contains replica-level, cell-level, and site-level CSV files; a provenance JSON; a recovery-frontier JSON; and a three-panel accuracy, confidence-width, and pooled-miss-rate figure. It remains under `artifacts/` because this protocol intentionally stops at 5,000 images and does not by itself authorize manuscript promotion.
+
+[[scripts/verification/verify_sigma_margin_sweep.py#main]] checks the approval gate, canonical grid, physical scale identities, confidence intervals, pooled counts, frontier rule, one-GPU Slurm contract, and resumable pending manifest.
+
 ## Gaussian Noise Statistics
 
 Maintained-noise experiments expose per-site event delivery and readout saturation counters so robustness results can be attributed to physical failure modes.

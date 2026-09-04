@@ -215,6 +215,7 @@ def verify_manifest_contract() -> None:
     assert "03:00:00" in controller_script
     assert "08:00:00" in controller_script
     assert "--dependency=\"afterok:${dependency}\"" in controller_script
+    assert "gpu-selection.json\" selected_family" in controller_script
 
     with tempfile.TemporaryDirectory() as directory:
         manifest_path = Path(directory) / "manifest.tsv"

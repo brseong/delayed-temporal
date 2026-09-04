@@ -110,7 +110,7 @@ submit_confirmation() {
 
 case "$phase" in
     start-selection)
-        [[ "$(json_value "$THETA_OUTPUT_DIR/gpu-selection.json" status)" == "selected" ]]
+        [[ -n "$(json_value "$THETA_OUTPUT_DIR/gpu-selection.json" selected_family)" ]]
         manifest="$THETA_MANIFEST_DIR/selection.tsv"
         build_manifest selection "$manifest"
         array_job="$(submit_array "$manifest" 03:00:00)"
