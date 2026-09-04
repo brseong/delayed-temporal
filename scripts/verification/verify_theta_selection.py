@@ -203,6 +203,19 @@ def verify_manifest_contract() -> None:
     assert "#SBATCH --gres=gpu:1" in task_script
     assert "DataParallel" not in task_script
 
+    controller_script = (
+        _ROOT
+        / "scripts"
+        / "experiments"
+        / "ubai"
+        / "continue_theta_selection_workflow.sh"
+    ).read_text(encoding="utf-8")
+    assert "start-selection|post-selection|post-extension|post-confirmation|finalize" in controller_script
+    assert "selection-expanded.tsv" in controller_script
+    assert "03:00:00" in controller_script
+    assert "08:00:00" in controller_script
+    assert "--dependency=\"afterok:${dependency}\"" in controller_script
+
     with tempfile.TemporaryDirectory() as directory:
         manifest_path = Path(directory) / "manifest.tsv"
         with manifest_path.open("w", newline="", encoding="utf-8") as handle:
