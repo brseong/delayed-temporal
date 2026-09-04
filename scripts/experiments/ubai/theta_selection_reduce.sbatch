@@ -41,7 +41,7 @@ to_container_path() {
 
 container_log_dir="$(to_container_path "$THETA_LOG_DIR")"
 container_output_dir="$(to_container_path "$THETA_OUTPUT_DIR")"
-IFS=',' read -r -a manifest_paths <<< "$THETA_MANIFESTS"
+IFS=':' read -r -a manifest_paths <<< "$THETA_MANIFESTS"
 manifest_args=()
 for manifest in "${manifest_paths[@]}"; do
     manifest_args+=(--manifest "$(to_container_path "$manifest")")

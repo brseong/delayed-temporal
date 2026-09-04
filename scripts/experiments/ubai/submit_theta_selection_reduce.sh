@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [[ $# -ne 4 ]]; then
-    echo "Usage: $0 MODE COMMA_SEPARATED_MANIFESTS DEPENDENCY OUTPUT_DIR" >&2
+    echo "Usage: $0 MODE COLON_SEPARATED_MANIFESTS DEPENDENCY OUTPUT_DIR" >&2
     exit 2
 fi
 
@@ -22,14 +22,16 @@ output_dir="$(realpath -m "$4")"
 
 mkdir -p "$output_dir" "$THETA_LOG_DIR/slurm"
 extra_exports=""
+dependency_type="afterok"
 if [[ "$mode" == "benchmark" ]]; then
     : "${THETA_AVAILABILITY_FILE:?THETA_AVAILABILITY_FILE is required}"
     extra_exports=",THETA_AVAILABILITY_FILE=$THETA_AVAILABILITY_FILE"
+    dependency_type="afterany"
 fi
 
 sbatch \
     --parsable \
-    --dependency="afterok:$dependency" \
+    --dependency="$dependency_type:$dependency" \
     --output="$THETA_LOG_DIR/slurm/%x-%j.out" \
     --error="$THETA_LOG_DIR/slurm/%x-%j.err" \
     --export="ALL,THETA_REDUCE_MODE=$mode,THETA_MANIFESTS=$manifests,THETA_OUTPUT_DIR=$output_dir$extra_exports" \
