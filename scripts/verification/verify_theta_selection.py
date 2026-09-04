@@ -18,6 +18,7 @@ for path in (_ROOT, _ROOT / "scripts" / "analysis"):
 
 from scripts.analysis.select_ubai_gpu_family import (
     choose_family,
+    failed_run_reason,
     gpu_model_matches_family,
 )
 from scripts.analysis.summarize_theta_selection import (
@@ -253,6 +254,19 @@ def verify_gpu_selection() -> None:
     )
     assert selected == "rtxa6000"
     assert "GPU model" in payload["rejected"]["rtx6000ada"]
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        spec = {
+            "log_file": "a10.log",
+            "source_commit": "commit",
+            "gpu_family": "a10",
+        }
+        (root / "a10.log.partial.1").write_text(
+            "gpu_family: a10\nsource commit\ntorch.OutOfMemoryError: CUDA out of memory\n",
+            encoding="utf-8",
+        )
+        assert failed_run_reason(spec, root) == "OOM at batch size 32"
 
 
 def main() -> None:

@@ -40,6 +40,7 @@ def choose_family(
     grouped: dict[str, list[Any]],
     *,
     availability: dict[str, int],
+    pre_rejected: dict[str, str] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Require replay parity, then choose throughput with a 5% capacity tie-break."""
 
@@ -54,7 +55,7 @@ def choose_family(
     reference_correct_count = next(iter(reference_correct))
 
     eligible: dict[str, dict[str, Any]] = {}
-    rejected: dict[str, str] = {}
+    rejected: dict[str, str] = dict(pre_rejected or {})
     for family, runs in grouped.items():
         if family not in PARTITIONS:
             rejected[family] = "unknown GPU family"
@@ -126,6 +127,27 @@ def choose_family(
     }
 
 
+def failed_run_reason(spec: dict[str, str], log_dir: Path) -> str:
+    """Classify the latest identity-matching partial benchmark log."""
+
+    prefix = f"{spec['log_file']}.partial."
+    candidates = sorted(
+        (path for path in log_dir.glob(f"{spec['log_file']}.partial.*") if path.name.startswith(prefix)),
+        key=lambda path: path.stat().st_mtime_ns,
+        reverse=True,
+    )
+    for path in candidates:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if spec["source_commit"] not in text or f"gpu_family: {spec['gpu_family']}" not in text:
+            continue
+        if "CUDA out of memory" in text or "torch.OutOfMemoryError" in text:
+            return "OOM at batch size 32"
+        if "nan" in text.casefold():
+            return "NaN reported by benchmark"
+        return "incomplete or failed evaluator log"
+    return "missing complete benchmark log"
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, action="append", required=True)
@@ -150,11 +172,26 @@ def main() -> None:
         availability[family] = int(count)
 
     grouped: dict[str, list[Any]] = {}
+    failures: dict[str, list[str]] = {}
     for manifest in args.manifest:
         for spec in read_manifest(manifest):
-            run = parse_log(spec, args.log_dir)
+            try:
+                run = parse_log(spec, args.log_dir)
+            except (FileNotFoundError, UnicodeDecodeError, ValueError) as error:
+                reason = failed_run_reason(spec, args.log_dir)
+                failures.setdefault(spec["gpu_family"], []).append(
+                    f"{spec['run_id']}: {reason} ({type(error).__name__})"
+                )
+                continue
             grouped.setdefault(spec["gpu_family"], []).append(run)
-    selected, payload = choose_family(grouped, availability=availability)
+    pre_rejected = {
+        family: "; ".join(reasons) for family, reasons in failures.items()
+    }
+    selected, payload = choose_family(
+        grouped,
+        availability=availability,
+        pre_rejected=pre_rejected,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
