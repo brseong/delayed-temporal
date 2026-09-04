@@ -67,14 +67,25 @@ for checkout in transformers spikingjelly; do
     source_checkout="$repo_root/src/$checkout"
     target_checkout="$stage_root/source-checkouts/$checkout"
     if [[ ! -d "$target_checkout" ]]; then
-        mkdir -p "$target_checkout"
-        (
-            cd "$source_checkout"
-            tar --exclude=.git -cf - .
-        ) | (
-            cd "$target_checkout"
-            tar -xf -
-        )
+        if [[ "$checkout" == "transformers" ]]; then
+            mkdir -p "$target_checkout/src"
+            (
+                cd "$source_checkout/src"
+                tar -cf - transformers
+            ) | (
+                cd "$target_checkout/src"
+                tar --no-same-owner -xf -
+            )
+        else
+            mkdir -p "$target_checkout"
+            (
+                cd "$source_checkout"
+                tar -cf - spikingjelly
+            ) | (
+                cd "$target_checkout"
+                tar --no-same-owner -xf -
+            )
+        fi
     fi
 done
 
