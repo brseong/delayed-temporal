@@ -35,7 +35,13 @@ fi
 checkpoint_name="$(basename "$checkpoint_source")"
 checkpoint_target="$stage_root/checkpoints/$checkpoint_name"
 mkdir -p "$checkpoint_target"
-rsync -a --delete "$checkpoint_source/" "$checkpoint_target/"
+if [[ ! -f "$stage_root/checkpoint-manifest.json" ]]; then
+    if find "$checkpoint_target" -mindepth 1 -print -quit | grep -q .; then
+        echo "Incomplete checkpoint artifact exists: $checkpoint_target" >&2
+        exit 2
+    fi
+    cp -a "$checkpoint_source/." "$checkpoint_target/"
+fi
 "$python_bin" scripts/setup/hash_artifact.py \
     --path "$checkpoint_target" \
     --output "$stage_root/checkpoint-manifest.json" >/dev/null
@@ -60,6 +66,10 @@ if (( stage_bytes > 30 * 1024 * 1024 * 1024 )); then
 fi
 
 ssh "$remote_host" "mkdir -p '$remote_assets'"
-rsync -a --partial --info=progress2 "$stage_root/" "$remote_host:$remote_assets/"
+if command -v rsync >/dev/null 2>&1; then
+    rsync -a --partial --info=progress2 "$stage_root/" "$remote_host:$remote_assets/"
+else
+    scp -rp "$stage_root/." "$remote_host:$remote_assets/"
+fi
 ssh "$remote_host" "cd '$remote_assets' && sha256sum --check SHA256SUMS"
 echo "$remote_host:$remote_assets"
