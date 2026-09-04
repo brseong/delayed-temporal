@@ -46,10 +46,17 @@ fi
     --path "$checkpoint_target" \
     --output "$stage_root/checkpoint-manifest.json" >/dev/null
 
-environment_archive="$stage_root/runtime/dt-environment.tar"
+environment_archive="$stage_root/runtime/dt-environment.tar.zst"
 if [[ ! -f "$environment_archive" ]]; then
-    tar -C "$(dirname "$environment_root")" -cf "$environment_archive" \
-        "$(basename "$environment_root")"
+    legacy_archive="$stage_root/runtime/dt-environment.tar"
+    if [[ -f "$legacy_archive" ]]; then
+        /opt/conda/bin/zstd -T0 -3 "$legacy_archive" -o "$environment_archive"
+        rm -f "$legacy_archive"
+    else
+        tar -C "$(dirname "$environment_root")" -cf - \
+            "$(basename "$environment_root")" \
+            | /opt/conda/bin/zstd -T0 -3 -o "$environment_archive"
+    fi
 fi
 
 (

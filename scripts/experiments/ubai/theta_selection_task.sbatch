@@ -12,10 +12,14 @@ set -euo pipefail
 : "${THETA_LOG_DIR:?THETA_LOG_DIR is required}"
 : "${THETA_CONTAINER_IMAGE:?THETA_CONTAINER_IMAGE is required}"
 : "${THETA_REMOTE_REPO:?THETA_REMOTE_REPO is required}"
-: "${THETA_REMOTE_ENV:?THETA_REMOTE_ENV is required}"
+: "${THETA_ENV_ARCHIVE:?THETA_ENV_ARCHIVE is required}"
 : "${THETA_REMOTE_ASSETS:?THETA_REMOTE_ASSETS is required}"
 
 task_index="${SLURM_ARRAY_TASK_ID:?array task id is required}"
+runtime_parent="${SLURM_TMPDIR:-/tmp}/theta-runtime-${SLURM_JOB_ID}-${task_index}"
+mkdir -p "$runtime_parent"
+tar --zstd -xf "$THETA_ENV_ARCHIVE" -C "$runtime_parent"
+test -x "$runtime_parent/dt/bin/python"
 line_number="$((task_index + 2))"
 row="$(sed -n "${line_number}p" "$THETA_MANIFEST")"
 if [[ -z "$row" ]]; then
@@ -67,7 +71,7 @@ fi
     srun \
         --ntasks=1 \
         --container-image="$THETA_CONTAINER_IMAGE" \
-        --container-mounts="$THETA_REMOTE_REPO:/data/delayed-temporal,$THETA_REMOTE_ENV:/opt/conda/envs/dt,$THETA_REMOTE_ASSETS:/data/ubai-assets" \
+        --container-mounts="$THETA_REMOTE_REPO:/data/delayed-temporal,$runtime_parent/dt:/opt/conda/envs/dt,$THETA_REMOTE_ASSETS:/data/ubai-assets" \
         --container-workdir=/data/delayed-temporal \
         /usr/bin/env \
         PYTHONPATH=/data/delayed-temporal:/data/delayed-temporal/src/transformers/src:/data/delayed-temporal/src/spikingjelly \

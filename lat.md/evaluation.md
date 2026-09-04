@@ -174,7 +174,7 @@ Clamp reports retain the maximum semantic excursion rate and its site as diagnos
 
 UBAI execution benchmarks RTX 3090, A10, RTX 6000 Ada, and RTX A6000 twice with five warm-up and twenty measured batches. [[scripts/analysis/select_ubai_gpu_family.py#choose_family]] rejects OOM, incomplete timing, wrong hardware identity, replica disagreement, and predictions differing from the RTX A6000 reference. It chooses the lowest median seconds per image; families within 5% use current free-GPU capacity as the tie-break.
 
-The UBAI task contract uses one GPU, four CPUs, 64 GB RAM, no `DataParallel`, and immutable condition/data/checkpoint/commit/GPU-family manifests. [[scripts/experiments/ubai/build_theta_selection_manifest.py#main]] creates one row per array index, and completed logs are resumed only after their recorded identity matches that row.
+The UBAI task contract uses one GPU, four CPUs, 64 GB RAM, no `DataParallel`, and immutable condition/data/checkpoint/commit/GPU-family manifests. The portable environment is stored once as a compressed archive and expanded into job-local temporary storage, avoiding a second persistent copy under the 100 GB home quota. [[scripts/experiments/ubai/build_theta_selection_manifest.py#main]] creates one row per array index, and completed logs are resumed only after their recorded identity matches that row.
 
 [[scripts/verification/verify_theta_selection.py#main]] covers the 0.5-point boundary, tie behavior, upper-grid guard, replay and validation gates, offline dataset order and fingerprint replay, TensorBoard suppression, GPU-family selection, and one-GPU manifest contract.
 

@@ -17,7 +17,7 @@ output_dir="$(realpath -m "$4")"
 : "${THETA_LOG_DIR:?THETA_LOG_DIR is required}"
 : "${THETA_CONTAINER_IMAGE:?THETA_CONTAINER_IMAGE is required}"
 : "${THETA_REMOTE_REPO:?THETA_REMOTE_REPO is required}"
-: "${THETA_REMOTE_ENV:?THETA_REMOTE_ENV is required}"
+: "${THETA_ENV_ARCHIVE:?THETA_ENV_ARCHIVE is required}"
 : "${THETA_REMOTE_ASSETS:?THETA_REMOTE_ASSETS is required}"
 
 mkdir -p "$output_dir" "$THETA_LOG_DIR/slurm"

@@ -11,17 +11,12 @@ set -euo pipefail
 
 : "${THETA_REMOTE_ASSETS:?THETA_REMOTE_ASSETS is required}"
 : "${THETA_ENV_ARCHIVE:?THETA_ENV_ARCHIVE is required}"
-: "${THETA_REMOTE_ENV_PARENT:?THETA_REMOTE_ENV_PARENT is required}"
 : "${THETA_CONTAINER_IMAGE:?THETA_CONTAINER_IMAGE is required}"
 
 cd "$THETA_REMOTE_ASSETS"
 sha256sum --check SHA256SUMS
 
-mkdir -p "$THETA_REMOTE_ENV_PARENT"
-if [[ ! -x "$THETA_REMOTE_ENV_PARENT/dt/bin/python" ]]; then
-    tar -xf "$THETA_ENV_ARCHIVE" -C "$THETA_REMOTE_ENV_PARENT"
-fi
-test -x "$THETA_REMOTE_ENV_PARENT/dt/bin/python"
+test -f "$THETA_ENV_ARCHIVE"
 
 mkdir -p "$(dirname "$THETA_CONTAINER_IMAGE")"
 if [[ ! -f "$THETA_CONTAINER_IMAGE" ]]; then
