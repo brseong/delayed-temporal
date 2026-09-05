@@ -708,6 +708,56 @@ def verify_host_mediated_implicit_relu_boundary() -> None:
     assert metadata["upper_bound_clamped_values"] == 1
 
 
+def verify_hagen_shift_probe_consolidation() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Hagen shift probe consolidation]]
+    class CountingHagen(HagenPWMBackend):
+        def __init__(self) -> None:
+            super().__init__(HagenConfig(mode="mock"))
+            self.calls: list[tuple[int, int]] = []
+
+        def _execute(
+            self,
+            value: torch.Tensor,
+            affine: object,
+            *,
+            avg: int,
+            relu_boundary: object = None,
+            activation_shift: int | None = None,
+        ) -> tuple[torch.Tensor, dict[str, object]]:
+            self.calls.append(tuple(value.shape))
+            return torch.tensor([[-4.0, 8.0], [16.0, 32.0]]), {
+                "physical_call": len(self.calls)
+            }
+
+    converted = SimpleNamespace(
+        manifest=SimpleNamespace(activation="relu"),
+        first=SimpleNamespace(
+            weight_with_bias=torch.ones((2, 3), dtype=torch.int32), scale=1.0
+        ),
+    )
+    backend = CountingHagen()
+    recommendation = backend.recommend_hidden_shift(
+        converted,
+        torch.ones((2, 2), dtype=torch.int32),
+        torch.tensor([[0, 4], [8, 16]], dtype=torch.int32),
+        candidates=(0, 1, 2),
+        relu_boundary="implicit-lower-bound-host",
+        activation="relu",
+    )
+    assert len(backend.calls) == 1
+    assert len(recommendation["candidates"]) == 3
+    assert all(
+        row["shared_physical_shift_probe"]
+        for row in recommendation["candidates"]
+    )
+
+    backend.calls.clear()
+    probes = backend.probe(converted)
+    assert len(backend.calls) == 1
+    assert backend.calls[0] == (2, 3)
+    assert len(probes["probes"]) == 1
+
+
 def verify_sigmoid_host_activation_adapter() -> None:
     # @lat: [[hardware#Toy ANN2SNN Verification#Sigmoid host activation adapter]]
     model, _, calibration_x = _converted_fixture()
@@ -1449,6 +1499,7 @@ def main() -> None:
     verify_hagen_output_row_chunking()
     verify_hagen_host_tiling()
     verify_host_mediated_implicit_relu_boundary()
+    verify_hagen_shift_probe_consolidation()
     verify_sigmoid_host_activation_adapter()
     verify_condition_process_isolation_contract()
     verify_transient_worker_retry()

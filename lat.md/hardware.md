@@ -102,7 +102,7 @@ The formal default does not invoke Hagen `ConvertingReLU`. It scales the cached 
 
 The sigmoid control runs `Hagen raw affine -> host sigmoid -> UInt5 Potential -> TTFS pool`. It intentionally does not claim that the public hxtorch graph realizes the paper's $\phi_{\mathrm{NL}}$ and constant-reference $\psi_{\mathrm{ED}}$ circuit: `sigmoid_physical_subcircuit=false` and host-adapter scale/range metadata are required in every artifact. The same pooled UInt5 rail and physical LIF graph are therefore exercised, while activation-circuit evidence remains out of scope.
 
-The integer reference shift applies to its int32 accumulator, whereas physical Hagen output is already Int8. A separate Hagen hidden shift defaults to one and the probe recommends it from unlabeled calibration activations; physical output logits receive no second software shift.
+The integer reference shift applies to its int32 accumulator, whereas physical Hagen output is already Int8. A separate Hagen hidden shift defaults to one and the probe recommends it from unlabeled calibration activations; physical output logits receive no second software shift. For the default host-mediated boundary, all shift candidates are scored from one physical preactivation tensor because shifting and clamping occur after Hagen. Small models also collapse duplicate 128-row and architecture-width probes.
 
 For inputs wider than one signed Hagen array, the adapter first probes the high-level `Linear` path. Its explicit `host-128` fallback runs 128-input analog MAC tiles, sums partial Int8 values on the host, and records that host accumulation rather than presenting it as one on-chip matrix operation.
 
@@ -165,6 +165,12 @@ These test specifications protect the conversion and network-level hardware boun
 ### Host-mediated implicit ReLU boundary
 
 The default hidden boundary must lower raw PWM values through the declared $V_{lb}=0$ Potential range without calling `ConvertingReLU`, retain UInt5 upper saturation, and label the result as host-mediated rather than continuous on-chip activation.
+
+### Hagen shift probe consolidation
+
+The implicit host-boundary shift sweep must reuse one physical preactivation, while native converting-ReLU candidates remain distinct hardware executions.
+
+A model narrower than 128 input lanes must issue one unique shape probe rather than executing its architecture width twice. Candidate scores and metadata must disclose shared physical observations.
 
 ### Sigmoid host activation adapter
 

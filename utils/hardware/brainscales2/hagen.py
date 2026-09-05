@@ -446,8 +446,32 @@ class HagenPWMBackend:
         # Sigmoid uses the frozen first-affine scale, so there is no arbitrary
         # bit shift to sweep.  Keep the common payload schema for the notebook.
         candidate_shifts = candidates if resolved_activation == "relu" else (self.config.hidden_shift,)
+        shared_raw: torch.Tensor | None = None
+        shared_metadata: dict[str, Any] | None = None
+        if (
+            resolved_activation == "relu"
+            and relu_boundary == "implicit-lower-bound-host"
+        ):
+            # The shift and lower clamp are host-side for this boundary. Run
+            # the analog MAC once, then score every candidate from that same
+            # physical observation instead of repeatedly reserving hardware.
+            shared_raw, shared_metadata = self._execute(
+                augmented,
+                converted.first,
+                avg=1,
+            )
         for shift in candidate_shifts:
-            if resolved_activation == "relu":
+            if shared_raw is not None:
+                output, boundary_metadata = self._implicit_lower_bound_uint5(
+                    shared_raw,
+                    shift=shift,
+                )
+                metadata = {
+                    **(shared_metadata or {}),
+                    **boundary_metadata,
+                    "shared_physical_shift_probe": True,
+                }
+            elif resolved_activation == "relu":
                 output, metadata = self._execute(
                     augmented,
                     converted.first,
@@ -473,6 +497,7 @@ class HagenPWMBackend:
                     "score": mse + max(0.0, saturation - 0.01) * 100.0,
                     "activation": resolved_activation,
                     "shift_used": resolved_activation == "relu",
+                    "shared_physical_shift_probe": shared_raw is not None,
                     "metadata": metadata,
                 }
             )
@@ -482,8 +507,8 @@ class HagenPWMBackend:
     def probe(self, converted: ConvertedToyModel) -> dict[str, Any]:
         """Probe native 128-row and architecture-sized first-layer execution."""
         probes: list[dict[str, Any]] = []
-        for features in sorted({128, converted.architecture.input_features + 1}):
-            features = min(features, converted.first.weight_with_bias.shape[1])
+        width = converted.first.weight_with_bias.shape[1]
+        for features in sorted({min(128, width), width}):
             value = torch.full((2, features), 15.0)
             affine = QuantizedAffine(
                 converted.first.weight_with_bias[:, :features],
