@@ -25,6 +25,7 @@ from scripts.evaluation.brainscales2_toy_hil import (
     _deadline_margin_context,
     _evaluate_readout_ablations,
     _load_deadline_margin_payload,
+    _run_hagen_first,
     _load_isolated_condition,
     _run_hagen_output,
     _run_isolated_pool_chunks,
@@ -622,6 +623,29 @@ class _FakeChunkedHagen:
     def __init__(self) -> None:
         self.config = SimpleNamespace(mode="hardware")
         self.row_counts: list[int] = []
+        self.first_row_counts: list[int] = []
+
+    def first_layer(
+        self,
+        converted: object,
+        input_uint5: torch.Tensor,
+        *,
+        avg: int,
+        **_: object,
+    ) -> HagenResult:
+        del converted
+        self.first_row_counts.append(input_uint5.shape[0])
+        value = input_uint5.to(torch.int32) * avg
+        return HagenResult(
+            value=value,
+            metadata={
+                "backend": "fake-hardware",
+                "input_shape": list(input_uint5.shape),
+                "output_shape": list(value.shape),
+                "elapsed_s": 0.5,
+                "avg": avg,
+            },
+        )
 
     def output_layer(self, converted: object, hidden: torch.Tensor) -> HagenResult:
         del converted
@@ -636,6 +660,30 @@ class _FakeChunkedHagen:
                 "elapsed_s": 0.25,
             },
         )
+
+
+def verify_hagen_first_row_chunking() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Hagen first-layer row chunking]]
+    hagen = _FakeChunkedHagen()
+    input_uint5 = torch.arange(14, dtype=torch.int32).reshape(7, 2)
+    result = _run_hagen_first(
+        SimpleNamespace(
+            hagen_row_chunk_size=3,
+            relu_boundary="implicit-lower-bound-host",
+            activation="relu",
+        ),
+        hagen,
+        None,
+        input_uint5,
+        avg=4,
+    )
+    assert hagen.first_row_counts == [3, 3, 1]
+    torch.testing.assert_close(result.value, input_uint5 * 4)
+    assert result.metadata["chunked"] is True
+    assert result.metadata["row_chunk_count"] == 3
+    assert result.metadata["input_shape"] == [7, 2]
+    assert result.metadata["output_shape"] == [7, 2]
+    assert result.metadata["elapsed_s"] == 1.5
 
 
 def verify_hagen_output_row_chunking() -> None:
@@ -1456,7 +1504,7 @@ def verify_python311_and_notebook_contract() -> None:
         "'--pool-calibration-trial-chunk-size', "
         "POOL_CALIBRATION_TRIAL_CHUNK_SIZE"
     ) in source
-    assert "HAGEN_ROW_CHUNK_SIZE = 512" in source
+    assert "HAGEN_ROW_CHUNK_SIZE = 128" in source
     assert "CONDITION_WORKER_MAX_ATTEMPTS = 3" in source
     assert "CONDITION_WORKER_RETRY_BACKOFF_S = 20.0" in source
     assert "CONDITION_WORKER_IDLE_TIMEOUT_S = 180.0" in source
@@ -1496,6 +1544,7 @@ def main() -> None:
     verify_pool_size_aware_hardware_chunk_cap()
     verify_pool_chunk_process_isolation()
     verify_replay_split_and_reproducibility()
+    verify_hagen_first_row_chunking()
     verify_hagen_output_row_chunking()
     verify_hagen_host_tiling()
     verify_host_mediated_implicit_relu_boundary()

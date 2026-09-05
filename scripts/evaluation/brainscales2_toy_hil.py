@@ -163,7 +163,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_POOL_REPLICA_SAMPLE_BUDGET,
         help="hardware cap for pool_size times samples in one spiking graph",
     )
-    parser.add_argument("--hagen-row-chunk-size", type=int, default=512)
+    parser.add_argument("--hagen-row-chunk-size", type=int, default=128)
     parser.add_argument("--condition-worker-max-attempts", type=int, default=3)
     parser.add_argument("--condition-worker-retry-backoff-s", type=float, default=20.0)
     parser.add_argument("--condition-worker-idle-timeout-s", type=float, default=180.0)
@@ -762,6 +762,70 @@ def _run_hagen_output(
     return HagenResult(combined, metadata)
 
 
+def _run_hagen_first(
+    args: argparse.Namespace,
+    hagen: HagenPWMBackend,
+    converted: ConvertedToyModel,
+    input_uint5: torch.Tensor,
+    *,
+    avg: int,
+) -> HagenResult:
+    """Run the physical first layer in bounded row batches."""
+    if (
+        hagen.config.mode != "hardware"
+        or input_uint5.shape[0] <= args.hagen_row_chunk_size
+    ):
+        return hagen.first_layer(
+            converted,
+            input_uint5,
+            avg=avg,
+            relu_boundary=args.relu_boundary,
+            activation=args.activation,
+        )
+    chunk_results: list[HagenResult] = []
+    row_chunks: list[dict[str, Any]] = []
+    for start in range(0, input_uint5.shape[0], args.hagen_row_chunk_size):
+        stop = min(start + args.hagen_row_chunk_size, input_uint5.shape[0])
+        print(
+            f"  Hagen first row chunk [{start}:{stop}) / {input_uint5.shape[0]}",
+            flush=True,
+        )
+        result = hagen.first_layer(
+            converted,
+            input_uint5[start:stop],
+            avg=avg,
+            relu_boundary=args.relu_boundary,
+            activation=args.activation,
+        )
+        chunk_results.append(result)
+        row_chunks.append(
+            {
+                "row_start": start,
+                "row_stop": stop,
+                "metadata": result.metadata,
+            }
+        )
+    combined = torch.cat([result.value for result in chunk_results], dim=0)
+    metadata = dict(chunk_results[0].metadata)
+    for key in ("input_shape", "output_shape", "elapsed_s"):
+        metadata.pop(key, None)
+    metadata.update(
+        {
+            "chunked": True,
+            "row_chunk_size": args.hagen_row_chunk_size,
+            "row_chunk_count": len(chunk_results),
+            "row_chunks": row_chunks,
+            "input_shape": list(input_uint5.shape),
+            "output_shape": list(combined.shape),
+            "elapsed_s": sum(
+                float(result.metadata.get("elapsed_s", 0.0))
+                for result in chunk_results
+            ),
+        }
+    )
+    return HagenResult(combined, metadata)
+
+
 def _evaluate_readout_ablations(
     args: argparse.Namespace,
     hagen: HagenPWMBackend | None,
@@ -890,12 +954,12 @@ def evaluation_phase(args: argparse.Namespace) -> None:
                     first_metadata = {"backend": "torch", "avg": 1}
                 else:
                     input_uint5 = converted.encode_input(test_x)
-                    first = hagen.first_layer(
+                    first = _run_hagen_first(
+                        args,
+                        hagen,
                         converted,
                         input_uint5,
                         avg=hagen_avg,
-                        relu_boundary=args.relu_boundary,
-                        activation=args.activation,
                     )
                     first_hidden = first.value
                     first_metadata = first.metadata
@@ -1761,12 +1825,12 @@ def prepare_first_hidden_phase(args: argparse.Namespace) -> None:
     if hagen is None:
         raise ValueError("physical first-hidden preparation requires a Hagen backend")
     input_uint5 = converted.encode_input(test_x)
-    first = hagen.first_layer(
+    first = _run_hagen_first(
+        args,
+        hagen,
         converted,
         input_uint5,
         avg=args.condition_hagen_avg,
-        relu_boundary=args.relu_boundary,
-        activation=args.activation,
     )
     payload = {
         "hagen_avg": args.condition_hagen_avg,
@@ -2005,12 +2069,13 @@ def margin_calibration_phase(args: argparse.Namespace) -> None:
     hagen = _hagen_backend(args)
     if hagen is None:
         raise ValueError("calibrate-margin requires a physical Hagen backend")
-    first = hagen.first_layer(
+    input_uint5 = converted.encode_input(calibration_x)
+    first = _run_hagen_first(
+        args,
+        hagen,
         converted,
-        converted.encode_input(calibration_x),
+        input_uint5,
         avg=1,
-        relu_boundary=args.relu_boundary,
-        activation=args.activation,
     )
     hidden_uint5 = first.value.detach().cpu().to(torch.int32)
     hidden_sha256 = _tensor_sha256(hidden_uint5)
