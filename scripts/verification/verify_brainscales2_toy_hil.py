@@ -22,15 +22,23 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from scripts.evaluation.brainscales2_toy_hil import (
     _aggregate_isolated_conditions,
     _apply_condition_worker_config,
+    _deadline_margin_context,
     _evaluate_readout_ablations,
+    _load_deadline_margin_payload,
     _load_isolated_condition,
     _run_hagen_output,
     _run_isolated_pool_chunks,
     _run_temporal_pool,
     _run_worker_command_with_retries,
+    _timing_calibration_sha256,
 )
 from utils.hardware.brainscales2.config import BrainScaleS2PoolConfig
 from utils.hardware.brainscales2.hagen import HagenConfig, HagenPWMBackend, HagenResult
+from utils.hardware.brainscales2.margin import (
+    DeadlineMarginConfig,
+    DeadlineMarginObservation,
+    select_deadline_margin,
+)
 from utils.hardware.brainscales2.toy import (
     ARCHITECTURES,
     ToyMLP,
@@ -43,6 +51,7 @@ from utils.hardware.brainscales2.toy import (
 from utils.hardware.brainscales2.toy_artifacts import (
     ToyConditionEvaluation,
     activation_error_by_code,
+    deadline_margin_comparisons,
     summarize_toy_evaluations,
     write_toy_artifacts,
 )
@@ -412,7 +421,7 @@ def verify_m16_calibration_inference_batch_separation() -> None:
         spiking,
         timing_calibration=timing,
     )
-    assert backend.batch_counts == [44, 64]
+    assert backend.batch_counts == [128, 64]
     assert result.first_spike_s.shape == (8, 8, 30, 16)
     assert result.metadata["calibration_strategy"] == "shared-split"
 
@@ -526,7 +535,7 @@ def verify_pool_chunk_process_isolation() -> None:
         code_times = torch.linspace(
             spiking_config.input_late_s,
             spiking_config.input_early_s,
-            11,
+            32,
             dtype=torch.float64,
         )
         coordinates = resolve_grouped_physical_coordinates(
@@ -955,6 +964,166 @@ def verify_transient_worker_retry() -> None:
         assert (silent_dir / "worker_attempt_1.log").is_file()
 
 
+def verify_deadline_margin_selection() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Deadline margin selection]]
+    hidden = torch.ones((64, 3), dtype=torch.int32)
+    hidden[0].zero_()
+    first = torch.full((4, 64, 3, 1), 64.0e-6, dtype=torch.float64)
+    observations = {
+        placement: DeadlineMarginObservation(first, hidden, {"placement": placement})
+        for placement in ("local-pool", "cross-quadrant")
+    }
+    config = DeadlineMarginConfig(bootstrap_iterations=50)
+    selection = select_deadline_margin(observations, config)
+    assert selection.viable
+    assert abs(float(selection.selected_margin_s) - 4.0e-6) < 1.0e-12
+    assert abs(float(selection.selected_deadline_s) - 64.0e-6) < 1.0e-12
+    assert all(row["supported_samples"] == 63 for row in selection.structural_floor)
+    for placement in observations:
+        upper = [
+            row["bootstrap_upper"]
+            for row in selection.curve
+            if row["placement"] == placement
+        ]
+        assert all(right <= left for left, right in zip(upper, upper[1:]))
+    try:
+        DeadlineMarginConfig(margin_step_s=1.5e-6)
+    except ValueError as error:
+        assert "hardware dt grid" in str(error)
+    else:
+        raise AssertionError("off-grid deadline candidates must fail")
+
+    structural = first.clone()
+    structural[:, :, 0, 0] = torch.nan
+    failed = select_deadline_margin(
+        {"local-pool": DeadlineMarginObservation(structural, hidden, {})},
+        replace(config, bootstrap_iterations=20),
+    )
+    assert not failed.viable
+    assert failed.selected_margin_s is None
+
+
+def verify_deadline_margin_provenance_and_timing_hash() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Deadline margin provenance]]
+    calibration = TimingCalibration(
+        response_delay_s=5.0e-6,
+        neuron_offset_s=torch.zeros((2, 1), dtype=torch.float64),
+        calibration_trials=4,
+        nominal_code_time_s=torch.arange(32, dtype=torch.float64),
+        raw_max_expected_time_s=torch.arange(32, dtype=torch.float64),
+        analytic_max_correction_s=torch.zeros(32, dtype=torch.float64),
+    )
+    changed = replace(
+        calibration,
+        analytic_max_correction_s=torch.ones(32, dtype=torch.float64),
+    )
+    assert _timing_calibration_sha256(calibration) != _timing_calibration_sha256(changed)
+
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        files = {}
+        for name in ("checkpoint", "converted", "hagen", "spiking"):
+            path = root / name
+            path.write_text(name, encoding="utf-8")
+            files[name] = path
+        args = SimpleNamespace(
+            deadline_margin_json=root / "deadline_margin.json",
+            task="yinyang",
+            architecture="yy-30",
+            activation="relu",
+            pooling_domain="ttfs",
+            pool_mapping="dedicated",
+            temporal_pool_estimator="analytic-corrected-max",
+            placements=["local-pool", "cross-quadrant"],
+            checkpoint=files["checkpoint"],
+            converted_checkpoint=files["converted"],
+            hagen_calibration=files["hagen"],
+            spiking_calibration=files["spiking"],
+            hagen_hidden_shift=2,
+            relu_boundary="implicit-lower-bound-host",
+            dt_s=1.0e-6,
+            input_early_s=5.0e-6,
+            input_late_s=25.0e-6,
+            deadline_s=60.0e-6,
+            tau_m_s=20.0e-6,
+            tau_syn_s=1.0e-6,
+            leak=80.0,
+            reset=80.0,
+            threshold=125.0,
+            refractory_time_s=1.0e-6,
+            i_synin_gm=500.0,
+            synapse_dac_bias=600.0,
+            synaptic_weight=63.0,
+            input_fan_in=4,
+        )
+        payload = {
+            "schema_version": 1,
+            "viable": True,
+            "selected_margin_s": 5.0e-6,
+            "selected_deadline_s": 65.0e-6,
+            "placements": ["local-pool", "cross-quadrant"],
+            "context": _deadline_margin_context(args),
+        }
+        args.deadline_margin_json.write_text(json.dumps(payload), encoding="utf-8")
+        assert _load_deadline_margin_payload(args)["selected_margin_s"] == 5.0e-6
+        args.threshold = 126.0
+        try:
+            _load_deadline_margin_payload(args)
+        except ValueError as error:
+            assert "hardware context" in str(error)
+        else:
+            raise AssertionError("changed operating point must invalidate margin artifact")
+
+
+def verify_deadline_margin_comparison() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Paired deadline comparison]]
+    hidden = torch.tensor([[2, 0], [3, 1]], dtype=torch.int32)
+    fired = torch.ones((2, 2, 2, 1), dtype=torch.bool)
+    result = ToyPoolResult(
+        first_spike_s=torch.full(fired.shape, 40.0e-6, dtype=torch.float64),
+        fired=fired,
+        spike_count=fired.to(torch.int64),
+        nominal_input_s=torch.full((2, 2), 20.0e-6, dtype=torch.float64),
+        pooled_first_spike_s=torch.full((2, 2, 2), 20.0e-6, dtype=torch.float64),
+        decoded_uint5=hidden.unsqueeze(0).repeat(2, 1, 1),
+        all_miss=torch.zeros((2, 2, 2), dtype=torch.bool),
+        physical_coordinates=torch.arange(2).reshape(2, 1),
+        pool_size=1,
+        placement="local-pool",
+        mapping="dedicated",
+    )
+    labels = torch.tensor([0, 1])
+    baseline_logits = torch.tensor([[[2.0, 0.0], [2.0, 0.0]]]).repeat(2, 1, 1)
+    margin_logits = torch.tensor([[[2.0, 0.0], [0.0, 2.0]]]).repeat(2, 1, 1)
+
+    def evaluation(key: str, logits: torch.Tensor, margin: float) -> ToyConditionEvaluation:
+        return ToyConditionEvaluation(
+            key=key,
+            pool_size=1,
+            pooling_domain="ttfs",
+            pool_result=result,
+            nominal_hidden_uint5=hidden,
+            logits=logits,
+            oracle_miss_repair_logits=logits,
+            torch_readout_logits=logits,
+            torch_oracle_miss_repair_logits=logits,
+            pwm_metadata={"backend": "fixture"},
+            deadline_margin_s=margin,
+        )
+
+    rows = deadline_margin_comparisons(
+        labels,
+        [
+            evaluation("baseline", baseline_logits, 0.0),
+            evaluation("margin", margin_logits, 5.0e-6),
+        ],
+        bootstrap_iterations=20,
+    )
+    assert len(rows) == 1
+    assert rows[0]["accuracy_gain"] == 0.5
+    assert rows[0]["deadline_margin_s"] == 5.0e-6
+
+
 def verify_metrics_and_artifact_schema() -> None:
     # @lat: [[hardware#Toy ANN2SNN Verification#Network artifact contract]]
     spiking = BrainScaleS2PoolConfig(
@@ -1011,6 +1180,7 @@ def verify_metrics_and_artifact_schema() -> None:
             "manifest.json",
             "runtime.json",
             "metrics.csv",
+            "deadline_margin_comparison.csv",
             "activation_error_by_code.csv",
             "predictions.csv",
             "events.csv",
@@ -1174,11 +1344,15 @@ def verify_python311_and_notebook_contract() -> None:
     source_paths = [
         REPOSITORY_ROOT / "utils/hardware/brainscales2/toy.py",
         REPOSITORY_ROOT / "utils/hardware/brainscales2/toy_pooling.py",
+        REPOSITORY_ROOT / "utils/hardware/brainscales2/toy_artifacts.py",
+        REPOSITORY_ROOT / "utils/hardware/brainscales2/margin.py",
         REPOSITORY_ROOT / "utils/hardware/brainscales2/hagen.py",
         REPOSITORY_ROOT / "scripts/evaluation/brainscales2_toy_hil.py",
     ]
     for path in source_paths:
         ast.parse(path.read_text(encoding="utf-8"), feature_version=(3, 11))
+    cli_source = source_paths[-1].read_text(encoding="utf-8")
+    assert "args.phase in (\"hardware-smoke\", \"hardware-eval\")" in cli_source
     notebook = REPOSITORY_ROOT / "scripts/notebooks/ebrains_brainscales2_toy_hil.ipynb"
     payload = json.loads(notebook.read_text(encoding="utf-8"))
     version = payload["metadata"]["language_info"]["version"]
@@ -1188,6 +1362,7 @@ def verify_python311_and_notebook_contract() -> None:
     )
     assert "RUN_TRAIN = True" in source
     assert "RUN_HAGEN_PROBE = True" in source
+    assert "RUN_MARGIN_CALIBRATION = True" in source
     assert "RUN_HARDWARE_SMOKE = True" in source
     assert "RUN_YINYANG_FULL = True" in source
     assert "RUN_LOCAL_REPLAY = False" in source
@@ -1209,10 +1384,17 @@ def verify_python311_and_notebook_contract() -> None:
     assert "'--relu-boundary', RELU_BOUNDARY" in source
     assert "TOY_ACTIVATION = 'relu'" in source
     assert "'--activation', TOY_ACTIVATION" in source
-    assert "POOLING_DOMAIN = 'potential'" in source
+    assert "POOLING_DOMAIN = 'ttfs'" in source
+    assert "TEMPORAL_POOL_ESTIMATOR = 'analytic-corrected-max'" in source
     assert "'--pooling-domain', POOLING_DOMAIN" in source
+    assert "'--temporal-pool-estimator', TEMPORAL_POOL_ESTIMATOR" in source
+    assert "'--phase', 'calibrate-margin'" in source
+    assert "--deadline-margin-json" in source
+    assert "--include-zero-margin-control" in source
+    assert "MARGIN_DIAGNOSTIC_DEADLINE_S = 100.0e-6" in source
     assert "Smoke did not use Hagen avg=M with one LIF" in source
     assert "activation_error_by_code.csv" in source
+    assert "deadline_margin_comparison.csv" in source
     assert "oracle_miss_repair_accuracy" in source
     assert "torch_readout_accuracy" in source
     assert "POOL_SAMPLE_CHUNK_SIZE = 64" in source
@@ -1243,6 +1425,9 @@ def verify_python311_and_notebook_contract() -> None:
     assert source.index("'--phase', 'train'") < source.index(
         "setup_hardware_client()"
     )
+    assert source.index("if RUN_MARGIN_CALIBRATION:") < source.index(
+        "if RUN_HARDWARE_SMOKE:"
+    )
     assert source.index("if RUN_HARDWARE_SMOKE:") < source.index(
         "if RUN_YINYANG_FULL:"
     )
@@ -1267,6 +1452,9 @@ def main() -> None:
     verify_sigmoid_host_activation_adapter()
     verify_condition_process_isolation_contract()
     verify_transient_worker_retry()
+    verify_deadline_margin_selection()
+    verify_deadline_margin_provenance_and_timing_hash()
+    verify_deadline_margin_comparison()
     verify_metrics_and_artifact_schema()
     verify_hardware_error_attribution()
     verify_python311_and_notebook_contract()

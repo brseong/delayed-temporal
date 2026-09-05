@@ -924,7 +924,9 @@ class GroupedHardwarePoolBackend:
         spiking_config: BrainScaleS2PoolConfig,
     ) -> TimingCalibrationObservation:
         """Acquire only calibration events so peak batch memory stays bounded."""
-        code_values = torch.linspace(0.0, 31.0, 11)
+        # Corrected-max calibration is code-conditioned. Exercise every UInt5
+        # code so deadline changes never fall back to a nearest sparse codeword.
+        code_values = torch.arange(32, dtype=torch.float32)
         code_times = _nominal_uint5_times(code_values, spiking_config)
         input_channels = (
             config.logical_neurons * spiking_config.input_fan_in

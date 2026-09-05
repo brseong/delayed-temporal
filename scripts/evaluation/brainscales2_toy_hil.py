@@ -14,6 +14,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import os
 import platform
 import signal
@@ -29,6 +30,11 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from utils.hardware.brainscales2.config import BrainScaleS2PoolConfig
+from utils.hardware.brainscales2.margin import (
+    DeadlineMarginConfig,
+    DeadlineMarginObservation,
+    select_deadline_margin,
+)
 from utils.hardware.brainscales2.hagen import (
     HagenConfig,
     HagenPWMBackend,
@@ -83,6 +89,7 @@ def parse_args() -> argparse.Namespace:
             "convert",
             "local-eval",
             "probe-hagen",
+            "calibrate-margin",
             "hardware-smoke",
             "hardware-eval",
         ),
@@ -173,6 +180,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--bootstrap-iterations", type=int, default=1_000)
+    parser.add_argument("--deadline-margin-json", type=Path)
+    parser.add_argument(
+        "--include-zero-margin-control",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument("--margin-calibration-samples", type=int, default=256)
+    parser.add_argument("--margin-calibration-trials", type=int, default=8)
+    parser.add_argument("--margin-diagnostic-deadline-s", type=float, default=100.0e-6)
+    parser.add_argument("--margin-max-s", type=float, default=40.0e-6)
+    parser.add_argument("--margin-step-s", type=float, default=1.0e-6)
+    parser.add_argument("--margin-target-sample-miss-rate", type=float, default=0.05)
+    parser.add_argument("--margin-confidence", type=float, default=0.95)
+    parser.add_argument("--margin-bootstrap-iterations", type=int, default=2_000)
 
     parser.add_argument("--hagen-calibration", type=Path)
     parser.add_argument("--spiking-calibration", type=Path)
@@ -219,6 +240,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prepare-first-hidden", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--first-hidden-cache", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--condition-hagen-avg", type=int, default=1, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--condition-deadline-margin-s", type=float, default=0.0, help=argparse.SUPPRESS
+    )
     parser.add_argument("--condition-code-revision", help=argparse.SUPPRESS)
     parser.add_argument("--condition-hagen-calibration-sha256", help=argparse.SUPPRESS)
     parser.add_argument("--condition-spiking-calibration-sha256", help=argparse.SUPPRESS)
@@ -232,6 +256,7 @@ _WORKER_PATH_FIELDS = {
     "checkpoint",
     "converted_checkpoint",
     "replay_events",
+    "deadline_margin_json",
     "output_dir",
     "hagen_calibration",
     "spiking_calibration",
@@ -272,6 +297,10 @@ def _git_revision() -> str | None:
 def _json_normalize(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     if isinstance(value, dict):
         return {str(key): _json_normalize(child) for key, child in value.items()}
     if isinstance(value, (tuple, list)):
@@ -317,6 +346,23 @@ def _validate_architecture(args: argparse.Namespace) -> None:
         raise ValueError("condition_worker_retry_backoff_s must be non-negative")
     if args.condition_worker_idle_timeout_s <= 0:
         raise ValueError("condition_worker_idle_timeout_s must be positive")
+    if args.margin_calibration_samples <= 0 or args.margin_calibration_trials <= 0:
+        raise ValueError("margin calibration sample and trial counts must be positive")
+    if args.phase == "calibrate-margin":
+        _deadline_margin_config(args)
+        if set(args.placements) != {"local-pool", "cross-quadrant"}:
+            raise ValueError("margin calibration requires both physical placements")
+        if args.temporal_pool_estimator != "analytic-corrected-max":
+            raise ValueError("margin calibration requires analytic-corrected-max")
+    if (
+        args.phase in ("hardware-smoke", "hardware-eval")
+        and args.pooling_domain == "ttfs"
+        and not args.condition_worker
+        and args.deadline_margin_json is None
+    ):
+        raise ValueError("TTFS hardware evaluation requires --deadline-margin-json")
+    if args.condition_deadline_margin_s < 0.0:
+        raise ValueError("condition_deadline_margin_s must be non-negative")
     if architecture.task != args.task:
         raise ValueError(
             f"architecture {architecture.name} belongs to {architecture.task}, not {args.task}"
@@ -325,7 +371,7 @@ def _validate_architecture(args: argparse.Namespace) -> None:
         raise ValueError("mnist-128 requires --pool-mapping time-multiplexed")
     if args.pooling_domain == "potential" and args.pwm_backend == "torch":
         raise ValueError("potential-domain pooling requires a Hagen PWM backend")
-    if args.phase.startswith("hardware"):
+    if args.phase.startswith("hardware") or args.phase == "calibrate-margin":
         if args.pwm_backend != "hagen-hardware" or args.pool_backend != "hardware":
             raise ValueError(
                 "hardware phases require --pwm-backend hagen-hardware and --pool-backend hardware"
@@ -489,6 +535,93 @@ def _spiking_config(args: argparse.Namespace) -> BrainScaleS2PoolConfig:
         allow_environment_calibration=args.allow_environment_calibration,
         raw_time_scale_s=args.raw_time_scale_s,
     )
+
+
+def _deadline_margin_config(args: argparse.Namespace) -> DeadlineMarginConfig:
+    return DeadlineMarginConfig(
+        dt_s=args.dt_s,
+        base_deadline_s=args.deadline_s,
+        diagnostic_deadline_s=args.margin_diagnostic_deadline_s,
+        maximum_margin_s=args.margin_max_s,
+        margin_step_s=args.margin_step_s,
+        target_sample_miss_rate=args.margin_target_sample_miss_rate,
+        confidence=args.margin_confidence,
+        bootstrap_iterations=args.margin_bootstrap_iterations,
+        seed=args.seed,
+    )
+
+
+def _deadline_margin_context(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "task": args.task,
+        "architecture": args.architecture,
+        "activation": args.activation,
+        "pooling_domain": args.pooling_domain,
+        "temporal_pool_estimator": args.temporal_pool_estimator,
+        "pool_mapping": args.pool_mapping,
+        "checkpoint_sha256": file_sha256(args.checkpoint),
+        "converted_checkpoint_sha256": file_sha256(args.converted_checkpoint),
+        "hagen_calibration_sha256": file_sha256(args.hagen_calibration),
+        "spiking_calibration_sha256": file_sha256(args.spiking_calibration),
+        "hagen_hidden_shift": args.hagen_hidden_shift,
+        "relu_boundary": args.relu_boundary,
+        "dt_s": args.dt_s,
+        "input_early_s": args.input_early_s,
+        "input_late_s": args.input_late_s,
+        "base_deadline_s": args.deadline_s,
+        "tau_mem_s": args.tau_m_s,
+        "tau_syn_s": args.tau_syn_s,
+        "leak": args.leak,
+        "reset": args.reset,
+        "threshold": args.threshold,
+        "refractory_time_s": args.refractory_time_s,
+        "i_synin_gm": args.i_synin_gm,
+        "synapse_dac_bias": args.synapse_dac_bias,
+        "synaptic_weight": args.synaptic_weight,
+        "input_fan_in": args.input_fan_in,
+    }
+
+
+def _metadata_values(value: Any, key: str) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for child_key, child in value.items():
+            if child_key == key and child is not None:
+                found.add(str(child))
+            else:
+                found.update(_metadata_values(child, key))
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            found.update(_metadata_values(child, key))
+    return found
+
+
+def _load_deadline_margin_payload(args: argparse.Namespace) -> dict[str, Any] | None:
+    margin_path = getattr(args, "deadline_margin_json", None)
+    if margin_path is None:
+        return None
+    path = Path(margin_path).resolve()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != 1 or not payload.get("viable"):
+        raise ValueError("deadline margin artifact is not a viable schema-v1 selection")
+    selected = payload.get("selected_margin_s")
+    if isinstance(selected, bool) or not isinstance(selected, (int, float)):
+        raise TypeError("deadline margin artifact has no numeric selected margin")
+    selected = float(selected)
+    if selected < 0.0 or not math.isfinite(selected):
+        raise ValueError("selected deadline margin must be finite and non-negative")
+    if payload.get("context") != _deadline_margin_context(args):
+        raise ValueError("deadline margin artifact does not match this hardware context")
+    calibrated_placements = set(payload.get("placements", []))
+    if not set(args.placements).issubset(calibrated_placements):
+        raise ValueError("deadline margin artifact does not cover requested placements")
+    expected_deadline = args.deadline_s + selected
+    if not math.isclose(
+        float(payload.get("selected_deadline_s")), expected_deadline, abs_tol=1.0e-12
+    ):
+        raise ValueError("deadline margin artifact has an inconsistent selected deadline")
+    payload["selected_margin_s"] = selected
+    return payload
 
 
 def _hagen_backend(args: argparse.Namespace) -> HagenPWMBackend | None:
@@ -808,9 +941,10 @@ def evaluation_phase(args: argparse.Namespace) -> None:
                 pool_result,
                 ideal.hidden_uint5,
             )
+            margin_ns = int(round(args.condition_deadline_margin_s * 1.0e9))
             key = (
                 f"{args.pooling_domain}_M{effective_pool_size}_"
-                f"{placement}_{args.pool_mapping}"
+                f"{placement}_{args.pool_mapping}_margin{margin_ns}ns"
             )
             runtime[key] = {
                 "elapsed_s": perf_counter() - started,
@@ -829,6 +963,8 @@ def evaluation_phase(args: argparse.Namespace) -> None:
                     torch_readout_logits=torch_readout_logits,
                     torch_oracle_miss_repair_logits=torch_oracle_miss_repair_logits,
                     pwm_metadata={"first": first_metadata, "output": output_metadata},
+                    base_deadline_s=args.deadline_s - args.condition_deadline_margin_s,
+                    deadline_margin_s=args.condition_deadline_margin_s,
                 )
             )
 
@@ -858,6 +994,10 @@ def evaluation_phase(args: argparse.Namespace) -> None:
         "pool_backend": args.pool_backend,
         "pooling_domain": args.pooling_domain,
         "temporal_pool_estimator": args.temporal_pool_estimator,
+        "base_deadline_s": args.deadline_s - args.condition_deadline_margin_s,
+        "deadline_margin_s": args.condition_deadline_margin_s,
+        "resolved_deadline_s": args.deadline_s,
+        "deadline_margin_json": args.deadline_margin_json,
         "relu_boundary": args.relu_boundary,
         "pool_mapping": args.pool_mapping,
         "pool_sample_chunk_size": args.pool_sample_chunk_size,
@@ -884,6 +1024,9 @@ def evaluation_phase(args: argparse.Namespace) -> None:
                 "key": item.key,
                 "pool_size": item.pool_size,
                 "pooling_domain": item.pooling_domain,
+                "base_deadline_s": item.base_deadline_s,
+                "deadline_margin_s": item.deadline_margin_s,
+                "resolved_deadline_s": item.resolved_deadline_s,
                 "hagen_avg": item.pool_size if item.pooling_domain == "potential" else 1,
                 "temporal_pool_size": item.pool_result.pool_size,
                 "placement": item.pool_result.placement,
@@ -1162,9 +1305,17 @@ def _timing_calibration_sha256(calibration: TimingCalibration) -> str:
     digest = hashlib.sha256()
     digest.update(repr(float(calibration.response_delay_s)).encode("ascii"))
     digest.update(str(int(calibration.calibration_trials)).encode("ascii"))
-    digest.update(
-        calibration.neuron_offset_s.detach().cpu().contiguous().numpy().tobytes()
-    )
+    for name, value in (
+        ("neuron_offset_s", calibration.neuron_offset_s),
+        ("nominal_code_time_s", calibration.nominal_code_time_s),
+        ("raw_max_expected_time_s", calibration.raw_max_expected_time_s),
+        ("analytic_max_correction_s", calibration.analytic_max_correction_s),
+    ):
+        digest.update(name.encode("ascii"))
+        if value is None:
+            digest.update(b"none")
+        else:
+            digest.update(value.detach().cpu().contiguous().numpy().tobytes())
     return digest.hexdigest()
 
 
@@ -1681,6 +1832,8 @@ def _load_isolated_condition(
             "torch_oracle_miss_repair_logits"
         ],
         pwm_metadata=condition_manifest["pwm_metadata"],
+        base_deadline_s=float(condition_manifest.get("base_deadline_s", 60.0e-6)),
+        deadline_margin_s=float(condition_manifest.get("deadline_margin_s", 0.0)),
     )
     return evaluation, archive, manifest, runtime
 
@@ -1707,6 +1860,22 @@ def _aggregate_isolated_conditions(
         runtimes[evaluation.key] = runtime
     if reference_archive is None:
         raise ValueError("no isolated condition workers were produced")
+    margin_payload = _load_deadline_margin_payload(args)
+    run_chip_identifiers = {
+        chip
+        for evaluation in evaluations
+        for chip in _metadata_values(evaluation.pool_result.metadata, "chip_identifier")
+    }
+    if margin_payload is not None:
+        calibration_chip_identifiers = set(margin_payload.get("chip_identifiers", []))
+        if (
+            calibration_chip_identifiers
+            and run_chip_identifiers
+            and run_chip_identifiers != calibration_chip_identifiers
+        ):
+            raise RuntimeError(
+                "formal conditions ran on a different chip than margin calibration"
+            )
     base_manifest = {
         key: value
         for key, value in manifests[0].items()
@@ -1716,6 +1885,27 @@ def _aggregate_isolated_conditions(
         {
             "pool_sizes": sorted({item.pool_size for item in evaluations}),
             "placements": list(dict.fromkeys(item.pool_result.placement for item in evaluations)),
+            "deadline_variants": sorted(
+                {
+                    (item.deadline_margin_s, item.resolved_deadline_s)
+                    for item in evaluations
+                }
+            ),
+            "deadline_margin_selection": (
+                None
+                if margin_payload is None
+                else {
+                    "artifact": str(args.deadline_margin_json),
+                    "selected_margin_s": margin_payload["selected_margin_s"],
+                    "selected_deadline_s": margin_payload["selected_deadline_s"],
+                    "target_sample_miss_rate": margin_payload["config"][
+                        "target_sample_miss_rate"
+                    ],
+                    "confidence": margin_payload["config"]["confidence"],
+                    "chip_identifiers": margin_payload.get("chip_identifiers", []),
+                }
+            ),
+            "run_chip_identifiers": sorted(run_chip_identifiers),
             "conditions": [
                 condition
                 for manifest in manifests
@@ -1772,8 +1962,151 @@ def _aggregate_isolated_conditions(
     )
 
 
+def _write_deadline_margin_figure(output_dir: Path, rows: list[dict[str, Any]]) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+    figure, axis = plt.subplots(figsize=(7.5, 4.5))
+    for placement in sorted({str(row["placement"]) for row in rows}):
+        selected = [row for row in rows if row["placement"] == placement]
+        axis.plot(
+            [float(row["margin_s"]) * 1.0e6 for row in selected],
+            [float(row["bootstrap_upper"]) for row in selected],
+            marker="o",
+            label=placement,
+        )
+    axis.axhline(
+        float(rows[0]["target_rate"]), color="black", linestyle="--", label="target"
+    )
+    axis.set_xlabel("deadline margin [us]")
+    axis.set_ylabel("95% upper bound: sample any positive miss")
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(output_dir / "deadline_margin_curve.png", dpi=180)
+    plt.close(figure)
+
+
+def margin_calibration_phase(args: argparse.Namespace) -> None:
+    """Select one common temporal margin from unlabeled physical hidden events."""
+    if args.pooling_domain != "ttfs":
+        raise ValueError("calibrate-margin requires --pooling-domain ttfs")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    dataset = load_dataset_bundle(args.task, cache_dir=args.dataset_cache)
+    model = _load_float_checkpoint(args)
+    converted = _load_or_convert(args, model, dataset.calibration_x)
+    samples = min(
+        args.margin_calibration_samples,
+        dataset.calibration_x.shape[0],
+        32 if args.quick else args.margin_calibration_samples,
+    )
+    trials = min(args.margin_calibration_trials, 2) if args.quick else args.margin_calibration_trials
+    calibration_x = dataset.calibration_x[:samples]
+    hagen = _hagen_backend(args)
+    if hagen is None:
+        raise ValueError("calibrate-margin requires a physical Hagen backend")
+    first = hagen.first_layer(
+        converted,
+        converted.encode_input(calibration_x),
+        avg=1,
+        relu_boundary=args.relu_boundary,
+        activation=args.activation,
+    )
+    hidden_uint5 = first.value.detach().cpu().to(torch.int32)
+    hidden_sha256 = _tensor_sha256(hidden_uint5)
+    diagnostic_config = replace(
+        _spiking_config(args),
+        observation_deadline_s=args.margin_diagnostic_deadline_s,
+    )
+    temporal_backend = _pool_backend(args)
+    observations: dict[str, DeadlineMarginObservation] = {}
+    raw_archive: dict[str, Any] = {
+        "hidden_uint5": hidden_uint5,
+        "hidden_sha256": hidden_sha256,
+        "placements": {},
+    }
+    chip_identifiers: set[str] = set()
+    calibration_trials = min(4, args.pool_calibration_trials)
+    for placement in args.placements:
+        placement_args = argparse.Namespace(**vars(args))
+        placement_args.output_dir = args.output_dir / "observations" / placement
+        placement_args.condition_worker = True
+        pool_config = ToyPoolConfig(
+            pool_size=1,
+            logical_neurons=converted.architecture.hidden_features,
+            placement=placement,
+            mapping=args.pool_mapping,
+            inference_trials=trials,
+            calibration_trials=max(2, calibration_trials),
+            seed=args.seed,
+            estimator="analytic-corrected-max",
+        )
+        result = _run_temporal_pool(
+            placement_args,
+            temporal_backend,
+            hidden_uint5,
+            pool_config,
+            diagnostic_config,
+        )
+        observation = DeadlineMarginObservation(
+            first_spike_s=result.first_spike_s,
+            hidden_uint5=hidden_uint5,
+            metadata=result.metadata,
+        )
+        observations[placement] = observation
+        raw_archive["placements"][placement] = {
+            "first_spike_s": result.first_spike_s,
+            "nominal_input_s": result.nominal_input_s,
+            "physical_coordinates": result.physical_coordinates,
+            "metadata": result.metadata,
+        }
+        chip_identifiers.update(_metadata_values(result.metadata, "chip_identifier"))
+
+    selection = select_deadline_margin(observations, _deadline_margin_config(args))
+    payload = {
+        **selection.to_dict(),
+        "context": _deadline_margin_context(args),
+        "calibration_samples": samples,
+        "calibration_trials": trials,
+        "hidden_uint5_sha256": hidden_sha256,
+        "hidden_uint5_zero_rate": float((hidden_uint5 == 0).float().mean()),
+        "chip_identifiers": sorted(chip_identifiers),
+        "physical_coordinates": {
+            placement: raw_archive["placements"][placement][
+                "physical_coordinates"
+            ].tolist()
+            for placement in observations
+        },
+        "dataset": dataset.metadata,
+        "hagen_metadata": first.metadata,
+        "environment": {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "git_revision": _git_revision(),
+            "python": platform.python_version(),
+            "torch": torch.__version__,
+            "platform": platform.platform(),
+            "ebrains_release": os.environ.get("EBRAINS_RELEASE"),
+        },
+    }
+    torch.save(raw_archive, args.output_dir / "deadline_margin_events.pt")
+    _json_write(args.output_dir / "deadline_margin.json", payload)
+    _write_csv(args.output_dir / "deadline_margin_curve.csv", list(selection.curve))
+    _write_deadline_margin_figure(args.output_dir, list(selection.curve))
+    if not selection.viable:
+        raise RuntimeError(
+            "no deadline margin met the calibration-only sample miss target; "
+            "inspect structural_floor in deadline_margin.json"
+        )
+    print(
+        f"Selected deadline margin {selection.selected_margin_s * 1e6:.1f} us; "
+        f"deadline={selection.selected_deadline_s * 1e6:.1f} us",
+        flush=True,
+    )
+
+
 def isolated_hardware_evaluation_phase(args: argparse.Namespace) -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    margin_payload = _load_deadline_margin_payload(args)
     pool_sizes = [1, 4] if args.quick else list(args.pool_sizes)
     placements = [args.placements[0]] if args.quick else list(args.placements)
     condition_root = args.output_dir / "condition_workers"
@@ -1797,26 +2130,45 @@ def isolated_hardware_evaluation_phase(args: argparse.Namespace) -> None:
         )
         first_hidden_dirs[hagen_avg] = worker_dir
 
+    deadline_margins = [0.0]
+    if margin_payload is not None:
+        selected_margin = float(margin_payload["selected_margin_s"])
+        deadline_margins = (
+            [0.0, selected_margin]
+            if args.include_zero_margin_control and selected_margin > 0.0
+            else [selected_margin]
+        )
+
     worker_dirs: list[Path] = []
-    for placement in placements:
-        for pool_size in pool_sizes:
+    for placement_index, placement in enumerate(placements):
+        for pool_index, pool_size in enumerate(pool_sizes):
             hagen_avg = 1 if args.pooling_domain == "ttfs" else int(pool_size)
-            key = f"{args.pooling_domain}_M{pool_size}_{placement}_{args.pool_mapping}"
-            worker_dir = condition_root / key
-            _run_condition_subprocess(
-                args,
-                worker_dir,
-                required=("manifest.json", "runtime.json", "intermediates.pt"),
-                overrides={
-                    "prepare_first_hidden": False,
-                    "first_hidden_cache": str(
-                        (first_hidden_dirs[hagen_avg] / "first_hidden.pt").resolve()
-                    ),
-                    "placements": [placement],
-                    "pool_sizes": [pool_size],
-                },
-            )
-            worker_dirs.append(worker_dir)
+            ordered_margins = list(deadline_margins)
+            if (placement_index + pool_index) % 2:
+                ordered_margins.reverse()
+            for margin_s in ordered_margins:
+                margin_ns = int(round(margin_s * 1.0e9))
+                key = (
+                    f"{args.pooling_domain}_M{pool_size}_{placement}_"
+                    f"{args.pool_mapping}_margin{margin_ns}ns"
+                )
+                worker_dir = condition_root / key
+                _run_condition_subprocess(
+                    args,
+                    worker_dir,
+                    required=("manifest.json", "runtime.json", "intermediates.pt"),
+                    overrides={
+                        "prepare_first_hidden": False,
+                        "first_hidden_cache": str(
+                            (first_hidden_dirs[hagen_avg] / "first_hidden.pt").resolve()
+                        ),
+                        "placements": [placement],
+                        "pool_sizes": [pool_size],
+                        "deadline_s": args.deadline_s + margin_s,
+                        "condition_deadline_margin_s": margin_s,
+                    },
+                )
+                worker_dirs.append(worker_dir)
     _aggregate_isolated_conditions(args, worker_dirs, first_hidden_dirs)
 
 
@@ -1854,7 +2206,7 @@ def main() -> None:
     elif args.prepare_first_hidden:
         prepare_first_hidden_phase(args)
     elif (
-        args.phase == "hardware-eval"
+        args.phase in ("hardware-smoke", "hardware-eval")
         and args.pool_backend == "hardware"
         and not args.condition_worker
     ):
@@ -1865,6 +2217,8 @@ def main() -> None:
         convert_phase(args)
     elif args.phase == "probe-hagen":
         probe_phase(args)
+    elif args.phase == "calibrate-margin":
+        margin_calibration_phase(args)
     else:
         evaluation_phase(args)
 

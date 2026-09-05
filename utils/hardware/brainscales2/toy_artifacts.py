@@ -31,8 +31,18 @@ class ToyConditionEvaluation:
     torch_readout_logits: torch.Tensor
     torch_oracle_miss_repair_logits: torch.Tensor
     pwm_metadata: dict[str, Any]
+    base_deadline_s: float = 60.0e-6
+    deadline_margin_s: float = 0.0
+
+    @property
+    def resolved_deadline_s(self) -> float:
+        return self.base_deadline_s + self.deadline_margin_s
 
     def __post_init__(self) -> None:
+        if not math.isfinite(self.base_deadline_s) or self.base_deadline_s <= 0.0:
+            raise ValueError("base deadline must be finite and positive")
+        if not math.isfinite(self.deadline_margin_s) or self.deadline_margin_s < 0.0:
+            raise ValueError("deadline margin must be finite and non-negative")
         if self.logits.ndim != 3:
             raise ValueError("condition logits must have shape [trial, sample, class]")
         if self.logits.shape[:2] != self.pool_result.decoded_uint5.shape[:2]:
@@ -174,6 +184,9 @@ def _activation_analysis(
                 "condition": evaluation.key,
                 "pool_size": evaluation.pool_size,
                 "pooling_domain": evaluation.pooling_domain,
+                "base_deadline_s": evaluation.base_deadline_s,
+                "deadline_margin_s": evaluation.deadline_margin_s,
+                "resolved_deadline_s": evaluation.resolved_deadline_s,
                 "hagen_avg": (
                     evaluation.pool_size if evaluation.pooling_domain == "potential" else 1
                 ),
@@ -246,7 +259,7 @@ def summarize_toy_evaluations(
             },
         ]
     )
-    correctness: dict[tuple[str, str, str, int], torch.Tensor] = {}
+    correctness: dict[tuple[str, str, str, int, int], torch.Tensor] = {}
     for evaluation in evaluations:
         repeated_labels = labels.reshape(1, -1).expand(evaluation.logits.shape[0], -1)
         correct = evaluation.logits.argmax(dim=-1) == repeated_labels
@@ -274,10 +287,12 @@ def summarize_toy_evaluations(
             if finite_latency.numel() >= 2
             else math.nan
         )
+        margin_ns = int(round(evaluation.deadline_margin_s * 1.0e9))
         condition_group = (
             evaluation.pooling_domain,
             result.placement,
             result.mapping,
+            margin_ns,
             evaluation.pool_size,
         )
         correctness[condition_group] = correct
@@ -286,6 +301,9 @@ def summarize_toy_evaluations(
                 "condition": evaluation.key,
                 "pool_size": evaluation.pool_size,
                 "pooling_domain": evaluation.pooling_domain,
+                "base_deadline_s": evaluation.base_deadline_s,
+                "deadline_margin_s": evaluation.deadline_margin_s,
+                "resolved_deadline_s": evaluation.resolved_deadline_s,
                 "hagen_avg": (
                     evaluation.pool_size if evaluation.pooling_domain == "potential" else 1
                 ),
@@ -339,6 +357,7 @@ def summarize_toy_evaluations(
             str(row["pooling_domain"]),
             str(row["placement"]),
             str(row["mapping"]),
+            int(round(float(row["deadline_margin_s"]) * 1.0e9)),
         )
         current_key = (*group, int(row["pool_size"]))
         baseline_key = (*group, 1)
@@ -355,6 +374,72 @@ def summarize_toy_evaluations(
         )
         row["recovery_ci_low"] = low
         row["recovery_ci_high"] = high
+    return rows
+
+
+def deadline_margin_comparisons(
+    labels: torch.Tensor,
+    evaluations: list[ToyConditionEvaluation],
+    *,
+    bootstrap_iterations: int = 1_000,
+    seed: int = 0,
+) -> list[dict[str, Any]]:
+    """Compare selected deadline extensions with same-run zero-margin controls."""
+    lookup = {
+        (
+            item.pooling_domain,
+            item.pool_result.placement,
+            item.pool_result.mapping,
+            item.pool_size,
+            int(round(item.deadline_margin_s * 1.0e9)),
+        ): item
+        for item in evaluations
+    }
+    rows: list[dict[str, Any]] = []
+    for key, current in sorted(lookup.items()):
+        domain, placement, mapping, pool_size, margin_ns = key
+        if margin_ns <= 0:
+            continue
+        baseline = lookup.get((domain, placement, mapping, pool_size, 0))
+        if baseline is None or baseline.logits.shape != current.logits.shape:
+            continue
+        repeated_labels = labels.reshape(1, -1).expand(current.logits.shape[0], -1)
+        current_correct = current.logits.argmax(dim=-1) == repeated_labels
+        baseline_correct = baseline.logits.argmax(dim=-1) == repeated_labels
+        low, high = _paired_accuracy_ci(
+            current_correct,
+            baseline_correct,
+            seed=seed + pool_size + margin_ns,
+            iterations=bootstrap_iterations,
+        )
+
+        def positive_sample_miss(item: ToyConditionEvaluation) -> torch.Tensor:
+            positive = item.nominal_hidden_uint5 > 0
+            return (item.pool_result.all_miss & positive.unsqueeze(0)).any(dim=-1)
+
+        current_miss = positive_sample_miss(current)
+        baseline_miss = positive_sample_miss(baseline)
+        rows.append(
+            {
+                "pooling_domain": domain,
+                "placement": placement,
+                "mapping": mapping,
+                "pool_size": pool_size,
+                "base_deadline_s": current.base_deadline_s,
+                "deadline_margin_s": current.deadline_margin_s,
+                "resolved_deadline_s": current.resolved_deadline_s,
+                "accuracy_gain": float(
+                    current_correct.float().mean() - baseline_correct.float().mean()
+                ),
+                "accuracy_gain_ci_low": low,
+                "accuracy_gain_ci_high": high,
+                "positive_sample_miss_rate_baseline": float(baseline_miss.float().mean()),
+                "positive_sample_miss_rate_margin": float(current_miss.float().mean()),
+                "positive_sample_miss_rate_change": float(
+                    current_miss.float().mean() - baseline_miss.float().mean()
+                ),
+            }
+        )
     return rows
 
 
@@ -400,6 +485,15 @@ def write_toy_artifacts(
         encoding="utf-8",
     )
     _write_rows(output_dir / "metrics.csv", metrics)
+    _write_rows(
+        output_dir / "deadline_margin_comparison.csv",
+        deadline_margin_comparisons(
+            labels,
+            evaluations,
+            bootstrap_iterations=bootstrap_iterations,
+            seed=seed,
+        ),
+    )
     _write_rows(
         output_dir / "activation_error_by_code.csv",
         activation_error_by_code(evaluations),
@@ -461,6 +555,9 @@ def write_toy_artifacts(
 
     event_fields = (
         "condition",
+        "base_deadline_s",
+        "deadline_margin_s",
+        "resolved_deadline_s",
         "trial",
         "sample",
         "logical_neuron",
@@ -488,6 +585,9 @@ def write_toy_artifacts(
                             writer.writerow(
                                 {
                                     "condition": evaluation.key,
+                                    "base_deadline_s": evaluation.base_deadline_s,
+                                    "deadline_margin_s": evaluation.deadline_margin_s,
+                                    "resolved_deadline_s": evaluation.resolved_deadline_s,
                                     "trial": trial,
                                     "sample": sample,
                                     "logical_neuron": logical,
@@ -556,9 +656,14 @@ def _write_figures(
     condition_rows = [row for row in metrics if "pool_size" in row]
     if condition_rows:
         figure, axis = plt.subplots(figsize=(7.5, 4.5))
-        groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
         for row in condition_rows:
-            key = (str(row["pooling_domain"]), str(row["placement"]), str(row["mapping"]))
+            key = (
+                str(row["pooling_domain"]),
+                str(row["placement"]),
+                str(row["mapping"]),
+                f"margin={float(row['deadline_margin_s']) * 1e6:g}us",
+            )
             groups.setdefault(key, []).append(row)
         for key, rows in groups.items():
             rows.sort(key=lambda row: int(row["pool_size"]))

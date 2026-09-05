@@ -30,6 +30,12 @@ from .toy_pooling import (
     resolve_grouped_physical_coordinates,
 )
 from .hagen import HagenConfig, HagenPWMBackend
+from .margin import (
+    DeadlineMarginConfig,
+    DeadlineMarginObservation,
+    DeadlineMarginSelection,
+    select_deadline_margin,
+)
 
 __all__ = [
     "BrainScaleS2PoolConfig",
@@ -55,4 +61,8 @@ __all__ = [
     "resolve_grouped_physical_coordinates",
     "HagenConfig",
     "HagenPWMBackend",
+    "DeadlineMarginConfig",
+    "DeadlineMarginObservation",
+    "DeadlineMarginSelection",
+    "select_deadline_margin",
 ]

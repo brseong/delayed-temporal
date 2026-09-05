@@ -106,7 +106,7 @@ The integer reference shift applies to its int32 accumulator, whereas physical H
 
 For inputs wider than one signed Hagen array, the adapter first probes the high-level `Linear` path. Its explicit `host-128` fallback runs 128-input analog MAC tiles, sums partial Int8 values on the host, and records that host accumulation rather than presenting it as one on-chip matrix operation.
 
-TTFS-domain pooling runs Hagen with `avg=1` and assigns `M` LIF replicas to each logical hidden unit. Potential-domain pooling runs Hagen with `avg=M` and one downstream LIF. The EBRAINS acceptance launcher selects the latter so its reported `M` is explicitly Hagen averaging, while the TTFS-replica path remains a separate selectable control.
+TTFS-domain pooling runs Hagen with `avg=1` and assigns `M` LIF replicas to each logical hidden unit. Potential-domain pooling runs Hagen with `avg=M` and one downstream LIF. The EBRAINS acceptance launcher selects TTFS replicas with finite-$M$ analytic corrected-max decoding; Hagen `avg=M` remains a separately labeled potential-domain comparison and is never conflated with neuron pooling.
 
 An all-miss logical pool decodes to zero on the positive UInt5 rail. Artifacts retain the all-miss mask and also report accuracy on samples without any all-miss hidden activation, preventing silent sample deletion or fabricated deadline spikes.
 
@@ -126,7 +126,11 @@ At `M=16`, dedicated placement uses 480 of 512 neuron circuits. The 128-hidden-u
 
 Full hardware evaluation slices samples and caps `pool_size * samples` at 128 replica-samples, so M=8 and M=16 use 16 and 8 samples. Every chunk runs in a disposable child process to release native hxtorch memory under the 2 GB EBRAINS limit, then [[utils/hardware/brainscales2/toy_pooling.py#concatenate_toy_pool_results]] restores order and provenance.
 
-Timing calibration is acquired once per physical condition in disposable four-trial workers. Their raw events are concatenated before offset estimation, and every inference chunk reuses the same checksummed calibration; calibration and inference batches never coexist in one M=16 graph.
+Timing calibration is acquired once per physical condition in disposable four-trial workers. Their raw events are concatenated before offset estimation across all 32 UInt5 codes, and every inference chunk reuses the same checksummed calibration; calibration and inference batches never coexist in one M=16 graph.
+
+Before formal evaluation, [[scripts/evaluation/brainscales2_toy_hil.py#margin_calibration_phase]] measures unlabeled calibration activations at $M=1$ with a 100 microsecond diagnostic deadline. Code zero is excluded; for each 1 microsecond candidate extension from 0 to 40 microseconds, it bootstraps trials and samples and computes the upper confidence bound for the sample-level event that any positive hidden unit misses. The smallest common margin whose bound is at most 5% in both placements is selected, while nonfires at the diagnostic deadline form a structural floor and block the run when no candidate passes.
+
+The selected margin extends only the observation deadline: the TTFS input window, UInt5 bounds, weights, and activation values are unchanged. Formal evaluation interleaves the selected margin and a zero-margin control over identical cached hidden inputs, every pool size, and both placements; the calibration context binds checkpoints, both calibration files, chip operating parameters, and the time grid before reuse.
 
 After temporal decoding, the physical Hagen readout also slices the flattened trial-sample row axis before each PWM call. When any all-miss position exists, original and oracle-repaired rows are concatenated and tagged as separate segments; the logits retain row order, and every chunk records calibration, chip, shape, and elapsed time.
 
@@ -146,13 +150,13 @@ Synthetic and artifact-replay backends validate accuracy propagation before hard
 
 Network artifacts join float, ideal-converted, and physical predictions with complete intermediate tensors and bounded human-readable event extracts.
 
-[[utils/hardware/brainscales2/toy_artifacts.py#write_toy_artifacts]] writes conversion and run manifests, prediction variants, accuracy and NLL drops, paired recovery intervals, support-stratified miss metrics, per-code UInt5 error, readout ablations, raw timing tensors, and figures. `intermediates.pt` remains lossless; `events.csv` records a deterministic sample/trial subset.
+[[utils/hardware/brainscales2/toy_artifacts.py#write_toy_artifacts]] writes conversion and run manifests, prediction variants, accuracy and NLL drops, paired recovery intervals, same-run zero-versus-selected-margin comparisons, support-stratified miss metrics, per-code UInt5 error, readout ablations, raw timing tensors, and figures. `intermediates.pt` remains lossless; `events.csv` records a deterministic sample/trial subset.
 
 Accepted physical runs use a per-run Git allowlist. The committed bundle keeps checkpoints, calibration, manifests, metrics, predictions, figures, and compressed event extracts; oversized lossless tensors and worker chunks remain external and are represented by size and SHA-256 in `artifact_inventory.json`.
 
-[[scripts/evaluation/brainscales2_toy_hil.py#main]] separates train, convert, local evaluation, Hagen probe, hardware smoke, and full hardware phases. MNIST hardware evaluation defaults to a 128-sample runtime benchmark until the caller explicitly sets a formal sample count.
+[[scripts/evaluation/brainscales2_toy_hil.py#main]] separates train, convert, local evaluation, Hagen probe, deadline-margin calibration, hardware smoke, and full hardware phases. MNIST hardware evaluation defaults to a 128-sample runtime benchmark until the caller explicitly sets a formal sample count.
 
-The EBRAINS notebook defaults to a one-pass Yin-Yang acceptance pipeline: train, convert, Hagen probe, hardware smoke, and full evaluation. It configures the shared client from a writable `/tmp` checkout, pins both calibrations, applies the probe-selected shift, and blocks formal execution unless same-run smoke passes. Failures stop later stages and enter `pipeline_status.json`.
+The EBRAINS notebook defaults to a one-pass Yin-Yang acceptance pipeline: train, convert, Hagen probe, deadline-margin calibration, hardware smoke, and full evaluation. It configures the shared client from a writable `/tmp` checkout, pins both calibrations, applies the probe-selected shift, and blocks formal execution unless same-run smoke passes. Failures stop later stages and enter `pipeline_status.json`.
 
 ## Toy ANN2SNN Verification
 
@@ -221,6 +225,24 @@ Temporal pooling separates drop-aware activation mean, raw maximum, finite-$M$ d
 `analytic-corrected-max` estimates the delivered residual scale and codewise deadline tail only from calibration events, then adds the finite-$M$ conditional earliest-time offset. `empirical-corrected-max` monotonically inverts the codewise calibration response without labels.
 
 All four estimators consume the same raw-event tensor, retain all-miss-to-zero semantics, and run through the same frozen readout. Replay results remain rough model-selection evidence; hardware acceptance requires an independent calibration acquisition and evaluation events.
+
+### Deadline margin selection
+
+Margin calibration must exclude code zero and choose the smallest hardware-grid deadline extension whose hierarchical-bootstrap miss upper bound passes in every placement.
+
+All candidates for a placement reuse the same bootstrap draws so the nested miss curve remains monotone. A persistent diagnostic-deadline floor must produce no selection rather than being hidden by a larger margin.
+
+### Deadline margin provenance
+
+A selected margin may be reused only with the exact unlabeled model, calibration files, timing grid, physical operating point, and complete 32-code timing correction that produced it.
+
+Changed checkpoints, calibration checksums, neuron parameters, or corrected-max tables must invalidate reuse. The margin changes only the deadline and must not modify the encoded activation interval.
+
+### Paired deadline comparison
+
+Every formal margin run must report selected-versus-zero deadline changes from matched task, placement, mapping, pooling method, pool size, and cached hidden inputs.
+
+The artifact records paired accuracy confidence intervals and positive-code sample miss-rate changes separately, preventing conditions at different margins from sharing an $M=1$ baseline.
 
 ### Held-out hardware replay
 
