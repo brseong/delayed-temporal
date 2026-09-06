@@ -230,6 +230,19 @@ def verify_manifest_contract() -> None:
     assert 'realpath -m "$4"' not in reducer_submit_script
     assert '[[ "$output_dir" != /* ]]' in reducer_submit_script
 
+    reducer_script = (
+        _ROOT
+        / "scripts"
+        / "experiments"
+        / "ubai"
+        / "theta_selection_reduce.sbatch"
+    ).read_text(encoding="utf-8")
+    assert 'while [[ "$remaining_manifests" == *:* ]]' in reducer_script
+    assert 'remaining_manifests="${remaining_manifests#*:}"' in reducer_script
+    assert 'THETA_MANIFESTS contains an empty path' in reducer_script
+    assert "THETA_SKIP_FULL_VALIDATION" in controller_script
+    assert "full_validation=skipped" in controller_script
+
     with tempfile.TemporaryDirectory() as directory:
         manifest_path = Path(directory) / "manifest.tsv"
         with manifest_path.open("w", newline="", encoding="utf-8") as handle:

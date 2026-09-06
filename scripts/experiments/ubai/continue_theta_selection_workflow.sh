@@ -27,6 +27,11 @@ if [[ ! -x "$control_python" ]]; then
     echo "THETA_CONTROL_PYTHON is not executable: $control_python" >&2
     exit 2
 fi
+skip_full_validation="${THETA_SKIP_FULL_VALIDATION:-0}"
+if [[ "$skip_full_validation" != "0" && "$skip_full_validation" != "1" ]]; then
+    echo "THETA_SKIP_FULL_VALIDATION must be 0 or 1: $skip_full_validation" >&2
+    exit 2
+fi
 
 mkdir -p "$THETA_LOG_DIR/slurm" "$THETA_OUTPUT_DIR" "$THETA_MANIFEST_DIR"
 workflow_log="$THETA_OUTPUT_DIR/workflow.log"
@@ -152,6 +157,12 @@ case "$phase" in
         if [[ "$status" != "confirmed" ]]; then
             record "stopped after confirmation status=$status"
             exit 1
+        fi
+        if [[ "$skip_full_validation" == "1" ]]; then
+            selected_theta="$(json_value "$THETA_OUTPUT_DIR/selection.json" selected_theta)"
+            record "complete selected_theta=$selected_theta full_validation=skipped"
+            : > "$THETA_OUTPUT_DIR/WORKFLOW_COMPLETE"
+            exit 0
         fi
         selection_manifest="$(active_selection_manifest)"
         confirmation_manifest="$THETA_MANIFEST_DIR/confirmation.tsv"
