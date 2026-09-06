@@ -216,6 +216,8 @@ def verify_manifest_contract() -> None:
     assert "08:00:00" in controller_script
     assert "--dependency=\"afterok:${dependency}\"" in controller_script
     assert "gpu-selection.json\" selected_family" in controller_script
+    assert "THETA_CONTROL_PYTHON" in controller_script
+    assert '"$control_python" "$THETA_REMOTE_REPO/scripts/experiments/ubai/build_theta_selection_manifest.py"' in controller_script
 
     with tempfile.TemporaryDirectory() as directory:
         manifest_path = Path(directory) / "manifest.tsv"

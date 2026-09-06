@@ -22,6 +22,11 @@ phase="$1"
 : "${THETA_MANIFEST_DIR:?THETA_MANIFEST_DIR is required}"
 : "${THETA_REMOTE_REPO:?THETA_REMOTE_REPO is required}"
 : "${THETA_CONTROL_SCRIPT:?THETA_CONTROL_SCRIPT is required}"
+control_python="${THETA_CONTROL_PYTHON:-/home1/sizz1997/miniconda3/bin/python}"
+if [[ ! -x "$control_python" ]]; then
+    echo "THETA_CONTROL_PYTHON is not executable: $control_python" >&2
+    exit 2
+fi
 
 mkdir -p "$THETA_LOG_DIR/slurm" "$THETA_OUTPUT_DIR" "$THETA_MANIFEST_DIR"
 workflow_log="$THETA_OUTPUT_DIR/workflow.log"
@@ -31,7 +36,7 @@ record() {
 }
 
 json_value() {
-    python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))[sys.argv[2]])' "$1" "$2"
+    "$control_python" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))[sys.argv[2]])' "$1" "$2"
 }
 
 submit_controller() {
@@ -57,7 +62,7 @@ build_manifest() {
     local stage="$1"
     local output="$2"
     shift 2
-    python3 "$THETA_REMOTE_REPO/scripts/experiments/ubai/build_theta_selection_manifest.py" \
+    "$control_python" "$THETA_REMOTE_REPO/scripts/experiments/ubai/build_theta_selection_manifest.py" \
         --stage "$stage" \
         --output "$output" \
         --source-commit "$THETA_SOURCE_COMMIT" \
