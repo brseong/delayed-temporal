@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 
-BASE_THETAS = (40, 80, 160, 320, 640, 1000, 1400, 2000, 2800, 4000)
+BASE_THETAS = (10, 20, 40, 80, 160, 320, 640, 1000, 1400, 2000, 2800, 4000)
 FAMILY_PARTITIONS = {
     "rtx3090": "gpu1",
     "a10": "gpu2,gpu6",

@@ -75,11 +75,17 @@ def make_run(
 
 def verify_selection_rule() -> None:
     runs = [make_run(theta, 0.80) for theta in BASE_THETAS]
+    runs[BASE_THETAS.index(10.0)] = make_run(10.0, 0.70)
+    runs[BASE_THETAS.index(20.0)] = make_run(20.0, 0.70)
     runs[BASE_THETAS.index(40.0)] = make_run(40.0, 0.7948)
     runs[BASE_THETAS.index(80.0)] = make_run(80.0, 0.7950)
     selected, status, best = choose_theta(runs)
     assert status == "selected" and selected == 80.0 and best == 0.80
     assert validation_neighbors(80.0, BASE_THETAS) == [40.0, 80.0, 160.0]
+
+    unresolved = [make_run(theta, 0.80) for theta in BASE_THETAS]
+    selected, status, _ = choose_theta(unresolved)
+    assert selected == 10.0 and status == "needs_lower_extension"
 
     rising = [make_run(theta, 0.80) for theta in BASE_THETAS]
     rising[-2] = make_run(2800.0, 0.80)
@@ -208,7 +214,7 @@ def verify_manifest_contract() -> None:
         )
         for theta in MANIFEST_THETAS
     ]
-    assert len(rows) == 10
+    assert len(rows) == len(MANIFEST_THETAS)
     assert len({row["run_id"] for row in rows}) == len(rows)
     assert [int(row["theta"]) for row in rows] == list(MANIFEST_THETAS)
     builder_script = (

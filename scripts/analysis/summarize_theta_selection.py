@@ -15,7 +15,7 @@ from typing import Iterable, Sequence
 import matplotlib.pyplot as plt
 
 
-BASE_THETAS = (40.0, 80.0, 160.0, 320.0, 640.0, 1000.0, 1400.0, 2000.0, 2800.0, 4000.0)
+BASE_THETAS = (10.0, 20.0, 40.0, 80.0, 160.0, 320.0, 640.0, 1000.0, 1400.0, 2000.0, 2800.0, 4000.0)
 EXTENSION_THETAS = (5600.0, 8000.0)
 ACCURACY_TOLERANCE = 0.005
 PLATEAU_TOLERANCE = 0.001
@@ -202,7 +202,7 @@ def read_manifest(path: Path) -> list[dict[str, str]]:
 
 
 def choose_theta(runs: Sequence[Run]) -> tuple[float | None, str, float]:
-    """Apply the preregistered accuracy rule and upper-grid guard."""
+    """Apply the accuracy rule and reject unresolved grid boundaries."""
 
     candidates = {
         run.theta: run
@@ -221,6 +221,8 @@ def choose_theta(runs: Sequence[Run]) -> tuple[float | None, str, float]:
 
     best = max(run.accuracy for run in candidates.values())
     selected = min(theta for theta, run in candidates.items() if run.accuracy >= best - ACCURACY_TOLERANCE)
+    if selected == min(candidates):
+        return selected, "needs_lower_extension", best
     return selected, "selected", best
 
 
@@ -339,11 +341,18 @@ def main() -> None:
         "plateau_tolerance": PLATEAU_TOLERANCE,
         "best_selection_accuracy": best,
         "selected_theta": selected,
+        "evaluated_thetas": sorted(
+            run.theta
+            for run in runs
+            if run.stage == "selection" and run.backend == "spiking" and run.theta is not None
+        ),
     }
     if selected is not None:
         candidate_values = [run.theta for run in runs if run.stage == "selection" and run.theta is not None]
         payload["validation_neighbors"] = validation_neighbors(selected, candidate_values)
         if args.confirm:
+            if status != "selected":
+                raise ValueError(f"cannot confirm unresolved selection status: {status}")
             validate_replay_and_validation(runs, selected)
             payload["status"] = "confirmed"
         if args.require_full:
