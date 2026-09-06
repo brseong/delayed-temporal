@@ -54,7 +54,26 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--gpu-family", choices=tuple(FAMILY_PARTITIONS))
     parser.add_argument("--selection-json", type=Path)
     parser.add_argument("--extension", action="store_true")
+    parser.add_argument(
+        "--extra-theta",
+        action="append",
+        type=float,
+        default=[],
+        help="Add a positive theta candidate to a selection manifest; repeat as needed.",
+    )
     return parser.parse_args()
+
+
+def theta_text(theta: float) -> str:
+    """Return a stable compact representation for manifest values and run IDs."""
+
+    if theta <= 0:
+        raise ValueError(f"theta must be positive: {theta}")
+    return format(float(theta), ".15g")
+
+
+def theta_run_id(prefix: str, theta: float) -> str:
+    return f"{prefix}_{theta_text(theta).replace('.', 'p')}"
 
 
 def row(
@@ -62,7 +81,7 @@ def row(
     run_id: str,
     stage: str,
     backend: str,
-    theta: int,
+    theta: float,
     split: str,
     expected_samples: int,
     dataset_path: str,
@@ -78,7 +97,7 @@ def row(
         "run_id": run_id,
         "stage": stage,
         "backend": backend,
-        "theta": str(theta),
+        "theta": theta_text(theta),
         "split": split,
         "expected_samples": str(expected_samples),
         "dataset_path": dataset_path,
@@ -97,6 +116,8 @@ def row(
 
 def main() -> None:
     args = parse_arguments()
+    if args.extra_theta and args.stage != "selection":
+        raise ValueError("--extra-theta is valid only for selection manifests")
     dataset_manifest = json.loads(args.dataset_manifest.read_text(encoding="utf-8"))
     train = dataset_manifest["train_selection"]
     validation = dataset_manifest["validation"]
@@ -131,10 +152,12 @@ def main() -> None:
                 **common,
             ))
     elif args.stage == "selection":
-        thetas = list(BASE_THETAS) + ([5600, 8000] if args.extension else [])
+        thetas = sorted(set(BASE_THETAS) | set(args.extra_theta))
+        if args.extension:
+            thetas = sorted(set(thetas) | {5600, 8000})
         for theta in thetas:
             rows.append(row(
-                run_id=f"selection_theta_{theta}",
+                run_id=theta_run_id("selection_theta", theta),
                 stage="selection",
                 backend="spiking",
                 theta=theta,
@@ -159,10 +182,10 @@ def main() -> None:
         if args.selection_json is None:
             raise ValueError("confirmation/full manifest requires --selection-json")
         selection = json.loads(args.selection_json.read_text(encoding="utf-8"))
-        selected = int(selection["selected_theta"])
+        selected = float(selection["selected_theta"])
         if args.stage == "confirmation":
             rows.append(row(
-                run_id=f"replay_theta_{selected}",
+                run_id=theta_run_id("replay_theta", selected),
                 stage="replay",
                 backend="spiking",
                 theta=selected,
@@ -173,9 +196,9 @@ def main() -> None:
                 **common,
             ))
             for theta_value in selection["validation_neighbors"]:
-                theta = int(theta_value)
+                theta = float(theta_value)
                 rows.append(row(
-                    run_id=f"validation_theta_{theta}",
+                    run_id=theta_run_id("validation_theta", theta),
                     stage="validation",
                     backend="spiking",
                     theta=theta,

@@ -164,7 +164,7 @@ The deterministic selection workflow chooses the smallest accurate global thresh
 
 [[scripts/evaluation/error_analysis_vit.py#load_evaluation_dataset]] accepts a self-contained Hugging Face dataset artifact through `--evaluation-dataset-path`. It preserves saved order and fingerprints, accumulates top-1 from local correct/total counts, writes a prediction SHA-256 digest, and can disable TensorBoard completely with `--no-tensorboard`.
 
-The preregistered training candidates are $	heta\in\{40,80,160,320,640,1000,1400,2000,2800,4000\}$. Every run uses the seed-0 shuffled ImageNet training subset of exactly 5,000 images, float64, batch size 32, analytic ranges, all maintained ViT spiking paths, and zero timing noise, mismatch, deadline margin, weight noise, and bias noise.
+The initial training candidates are $\theta\in\{40,80,160,320,640,1000,1400,2000,2800,4000\}$. If the smallest evaluated candidate remains within 0.005 of the best accuracy, the lower boundary is unresolved: evaluate 20 and 10, then halve the boundary again until the first lower candidate fails. Every run uses the seed-0 shuffled ImageNet training subset of exactly 5,000 images, float64, batch size 32, analytic ranges, all maintained ViT spiking paths, and zero timing noise, mismatch, deadline margin, weight noise, and bias noise.
 
 [[scripts/analysis/summarize_theta_selection.py#choose_theta]] selects the smallest candidate whose accuracy is within 0.005 of the best candidate accuracy. A gain above 0.001 from 2,800 to 4,000 requires 5,600 and 8,000; a further gain above 0.001 from 5,600 to 8,000 marks the search range insufficient rather than approving an endpoint.
 

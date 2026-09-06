@@ -31,7 +31,11 @@ from scripts.analysis.summarize_theta_selection import (
 )
 from scripts.evaluation.error_analysis_vit import load_evaluation_dataset
 from scripts.experiments.ubai.build_theta_selection_manifest import BASE_THETAS as MANIFEST_THETAS
-from scripts.experiments.ubai.build_theta_selection_manifest import row as manifest_row
+from scripts.experiments.ubai.build_theta_selection_manifest import (
+    row as manifest_row,
+    theta_run_id,
+    theta_text,
+)
 from scripts.setup.prepare_imagenet_theta_selection import label_sha256
 from utils.transformers.optional_tensorboard import create_summary_writer
 
@@ -177,6 +181,16 @@ def verify_offline_dataset_and_tensorboard() -> None:
 
 
 def verify_manifest_contract() -> None:
+    assert theta_text(20) == "20"
+    assert theta_text(2.5) == "2.5"
+    assert theta_run_id("selection_theta", 2.5) == "selection_theta_2p5"
+    try:
+        theta_text(0)
+    except ValueError as error:
+        assert "positive" in str(error)
+    else:
+        raise AssertionError("non-positive theta was accepted")
+
     rows = [
         manifest_row(
             run_id=f"selection_theta_{theta}",
@@ -197,6 +211,14 @@ def verify_manifest_contract() -> None:
     assert len(rows) == 10
     assert len({row["run_id"] for row in rows}) == len(rows)
     assert [int(row["theta"]) for row in rows] == list(MANIFEST_THETAS)
+    builder_script = (
+        _ROOT
+        / "scripts"
+        / "experiments"
+        / "ubai"
+        / "build_theta_selection_manifest.py"
+    ).read_text(encoding="utf-8")
+    assert '"--extra-theta"' in builder_script
     task_script = (
         _ROOT / "scripts" / "experiments" / "ubai" / "theta_selection_task.sbatch"
     ).read_text(encoding="utf-8")
