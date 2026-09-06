@@ -219,6 +219,17 @@ def verify_manifest_contract() -> None:
     assert "THETA_CONTROL_PYTHON" in controller_script
     assert '"$control_python" "$THETA_REMOTE_REPO/scripts/experiments/ubai/build_theta_selection_manifest.py"' in controller_script
 
+    reducer_submit_script = (
+        _ROOT
+        / "scripts"
+        / "experiments"
+        / "ubai"
+        / "submit_theta_selection_reduce.sh"
+    ).read_text(encoding="utf-8")
+    assert 'output_dir="$4"' in reducer_submit_script
+    assert 'realpath -m "$4"' not in reducer_submit_script
+    assert '[[ "$output_dir" != /* ]]' in reducer_submit_script
+
     with tempfile.TemporaryDirectory() as directory:
         manifest_path = Path(directory) / "manifest.tsv"
         with manifest_path.open("w", newline="", encoding="utf-8") as handle:

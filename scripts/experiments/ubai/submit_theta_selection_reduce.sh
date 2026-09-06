@@ -12,7 +12,11 @@ fi
 mode="$1"
 manifests="$2"
 dependency="$3"
-output_dir="$(realpath -m "$4")"
+output_dir="$4"
+if [[ "$output_dir" != /* ]]; then
+    echo "OUTPUT_DIR must be absolute: $output_dir" >&2
+    exit 2
+fi
 
 : "${THETA_LOG_DIR:?THETA_LOG_DIR is required}"
 : "${THETA_CONTAINER_IMAGE:?THETA_CONTAINER_IMAGE is required}"
