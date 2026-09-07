@@ -814,8 +814,6 @@ def main() -> None:
         print(f"complete\t{args.check_run_id}")
         return
     if args.write_pending:
-        if args.wandb_dir is None:
-            raise ValueError("--write-pending requires --wandb-dir")
         count = write_pending_manifest(
             args.manifest, specs, args.log_dir, args.write_pending,
             wandb_dir=args.wandb_dir,
@@ -825,7 +823,7 @@ def main() -> None:
     outputs = (
         args.raw_csv, args.summary_csv, args.site_csv,
         args.frontier_json, args.figure_prefix,
-        args.wandb_run_manifest, args.provenance_json, args.wandb_dir,
+        args.provenance_json,
     )
     if any(path is None for path in outputs):
         raise ValueError("aggregation requires all CSV, JSON, and figure output paths")
@@ -840,9 +838,12 @@ def main() -> None:
         site_csv=args.site_csv,
         frontier_json=args.frontier_json,
     )
-    write_wandb_run_manifest(
-        specs, args.log_dir, args.wandb_dir, args.wandb_run_manifest
-    )
+    if (args.wandb_run_manifest is None) != (args.wandb_dir is None):
+        raise ValueError("W&B run manifest requires both W&B paths")
+    if args.wandb_run_manifest is not None and args.wandb_dir is not None:
+        write_wandb_run_manifest(
+            specs, args.log_dir, args.wandb_dir, args.wandb_run_manifest
+        )
     write_provenance(args.manifest, specs, args.provenance_json)
     plot_summary(summary, frontier, args.figure_prefix)
     print(json.dumps(frontier, sort_keys=True))

@@ -55,8 +55,7 @@ for path in \
     fi
 done
 
-mkdir -p "$manifest_dir" "$log_dir/slurm" "$output_dir" "$figure_dir" \
-    "$wandb_dir/runs" "$wandb_dir/rejected"
+mkdir -p "$manifest_dir" "$log_dir/slurm" "$output_dir" "$figure_dir"
 exec 9> "$result_root/submit.lock"
 if ! flock -n 9; then
     echo "Another sigma-margin submission command is active" >&2
@@ -79,7 +78,6 @@ source_commit="$(git -C "$remote_repo" rev-parse HEAD)"
 "$control_python" "$remote_repo/scripts/analysis/summarize_sigma_margin_sweep.py" \
     --manifest "$manifest" \
     --log-dir "$log_dir" \
-    --wandb-dir "$wandb_dir" \
     --write-pending "$pending_manifest"
 pending_count="$(( $(wc -l < "$pending_manifest") - 1 ))"
 partition="$("$control_python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["selected_partition"])' "$gpu_selection")"
@@ -108,7 +106,6 @@ export SIGMA_MARGIN_MANIFEST="$manifest"
 export SIGMA_MARGIN_LOG_DIR="$log_dir"
 export SIGMA_MARGIN_OUTPUT_DIR="$output_dir"
 export SIGMA_MARGIN_FIGURE_DIR="$figure_dir"
-export SIGMA_MARGIN_WANDB_DIR="$wandb_dir"
 
 if [[ "$mode" == "pilot" ]]; then
     export SIGMA_MARGIN_TASK_MANIFEST="$pilot_manifest"
@@ -150,7 +147,6 @@ def tree_bytes(path):
     return sum(item.stat().st_size for item in path.rglob("*") if item.is_file()) if path.exists() else 0
 pilot_bytes = 0
 for run_id in pilot_ids:
-    pilot_bytes += tree_bytes(result_root / "wandb" / "runs" / run_id)
     log = result_root / "logs" / f"{run_id}.log"
     pilot_bytes += log.stat().st_size
 if pilot_bytes <= 0:

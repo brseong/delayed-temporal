@@ -27,11 +27,8 @@ from scripts.analysis.summarize_sigma_margin_sweep import (
     parse_run_log,
     plot_summary,
     read_manifest,
-    sha256_file,
-    validated_wandb_run,
     write_pending_manifest,
     write_provenance,
-    write_wandb_run_manifest,
 )
 from scripts.experiments.ubai.build_sigma_margin_manifest import (
     PILOT_RUN_IDS,
@@ -289,30 +286,12 @@ def write_log(path: Path, spec, *, correct: int) -> None:
     )
 
 
-def write_wandb_fixture(
-    wandb_dir: Path, log_dir: Path, spec, *, mode: str = "offline"
-) -> None:
-    run_root = wandb_dir / "runs" / spec.run_id
-    prefix = "offline-run" if mode == "offline" else "run"
-    local = run_root / "wandb" / f"{prefix}-fixture-{spec.run_id}"
-    local.mkdir(parents=True, exist_ok=True)
-    (local / "run-fixture.wandb").write_bytes(b"fixture")
-    marker = (
-        f"run_id\t{spec.run_id}\nmode\t{mode}\nlocal_dir\twandb/{local.name}\n"
-        f"log_sha256\t{sha256_file(log_dir / spec.log_file)}\n"
-    )
-    if mode == "online":
-        marker += f"wandb_id\t{spec.run_id}\nwandb_url\thttps://wandb.ai/example/{spec.run_id}\n"
-    (run_root / "ACCEPTED.tsv").write_text(marker, encoding="utf-8")
-
-
 def verify_manifest_aggregation_and_resume(root: Path) -> None:
     rows = build_rows(theta=Decimal("40"), common=common_identity(),
                       fractions=("1.000e-10",), margins=("0", "1"), seeds=(0, 1, 2))
     manifest = root / "manifest.tsv"
     manifest.write_text(serialized_tsv(rows), encoding="utf-8")
     specs = read_manifest(manifest, require_canonical=False)
-    wandb_dir = root / "wandb"
     for spec in specs:
         if spec.stage == "baseline":
             correct = 4500 if spec.backend == "spiking" else 4550
@@ -321,9 +300,6 @@ def verify_manifest_aggregation_and_resume(root: Path) -> None:
         else:
             correct = 4475 + int(spec.seed or 0)
         write_log(root / spec.log_file, spec, correct=correct)
-        mode = "online" if spec == specs[-1] else "offline"
-        write_wandb_fixture(wandb_dir, root, spec, mode=mode)
-        validated_wandb_run(spec, root, wandb_dir)
     runs = [parse_run_log(spec, root) for spec in specs]
     summary = aggregate_runs(runs)
     site_rows = aggregate_sites(runs)
@@ -338,17 +314,10 @@ def verify_manifest_aggregation_and_resume(root: Path) -> None:
     plot_summary(summary, frontier, figure)
     assert figure.with_suffix(".pdf").is_file() and figure.with_suffix(".png").is_file()
     pending = root / "pending.tsv"
-    assert write_pending_manifest(manifest, specs, root, pending, wandb_dir=wandb_dir) == 0
-    marker = wandb_dir / "runs" / specs[-1].run_id / "ACCEPTED.tsv"
-    marker.unlink()
-    assert write_pending_manifest(manifest, specs, root, pending, wandb_dir=wandb_dir) == 1
-    write_wandb_fixture(wandb_dir, root, specs[-1], mode="online")
-    run_manifest = root / "wandb-run-manifest.csv"
-    write_wandb_run_manifest(specs, root, wandb_dir, run_manifest)
-    with run_manifest.open(newline="", encoding="utf-8") as handle:
-        run_rows = list(csv.DictReader(handle))
-    assert len(run_rows) == len(specs)
-    assert {row["mode"] for row in run_rows} == {"offline", "online"}
+    assert write_pending_manifest(manifest, specs, root, pending) == 0
+    (root / specs[-1].log_file).unlink()
+    assert write_pending_manifest(manifest, specs, root, pending) == 1
+    write_log(root / specs[-1].log_file, specs[-1], correct=4477)
     provenance = root / "provenance.json"
     write_provenance(manifest, specs, provenance)
     assert json.loads(provenance.read_text(encoding="utf-8"))["runs"] == len(specs)
@@ -377,29 +346,22 @@ def verify_slurm_contract() -> None:
     task = (ROOT / "scripts/experiments/ubai/sigma_margin_task.sbatch").read_text()
     submit = (ROOT / "scripts/experiments/ubai/submit_sigma_margin_ubai.sh").read_text()
     reducer = (ROOT / "scripts/experiments/ubai/sigma_margin_reduce.sbatch").read_text()
-    sync = (ROOT / "scripts/experiments/sync_sigma_margin_wandb.sh").read_text()
     assert "#SBATCH --gres=gpu:1" in task
     assert "#SBATCH --cpus-per-task=4" in task and "#SBATCH --mem=64G" in task
     assert "DataParallel" not in task and "/usr/bin/env -u WANDB_API_KEY" in task
-    assert 'SIGMA_MARGIN_WANDB_MODE:-online' in task
-    assert 'WANDB_MODE="$wandb_mode"' in task and '--experiment_name "$run_id"' in task
-    assert 'WANDB_RUN_ID="$run_id"' in task and "WANDB_RESUME=allow" in task
+    assert "WANDB_MODE=disabled" in task and '--experiment_name "$run_id"' in task
+    assert "WANDB_RUN_ID" not in task and "WANDB_RESUME" not in task
     assert '$HOME:$HOME' in task
-    assert "WANDB_RUN_GROUP=vit_base_sigma_margin_5k_float64_v1" in task
-    assert "WANDB_TAGS=theta40,imagenet5k,sigma-margin,float64" in task
     assert '--array="0-${array_end}%8"' in submit and '--array="0-5%6"' in submit
     assert 'mode="pilot"' in submit and "60000000000" in submit
     assert "/home1/sizz1997/miniconda3/bin/python" in submit
-    assert "--theta-confirmation-manifest" in submit and "--wandb-dir" in submit
+    assert "--theta-confirmation-manifest" in submit and "--wandb-dir" not in submit
     assert '--dependency="afterany:$array_job"' in submit
-    assert "--wandb-run-manifest" in reducer and "--provenance-json" in reducer
-    assert "run manifest must contain exactly 470 unique runs" in sync
-    assert "verify_sigma_margin_wandb_sync.py" in sync
+    assert "--wandb-run-manifest" not in reducer and "--provenance-json" in reducer
     for path in (
         ROOT / "scripts/experiments/ubai/sigma_margin_task.sbatch",
         ROOT / "scripts/experiments/ubai/submit_sigma_margin_ubai.sh",
         ROOT / "scripts/experiments/ubai/sigma_margin_reduce.sbatch",
-        ROOT / "scripts/experiments/sync_sigma_margin_wandb.sh",
     ):
         subprocess.run(["bash", "-n", str(path)], check=True)
 

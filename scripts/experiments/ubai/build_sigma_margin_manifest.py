@@ -412,7 +412,7 @@ def main() -> None:
         "tag": "vit_base_sigma_margin_5k_float64_v1",
         "status": "planned",
         "validation_scope": "fixed-prefix-5000",
-        "wandb_mode": "offline",
+        "wandb_mode": "disabled",
         "selected_theta": float(selected_theta),
         "theta_selection_source_commit": selection_source_commit,
         "time_noise_std_fracs": list(TIME_NOISE_STD_FRACS),
