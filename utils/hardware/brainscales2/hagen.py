@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from hashlib import sha256
 from importlib import import_module
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 
 import torch
 
@@ -72,6 +73,7 @@ class HagenPWMBackend:
 
     def __init__(self, config: HagenConfig) -> None:
         self.config = config
+        self._active_hxtorch: Any | None = None
 
     @staticmethod
     def dependencies_available() -> bool:
@@ -115,6 +117,27 @@ class HagenPWMBackend:
             "installed hxtorch could not initialize the explicit Hagen calibration: "
             + "; ".join(errors)
         )
+
+    @contextmanager
+    def hardware_session(self) -> Iterator[None]:
+        """Keep one hxtorch initialization active across related PWM calls."""
+        if self._active_hxtorch is not None:
+            yield
+            return
+        if not self.dependencies_available():
+            raise RuntimeError(
+                "hxtorch.perceptron is unavailable; use the EBRAINS-experimental kernel"
+            )
+        hxtorch = import_module("hxtorch")
+        initialized = False
+        try:
+            initialized = self._initialize_hardware(hxtorch)
+            self._active_hxtorch = hxtorch
+            yield
+        finally:
+            self._active_hxtorch = None
+            if initialized:
+                hxtorch.release_hardware()
 
     def _high_level_linear(
         self,
@@ -218,11 +241,12 @@ class HagenPWMBackend:
             raise RuntimeError(
                 "hxtorch.perceptron is unavailable; use the EBRAINS-experimental kernel"
             )
-        hxtorch = import_module("hxtorch")
+        hxtorch = self._active_hxtorch or import_module("hxtorch")
         initialized = False
         started = perf_counter()
         try:
-            initialized = self._initialize_hardware(hxtorch)
+            if self._active_hxtorch is None:
+                initialized = self._initialize_hardware(hxtorch)
             output, tiling, schedule = self._linear(
                 hxtorch,
                 value,

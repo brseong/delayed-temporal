@@ -206,11 +206,11 @@ Every full-run hardware chunk must execute in a disposable child, persist its re
 
 ### Hagen output row chunking
 
-Physical Hagen readout chunks must preserve flattened trial-sample row order, bound each PWM call, and retain per-chunk provenance in the aggregate metadata.
+Physical Hagen readout chunks must preserve flattened trial-sample row order, bound each PWM call, retain per-chunk provenance, and share one hxtorch initialization until the row group completes.
 
 ### Hagen first-layer row chunking
 
-Physical Hagen hidden inference must split sample rows before each PWM call, preserve sample order, and retain per-chunk provenance; this bounds RCF uploads during margin calibration and full evaluation.
+Physical Hagen hidden inference must split sample rows before each PWM call, preserve sample order, and retain per-chunk provenance; all chunks share one hxtorch initialization before one final release.
 
 ### Condition process isolation
 

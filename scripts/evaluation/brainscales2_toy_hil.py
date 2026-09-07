@@ -726,21 +726,22 @@ def _run_hagen_output(
         return hagen.output_layer(converted, flat_hidden)
     chunk_results: list[HagenResult] = []
     row_chunks: list[dict[str, Any]] = []
-    for start in range(0, flat_hidden.shape[0], args.hagen_row_chunk_size):
-        stop = min(start + args.hagen_row_chunk_size, flat_hidden.shape[0])
-        print(
-            f"  Hagen output row chunk [{start}:{stop}) / {flat_hidden.shape[0]}",
-            flush=True,
-        )
-        result = hagen.output_layer(converted, flat_hidden[start:stop])
-        chunk_results.append(result)
-        row_chunks.append(
-            {
-                "row_start": start,
-                "row_stop": stop,
-                "metadata": result.metadata,
-            }
-        )
+    with hagen.hardware_session():
+        for start in range(0, flat_hidden.shape[0], args.hagen_row_chunk_size):
+            stop = min(start + args.hagen_row_chunk_size, flat_hidden.shape[0])
+            print(
+                f"  Hagen output row chunk [{start}:{stop}) / {flat_hidden.shape[0]}",
+                flush=True,
+            )
+            result = hagen.output_layer(converted, flat_hidden[start:stop])
+            chunk_results.append(result)
+            row_chunks.append(
+                {
+                    "row_start": start,
+                    "row_stop": stop,
+                    "metadata": result.metadata,
+                }
+            )
     combined = torch.cat([result.value for result in chunk_results], dim=0)
     metadata = dict(chunk_results[0].metadata)
     for key in ("input_shape", "output_shape", "elapsed_s"):
@@ -784,27 +785,28 @@ def _run_hagen_first(
         )
     chunk_results: list[HagenResult] = []
     row_chunks: list[dict[str, Any]] = []
-    for start in range(0, input_uint5.shape[0], args.hagen_row_chunk_size):
-        stop = min(start + args.hagen_row_chunk_size, input_uint5.shape[0])
-        print(
-            f"  Hagen first row chunk [{start}:{stop}) / {input_uint5.shape[0]}",
-            flush=True,
-        )
-        result = hagen.first_layer(
-            converted,
-            input_uint5[start:stop],
-            avg=avg,
-            relu_boundary=args.relu_boundary,
-            activation=args.activation,
-        )
-        chunk_results.append(result)
-        row_chunks.append(
-            {
-                "row_start": start,
-                "row_stop": stop,
-                "metadata": result.metadata,
-            }
-        )
+    with hagen.hardware_session():
+        for start in range(0, input_uint5.shape[0], args.hagen_row_chunk_size):
+            stop = min(start + args.hagen_row_chunk_size, input_uint5.shape[0])
+            print(
+                f"  Hagen first row chunk [{start}:{stop}) / {input_uint5.shape[0]}",
+                flush=True,
+            )
+            result = hagen.first_layer(
+                converted,
+                input_uint5[start:stop],
+                avg=avg,
+                relu_boundary=args.relu_boundary,
+                activation=args.activation,
+            )
+            chunk_results.append(result)
+            row_chunks.append(
+                {
+                    "row_start": start,
+                    "row_stop": stop,
+                    "metadata": result.metadata,
+                }
+            )
     combined = torch.cat([result.value for result in chunk_results], dim=0)
     metadata = dict(chunk_results[0].metadata)
     for key in ("input_shape", "output_shape", "elapsed_s"):

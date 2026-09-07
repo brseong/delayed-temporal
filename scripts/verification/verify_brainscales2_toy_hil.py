@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -624,6 +625,12 @@ class _FakeChunkedHagen:
         self.config = SimpleNamespace(mode="hardware")
         self.row_counts: list[int] = []
         self.first_row_counts: list[int] = []
+        self.session_entries = 0
+
+    @contextmanager
+    def hardware_session(self):
+        self.session_entries += 1
+        yield
 
     def first_layer(
         self,
@@ -678,6 +685,7 @@ def verify_hagen_first_row_chunking() -> None:
         avg=4,
     )
     assert hagen.first_row_counts == [3, 3, 1]
+    assert hagen.session_entries == 1
     torch.testing.assert_close(result.value, input_uint5 * 4)
     assert result.metadata["chunked"] is True
     assert result.metadata["row_chunk_count"] == 3
@@ -697,6 +705,7 @@ def verify_hagen_output_row_chunking() -> None:
         hidden,
     )
     assert hagen.row_counts == [3, 3, 1]
+    assert hagen.session_entries == 1
     torch.testing.assert_close(
         result.value, hidden.sum(dim=1, keepdim=True).to(torch.int8)
     )
