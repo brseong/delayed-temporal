@@ -142,7 +142,7 @@ The event-aware migration is complete across the shared sampler and encoder boun
 
 Affine, multiplication, exponential, exponential-difference/division, activation, softmin, and attention value paths use decorated events and retain noise-off parity references. Verification exercises opening, closing/reference, and internal exp-temporal cases.
 
-Any new ViT-B/16 noise campaign must consume an `approved` `selection.json` produced by [[evaluation#ViT-B/16 Global Theta Selection]] and use its `selected_theta` as the global operating point. A $	heta=2000$ artifact remains preserved but is marked superseded and excluded from manuscript support whenever the approved value differs; no replacement robustness figure is promoted before the new-theta sweep finishes.
+A manuscript-supporting ViT-B/16 noise campaign must consume an `approved` `selection.json` produced by [[evaluation#ViT-B/16 Global Theta Selection]] and use its `selected_theta` as the global operating point. The bounded 5k sigma-margin diagnostic may instead consume the exact `confirmed` evidence defined below. A $\theta=2000$ artifact remains preserved but is marked superseded and excluded from manuscript support whenever the selected value differs; no replacement robustness figure is promoted by the 5k diagnostic alone.
 
 The maintained manuscript protocol is:
 
@@ -156,9 +156,9 @@ Every stage keeps the noise-free tensor path as a parity reference. No stage may
 
 ## Sigma and Deadline-Margin Grid
 
-The follow-up ViT-B/16 diagnostic separates timing-error scale from the receiver's late-arrival grace after the global threshold has been approved.
+The follow-up ViT-B/16 diagnostic separates timing-error scale from the receiver's late-arrival grace at the confirmed 5k operating point.
 
-The experiment fixes the `approved` threshold from [[evaluation#ViT-B/16 Global Theta Selection]] and defines
+The experiment fixes the `confirmed` threshold \(\theta^*=40\) from [[evaluation#ViT-B/16 Global Theta Selection]] and defines
 
 $$
 \sigma_t=r_t(2\theta^*),\qquad k=\frac{m}{\sigma_t},\qquad m=k\sigma_t.
@@ -166,13 +166,15 @@ $$
 
 It evaluates the existing 12-point $r_t$ grid against $k\in\{0,0.5,1,1.5,2,2.5,3,4,5,6,8,10,12\}$ on the fixed first 5,000 validation images. Every stochastic cell uses seeds 0, 1, and 2; clean spiking and dense references are deterministic singletons. Static mismatch, calibration, learned-parameter noise, and a second theta axis remain disabled.
 
-[[scripts/experiments/ubai/build_sigma_margin_manifest.py#main]] validates the approved theta evidence and produces 470 immutable conditions bound to the data, checkpoint, source commit, and selected GPU family. UBAI jobs use one GPU each with at most eight concurrent array tasks, while resume submission includes only logs that fail the complete identity check.
+[[scripts/experiments/ubai/build_sigma_margin_manifest.py#main]] validates `selection.json`, the theta raw CSV, the 5k confirmation manifest, and GPU selection. It requires lower candidates 10 and 20, validation neighbors 20, 40, and 80, replay count/digest equality, validation stability, and matching data, checkpoint, and source identities. Their SHA-256 values are embedded in each of the 470 immutable rows.
+
+A six-run pilot records clean spiking, dense reference, three zero-margin noise scales, and the largest-scale `k=12` endpoint. Each UBAI task writes a credential-free W&B offline run named by its manifest ID; only a log-hash-matched one-to-one directory is accepted. The full array is submitted only after the pilot passes and its projected total asset use remains at or below 60 GB. Accepted directories are copied to baekryun and synchronized separately; manifests, logs, and CSV files remain authoritative.
 
 [[scripts/analysis/summarize_sigma_margin_sweep.py#build_frontier]] defines recovery at each $r_t$ as the smallest preregistered $k$ whose three-seed mean is within one percentage point of the clean spiking baseline. Failure to recover at $k=12$ is retained as `unrecovered`, and later nonmonotonic cells are reported rather than removed.
 
 The result set contains replica-level, cell-level, and site-level CSV files; a provenance JSON; a recovery-frontier JSON; and a three-panel accuracy, confidence-width, and pooled-miss-rate figure. It remains under `artifacts/` because this protocol intentionally stops at 5,000 images and does not by itself authorize manuscript promotion.
 
-[[scripts/verification/verify_sigma_margin_sweep.py#main]] checks the approval gate, canonical grid, physical scale identities, confidence intervals, pooled counts, frontier rule, one-GPU Slurm contract, and resumable pending manifest.
+[[scripts/verification/verify_sigma_margin_sweep.py#main]] checks the confirmed-evidence gate, canonical grid, physical scale identities, confidence intervals, pooled counts, frontier rule, one-GPU Slurm contract, offline-run identity, pilot contract, and resumable pending manifest. [[scripts/verification/verify_sigma_margin_wandb_sync.py#main]] audits the final 470-run online mirror against the authoritative raw CSV.
 
 ## Gaussian Noise Statistics
 

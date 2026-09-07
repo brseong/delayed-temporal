@@ -11,6 +11,7 @@ set -euo pipefail
 : "${SIGMA_MARGIN_MANIFEST:?SIGMA_MARGIN_MANIFEST is required}"
 : "${SIGMA_MARGIN_TASK_MANIFEST:?SIGMA_MARGIN_TASK_MANIFEST is required}"
 : "${SIGMA_MARGIN_LOG_DIR:?SIGMA_MARGIN_LOG_DIR is required}"
+: "${SIGMA_MARGIN_WANDB_DIR:?SIGMA_MARGIN_WANDB_DIR is required}"
 : "${THETA_CONTAINER_IMAGE:?THETA_CONTAINER_IMAGE is required}"
 : "${THETA_REMOTE_REPO:?THETA_REMOTE_REPO is required}"
 : "${THETA_ENV_ARCHIVE:?THETA_ENV_ARCHIVE is required}"
@@ -33,7 +34,7 @@ IFS=$'\t' read -r \
     deadline_margin_std deadline_margin_abs seed split expected_samples \
     dataset_path dataset_fingerprint precision source_commit checkpoint_path \
     checkpoint_sha256 gpu_family theta_selection_sha256 \
-    theta_selection_raw_sha256 theta_full_manifest_sha256 \
+    theta_selection_raw_sha256 theta_confirmation_manifest_sha256 \
     gpu_selection_sha256 log_file <<< "$row"
 
 actual_commit="$(git -C "$THETA_REMOTE_REPO" rev-parse HEAD)"
@@ -59,6 +60,9 @@ to_container_path() {
 
 container_manifest="$(to_container_path "$SIGMA_MARGIN_MANIFEST")"
 container_log_dir="$(to_container_path "$SIGMA_MARGIN_LOG_DIR")"
+wandb_run_root="$SIGMA_MARGIN_WANDB_DIR/runs/$run_id"
+wandb_rejected_root="$SIGMA_MARGIN_WANDB_DIR/rejected"
+container_wandb_run_root="$(to_container_path "$wandb_run_root")"
 mounts="$THETA_REMOTE_REPO:/data/delayed-temporal,$THETA_REMOTE_ASSETS/source-checkouts/transformers:/data/delayed-temporal/src/transformers,$THETA_REMOTE_ASSETS/source-checkouts/spikingjelly:/data/delayed-temporal/src/spikingjelly,$runtime_parent/dt:/opt/conda/envs/dt,$THETA_REMOTE_ASSETS:/data/ubai-assets"
 
 check_complete() {
@@ -67,7 +71,7 @@ check_complete() {
         --container-image="$THETA_CONTAINER_IMAGE" \
         --container-mounts="$mounts" \
         --container-workdir=/data/delayed-temporal \
-        /usr/bin/env \
+        /usr/bin/env -u WANDB_API_KEY \
         PYTHONPATH=/data/delayed-temporal:/data/delayed-temporal/src/transformers/src:/data/delayed-temporal/src/spikingjelly \
         /opt/conda/envs/dt/bin/python \
         scripts/analysis/summarize_sigma_margin_sweep.py \
@@ -76,15 +80,43 @@ check_complete() {
         --check-run-id "$run_id"
 }
 
-mkdir -p "$SIGMA_MARGIN_LOG_DIR"
+check_wandb_complete() {
+    local marker="$wandb_run_root/ACCEPTED.tsv"
+    [[ -f "$marker" ]] || return 1
+    local marker_run marker_offline marker_hash actual_hash
+    marker_run="$(awk -F $'\t' '$1 == "run_id" {print $2}' "$marker")"
+    marker_offline="$(awk -F $'\t' '$1 == "offline_dir" {print $2}' "$marker")"
+    marker_hash="$(awk -F $'\t' '$1 == "log_sha256" {print $2}' "$marker")"
+    [[ "$marker_run" == "$run_id" ]] || return 1
+    [[ "$marker_offline" == wandb/offline-run-* ]] || return 1
+    [[ -d "$wandb_run_root/$marker_offline" ]] || return 1
+    mapfile -t existing_offline < <(
+        find "$wandb_run_root/wandb" -mindepth 1 -maxdepth 1 \
+            -type d -name 'offline-run-*' -print | sort
+    )
+    [[ "${#existing_offline[@]}" -eq 1 ]] || return 1
+    actual_hash="$(sha256sum "$SIGMA_MARGIN_LOG_DIR/$log_file" | awk '{print $1}')"
+    [[ "$marker_hash" == "$actual_hash" ]]
+}
+
+archive_wandb_run() {
+    [[ -d "$wandb_run_root" ]] || return 0
+    mkdir -p "$wandb_rejected_root"
+    mv "$wandb_run_root" \
+        "$wandb_rejected_root/${run_id}.$(date -u +%Y%m%dT%H%M%SZ).${SLURM_JOB_ID}.${task_index}"
+}
+
+mkdir -p "$SIGMA_MARGIN_LOG_DIR" "$SIGMA_MARGIN_WANDB_DIR/runs" "$wandb_rejected_root"
 log_path="$SIGMA_MARGIN_LOG_DIR/$log_file"
-if check_complete >/dev/null 2>&1; then
-    echo "Skipping complete manifest identity: $run_id"
+if check_complete >/dev/null 2>&1 && check_wandb_complete; then
+    echo "Skipping complete manifest and W&B identity: $run_id"
     exit 0
 fi
 if [[ -f "$log_path" ]]; then
     mv "$log_path" "$log_path.rejected.$(date -u +%Y%m%dT%H%M%SZ)"
 fi
+archive_wandb_run
+mkdir -p "$wandb_run_root"
 temporary_log="$log_path.partial.${SLURM_JOB_ID}.${task_index}"
 
 gaussian_args=(--no-gaussian-time-noise --time-noise-seed 0)
@@ -102,9 +134,14 @@ if {
         --container-image="$THETA_CONTAINER_IMAGE" \
         --container-mounts="$mounts" \
         --container-workdir=/data/delayed-temporal \
-        /usr/bin/env \
+        /usr/bin/env -u WANDB_API_KEY \
         PYTHONPATH=/data/delayed-temporal:/data/delayed-temporal/src/transformers/src:/data/delayed-temporal/src/spikingjelly \
-        WANDB_MODE=disabled \
+        WANDB_MODE=offline \
+        WANDB_DIR="$container_wandb_run_root" \
+        WANDB_RUN_GROUP=vit_base_sigma_margin_5k_float64_v1 \
+        WANDB_TAGS=theta40,imagenet5k,sigma-margin,float64 \
+        WANDB_SILENT=true \
+        WANDB_CONSOLE=off \
         HF_DATASETS_OFFLINE=1 \
         TRANSFORMERS_OFFLINE=1 \
         OMP_NUM_THREADS=4 \
@@ -112,7 +149,7 @@ if {
         OPENBLAS_NUM_THREADS=4 \
         NUMEXPR_NUM_THREADS=4 \
         /opt/conda/envs/dt/bin/python scripts/evaluation/error_analysis_vit.py \
-        --experiment_name "vit_base_sigma_margin_5k_float64_v1-${run_id}" \
+        --experiment_name "$run_id" \
         --device cuda \
         --model_backend "$backend" \
         --model_id "$checkpoint_path" \
@@ -143,12 +180,32 @@ if {
     mv "$temporary_log" "$log_path"
 else
     echo "Evaluator failed; partial log retained at $temporary_log" >&2
+    archive_wandb_run
     exit 1
 fi
 
 if ! check_complete; then
     mv "$log_path" "$log_path.failed.$(date -u +%Y%m%dT%H%M%SZ)"
+    archive_wandb_run
     echo "Completed evaluator output failed manifest validation: $run_id" >&2
     exit 1
 fi
-echo "Completed $run_id -> $log_path"
+mapfile -t offline_dirs < <(
+    find "$wandb_run_root/wandb" -mindepth 1 -maxdepth 1 \
+        -type d -name 'offline-run-*' -print | sort
+)
+if [[ "${#offline_dirs[@]}" -ne 1 ]]; then
+    mv "$log_path" "$log_path.failed-wandb.$(date -u +%Y%m%dT%H%M%SZ)"
+    archive_wandb_run
+    echo "Expected exactly one offline W&B run for $run_id" >&2
+    exit 1
+fi
+offline_relative="wandb/$(basename "${offline_dirs[0]}")"
+log_sha256="$(sha256sum "$log_path" | awk '{print $1}')"
+marker="$wandb_run_root/ACCEPTED.tsv"
+temporary_marker="$marker.partial"
+printf 'run_id\t%s\noffline_dir\t%s\nlog_sha256\t%s\n' \
+    "$run_id" "$offline_relative" "$log_sha256" > "$temporary_marker"
+mv "$temporary_marker" "$marker"
+check_wandb_complete
+echo "Completed $run_id -> $log_path; W&B -> $offline_relative"

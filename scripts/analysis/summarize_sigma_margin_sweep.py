@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import asdict, dataclass, field
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -24,7 +25,7 @@ REQUIRED_FIELDS = {
 HASH_FIELDS = (
     "theta_selection_sha256",
     "theta_selection_raw_sha256",
-    "theta_full_manifest_sha256",
+    "theta_confirmation_manifest_sha256",
     "gpu_selection_sha256",
 )
 GPU_MARKERS = {
@@ -654,16 +655,67 @@ def plot_summary(
     plt.close(figure)
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validated_wandb_run(
+    spec: ManifestRun,
+    log_dir: Path,
+    wandb_dir: Path,
+) -> tuple[Path, str]:
+    """Match one accepted offline W&B directory to its evaluator log."""
+
+    run_root = wandb_dir / "runs" / spec.run_id
+    marker = run_root / "ACCEPTED.tsv"
+    if not marker.is_file():
+        raise FileNotFoundError(marker)
+    fields: dict[str, str] = {}
+    for line in marker.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("	")
+        if not separator or key in fields:
+            raise ValueError(f"invalid W&B marker: {marker}")
+        fields[key] = value
+    if fields.get("run_id") != spec.run_id:
+        raise ValueError(f"W&B marker run mismatch: {marker}")
+    log_path = log_dir / spec.log_file
+    log_sha256 = sha256_file(log_path)
+    if fields.get("log_sha256") != log_sha256:
+        raise ValueError(f"W&B marker log hash mismatch: {marker}")
+    relative = fields.get("offline_dir", "")
+    offline_dir = run_root / relative
+    if (
+        not relative
+        or Path(relative).is_absolute()
+        or offline_dir.parent != run_root / "wandb"
+        or not offline_dir.is_dir()
+        or not offline_dir.name.startswith("offline-run-")
+    ):
+        raise ValueError(f"invalid offline W&B directory in {marker}")
+    offline_runs = sorted((run_root / "wandb").glob("offline-run-*"))
+    if offline_runs != [offline_dir]:
+        raise ValueError(f"W&B run directory is not one-to-one for {spec.run_id}")
+    return offline_dir, log_sha256
+
+
 def write_pending_manifest(
     manifest_path: Path,
     specs: Sequence[ManifestRun],
     log_dir: Path,
     output: Path,
+    *,
+    wandb_dir: Path | None = None,
 ) -> int:
     pending: list[dict[str, str]] = []
     for spec in specs:
         try:
             parse_run_log(spec, log_dir)
+            if wandb_dir is not None:
+                validated_wandb_run(spec, log_dir, wandb_dir)
         except (FileNotFoundError, UnicodeDecodeError, ValueError):
             pending.append(spec.row)
     with manifest_path.open(newline="", encoding="utf-8") as handle:
@@ -678,10 +730,55 @@ def write_pending_manifest(
     return len(pending)
 
 
+def write_wandb_sync_manifest(
+    specs: Sequence[ManifestRun],
+    log_dir: Path,
+    wandb_dir: Path,
+    output: Path,
+) -> None:
+    rows = []
+    for spec in specs:
+        offline_dir, log_sha256 = validated_wandb_run(spec, log_dir, wandb_dir)
+        rows.append({
+            "run_id": spec.run_id,
+            "offline_dir": str(offline_dir.relative_to(wandb_dir)),
+            "log_sha256": log_sha256,
+        })
+    write_csv(output, rows)
+
+
+def write_provenance(
+    manifest: Path,
+    specs: Sequence[ManifestRun],
+    output: Path,
+) -> None:
+    first = specs[0]
+    payload = {
+        "format_version": 1,
+        "status": "complete",
+        "tag": "vit_base_sigma_margin_5k_float64_v1",
+        "validation_scope": "fixed-prefix-5000",
+        "runs": len(specs),
+        "stochastic_runs": sum(spec.stage == "sigma_margin" for spec in specs),
+        "theta": first.theta,
+        "source_commit": first.source_commit,
+        "checkpoint_sha256": first.checkpoint_sha256,
+        "dataset_fingerprint": first.dataset_fingerprint,
+        "gpu_family": first.gpu_family,
+        "manifest_sha256": sha256_file(manifest),
+        **{name: first.row[name] for name in HASH_FIELDS},
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(output)
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--log-dir", type=Path, required=True)
+    parser.add_argument("--wandb-dir", type=Path)
     parser.add_argument("--check-run-id")
     parser.add_argument("--write-pending", type=Path)
     parser.add_argument("--raw-csv", type=Path)
@@ -689,6 +786,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--site-csv", type=Path)
     parser.add_argument("--frontier-json", type=Path)
     parser.add_argument("--figure-prefix", type=Path)
+    parser.add_argument("--wandb-sync-manifest", type=Path)
+    parser.add_argument("--provenance-json", type=Path)
     return parser.parse_args()
 
 
@@ -703,12 +802,18 @@ def main() -> None:
         print(f"complete\t{args.check_run_id}")
         return
     if args.write_pending:
-        count = write_pending_manifest(args.manifest, specs, args.log_dir, args.write_pending)
+        if args.wandb_dir is None:
+            raise ValueError("--write-pending requires --wandb-dir")
+        count = write_pending_manifest(
+            args.manifest, specs, args.log_dir, args.write_pending,
+            wandb_dir=args.wandb_dir,
+        )
         print(f"pending\t{count}")
         return
     outputs = (
         args.raw_csv, args.summary_csv, args.site_csv,
         args.frontier_json, args.figure_prefix,
+        args.wandb_sync_manifest, args.provenance_json, args.wandb_dir,
     )
     if any(path is None for path in outputs):
         raise ValueError("aggregation requires all CSV, JSON, and figure output paths")
@@ -723,6 +828,10 @@ def main() -> None:
         site_csv=args.site_csv,
         frontier_json=args.frontier_json,
     )
+    write_wandb_sync_manifest(
+        specs, args.log_dir, args.wandb_dir, args.wandb_sync_manifest
+    )
+    write_provenance(args.manifest, specs, args.provenance_json)
     plot_summary(summary, frontier, args.figure_prefix)
     print(json.dumps(frontier, sort_keys=True))
 

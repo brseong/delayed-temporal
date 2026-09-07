@@ -13,6 +13,7 @@ set -euo pipefail
 : "${SIGMA_MARGIN_LOG_DIR:?SIGMA_MARGIN_LOG_DIR is required}"
 : "${SIGMA_MARGIN_OUTPUT_DIR:?SIGMA_MARGIN_OUTPUT_DIR is required}"
 : "${SIGMA_MARGIN_FIGURE_DIR:?SIGMA_MARGIN_FIGURE_DIR is required}"
+: "${SIGMA_MARGIN_WANDB_DIR:?SIGMA_MARGIN_WANDB_DIR is required}"
 : "${THETA_CONTAINER_IMAGE:?THETA_CONTAINER_IMAGE is required}"
 : "${THETA_REMOTE_REPO:?THETA_REMOTE_REPO is required}"
 : "${THETA_ENV_ARCHIVE:?THETA_ENV_ARCHIVE is required}"
@@ -42,6 +43,7 @@ container_manifest="$(to_container_path "$SIGMA_MARGIN_MANIFEST")"
 container_log_dir="$(to_container_path "$SIGMA_MARGIN_LOG_DIR")"
 container_output_dir="$(to_container_path "$SIGMA_MARGIN_OUTPUT_DIR")"
 container_figure_dir="$(to_container_path "$SIGMA_MARGIN_FIGURE_DIR")"
+container_wandb_dir="$(to_container_path "$SIGMA_MARGIN_WANDB_DIR")"
 manifest_commit="$(awk -F $'\t' 'NR == 2 {print $15}' "$SIGMA_MARGIN_MANIFEST")"
 actual_commit="$(git -C "$THETA_REMOTE_REPO" rev-parse HEAD)"
 if [[ -z "$manifest_commit" || "$actual_commit" != "$manifest_commit" ]]; then
@@ -57,6 +59,7 @@ srun \
     /usr/bin/env \
     PYTHONPATH=/data/delayed-temporal:/data/delayed-temporal/src/transformers/src:/data/delayed-temporal/src/spikingjelly \
     MPLBACKEND=Agg \
+    MPLCONFIGDIR=/tmp/matplotlib-${SLURM_JOB_ID} \
     /opt/conda/envs/dt/bin/python scripts/analysis/summarize_sigma_margin_sweep.py \
     --manifest "$container_manifest" \
     --log-dir "$container_log_dir" \
@@ -64,6 +67,9 @@ srun \
     --summary-csv "$container_output_dir/summary.csv" \
     --site-csv "$container_output_dir/site_summary.csv" \
     --frontier-json "$container_output_dir/frontier.json" \
+    --wandb-dir "$container_wandb_dir" \
+    --wandb-sync-manifest "$container_output_dir/wandb-sync-manifest.csv" \
+    --provenance-json "$container_output_dir/provenance.json" \
     --figure-prefix "$container_figure_dir/noise_sigma_margin_vit_base_5k_float64_v1"
 
 : > "$SIGMA_MARGIN_OUTPUT_DIR/COMPLETE"

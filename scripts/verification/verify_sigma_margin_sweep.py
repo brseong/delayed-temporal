@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import replace
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -13,7 +14,6 @@ import shutil
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
-
 
 ROOT = Path(__file__).resolve().parents[2]
 for path in (ROOT, ROOT / "scripts" / "analysis"):
@@ -27,11 +27,16 @@ from scripts.analysis.summarize_sigma_margin_sweep import (
     parse_run_log,
     plot_summary,
     read_manifest,
+    sha256_file,
+    validated_wandb_run,
     write_pending_manifest,
+    write_provenance,
+    write_wandb_sync_manifest,
 )
 from scripts.experiments.ubai.build_sigma_margin_manifest import (
+    PILOT_RUN_IDS,
     build_rows,
-    resolve_approved_theta,
+    resolve_confirmed_theta,
     serialized_tsv,
 )
 
@@ -49,134 +54,171 @@ def common_identity() -> dict[str, str]:
         "gpu_family": "rtxa6000",
         "theta_selection_sha256": "a" * 64,
         "theta_selection_raw_sha256": "b" * 64,
-        "theta_full_manifest_sha256": "c" * 64,
+        "theta_confirmation_manifest_sha256": "c" * 64,
         "gpu_selection_sha256": "d" * 64,
     }
 
 
-def verify_approval_gate(root: Path) -> None:
-    selection = root / "selection.json"
-    selection.write_text(
-        json.dumps({"status": "approved", "selected_theta": 640.0}),
+def write_theta_evidence(root: Path) -> None:
+    (root / "selection.json").write_text(
+        json.dumps({
+            "status": "confirmed",
+            "selected_theta": 40.0,
+            "evaluated_thetas": [10.0, 20.0, 40.0, 80.0],
+            "validation_neighbors": [20.0, 40.0, 80.0],
+        }),
         encoding="utf-8",
     )
-    full_manifest = root / "full.tsv"
-    fields = (
+    manifest_fields = (
         "run_id", "stage", "backend", "theta", "expected_samples",
         "checkpoint_sha256", "dataset_fingerprint", "source_commit",
     )
-    with full_manifest.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, dialect="excel-tab", lineterminator="\n")
+    confirmation_rows = [
+        ("replay_theta_40", "replay", "spiking", "40", "train-fingerprint"),
+        ("validation_theta_20", "validation", "spiking", "20", "quick-fingerprint"),
+        ("validation_theta_40", "validation", "spiking", "40", "quick-fingerprint"),
+        ("validation_theta_80", "validation", "spiking", "80", "quick-fingerprint"),
+        ("validation_dense_reference", "validation", "hf", "2000", "quick-fingerprint"),
+    ]
+    with (root / "confirmation.tsv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=manifest_fields, dialect="excel-tab", lineterminator="\n")
         writer.writeheader()
-        writer.writerows([
-            {
-                "run_id": "full_spiking", "stage": "full", "backend": "spiking",
-                "theta": "640", "expected_samples": "50000",
+        for run_id, stage, backend, theta, fingerprint in confirmation_rows:
+            writer.writerow({
+                "run_id": run_id,
+                "stage": stage,
+                "backend": backend,
+                "theta": theta,
+                "expected_samples": "5000",
                 "checkpoint_sha256": "checkpoint-sha",
-                "dataset_fingerprint": "full-fingerprint", "source_commit": "theta-commit",
-            },
-            {
-                "run_id": "full_hf", "stage": "full", "backend": "hf",
-                "theta": "2000", "expected_samples": "50000",
-                "checkpoint_sha256": "checkpoint-sha",
-                "dataset_fingerprint": "full-fingerprint", "source_commit": "theta-commit",
-            },
-        ])
-    raw_csv = root / "theta-raw.csv"
-    with raw_csv.open("w", newline="", encoding="utf-8") as handle:
-        fields = (
-            "stage", "backend", "theta", "samples", "checkpoint_sha256",
-            "dataset_fingerprint", "source_commit",
-        )
-        writer = csv.DictWriter(handle, fieldnames=fields)
+                "dataset_fingerprint": fingerprint,
+                "source_commit": "theta-commit",
+            })
+    raw_fields = (
+        "run_id", "stage", "backend", "theta", "samples", "correct",
+        "accuracy", "prediction_sha256", "checkpoint_sha256",
+        "dataset_fingerprint", "source_commit",
+    )
+    selection_values = [
+        (10, 3900, "1" * 64),
+        (20, 4400, "2" * 64),
+        (40, 4554, "4" * 64),
+        (80, 4566, "8" * 64),
+    ]
+    raw_rows: list[dict[str, str]] = []
+    for theta, correct, digest in selection_values:
+        raw_rows.append({
+            "run_id": f"selection_theta_{theta}", "stage": "selection",
+            "backend": "spiking", "theta": str(theta), "samples": "5000",
+            "correct": str(correct), "accuracy": str(correct / 5000),
+            "prediction_sha256": digest, "checkpoint_sha256": "checkpoint-sha",
+            "dataset_fingerprint": "train-fingerprint", "source_commit": "theta-commit",
+        })
+    confirmation_values = {
+        "replay_theta_40": (40, 4554, "4" * 64, "train-fingerprint", "spiking"),
+        "validation_theta_20": (20, 4067, "a" * 64, "quick-fingerprint", "spiking"),
+        "validation_theta_40": (40, 4257, "b" * 64, "quick-fingerprint", "spiking"),
+        "validation_theta_80": (80, 4273, "c" * 64, "quick-fingerprint", "spiking"),
+        "validation_dense_reference": (2000, 4275, "d" * 64, "quick-fingerprint", "hf"),
+    }
+    for run_id, (theta, correct, digest, fingerprint, backend) in confirmation_values.items():
+        raw_rows.append({
+            "run_id": run_id,
+            "stage": "replay" if run_id.startswith("replay") else "validation",
+            "backend": backend, "theta": str(theta) if backend == "spiking" else "",
+            "samples": "5000", "correct": str(correct),
+            "accuracy": str(correct / 5000), "prediction_sha256": digest,
+            "checkpoint_sha256": "checkpoint-sha", "dataset_fingerprint": fingerprint,
+            "source_commit": "theta-commit",
+        })
+    with (root / "theta-raw.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=raw_fields)
         writer.writeheader()
-        writer.writerows([
-            {
-                "stage": "full", "backend": "spiking", "theta": "640.0",
-                "samples": "50000", "checkpoint_sha256": "checkpoint-sha",
-                "dataset_fingerprint": "full-fingerprint", "source_commit": "theta-commit",
-            },
-            {
-                "stage": "full", "backend": "hf", "theta": "",
-                "samples": "50000", "checkpoint_sha256": "checkpoint-sha",
-                "dataset_fingerprint": "full-fingerprint", "source_commit": "theta-commit",
-            },
-        ])
-    theta, source = resolve_approved_theta(
-        selection_json=selection,
-        theta_raw_csv=raw_csv,
-        theta_full_manifest=full_manifest,
+        writer.writerows(raw_rows)
+
+
+def verify_confirmation_gate(root: Path) -> None:
+    write_theta_evidence(root)
+    theta, source = resolve_confirmed_theta(
+        selection_json=root / "selection.json",
+        theta_raw_csv=root / "theta-raw.csv",
+        theta_confirmation_manifest=root / "confirmation.tsv",
         checkpoint_sha256="checkpoint-sha",
-        validation_fingerprint="full-fingerprint",
+        validation_prefix_fingerprint="quick-fingerprint",
     )
-    assert float(theta) == 640.0 and source == "theta-commit"
-    selection.write_text(
-        json.dumps({"status": "confirmed", "selected_theta": 640.0}),
-        encoding="utf-8",
-    )
+    assert theta == Decimal("40") and source == "theta-commit"
+    selection_path = root / "selection.json"
+    original = json.loads(selection_path.read_text(encoding="utf-8"))
+    selection_path.write_text(json.dumps({**original, "status": "selected"}), encoding="utf-8")
     try:
-        resolve_approved_theta(
-            selection_json=selection,
-            theta_raw_csv=raw_csv,
-            theta_full_manifest=full_manifest,
+        resolve_confirmed_theta(
+            selection_json=selection_path,
+            theta_raw_csv=root / "theta-raw.csv",
+            theta_confirmation_manifest=root / "confirmation.tsv",
             checkpoint_sha256="checkpoint-sha",
-            validation_fingerprint="full-fingerprint",
+            validation_prefix_fingerprint="quick-fingerprint",
         )
     except ValueError as error:
-        assert "approved" in str(error)
+        assert "confirmed" in str(error)
     else:
-        raise AssertionError("unapproved theta selection was accepted")
-    selection.write_text(
-        json.dumps({"status": "approved", "selected_theta": 640.0}),
-        encoding="utf-8",
-    )
+        raise AssertionError("unconfirmed theta evidence was accepted")
+    selection_path.write_text(json.dumps(original), encoding="utf-8")
+    raw_path = root / "theta-raw.csv"
+    original_raw = raw_path.read_text(encoding="utf-8")
+    raw_path.write_text(original_raw.replace("4" * 64, "9" * 64, 1), encoding="utf-8")
+    try:
+        resolve_confirmed_theta(
+            selection_json=selection_path,
+            theta_raw_csv=raw_path,
+            theta_confirmation_manifest=root / "confirmation.tsv",
+            checkpoint_sha256="checkpoint-sha",
+            validation_prefix_fingerprint="quick-fingerprint",
+        )
+    except ValueError as error:
+        assert "replay" in str(error)
+    else:
+        raise AssertionError("replay digest mismatch was accepted")
+    raw_path.write_text(original_raw, encoding="utf-8")
 
 
 def verify_builder_cli(root: Path) -> None:
     dataset_manifest = root / "dataset.json"
-    dataset_manifest.write_text(
-        json.dumps({
-            "validation": {
-                "quick_prefix_samples": 5000,
-                "quick_prefix_fingerprint": "quick-fingerprint",
-                "fingerprint": "full-fingerprint",
-            }
-        }),
-        encoding="utf-8",
-    )
+    dataset_manifest.write_text(json.dumps({
+        "validation": {
+            "quick_prefix_samples": 5000,
+            "quick_prefix_fingerprint": "quick-fingerprint",
+            "fingerprint": "full-fingerprint",
+        }
+    }), encoding="utf-8")
     gpu_selection = root / "gpu-selection.json"
-    gpu_selection.write_text(
-        json.dumps({
-            "selected_family": "rtxa6000",
-            "selected_partition": "gpu4,gpu5",
-        }),
-        encoding="utf-8",
-    )
+    gpu_selection.write_text(json.dumps({
+        "selected_family": "rtxa6000", "selected_partition": "gpu4,gpu5",
+    }), encoding="utf-8")
     output = root / "canonical.tsv"
+    pilot = root / "pilot.tsv"
     experiment = root / "experiment.json"
-    subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts/experiments/ubai/build_sigma_margin_manifest.py"),
-            "--output", str(output),
-            "--experiment-json", str(experiment),
-            "--selection-json", str(root / "selection.json"),
-            "--theta-raw-csv", str(root / "theta-raw.csv"),
-            "--theta-full-manifest", str(root / "full.tsv"),
-            "--dataset-manifest", str(dataset_manifest),
-            "--gpu-selection", str(gpu_selection),
-            "--source-commit", "experiment-commit",
-            "--checkpoint-path", "/data/ubai-assets/checkpoint",
-            "--checkpoint-sha256", "checkpoint-sha",
-        ],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    assert len(read_manifest(output)) == 470
+    subprocess.run([
+        sys.executable,
+        str(ROOT / "scripts/experiments/ubai/build_sigma_margin_manifest.py"),
+        "--output", str(output), "--pilot-output", str(pilot),
+        "--experiment-json", str(experiment),
+        "--selection-json", str(root / "selection.json"),
+        "--theta-raw-csv", str(root / "theta-raw.csv"),
+        "--theta-confirmation-manifest", str(root / "confirmation.tsv"),
+        "--dataset-manifest", str(dataset_manifest),
+        "--gpu-selection", str(gpu_selection),
+        "--source-commit", "experiment-commit",
+        "--checkpoint-path", "/data/ubai-assets/checkpoint",
+        "--checkpoint-sha256", "checkpoint-sha",
+    ], check=True, text=True, capture_output=True)
+    specs = read_manifest(output)
+    assert len(specs) == 470 and all(spec.theta == 40 for spec in specs)
+    with pilot.open(newline="", encoding="utf-8") as handle:
+        pilot_rows = list(csv.DictReader(handle, dialect="excel-tab"))
+    assert {row["run_id"] for row in pilot_rows} == set(PILOT_RUN_IDS)
     contract = json.loads(experiment.read_text(encoding="utf-8"))
     assert contract["runs"] == 470 and contract["stochastic_runs"] == 468
-    assert contract["selected_theta"] == 640.0
+    assert contract["selected_theta"] == 40.0
 
 
 def verify_submit_dry_run(root: Path) -> None:
@@ -191,36 +233,28 @@ def verify_submit_dry_run(root: Path) -> None:
     runtime.mkdir(parents=True)
     shutil.copy2(root / "selection.json", theta_root / "outputs/selection.json")
     shutil.copy2(root / "theta-raw.csv", theta_root / "outputs/theta-selection-raw.csv")
-    shutil.copy2(root / "full.tsv", theta_root / "manifests/full.tsv")
+    shutil.copy2(root / "confirmation.tsv", theta_root / "manifests/confirmation-lower.tsv")
     shutil.copy2(root / "dataset.json", dataset_root / "manifest.json")
-    (theta_root / "outputs/gpu-selection.json").write_text(
-        json.dumps({
-            "selected_family": "rtxa6000",
-            "selected_partition": "gpu4,gpu5",
-        }),
-        encoding="utf-8",
-    )
+    shutil.copy2(root / "gpu-selection.json", theta_root / "outputs/gpu-selection.json")
     (runtime / "dt-environment.tar.zst").write_bytes(b"fixture")
     (runtime / "ubuntu-24.04.sqsh").write_bytes(b"fixture")
     environment = os.environ.copy()
     environment.update({
-        "THETA_REMOTE_REPO": str(ROOT),
-        "THETA_REMOTE_ASSETS": str(assets),
-        "THETA_RESULT_ROOT": str(theta_root),
-        "SIGMA_MARGIN_RESULT_ROOT": str(sigma_root),
+        "THETA_REMOTE_REPO": str(ROOT), "THETA_REMOTE_ASSETS": str(assets),
+        "THETA_RESULT_ROOT": str(theta_root), "SIGMA_MARGIN_RESULT_ROOT": str(sigma_root),
+        "SIGMA_MARGIN_CONTROL_PYTHON": sys.executable,
         "THETA_CHECKPOINT_SHA256": "checkpoint-sha",
     })
     result = subprocess.run(
         ["bash", str(ROOT / "scripts/experiments/ubai/submit_sigma_margin_ubai.sh")],
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=True,
+        env=environment, text=True, capture_output=True, check=True,
     )
     assert "Expected runs: 470" in result.stdout
     assert "Pending runs: 470" in result.stdout
     assert "Dry preparation complete" in result.stdout
     assert len(read_manifest(sigma_root / "manifests/expected_runs.tsv")) == 470
+    with (sigma_root / "manifests/pilot.tsv").open(newline="", encoding="utf-8") as handle:
+        assert len(list(csv.DictReader(handle, dialect="excel-tab"))) == 6
 
 
 def write_log(path: Path, spec, *, correct: int) -> None:
@@ -248,29 +282,32 @@ def write_log(path: Path, spec, *, correct: int) -> None:
         "Evaluation metadata — model: checkpoint, dataset: imagenet-1k, split: validation, "
         f"samples: 5000, theta: {spec.theta}, precision: float64, source: disk:/fixture, "
         "fingerprint: quick-fingerprint\n"
-        f"Correct: {correct}\n"
-        "Evaluated samples: 5000\n"
+        f"Correct: {correct}\nEvaluated samples: 5000\n"
         f"Prediction SHA256: {hashlib.sha256(spec.run_id.encode()).hexdigest()}\n"
-        f"Accuracy: {correct / 5000:.8f}\n"
-        + site,
+        f"Accuracy: {correct / 5000:.8f}\n" + site,
+        encoding="utf-8",
+    )
+
+
+def write_wandb_fixture(wandb_dir: Path, log_dir: Path, spec) -> None:
+    run_root = wandb_dir / "runs" / spec.run_id
+    offline = run_root / "wandb" / f"offline-run-fixture-{spec.run_id}"
+    offline.mkdir(parents=True, exist_ok=True)
+    (offline / "run-fixture.wandb").write_bytes(b"fixture")
+    (run_root / "ACCEPTED.tsv").write_text(
+        f"run_id\t{spec.run_id}\noffline_dir\twandb/{offline.name}\n"
+        f"log_sha256\t{sha256_file(log_dir / spec.log_file)}\n",
         encoding="utf-8",
     )
 
 
 def verify_manifest_aggregation_and_resume(root: Path) -> None:
-    rows = build_rows(
-        theta=__import__("decimal").Decimal("640"),
-        common=common_identity(),
-        fractions=("1.000e-10",),
-        margins=("0", "1"),
-        seeds=(0, 1, 2),
-    )
+    rows = build_rows(theta=Decimal("40"), common=common_identity(),
+                      fractions=("1.000e-10",), margins=("0", "1"), seeds=(0, 1, 2))
     manifest = root / "manifest.tsv"
     manifest.write_text(serialized_tsv(rows), encoding="utf-8")
     specs = read_manifest(manifest, require_canonical=False)
-    assert len(specs) == 8
-    assert all(spec.seed is None for spec in specs[:2])
-    assert len({spec.run_id for spec in specs}) == 8
+    wandb_dir = root / "wandb"
     for spec in specs:
         if spec.stage == "baseline":
             correct = 4500 if spec.backend == "spiking" else 4550
@@ -279,7 +316,8 @@ def verify_manifest_aggregation_and_resume(root: Path) -> None:
         else:
             correct = 4475 + int(spec.seed or 0)
         write_log(root / spec.log_file, spec, correct=correct)
-
+        write_wandb_fixture(wandb_dir, root, spec)
+        validated_wandb_run(spec, root, wandb_dir)
     runs = [parse_run_log(spec, root) for spec in specs]
     summary = aggregate_runs(runs)
     site_rows = aggregate_sites(runs)
@@ -292,17 +330,19 @@ def verify_manifest_aggregation_and_resume(root: Path) -> None:
     assert all(float(row["miss_rate"]) == 0.1 for row in stochastic)
     figure = root / "figure"
     plot_summary(summary, frontier, figure)
-    assert figure.with_suffix(".pdf").is_file()
-    assert figure.with_suffix(".png").is_file()
-
+    assert figure.with_suffix(".pdf").is_file() and figure.with_suffix(".png").is_file()
     pending = root / "pending.tsv"
-    assert write_pending_manifest(manifest, specs, root, pending) == 0
-    (root / specs[-1].log_file).unlink()
-    assert write_pending_manifest(manifest, specs, root, pending) == 1
-    with pending.open(newline="", encoding="utf-8") as handle:
-        pending_rows = list(csv.DictReader(handle, dialect="excel-tab"))
-    assert pending_rows[0]["run_id"] == specs[-1].run_id
-
+    assert write_pending_manifest(manifest, specs, root, pending, wandb_dir=wandb_dir) == 0
+    marker = wandb_dir / "runs" / specs[-1].run_id / "ACCEPTED.tsv"
+    marker.unlink()
+    assert write_pending_manifest(manifest, specs, root, pending, wandb_dir=wandb_dir) == 1
+    write_wandb_fixture(wandb_dir, root, specs[-1])
+    sync_manifest = root / "wandb-sync-manifest.csv"
+    write_wandb_sync_manifest(specs, root, wandb_dir, sync_manifest)
+    assert len(list(csv.DictReader(sync_manifest.open(newline="", encoding="utf-8")))) == len(specs)
+    provenance = root / "provenance.json"
+    write_provenance(manifest, specs, provenance)
+    assert json.loads(provenance.read_text(encoding="utf-8"))["runs"] == len(specs)
     bad = replace(specs[2], gpu_family="a10")
     try:
         parse_run_log(bad, root)
@@ -313,14 +353,11 @@ def verify_manifest_aggregation_and_resume(root: Path) -> None:
 
 
 def verify_canonical_cardinality() -> None:
-    rows = build_rows(
-        theta=__import__("decimal").Decimal("640"),
-        common=common_identity(),
-    )
-    assert len(rows) == 470
-    assert len({row["run_id"] for row in rows}) == 470
+    rows = build_rows(theta=Decimal("40"), common=common_identity())
+    assert len(rows) == 470 and len({row["run_id"] for row in rows}) == 470
     assert len([row for row in rows if row["stage"] == "sigma_margin"]) == 468
-    assert all("\r" not in line for line in serialized_tsv(rows).splitlines())
+    assert all(Decimal(row["time_noise_std_abs"]) == Decimal("80") * Decimal(row["time_noise_std_frac"])
+               for row in rows)
     with TemporaryDirectory() as directory:
         manifest = Path(directory) / "expected.tsv"
         manifest.write_text(serialized_tsv(rows), encoding="utf-8")
@@ -331,22 +368,26 @@ def verify_slurm_contract() -> None:
     task = (ROOT / "scripts/experiments/ubai/sigma_margin_task.sbatch").read_text()
     submit = (ROOT / "scripts/experiments/ubai/submit_sigma_margin_ubai.sh").read_text()
     reducer = (ROOT / "scripts/experiments/ubai/sigma_margin_reduce.sbatch").read_text()
+    sync = (ROOT / "scripts/experiments/sync_sigma_margin_wandb.sh").read_text()
     assert "#SBATCH --gres=gpu:1" in task
     assert "#SBATCH --cpus-per-task=4" in task and "#SBATCH --mem=64G" in task
-    assert "DataParallel" not in task
-    assert '--array="0-${array_end}%8"' in submit
-    assert 'if [[ "$submit" == "0" ]]' in submit
-    assert "--write-pending" in submit
-    assert "--time=03:00:00" in submit
+    assert "DataParallel" not in task and "/usr/bin/env -u WANDB_API_KEY" in task
+    assert "WANDB_MODE=offline" in task and '--experiment_name "$run_id"' in task
+    assert "WANDB_RUN_GROUP=vit_base_sigma_margin_5k_float64_v1" in task
+    assert "WANDB_TAGS=theta40,imagenet5k,sigma-margin,float64" in task
+    assert '--array="0-${array_end}%8"' in submit and '--array="0-5%6"' in submit
+    assert 'mode="pilot"' in submit and "60000000000" in submit
+    assert "/home1/sizz1997/miniconda3/bin/python" in submit
+    assert "--theta-confirmation-manifest" in submit and "--wandb-dir" in submit
     assert '--dependency="afterany:$array_job"' in submit
-    assert "jobs are already active" in submit
-    assert "--frontier-json" in reducer and "--site-csv" in reducer
-    assert "Reducer source commit mismatch" in reducer
-    assert "--mismatch-theta-std 0" in task
+    assert "--wandb-sync-manifest" in reducer and "--provenance-json" in reducer
+    assert "sync manifest must contain exactly 470 unique runs" in sync
+    assert "verify_sigma_margin_wandb_sync.py" in sync
     for path in (
         ROOT / "scripts/experiments/ubai/sigma_margin_task.sbatch",
         ROOT / "scripts/experiments/ubai/submit_sigma_margin_ubai.sh",
         ROOT / "scripts/experiments/ubai/sigma_margin_reduce.sbatch",
+        ROOT / "scripts/experiments/sync_sigma_margin_wandb.sh",
     ):
         subprocess.run(["bash", "-n", str(path)], check=True)
 
@@ -355,7 +396,7 @@ def main() -> None:
     # @lat: [[lat.md/noise#Sigma and Deadline-Margin Grid]]
     with TemporaryDirectory() as directory:
         root = Path(directory)
-        verify_approval_gate(root)
+        verify_confirmation_gate(root)
         verify_builder_cli(root)
         verify_submit_dry_run(root)
         verify_manifest_aggregation_and_resume(root)

@@ -70,9 +70,18 @@ FIELDS = (
     "gpu_family",
     "theta_selection_sha256",
     "theta_selection_raw_sha256",
-    "theta_full_manifest_sha256",
+    "theta_confirmation_manifest_sha256",
     "gpu_selection_sha256",
     "log_file",
+)
+
+PILOT_RUN_IDS = (
+    "clean_spiking_baseline",
+    "dense_reference",
+    "sigma_1p000em10_margin_0_seed_0",
+    "sigma_3p162em10_margin_0_seed_0",
+    "sigma_1p000em09_margin_0_seed_0",
+    "sigma_1p000em09_margin_12_seed_0",
 )
 
 
@@ -100,59 +109,116 @@ def read_csv(path: Path) -> list[dict[str, str]]:
     return rows
 
 
-def resolve_approved_theta(
+def resolve_confirmed_theta(
     *,
     selection_json: Path,
     theta_raw_csv: Path,
-    theta_full_manifest: Path,
+    theta_confirmation_manifest: Path,
     checkpoint_sha256: str,
-    validation_fingerprint: str,
+    validation_prefix_fingerprint: str,
 ) -> tuple[Decimal, str]:
-    """Validate the completed theta-selection evidence and return its threshold."""
+    """Validate the complete 5k theta evidence and return its threshold."""
 
     selection = json.loads(selection_json.read_text(encoding="utf-8"))
-    if selection.get("status") != "approved":
-        raise ValueError("theta selection must have status='approved'")
+    if selection.get("status") != "confirmed":
+        raise ValueError("theta selection must have status='confirmed'")
     selected_value = selection.get("selected_theta")
     if isinstance(selected_value, bool) or not isinstance(selected_value, (int, float)):
-        raise ValueError("approved theta selection has no numeric selected_theta")
+        raise ValueError("confirmed theta selection has no numeric selected_theta")
     if not math.isfinite(float(selected_value)) or float(selected_value) <= 0.0:
         raise ValueError("selected_theta must be finite and positive")
     selected = Decimal(str(selected_value))
+    if selected != Decimal("40"):
+        raise ValueError(f"this campaign requires selected_theta=40, got {selected}")
+    evaluated = [Decimal(str(value)) for value in selection.get("evaluated_thetas", [])]
+    if not evaluated or Decimal("10") not in evaluated or Decimal("20") not in evaluated:
+        raise ValueError("confirmed theta selection must include lower candidates 10 and 20")
+    if min(evaluated) >= selected:
+        raise ValueError("confirmed theta selection has an unresolved lower boundary")
+    neighbors = [Decimal(str(value)) for value in selection.get("validation_neighbors", [])]
+    if neighbors != [Decimal("20"), Decimal("40"), Decimal("80")]:
+        raise ValueError("confirmed theta validation neighbors must be 20, 40, and 80")
 
-    manifest_rows = read_tsv(theta_full_manifest)
-    full_specs = [row for row in manifest_rows if row.get("stage") == "full"]
-    if len(full_specs) != 2 or {row.get("backend") for row in full_specs} != {"spiking", "hf"}:
-        raise ValueError("theta full manifest must contain one spiking and one dense run")
-    if any(row.get("expected_samples") != "50000" for row in full_specs):
-        raise ValueError("theta full manifest runs must cover 50,000 validation samples")
-    if any(row.get("checkpoint_sha256") != checkpoint_sha256 for row in full_specs):
-        raise ValueError("checkpoint differs from approved theta full manifest")
-    if any(row.get("dataset_fingerprint") != validation_fingerprint for row in full_specs):
-        raise ValueError("validation artifact differs from approved theta full manifest")
-    spiking_spec = next(row for row in full_specs if row["backend"] == "spiking")
-    if Decimal(spiking_spec["theta"]) != selected:
-        raise ValueError("selected theta differs from the full-validation manifest")
-    selection_source_commit = spiking_spec["source_commit"]
-    if any(row.get("source_commit") != selection_source_commit for row in full_specs):
-        raise ValueError("theta full manifest mixes source commits")
+    manifest_rows = read_tsv(theta_confirmation_manifest)
+    expected_run_ids = {
+        "replay_theta_40",
+        "validation_theta_20",
+        "validation_theta_40",
+        "validation_theta_80",
+        "validation_dense_reference",
+    }
+    if {row.get("run_id") for row in manifest_rows} != expected_run_ids:
+        raise ValueError("theta confirmation manifest does not match the 5k contract")
+    if any(row.get("expected_samples") != "5000" for row in manifest_rows):
+        raise ValueError("theta confirmation manifest runs must cover 5,000 samples")
+    if any(row.get("checkpoint_sha256") != checkpoint_sha256 for row in manifest_rows):
+        raise ValueError("checkpoint differs from confirmed theta manifest")
+    selection_source_commits = {row.get("source_commit") for row in manifest_rows}
+    if len(selection_source_commits) != 1:
+        raise ValueError("theta confirmation manifest mixes source commits")
+    selection_source_commit = next(iter(selection_source_commits))
+    validation_specs = [row for row in manifest_rows if row.get("stage") == "validation"]
+    if any(
+        row.get("dataset_fingerprint") != validation_prefix_fingerprint
+        for row in validation_specs
+    ):
+        raise ValueError("validation prefix differs from confirmed theta manifest")
 
     raw_rows = read_csv(theta_raw_csv)
-    full_runs = [row for row in raw_rows if row.get("stage") == "full"]
-    if len(full_runs) != 2 or {row.get("backend") for row in full_runs} != {"spiking", "hf"}:
-        raise ValueError("theta raw CSV must contain both complete full-validation runs")
-    for run in full_runs:
-        if run.get("samples") != "50000":
-            raise ValueError("theta raw CSV full runs must contain 50,000 samples")
-        if run.get("checkpoint_sha256") != checkpoint_sha256:
-            raise ValueError("theta raw CSV checkpoint identity mismatch")
-        if run.get("dataset_fingerprint") != validation_fingerprint:
-            raise ValueError("theta raw CSV validation fingerprint mismatch")
-        if run.get("source_commit") != selection_source_commit:
-            raise ValueError("theta raw CSV source identity mismatch")
-    spiking_run = next(row for row in full_runs if row["backend"] == "spiking")
-    if Decimal(spiking_run["theta"]) != selected:
-        raise ValueError("theta raw CSV does not confirm the selected threshold")
+    by_run_id = {row.get("run_id"): row for row in raw_rows}
+    if len(by_run_id) != len(raw_rows):
+        raise ValueError("theta raw CSV contains duplicate run IDs")
+    if not expected_run_ids.issubset(by_run_id):
+        raise ValueError("theta raw CSV is missing confirmation runs")
+    for spec in manifest_rows:
+        run = by_run_id[spec["run_id"]]
+        for field in (
+            "stage", "backend", "checkpoint_sha256",
+            "dataset_fingerprint", "source_commit",
+        ):
+            if run.get(field) != spec.get(field):
+                raise ValueError(
+                    f"theta raw CSV {field} mismatch for {spec['run_id']}"
+                )
+        if run.get("samples") != "5000":
+            raise ValueError("theta raw CSV confirmation runs must contain 5,000 samples")
+        if (
+            spec["backend"] == "spiking"
+            and Decimal(run["theta"]) != Decimal(spec["theta"])
+        ):
+            raise ValueError(f"theta raw CSV threshold mismatch for {spec['run_id']}")
+
+    selection_runs = [
+        row for row in raw_rows
+        if row.get("stage") == "selection" and row.get("backend") == "spiking"
+    ]
+    selection_thetas = {Decimal(row["theta"]) for row in selection_runs}
+    if selection_thetas != set(evaluated):
+        raise ValueError("theta raw CSV candidates differ from selection.json")
+    best_accuracy = max(Decimal(row["accuracy"]) for row in selection_runs)
+    selected_by_rule = min(
+        Decimal(row["theta"])
+        for row in selection_runs
+        if Decimal(row["accuracy"]) >= best_accuracy - Decimal("0.005")
+    )
+    if selected_by_rule != selected:
+        raise ValueError("theta raw CSV does not reproduce the selection rule")
+    selected_run = next(
+        row for row in selection_runs if Decimal(row["theta"]) == selected
+    )
+    replay = by_run_id["replay_theta_40"]
+    if (selected_run.get("correct"), selected_run.get("prediction_sha256")) != (
+        replay.get("correct"), replay.get("prediction_sha256")
+    ):
+        raise ValueError("theta replay count or prediction digest mismatch")
+    validation_runs = [
+        by_run_id[f"validation_theta_{value}"] for value in (20, 40, 80)
+    ]
+    selected_validation = by_run_id["validation_theta_40"]
+    if Decimal(selected_validation["accuracy"]) < (
+        max(Decimal(row["accuracy"]) for row in validation_runs) - Decimal("0.005")
+    ):
+        raise ValueError("selected theta fails 5k validation stability")
     return selected, selection_source_commit
 
 
@@ -277,7 +343,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--experiment-json", type=Path)
     parser.add_argument("--selection-json", type=Path, required=True)
     parser.add_argument("--theta-raw-csv", type=Path, required=True)
-    parser.add_argument("--theta-full-manifest", type=Path, required=True)
+    parser.add_argument("--theta-confirmation-manifest", type=Path, required=True)
+    parser.add_argument("--pilot-output", type=Path)
     parser.add_argument("--dataset-manifest", type=Path, required=True)
     parser.add_argument("--gpu-selection", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
@@ -296,12 +363,12 @@ def main() -> None:
     validation = dataset["validation"]
     if int(validation["quick_prefix_samples"]) != 5000:
         raise ValueError("validation artifact must define a fixed 5,000-image prefix")
-    selected_theta, selection_source_commit = resolve_approved_theta(
+    selected_theta, selection_source_commit = resolve_confirmed_theta(
         selection_json=args.selection_json,
         theta_raw_csv=args.theta_raw_csv,
-        theta_full_manifest=args.theta_full_manifest,
+        theta_confirmation_manifest=args.theta_confirmation_manifest,
         checkpoint_sha256=args.checkpoint_sha256,
-        validation_fingerprint=validation["fingerprint"],
+        validation_prefix_fingerprint=validation["quick_prefix_fingerprint"],
     )
 
     gpu_selection = json.loads(args.gpu_selection.read_text(encoding="utf-8"))
@@ -314,7 +381,7 @@ def main() -> None:
     evidence_hashes = {
         "theta_selection_sha256": sha256_file(args.selection_json),
         "theta_selection_raw_sha256": sha256_file(args.theta_raw_csv),
-        "theta_full_manifest_sha256": sha256_file(args.theta_full_manifest),
+        "theta_confirmation_manifest_sha256": sha256_file(args.theta_confirmation_manifest),
         "gpu_selection_sha256": sha256_file(args.gpu_selection),
     }
     common = {
@@ -333,12 +400,19 @@ def main() -> None:
     if len(rows) != 470:
         raise AssertionError(f"canonical manifest must contain 470 runs, got {len(rows)}")
     write_immutable(args.output, serialized_tsv(rows))
+    if args.pilot_output is not None:
+        pilot_rows = [row for row in rows if row["run_id"] in PILOT_RUN_IDS]
+        if {row["run_id"] for row in pilot_rows} != set(PILOT_RUN_IDS):
+            raise AssertionError("canonical manifest is missing pilot conditions")
+        write_immutable(args.pilot_output, serialized_tsv(pilot_rows))
 
     experiment_path = args.experiment_json or args.output.with_name("experiment.json")
     experiment: dict[str, Any] = {
         "format_version": 1,
         "tag": "vit_base_sigma_margin_5k_float64_v1",
         "status": "planned",
+        "validation_scope": "fixed-prefix-5000",
+        "wandb_mode": "offline",
         "selected_theta": float(selected_theta),
         "theta_selection_source_commit": selection_source_commit,
         "time_noise_std_fracs": list(TIME_NOISE_STD_FRACS),
