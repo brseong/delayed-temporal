@@ -346,6 +346,7 @@ def verify_slurm_contract() -> None:
     task = (ROOT / "scripts/experiments/ubai/sigma_margin_task.sbatch").read_text()
     submit = (ROOT / "scripts/experiments/ubai/submit_sigma_margin_ubai.sh").read_text()
     reducer = (ROOT / "scripts/experiments/ubai/sigma_margin_reduce.sbatch").read_text()
+    continuation = (ROOT / "scripts/experiments/ubai/continue_sigma_margin_ubai.sh").read_text()
     assert "#SBATCH --gres=gpu:1" in task
     assert "#SBATCH --cpus-per-task=4" in task and "#SBATCH --mem=64G" in task
     assert "DataParallel" not in task and "/usr/bin/env -u WANDB_API_KEY" in task
@@ -358,10 +359,14 @@ def verify_slurm_contract() -> None:
     assert "--theta-confirmation-manifest" in submit and "--wandb-dir" not in submit
     assert '--dependency="afterany:$array_job"' in submit
     assert "--wandb-run-manifest" not in reducer and "--provenance-json" in reducer
+    assert 'glob("disabled-batch-*.tsv")' in continuation
+    assert '--array="0-${array_end}%8"' in continuation
+    assert "WANDB" not in continuation
     for path in (
         ROOT / "scripts/experiments/ubai/sigma_margin_task.sbatch",
         ROOT / "scripts/experiments/ubai/submit_sigma_margin_ubai.sh",
         ROOT / "scripts/experiments/ubai/sigma_margin_reduce.sbatch",
+        ROOT / "scripts/experiments/ubai/continue_sigma_margin_ubai.sh",
     ):
         subprocess.run(["bash", "-n", str(path)], check=True)
 
