@@ -68,7 +68,7 @@ srun \
     --site-csv "$container_output_dir/site_summary.csv" \
     --frontier-json "$container_output_dir/frontier.json" \
     --wandb-dir "$container_wandb_dir" \
-    --wandb-sync-manifest "$container_output_dir/wandb-sync-manifest.csv" \
+    --wandb-run-manifest "$container_output_dir/wandb-run-manifest.csv" \
     --provenance-json "$container_output_dir/provenance.json" \
     --figure-prefix "$container_figure_dir/noise_sigma_margin_vit_base_5k_float64_v1"
 

@@ -668,7 +668,7 @@ def validated_wandb_run(
     log_dir: Path,
     wandb_dir: Path,
 ) -> tuple[Path, str]:
-    """Match one accepted offline W&B directory to its evaluator log."""
+    """Match one accepted local W&B directory to its evaluator log."""
 
     run_root = wandb_dir / "runs" / spec.run_id
     marker = run_root / "ACCEPTED.tsv"
@@ -686,20 +686,24 @@ def validated_wandb_run(
     log_sha256 = sha256_file(log_path)
     if fields.get("log_sha256") != log_sha256:
         raise ValueError(f"W&B marker log hash mismatch: {marker}")
-    relative = fields.get("offline_dir", "")
-    offline_dir = run_root / relative
+    mode = fields.get("mode", "offline")
+    if mode not in {"offline", "online"}:
+        raise ValueError(f"invalid W&B mode in {marker}: {mode}")
+    relative = fields.get("local_dir", fields.get("offline_dir", ""))
+    local_dir = run_root / relative
+    expected_prefix = "offline-run-" if mode == "offline" else "run-"
     if (
         not relative
         or Path(relative).is_absolute()
-        or offline_dir.parent != run_root / "wandb"
-        or not offline_dir.is_dir()
-        or not offline_dir.name.startswith("offline-run-")
+        or local_dir.parent != run_root / "wandb"
+        or not local_dir.is_dir()
+        or not local_dir.name.startswith(expected_prefix)
     ):
-        raise ValueError(f"invalid offline W&B directory in {marker}")
-    offline_runs = sorted((run_root / "wandb").glob("offline-run-*"))
-    if offline_runs != [offline_dir]:
+        raise ValueError(f"invalid {mode} W&B directory in {marker}")
+    local_runs = sorted((run_root / "wandb").glob(f"{expected_prefix}*"))
+    if local_runs != [local_dir]:
         raise ValueError(f"W&B run directory is not one-to-one for {spec.run_id}")
-    return offline_dir, log_sha256
+    return local_dir, log_sha256
 
 
 def write_pending_manifest(
@@ -730,7 +734,7 @@ def write_pending_manifest(
     return len(pending)
 
 
-def write_wandb_sync_manifest(
+def write_wandb_run_manifest(
     specs: Sequence[ManifestRun],
     log_dir: Path,
     wandb_dir: Path,
@@ -738,10 +742,18 @@ def write_wandb_sync_manifest(
 ) -> None:
     rows = []
     for spec in specs:
-        offline_dir, log_sha256 = validated_wandb_run(spec, log_dir, wandb_dir)
+        local_dir, log_sha256 = validated_wandb_run(spec, log_dir, wandb_dir)
+        marker = wandb_dir / "runs" / spec.run_id / "ACCEPTED.tsv"
+        marker_fields = dict(
+            line.split("\t", 1)
+            for line in marker.read_text(encoding="utf-8").splitlines()
+        )
         rows.append({
             "run_id": spec.run_id,
-            "offline_dir": str(offline_dir.relative_to(wandb_dir)),
+            "mode": marker_fields.get("mode", "offline"),
+            "local_dir": str(local_dir.relative_to(wandb_dir)),
+            "wandb_id": marker_fields.get("wandb_id", ""),
+            "wandb_url": marker_fields.get("wandb_url", ""),
             "log_sha256": log_sha256,
         })
     write_csv(output, rows)
@@ -786,7 +798,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--site-csv", type=Path)
     parser.add_argument("--frontier-json", type=Path)
     parser.add_argument("--figure-prefix", type=Path)
-    parser.add_argument("--wandb-sync-manifest", type=Path)
+    parser.add_argument("--wandb-run-manifest", type=Path)
     parser.add_argument("--provenance-json", type=Path)
     return parser.parse_args()
 
@@ -813,7 +825,7 @@ def main() -> None:
     outputs = (
         args.raw_csv, args.summary_csv, args.site_csv,
         args.frontier_json, args.figure_prefix,
-        args.wandb_sync_manifest, args.provenance_json, args.wandb_dir,
+        args.wandb_run_manifest, args.provenance_json, args.wandb_dir,
     )
     if any(path is None for path in outputs):
         raise ValueError("aggregation requires all CSV, JSON, and figure output paths")
@@ -828,8 +840,8 @@ def main() -> None:
         site_csv=args.site_csv,
         frontier_json=args.frontier_json,
     )
-    write_wandb_sync_manifest(
-        specs, args.log_dir, args.wandb_dir, args.wandb_sync_manifest
+    write_wandb_run_manifest(
+        specs, args.log_dir, args.wandb_dir, args.wandb_run_manifest
     )
     write_provenance(args.manifest, specs, args.provenance_json)
     plot_summary(summary, frontier, args.figure_prefix)

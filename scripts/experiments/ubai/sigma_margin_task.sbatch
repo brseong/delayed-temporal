@@ -17,6 +17,12 @@ set -euo pipefail
 : "${THETA_ENV_ARCHIVE:?THETA_ENV_ARCHIVE is required}"
 : "${THETA_REMOTE_ASSETS:?THETA_REMOTE_ASSETS is required}"
 
+wandb_mode="${SIGMA_MARGIN_WANDB_MODE:-online}"
+if [[ "$wandb_mode" != "online" && "$wandb_mode" != "offline" ]]; then
+    echo "SIGMA_MARGIN_WANDB_MODE must be online or offline" >&2
+    exit 2
+fi
+
 task_index="${SLURM_ARRAY_TASK_ID:?array task id is required}"
 runtime_parent="${SLURM_TMPDIR:-/tmp}/sigma-margin-runtime-${SLURM_JOB_ID}-${task_index}"
 mkdir -p "$runtime_parent"
@@ -63,7 +69,7 @@ container_log_dir="$(to_container_path "$SIGMA_MARGIN_LOG_DIR")"
 wandb_run_root="$SIGMA_MARGIN_WANDB_DIR/runs/$run_id"
 wandb_rejected_root="$SIGMA_MARGIN_WANDB_DIR/rejected"
 container_wandb_run_root="$(to_container_path "$wandb_run_root")"
-mounts="$THETA_REMOTE_REPO:/data/delayed-temporal,$THETA_REMOTE_ASSETS/source-checkouts/transformers:/data/delayed-temporal/src/transformers,$THETA_REMOTE_ASSETS/source-checkouts/spikingjelly:/data/delayed-temporal/src/spikingjelly,$runtime_parent/dt:/opt/conda/envs/dt,$THETA_REMOTE_ASSETS:/data/ubai-assets"
+mounts="$THETA_REMOTE_REPO:/data/delayed-temporal,$THETA_REMOTE_ASSETS/source-checkouts/transformers:/data/delayed-temporal/src/transformers,$THETA_REMOTE_ASSETS/source-checkouts/spikingjelly:/data/delayed-temporal/src/spikingjelly,$runtime_parent/dt:/opt/conda/envs/dt,$THETA_REMOTE_ASSETS:/data/ubai-assets,$HOME:$HOME"
 
 check_complete() {
     srun \
@@ -83,18 +89,26 @@ check_complete() {
 check_wandb_complete() {
     local marker="$wandb_run_root/ACCEPTED.tsv"
     [[ -f "$marker" ]] || return 1
-    local marker_run marker_offline marker_hash actual_hash
+    local marker_run marker_mode marker_local marker_hash actual_hash pattern
     marker_run="$(awk -F $'\t' '$1 == "run_id" {print $2}' "$marker")"
-    marker_offline="$(awk -F $'\t' '$1 == "offline_dir" {print $2}' "$marker")"
+    marker_mode="$(awk -F $'\t' '$1 == "mode" {print $2}' "$marker")"
+    marker_mode="${marker_mode:-offline}"
+    marker_local="$(awk -F $'\t' '$1 == "local_dir" || $1 == "offline_dir" {print $2}' "$marker")"
     marker_hash="$(awk -F $'\t' '$1 == "log_sha256" {print $2}' "$marker")"
     [[ "$marker_run" == "$run_id" ]] || return 1
-    [[ "$marker_offline" == wandb/offline-run-* ]] || return 1
-    [[ -d "$wandb_run_root/$marker_offline" ]] || return 1
-    mapfile -t existing_offline < <(
+    if [[ "$marker_mode" == "online" ]]; then
+        pattern='run-*'
+        [[ "$marker_local" == wandb/run-* ]] || return 1
+    else
+        pattern='offline-run-*'
+        [[ "$marker_local" == wandb/offline-run-* ]] || return 1
+    fi
+    [[ -d "$wandb_run_root/$marker_local" ]] || return 1
+    mapfile -t existing_runs < <(
         find "$wandb_run_root/wandb" -mindepth 1 -maxdepth 1 \
-            -type d -name 'offline-run-*' -print | sort
+            -type d -name "$pattern" -print | sort
     )
-    [[ "${#existing_offline[@]}" -eq 1 ]] || return 1
+    [[ "${#existing_runs[@]}" -eq 1 ]] || return 1
     actual_hash="$(sha256sum "$SIGMA_MARGIN_LOG_DIR/$log_file" | awk '{print $1}')"
     [[ "$marker_hash" == "$actual_hash" ]]
 }
@@ -126,6 +140,10 @@ fi
 
 export NVIDIA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:?CUDA_VISIBLE_DEVICES is required}"
 export NVIDIA_DRIVER_CAPABILITIES="compute,utility"
+wandb_env=(/usr/bin/env)
+if [[ "$wandb_mode" == "offline" ]]; then
+    wandb_env+=(-u WANDB_API_KEY)
+fi
 if {
     echo "Slurm identity — job_id: ${SLURM_JOB_ID}, task_id: ${task_index}, node: ${SLURMD_NODENAME}, gpu_family: ${gpu_family}"
     srun \
@@ -134,10 +152,13 @@ if {
         --container-image="$THETA_CONTAINER_IMAGE" \
         --container-mounts="$mounts" \
         --container-workdir=/data/delayed-temporal \
-        /usr/bin/env -u WANDB_API_KEY \
+        "${wandb_env[@]}" \
+        HOME="$HOME" \
         PYTHONPATH=/data/delayed-temporal:/data/delayed-temporal/src/transformers/src:/data/delayed-temporal/src/spikingjelly \
-        WANDB_MODE=offline \
+        WANDB_MODE="$wandb_mode" \
         WANDB_DIR="$container_wandb_run_root" \
+        WANDB_RUN_ID="$run_id" \
+        WANDB_RESUME=allow \
         WANDB_RUN_GROUP=vit_base_sigma_margin_5k_float64_v1 \
         WANDB_TAGS=theta40,imagenet5k,sigma-margin,float64 \
         WANDB_SILENT=true \
@@ -190,22 +211,33 @@ if ! check_complete; then
     echo "Completed evaluator output failed manifest validation: $run_id" >&2
     exit 1
 fi
-mapfile -t offline_dirs < <(
+if [[ "$wandb_mode" == "online" ]]; then
+    wandb_pattern='run-*'
+else
+    wandb_pattern='offline-run-*'
+fi
+mapfile -t wandb_dirs < <(
     find "$wandb_run_root/wandb" -mindepth 1 -maxdepth 1 \
-        -type d -name 'offline-run-*' -print | sort
+        -type d -name "$wandb_pattern" -print | sort
 )
-if [[ "${#offline_dirs[@]}" -ne 1 ]]; then
+if [[ "${#wandb_dirs[@]}" -ne 1 ]]; then
     mv "$log_path" "$log_path.failed-wandb.$(date -u +%Y%m%dT%H%M%SZ)"
     archive_wandb_run
-    echo "Expected exactly one offline W&B run for $run_id" >&2
+    echo "Expected exactly one $wandb_mode W&B run for $run_id" >&2
     exit 1
 fi
-offline_relative="wandb/$(basename "${offline_dirs[0]}")"
+local_relative="wandb/$(basename "${wandb_dirs[0]}")"
 log_sha256="$(sha256sum "$log_path" | awk '{print $1}')"
 marker="$wandb_run_root/ACCEPTED.tsv"
 temporary_marker="$marker.partial"
-printf 'run_id\t%s\noffline_dir\t%s\nlog_sha256\t%s\n' \
-    "$run_id" "$offline_relative" "$log_sha256" > "$temporary_marker"
+{
+    printf 'run_id\t%s\nmode\t%s\nlocal_dir\t%s\nlog_sha256\t%s\n' \
+        "$run_id" "$wandb_mode" "$local_relative" "$log_sha256"
+    if [[ "$wandb_mode" == "online" ]]; then
+        printf 'wandb_id\t%s\nwandb_url\thttps://wandb.ai/CIDA/vit-evaluation-imagenet-1k/runs/%s\n' \
+            "$run_id" "$run_id"
+    fi
+} > "$temporary_marker"
 mv "$temporary_marker" "$marker"
 check_wandb_complete
-echo "Completed $run_id -> $log_path; W&B -> $offline_relative"
+echo "Completed $run_id -> $log_path; W&B ($wandb_mode) -> $local_relative"

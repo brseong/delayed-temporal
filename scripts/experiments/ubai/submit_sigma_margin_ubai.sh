@@ -198,7 +198,7 @@ if (( pending_count > 0 )); then
     echo "Array job: $array_job"
 else
     array_job=""
-    echo "All evaluator logs and offline W&B runs are complete; submitting reducer only."
+    echo "All evaluator logs and local W&B runs are complete; submitting reducer only."
 fi
 
 reducer_job="$(sbatch \
