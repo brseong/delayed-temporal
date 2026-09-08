@@ -13,14 +13,12 @@ set -euo pipefail
 : "${SIGMA_MARGIN_LOG_DIR:?SIGMA_MARGIN_LOG_DIR is required}"
 : "${THETA_CONTAINER_IMAGE:?THETA_CONTAINER_IMAGE is required}"
 : "${THETA_REMOTE_REPO:?THETA_REMOTE_REPO is required}"
-: "${THETA_ENV_ARCHIVE:?THETA_ENV_ARCHIVE is required}"
+: "${THETA_ENV_ROOT:?THETA_ENV_ROOT is required}"
 : "${THETA_REMOTE_ASSETS:?THETA_REMOTE_ASSETS is required}"
 
 task_index="${SLURM_ARRAY_TASK_ID:?array task id is required}"
-runtime_parent="${SLURM_TMPDIR:-/tmp}/sigma-margin-runtime-${SLURM_JOB_ID}-${task_index}"
-mkdir -p "$runtime_parent"
-zstd --decompress --stdout "$THETA_ENV_ARCHIVE" | tar -xf - -C "$runtime_parent"
-test -x "$runtime_parent/dt/bin/python"
+test -x "$THETA_ENV_ROOT/bin/python"
+test -s "$THETA_ENV_ROOT/.archive.sha256"
 
 line_number="$((task_index + 2))"
 row="$(sed -n "${line_number}p" "$SIGMA_MARGIN_TASK_MANIFEST")"
@@ -59,7 +57,14 @@ to_container_path() {
 
 container_manifest="$(to_container_path "$SIGMA_MARGIN_MANIFEST")"
 container_log_dir="$(to_container_path "$SIGMA_MARGIN_LOG_DIR")"
-mounts="$THETA_REMOTE_REPO:/data/delayed-temporal,$THETA_REMOTE_ASSETS/source-checkouts/transformers:/data/delayed-temporal/src/transformers,$THETA_REMOTE_ASSETS/source-checkouts/spikingjelly:/data/delayed-temporal/src/spikingjelly,$runtime_parent/dt:/opt/conda/envs/dt,$THETA_REMOTE_ASSETS:/data/ubai-assets,$HOME:$HOME"
+scratch_root="$SIGMA_MARGIN_LOG_DIR/task-tmp/${SLURM_JOB_ID}-${task_index}"
+container_scratch_root="$(to_container_path "$scratch_root")"
+cleanup() {
+    rm -rf -- "$scratch_root"
+}
+trap cleanup EXIT
+mkdir -p "$scratch_root"
+mounts="$THETA_REMOTE_REPO:/data/delayed-temporal,$THETA_REMOTE_ASSETS/source-checkouts/transformers:/data/delayed-temporal/src/transformers,$THETA_REMOTE_ASSETS/source-checkouts/spikingjelly:/data/delayed-temporal/src/spikingjelly,$THETA_ENV_ROOT:/opt/conda/envs/dt,$THETA_REMOTE_ASSETS:/data/ubai-assets,$HOME:$HOME"
 
 check_complete() {
     srun \
@@ -104,6 +109,10 @@ if {
         --container-workdir=/data/delayed-temporal \
         /usr/bin/env -u WANDB_API_KEY \
         HOME="$HOME" \
+        TMPDIR="$container_scratch_root" \
+        XDG_CACHE_HOME="$container_scratch_root/cache" \
+        HF_HOME="$container_scratch_root/huggingface" \
+        PYTHONDONTWRITEBYTECODE=1 \
         PYTHONPATH=/data/delayed-temporal:/data/delayed-temporal/src/transformers/src:/data/delayed-temporal/src/spikingjelly \
         WANDB_MODE=disabled \
         WANDB_SILENT=true \

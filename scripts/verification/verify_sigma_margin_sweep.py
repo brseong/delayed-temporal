@@ -347,18 +347,28 @@ def verify_slurm_contract() -> None:
     submit = (ROOT / "scripts/experiments/ubai/submit_sigma_margin_ubai.sh").read_text()
     reducer = (ROOT / "scripts/experiments/ubai/sigma_margin_reduce.sbatch").read_text()
     continuation = (ROOT / "scripts/experiments/ubai/continue_sigma_margin_ubai.sh").read_text()
+    environment_prep = (ROOT / "scripts/experiments/ubai/sigma_margin_env_prep.sbatch").read_text()
     assert "#SBATCH --gres=gpu:1" in task
     assert "#SBATCH --cpus-per-task=4" in task and "#SBATCH --mem=64G" in task
     assert "DataParallel" not in task and "/usr/bin/env -u WANDB_API_KEY" in task
     assert "WANDB_MODE=disabled" in task and '--experiment_name "$run_id"' in task
     assert "WANDB_RUN_ID" not in task and "WANDB_RESUME" not in task
     assert '$HOME:$HOME' in task
+    assert "SLURM_TMPDIR" not in task and "zstd" not in task
+    assert '$THETA_ENV_ROOT:/opt/conda/envs/dt' in task
+    assert 'trap cleanup EXIT' in task and 'task-tmp/${SLURM_JOB_ID}-${task_index}' in task
     assert '--array="0-${array_end}%8"' in submit and '--array="0-5%6"' in submit
     assert 'mode="pilot"' in submit and "60000000000" in submit
     assert "/home1/sizz1997/miniconda3/bin/python" in submit
     assert "--theta-confirmation-manifest" in submit and "--wandb-dir" not in submit
     assert '--dependency="afterany:$array_job"' in submit
+    assert "sigma_margin_env_prep.sbatch" in submit
+    assert '--dependency="afterok:$prep_job"' in submit
     assert "--wandb-run-manifest" not in reducer and "--provenance-json" in reducer
+    assert "SLURM_TMPDIR" not in reducer and "zstd" not in reducer
+    assert '$THETA_ENV_ROOT:/opt/conda/envs/dt' in reducer
+    assert "zstd --decompress --stdout" in environment_prep
+    assert 'mv "$staging/dt" "$THETA_ENV_ROOT"' in environment_prep
     assert 'glob("disabled-batch-*.tsv")' in continuation
     assert '--array="0-${array_end}%8"' in continuation
     assert "WANDB" not in continuation
@@ -366,6 +376,7 @@ def verify_slurm_contract() -> None:
         ROOT / "scripts/experiments/ubai/sigma_margin_task.sbatch",
         ROOT / "scripts/experiments/ubai/submit_sigma_margin_ubai.sh",
         ROOT / "scripts/experiments/ubai/sigma_margin_reduce.sbatch",
+        ROOT / "scripts/experiments/ubai/sigma_margin_env_prep.sbatch",
         ROOT / "scripts/experiments/ubai/continue_sigma_margin_ubai.sh",
     ):
         subprocess.run(["bash", "-n", str(path)], check=True)

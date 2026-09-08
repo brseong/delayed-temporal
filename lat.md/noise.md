@@ -172,6 +172,8 @@ A six-run pilot records clean spiking, dense reference, three zero-margin noise 
 
 Cluster tasks disable external experiment tracking and treat the immutable manifest plus complete evaluator logs as the sole resume and aggregation contract. Existing tracking artifacts remain archived but are not required for completion.
 
+The portable Python environment is unpacked once on shared storage and mounted into every task. Temporary files for each task use a bounded experiment directory that is removed when the task exits; large environment trees are never unpacked under the compute node temporary directory.
+
 The full array is submitted only after the pilot passes and its projected total asset use remains at or below 60 GB.
 
 [[scripts/analysis/summarize_sigma_margin_sweep.py#build_frontier]] defines recovery at each $r_t$ as the smallest preregistered $k$ whose three-seed mean is within one percentage point of the clean spiking baseline. Failure to recover at $k=12$ is retained as `unrecovered`, and later nonmonotonic cells are reported rather than removed.

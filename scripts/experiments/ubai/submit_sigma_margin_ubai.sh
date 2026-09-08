@@ -39,6 +39,7 @@ gpu_selection="$theta_result_root/outputs/gpu-selection.json"
 checkpoint_path="/data/ubai-assets/checkpoints/vit_base_patch16_224.augreg2_in21k_ft_in1k"
 checkpoint_sha256="${THETA_CHECKPOINT_SHA256:-596ea1f22f56761c30661c87310c670e4ff296729bc5de349af41ac6ef6286ff}"
 environment_archive="${THETA_ENV_ARCHIVE:-$remote_assets/runtime/dt-environment.tar.zst}"
+environment_root="${THETA_ENV_ROOT:-$remote_assets/runtime/dt-shared-v1}"
 container_image="${THETA_CONTAINER_IMAGE:-$remote_assets/runtime/ubuntu-24.04.sqsh}"
 storage_limit_bytes="${SIGMA_MARGIN_STORAGE_LIMIT_BYTES:-60000000000}"
 
@@ -101,16 +102,26 @@ fi
 export THETA_REMOTE_REPO="$remote_repo"
 export THETA_REMOTE_ASSETS="$remote_assets"
 export THETA_ENV_ARCHIVE="$environment_archive"
+export THETA_ENV_ROOT="$environment_root"
 export THETA_CONTAINER_IMAGE="$container_image"
 export SIGMA_MARGIN_MANIFEST="$manifest"
 export SIGMA_MARGIN_LOG_DIR="$log_dir"
 export SIGMA_MARGIN_OUTPUT_DIR="$output_dir"
 export SIGMA_MARGIN_FIGURE_DIR="$figure_dir"
 
+prep_job="$(sbatch \
+    --parsable \
+    --output="$log_dir/slurm/%x-%j.out" \
+    --error="$log_dir/slurm/%x-%j.err" \
+    --export=ALL \
+    "$remote_repo/scripts/experiments/ubai/sigma_margin_env_prep.sbatch")"
+prep_job="${prep_job%%;*}"
+
 if [[ "$mode" == "pilot" ]]; then
     export SIGMA_MARGIN_TASK_MANIFEST="$pilot_manifest"
     pilot_job="$(sbatch \
         --parsable \
+        --dependency="afterok:$prep_job" \
         --partition="$partition" \
         --time=03:00:00 \
         --array="0-5%6" \
@@ -119,8 +130,9 @@ if [[ "$mode" == "pilot" ]]; then
         --export=ALL \
         "$remote_repo/scripts/experiments/ubai/sigma_margin_task.sbatch")"
     pilot_job="${pilot_job%%;*}"
-    printf '%s\tmode=pilot\tarray=%s\tpending=6\n' \
-        "$(date --iso-8601=seconds)" "$pilot_job" >> "$output_dir/submissions.tsv"
+    printf '%s\tmode=pilot\tprep=%s\tarray=%s\tpending=6\n' \
+        "$(date --iso-8601=seconds)" "$prep_job" "$pilot_job" >> "$output_dir/submissions.tsv"
+    echo "Environment prep job: $prep_job"
     echo "Pilot array job: $pilot_job"
     exit 0
 fi
@@ -177,20 +189,21 @@ if projected_total > limit:
     sigma_1p000em09_margin_0_seed_0 sigma_1p000em09_margin_12_seed_0
 
 export SIGMA_MARGIN_TASK_MANIFEST="$pending_manifest"
-dependency_args=()
+dependency_args=(--dependency="afterok:$prep_job")
 if (( pending_count > 0 )); then
     array_end="$((pending_count - 1))"
     array_job="$(sbatch \
         --parsable \
         --partition="$partition" \
         --time=03:00:00 \
+        --dependency="afterok:$prep_job" \
         --array="0-${array_end}%8" \
         --output="$log_dir/slurm/%x-%A_%a.out" \
         --error="$log_dir/slurm/%x-%A_%a.err" \
         --export=ALL \
         "$remote_repo/scripts/experiments/ubai/sigma_margin_task.sbatch")"
     array_job="${array_job%%;*}"
-    dependency_args+=(--dependency="afterany:$array_job")
+    dependency_args=(--dependency="afterany:$array_job")
     echo "Array job: $array_job"
 else
     array_job=""
@@ -208,4 +221,5 @@ reducer_job="${reducer_job%%;*}"
 printf '%s\tmode=full\tarray=%s\treducer=%s\tpending=%s\n' \
     "$(date --iso-8601=seconds)" "$array_job" "$reducer_job" "$pending_count" \
     >> "$output_dir/submissions.tsv"
+echo "Environment prep job: $prep_job"
 echo "Reducer job: $reducer_job"

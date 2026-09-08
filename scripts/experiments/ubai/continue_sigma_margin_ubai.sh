@@ -27,12 +27,16 @@ pending_count="$(( $(wc -l < "$pending") - 1 ))"
 
 export THETA_REMOTE_REPO="$repo"
 export THETA_REMOTE_ASSETS="$assets"
-export THETA_ENV_ARCHIVE="${THETA_ENV_ARCHIVE:-$assets/runtime/dt-environment.tar.zst}"
+export THETA_ENV_ROOT="${THETA_ENV_ROOT:-$assets/runtime/dt-shared-v1}"
 export THETA_CONTAINER_IMAGE="${THETA_CONTAINER_IMAGE:-$assets/runtime/ubuntu-24.04.sqsh}"
 export SIGMA_MARGIN_MANIFEST="$manifest"
 export SIGMA_MARGIN_LOG_DIR="$log_dir"
 export SIGMA_MARGIN_OUTPUT_DIR="$root/outputs"
 export SIGMA_MARGIN_FIGURE_DIR="$root/figures"
+if [[ ! -x "$THETA_ENV_ROOT/bin/python" || ! -s "$THETA_ENV_ROOT/.archive.sha256" ]]; then
+    echo "Shared environment is not ready: $THETA_ENV_ROOT" >&2
+    exit 2
+fi
 
 if (( pending_count == 0 )); then
     reducer="$(sbatch --parsable \
