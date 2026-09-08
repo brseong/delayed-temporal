@@ -172,7 +172,7 @@ A six-run pilot records clean spiking, dense reference, three zero-margin noise 
 
 Cluster tasks disable external experiment tracking and treat the immutable manifest plus complete evaluator logs as the sole resume and aggregation contract. Existing tracking artifacts remain archived but are not required for completion.
 
-The portable Python environment is unpacked once on shared storage and mounted into every task. Temporary files for each task use a bounded experiment directory that is removed when the task exits; large environment trees are never unpacked under the compute node temporary directory.
+The portable Python environment is unpacked under the local container data path on each compute node and removed when each task exits. Runtime extraction and temporary caches never use the compute node temporary directory, and stale experiment directories older than the task limit are removed before evaluation.
 
 The full array is submitted only after the pilot passes and its projected total asset use remains at or below 60 GB.
 

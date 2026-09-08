@@ -15,11 +15,22 @@ set -euo pipefail
 : "${SIGMA_MARGIN_FIGURE_DIR:?SIGMA_MARGIN_FIGURE_DIR is required}"
 : "${THETA_CONTAINER_IMAGE:?THETA_CONTAINER_IMAGE is required}"
 : "${THETA_REMOTE_REPO:?THETA_REMOTE_REPO is required}"
-: "${THETA_ENV_ROOT:?THETA_ENV_ROOT is required}"
+: "${THETA_ENV_ARCHIVE:?THETA_ENV_ARCHIVE is required}"
 : "${THETA_REMOTE_ASSETS:?THETA_REMOTE_ASSETS is required}"
 
-test -x "$THETA_ENV_ROOT/bin/python"
-test -s "$THETA_ENV_ROOT/.archive.sha256"
+enroot_data="/enroot/$(id -u)/data"
+runtime_parent="$enroot_data/sigma-margin-reducer-${SLURM_JOB_ID}"
+cleanup() {
+    rm -rf -- "$runtime_parent"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM INT
+mkdir -p "$enroot_data" "$runtime_parent/scratch"
+find "$enroot_data" -mindepth 1 -maxdepth 1 -type d \
+    -name 'sigma-margin-reducer-*' -uid "$(id -u)" -mmin +120 \
+    -exec rm -rf -- {} +
+zstd --decompress --stdout "$THETA_ENV_ARCHIVE" | tar -xf - -C "$runtime_parent"
+test -x "$runtime_parent/dt/bin/python"
 mkdir -p "$SIGMA_MARGIN_OUTPUT_DIR" "$SIGMA_MARGIN_FIGURE_DIR"
 
 to_container_path() {
@@ -41,13 +52,6 @@ container_manifest="$(to_container_path "$SIGMA_MARGIN_MANIFEST")"
 container_log_dir="$(to_container_path "$SIGMA_MARGIN_LOG_DIR")"
 container_output_dir="$(to_container_path "$SIGMA_MARGIN_OUTPUT_DIR")"
 container_figure_dir="$(to_container_path "$SIGMA_MARGIN_FIGURE_DIR")"
-scratch_root="$SIGMA_MARGIN_LOG_DIR/reducer-tmp/${SLURM_JOB_ID}"
-container_scratch_root="$(to_container_path "$scratch_root")"
-cleanup() {
-    rm -rf -- "$scratch_root"
-}
-trap cleanup EXIT
-mkdir -p "$scratch_root"
 manifest_commit="$(awk -F $'\t' 'NR == 2 {print $15}' "$SIGMA_MARGIN_MANIFEST")"
 actual_commit="$(git -C "$THETA_REMOTE_REPO" rev-parse HEAD)"
 if [[ -z "$manifest_commit" || "$actual_commit" != "$manifest_commit" ]]; then
@@ -58,15 +62,15 @@ fi
 srun \
     --ntasks=1 \
     --container-image="$THETA_CONTAINER_IMAGE" \
-    --container-mounts="$THETA_REMOTE_REPO:/data/delayed-temporal,$THETA_REMOTE_ASSETS/source-checkouts/transformers:/data/delayed-temporal/src/transformers,$THETA_REMOTE_ASSETS/source-checkouts/spikingjelly:/data/delayed-temporal/src/spikingjelly,$THETA_ENV_ROOT:/opt/conda/envs/dt,$THETA_REMOTE_ASSETS:/data/ubai-assets" \
+    --container-mounts="$THETA_REMOTE_REPO:/data/delayed-temporal,$THETA_REMOTE_ASSETS/source-checkouts/transformers:/data/delayed-temporal/src/transformers,$THETA_REMOTE_ASSETS/source-checkouts/spikingjelly:/data/delayed-temporal/src/spikingjelly,$runtime_parent/dt:/opt/conda/envs/dt,$runtime_parent/scratch:/work-tmp,$THETA_REMOTE_ASSETS:/data/ubai-assets" \
     --container-workdir=/data/delayed-temporal \
     /usr/bin/env \
-    TMPDIR="$container_scratch_root" \
-    XDG_CACHE_HOME="$container_scratch_root/cache" \
+    TMPDIR=/work-tmp \
+    XDG_CACHE_HOME=/work-tmp/cache \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/data/delayed-temporal:/data/delayed-temporal/src/transformers/src:/data/delayed-temporal/src/spikingjelly \
     MPLBACKEND=Agg \
-    MPLCONFIGDIR="$container_scratch_root/matplotlib" \
+    MPLCONFIGDIR=/work-tmp/matplotlib \
     /opt/conda/envs/dt/bin/python scripts/analysis/summarize_sigma_margin_sweep.py \
     --manifest "$container_manifest" \
     --log-dir "$container_log_dir" \
