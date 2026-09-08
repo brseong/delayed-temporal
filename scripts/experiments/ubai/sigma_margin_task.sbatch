@@ -25,6 +25,9 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 143' TERM INT
 mkdir -p "$enroot_data"
+find /tmp -mindepth 1 -maxdepth 1 -type d \
+    -name 'sigma-margin-runtime-*' -uid "$(id -u)" -mmin +240 \
+    -exec rm -rf -- {} +
 find "$enroot_data" -mindepth 1 -maxdepth 1 -type d \
     -name 'sigma-margin-runtime-*' -uid "$(id -u)" -mmin +240 \
     -exec rm -rf -- {} +

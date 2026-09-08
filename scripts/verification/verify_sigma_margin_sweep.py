@@ -357,6 +357,7 @@ def verify_slurm_contract() -> None:
     assert '$runtime_parent/dt:/opt/conda/envs/dt' in task
     assert 'trap cleanup EXIT' in task and 'sigma-margin-runtime-${SLURM_JOB_ID}-${task_index}' in task
     assert "-mmin +240" in task and "zstd --decompress --stdout" in task
+    assert "find /tmp" in task and "-name 'sigma-margin-runtime-*'" in task
     assert '--array="0-${array_end}%8"' in submit and '--array="0-5%6"' in submit
     assert 'mode="pilot"' in submit and "60000000000" in submit
     assert "/home1/sizz1997/miniconda3/bin/python" in submit
