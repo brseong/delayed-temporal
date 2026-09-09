@@ -158,6 +158,8 @@ Accepted physical runs use a per-run Git allowlist. The committed bundle keeps c
 
 The EBRAINS notebook defaults to a one-pass Yin-Yang acceptance pipeline: train, convert, Hagen probe, deadline-margin calibration, hardware smoke, and full evaluation. It configures the shared client from a writable `/tmp` checkout, pins both calibrations, applies the probe-selected shift, and blocks formal execution unless same-run smoke passes. Failures stop later stages and enter `pipeline_status.json`.
 
+The manual EBRAINS runner reuses the accepted seed-0 checkpoint and explicit calibration files. It isolates Hagen initialization behind a process-group watchdog, keeps each physical stage in a separate cell, and blocks full evaluation unless the same run passes service preflight, margin calibration, and hardware smoke.
+
 ## Toy ANN2SNN Verification
 
 These test specifications protect the conversion and network-level hardware boundary without requiring hxtorch locally.
@@ -275,3 +277,9 @@ Each condition must split zero/positive-code misses, report non-miss UInt5 error
 New source files must parse as Python 3.11, and the notebook must remain a thin launcher with an enabled Yin-Yang acceptance pipeline, explicit stage flags, and MNIST sample limits.
 
 Training must precede hardware allocation, the probe-selected shift must feed smoke, and formal stages must be gated by a passing same-run smoke artifact.
+
+### EBRAINS manual runner contract
+
+The clean manual runner must remain credential-free, reuse explicit accepted inputs, and prevent a stalled Hagen initialization from trapping the Jupyter kernel.
+
+Its default path skips retraining and the redundant Hagen shift probe, runs initialization in a disposable process with a fixed watchdog, records stage state, and permits the full Yin-Yang grid only after its own margin calibration and smoke gate pass.
