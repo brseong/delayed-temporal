@@ -280,4 +280,4 @@ Training must precede hardware allocation, the probe-selected shift must feed sm
 
 The default resume path reuses the accepted checkpoint and explicit calibration files, skips redundant training and shift probing, then starts at margin calibration. Setting the resume source to `None` restores the fresh train-and-probe path.
 
-Before either hardware path, Hagen initialization runs in a disposable process with a fixed watchdog and always attempts release. Every CLI phase also has a process-group timeout, stage state is recorded, and full Yin-Yang evaluation still requires the same run's smoke gate. The notebook contains no credentials.
+Before either hardware path, the shared-client handshake has bounded retries, while Hagen initialization runs in a disposable process with a fixed watchdog and always attempts release. Every CLI phase also has a process-group timeout, stage state is recorded, and full Yin-Yang evaluation still requires the same run's smoke gate. The notebook contains no credentials.

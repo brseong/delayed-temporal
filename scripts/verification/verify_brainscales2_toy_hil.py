@@ -1534,6 +1534,9 @@ def verify_python311_and_notebook_contract() -> None:
     assert "CONDITION_WORKER_RETRY_BACKOFF_S = 20.0" in source
     assert "CONDITION_WORKER_IDLE_TIMEOUT_S = 180.0" in source
     assert "PREFLIGHT_TIMEOUT_S = 120" in source
+    assert "HARDWARE_CLIENT_MAX_ATTEMPTS = 3" in source
+    assert "HARDWARE_CLIENT_RETRY_BACKOFF_S = 5.0" in source
+    assert "for attempt in range(1, HARDWARE_CLIENT_MAX_ATTEMPTS + 1)" in source
     assert "CLI_TIMEOUTS_S" in source
     assert "ARTIFACT_ROOT = None" in source
     assert "if ARTIFACT_ROOT is not None" in source
