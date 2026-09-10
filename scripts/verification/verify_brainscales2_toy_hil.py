@@ -1462,13 +1462,29 @@ def verify_python311_and_notebook_contract() -> None:
     assert "args.phase in (\"hardware-smoke\", \"hardware-eval\")" in cli_source
     notebook = REPOSITORY_ROOT / "scripts/notebooks/ebrains_brainscales2_toy_hil.ipynb"
     payload = json.loads(notebook.read_text(encoding="utf-8"))
+    assert payload["nbformat"] == 4
+    assert payload["metadata"]["kernelspec"]["display_name"] == (
+        "EBRAINS-experimental"
+    )
     version = payload["metadata"]["language_info"]["version"]
     assert version == "3.11" or version.startswith("3.11.")
+    for cell in payload["cells"]:
+        if cell["cell_type"] == "code":
+            assert cell.get("execution_count") is None
+            assert not cell.get("outputs")
+            cell_source = "".join(cell.get("source", []))
+            if not cell_source.lstrip().startswith("%"):
+                ast.parse(cell_source, feature_version=(3, 11))
     source = "\n".join(
         "".join(cell.get("source", [])) for cell in payload["cells"]
     )
-    assert "RUN_TRAIN = True" in source
-    assert "RUN_HAGEN_PROBE = True" in source
+    assert (
+        "RESUME_SOURCE_RUN = repo_root / "
+        "'artifacts/brainscales2-toy/20260901T095827Z'"
+    ) in source
+    assert "RUN_SERVICE_PREFLIGHT = True" in source
+    assert "RUN_TRAIN = RESUME_SOURCE_RUN is None" in source
+    assert "RUN_HAGEN_PROBE = RESUME_SOURCE_RUN is None" in source
     assert "RUN_MARGIN_CALIBRATION = True" in source
     assert "RUN_HARDWARE_SMOKE = True" in source
     assert "RUN_YINYANG_FULL = True" in source
@@ -1517,6 +1533,8 @@ def verify_python311_and_notebook_contract() -> None:
     assert "CONDITION_WORKER_MAX_ATTEMPTS = 3" in source
     assert "CONDITION_WORKER_RETRY_BACKOFF_S = 20.0" in source
     assert "CONDITION_WORKER_IDLE_TIMEOUT_S = 180.0" in source
+    assert "PREFLIGHT_TIMEOUT_S = 120" in source
+    assert "CLI_TIMEOUTS_S" in source
     assert "ARTIFACT_ROOT = None" in source
     assert "if ARTIFACT_ROOT is not None" in source
     assert "'--hagen-row-chunk-size', HAGEN_ROW_CHUNK_SIZE" in source
@@ -1529,65 +1547,28 @@ def verify_python311_and_notebook_contract() -> None:
         "'--condition-worker-idle-timeout-s', "
         "CONDITION_WORKER_IDLE_TIMEOUT_S"
     ) in source
+    assert "hxtorch.init_hardware(hxtorch.CalibrationPath" in source
+    assert "hxtorch.release_hardware()" in source
+    assert "os.killpg(process.pid, signal.SIGKILL)" in source
+    assert "service_preflight.json" in source
+    assert "run_stage('hagen-service-preflight', run_hagen_preflight)" in source
+    assert "--token" not in source
+    removed_notebook = (
+        REPOSITORY_ROOT
+        / "scripts/notebooks/ebrains_brainscales2_toy_manual_run.ipynb"
+    )
+    assert not removed_notebook.exists()
     assert source.index("'--phase', 'train'") < source.index(
         "setup_hardware_client()"
+    )
+    assert source.index("run_stage('hagen-service-preflight'") < source.index(
+        "'--phase', 'calibrate-margin'"
     )
     assert source.index("if RUN_MARGIN_CALIBRATION:") < source.index(
         "if RUN_HARDWARE_SMOKE:"
     )
     assert source.index("if RUN_HARDWARE_SMOKE:") < source.index(
         "if RUN_YINYANG_FULL:"
-    )
-
-
-def verify_manual_run_notebook_contract() -> None:
-    # @lat: [[hardware#Toy ANN2SNN Verification#EBRAINS manual runner contract]]
-    notebook = (
-        REPOSITORY_ROOT
-        / "scripts/notebooks/ebrains_brainscales2_toy_manual_run.ipynb"
-    )
-    payload = json.loads(notebook.read_text(encoding="utf-8"))
-    assert payload["nbformat"] == 4
-    assert payload["metadata"]["kernelspec"]["display_name"] == (
-        "EBRAINS-experimental"
-    )
-    version = payload["metadata"]["language_info"]["version"]
-    assert version == "3.11" or version.startswith("3.11.")
-    for cell in payload["cells"]:
-        if cell["cell_type"] == "code":
-            assert cell.get("execution_count") is None
-            assert not cell.get("outputs")
-            ast.parse("".join(cell.get("source", [])), feature_version=(3, 11))
-    source = "\n".join(
-        "".join(cell.get("source", [])) for cell in payload["cells"]
-    )
-    assert "SOURCE_RUN = repo_root / 'artifacts/brainscales2-toy/20260901T095827Z'" in source
-    assert "RUN_SERVICE_PREFLIGHT = True" in source
-    assert "RUN_HAGEN_PROBE = False" in source
-    assert "RUN_MARGIN_CALIBRATION = True" in source
-    assert "RUN_HARDWARE_SMOKE = True" in source
-    assert "RUN_YINYANG_FULL = True" in source
-    assert "PREFLIGHT_TIMEOUT_S = 120" in source
-    assert "hxtorch.init_hardware(hxtorch.CalibrationPath" in source
-    assert "hxtorch.release_hardware()" in source
-    assert "os.killpg(process.pid, signal.SIGKILL)" in source
-    assert "service_preflight.json" in source
-    assert "manual_pipeline_status.json" in source
-    assert "setup_hardware_client()" in source
-    assert "save_nightly_calibration" not in source
-    assert "--deadline-margin-json" in source
-    assert "--include-zero-margin-control" in source
-    assert "Full evaluation requires a passing same-run smoke gate" in source
-    assert "'--pool-sizes', 1, 2, 4, 8, 16" in source
-    assert "--token" not in source
-    assert source.index("run_hagen_preflight(PREFLIGHT_TIMEOUT_S)") < source.index(
-        "'--phase', 'calibrate-margin'"
-    )
-    assert source.index("'--phase', 'calibrate-margin'") < source.index(
-        "'--phase', 'hardware-smoke'"
-    )
-    assert source.index("'--phase', 'hardware-smoke'") < source.index(
-        "'--phase', 'hardware-eval'"
     )
 
 
@@ -1618,7 +1599,6 @@ def main() -> None:
     verify_metrics_and_artifact_schema()
     verify_hardware_error_attribution()
     verify_python311_and_notebook_contract()
-    verify_manual_run_notebook_contract()
     print("BrainScaleS-2 toy ANN2SNN verification passed")
 
 

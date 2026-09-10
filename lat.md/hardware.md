@@ -156,9 +156,9 @@ Accepted physical runs use a per-run Git allowlist. The committed bundle keeps c
 
 [[scripts/evaluation/brainscales2_toy_hil.py#main]] separates train, convert, local evaluation, Hagen probe, deadline-margin calibration, hardware smoke, and full hardware phases. MNIST hardware evaluation defaults to a 128-sample runtime benchmark until the caller explicitly sets a formal sample count.
 
-The EBRAINS notebook defaults to a one-pass Yin-Yang acceptance pipeline: train, convert, Hagen probe, deadline-margin calibration, hardware smoke, and full evaluation. It configures the shared client from a writable `/tmp` checkout, pins both calibrations, applies the probe-selected shift, and blocks formal execution unless same-run smoke passes. Failures stop later stages and enter `pipeline_status.json`.
+The canonical EBRAINS notebook defaults to resuming the accepted seed-0 checkpoint and explicit calibration files at deadline-margin calibration. A fresh mode instead trains, converts, and probes the Hagen shift before the same smoke-gated full evaluation.
 
-The manual EBRAINS runner reuses the accepted seed-0 checkpoint and explicit calibration files. It isolates Hagen initialization behind a process-group watchdog, keeps each physical stage in a separate cell, and blocks full evaluation unless the same run passes service preflight, margin calibration, and hardware smoke.
+It configures the shared client from a writable `/tmp` checkout, isolates Hagen initialization and every CLI phase behind process-group watchdogs, and records failures in `pipeline_status.json`. Full evaluation requires same-run preflight, margin calibration, and hardware smoke.
 
 ## Toy ANN2SNN Verification
 
@@ -274,12 +274,10 @@ Each condition must split zero/positive-code misses, report non-miss UInt5 error
 
 ### EBRAINS launcher contract
 
-New source files must parse as Python 3.11, and the notebook must remain a thin launcher with an enabled Yin-Yang acceptance pipeline, explicit stage flags, and MNIST sample limits.
+The single canonical notebook remains a thin Python 3.11 launcher with explicit stage flags, bounded hardware calls, and MNIST sample limits.
 
 Training must precede hardware allocation, the probe-selected shift must feed smoke, and formal stages must be gated by a passing same-run smoke artifact.
 
-### EBRAINS manual runner contract
+The default resume path reuses the accepted checkpoint and explicit calibration files, skips redundant training and shift probing, then starts at margin calibration. Setting the resume source to `None` restores the fresh train-and-probe path.
 
-The clean manual runner must remain credential-free, reuse explicit accepted inputs, and prevent a stalled Hagen initialization from trapping the Jupyter kernel.
-
-Its default path skips retraining and the redundant Hagen shift probe, runs initialization in a disposable process with a fixed watchdog, records stage state, and permits the full Yin-Yang grid only after its own margin calibration and smoke gate pass.
+Before either hardware path, Hagen initialization runs in a disposable process with a fixed watchdog and always attempts release. Every CLI phase also has a process-group timeout, stage state is recorded, and full Yin-Yang evaluation still requires the same run's smoke gate. The notebook contains no credentials.
