@@ -351,6 +351,7 @@ def _configure_grouped_synapse_weights(
     *,
     input_fan_in: int,
     synaptic_weight: float,
+    neuron_synaptic_weights: torch.Tensor | None = None,
 ) -> None:
     """Connect every logical source lane only to its physical replica block."""
     expected_inputs = (
@@ -367,6 +368,12 @@ def _configure_grouped_synapse_weights(
         raise ValueError(
             "grouped synapse weight shape does not match mapping and fan-in"
         )
+    if neuron_synaptic_weights is not None:
+        values = torch.as_tensor(neuron_synaptic_weights, device=weight.device)
+        if values.shape != (expected_outputs,) or not bool(torch.isfinite(values).all()):
+            raise ValueError("one finite digital weight is required per physical neuron")
+        if bool(((values < 0) | (values > 63) | (values != values.round())).any()):
+            raise ValueError("digital neuron weights must be integers in [0, 63]")
     weight.zero_()
     if config.mapping == "dedicated":
         for logical in range(config.logical_neurons):
@@ -380,6 +387,17 @@ def _configure_grouped_synapse_weights(
             ] = synaptic_weight
     else:
         weight[:, :input_fan_in] = synaptic_weight
+    if neuron_synaptic_weights is not None:
+        # Preserve connectivity, including when the original weight is zero.
+        if config.mapping == "dedicated":
+            for logical in range(config.logical_neurons):
+                start = logical * config.pool_size
+                lanes = _grouped_input_channel_slice(logical, config, input_fan_in)
+                weight[start : start + config.pool_size, lanes] = values[
+                    start : start + config.pool_size
+                ].unsqueeze(1)
+        else:
+            weight[:, :input_fan_in] = values.unsqueeze(1)
 
 
 def _nanmean(value: torch.Tensor, dim: int | tuple[int, ...]) -> torch.Tensor:
@@ -802,6 +820,8 @@ class GroupedHardwarePoolBackend:
         inputs: torch.Tensor,
         config: ToyPoolConfig,
         spiking_config: BrainScaleS2PoolConfig,
+        *,
+        neuron_synaptic_weights: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Execute one bounded raw-event graph and release hardware afterward."""
         spiking_config.require_reproducible_calibration()
@@ -838,6 +858,17 @@ class GroupedHardwarePoolBackend:
         try:
             hxtorch.init_hardware()
             initialized = True
+            chip_identifier = None
+            get_identifier = getattr(hxtorch, "get_unique_identifier", None)
+            if callable(get_identifier):
+                chip_identifier = [str(value) for value in get_identifier()]
+            if spiking_config.neuron_weight_calibration_path is not None:
+                if neuron_synaptic_weights is not None:
+                    raise ValueError("cannot override a pinned neuron weight calibration")
+                from .neuron_weights import load_neuron_weights
+                neuron_synaptic_weights = load_neuron_weights(
+                    spiking_config, config, coordinates, chip_identifier
+                )
             experiment = hxsnn.Experiment(dt=spiking_config.dt_s)
             experiment.inter_batch_entry_wait = int(
                 round(spiking_config.inter_batch_wait_s / _fpga_time_scale_s())
@@ -857,6 +888,7 @@ class GroupedHardwarePoolBackend:
                 config,
                 input_fan_in=spiking_config.input_fan_in,
                 synaptic_weight=spiking_config.synaptic_weight,
+                neuron_synaptic_weights=neuron_synaptic_weights,
             )
             lif = hxsnn.LIF(
                 size=output_neurons,
@@ -912,6 +944,11 @@ class GroupedHardwarePoolBackend:
                     "raw_spike_api": raw_api,
                     "grouped_broadcast": True,
                     "raw_batch_count": total_batches,
+                    "neuron_weight_calibration_sha256": spiking_config.neuron_weight_calibration_sha256,
+                    "neuron_synaptic_weights": (
+                        None if neuron_synaptic_weights is None
+                        else neuron_synaptic_weights.tolist()
+                    ),
                 },
             )
         finally:

@@ -233,6 +233,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--synapse-dac-bias", type=float, default=600.0)
     parser.add_argument("--synaptic-weight", type=float, default=63.0)
     parser.add_argument("--input-fan-in", type=int, default=4)
+    parser.add_argument("--neuron-weight-calibration", type=Path)
     parser.add_argument("--raw-time-scale-s", type=float)
     parser.add_argument("--condition-worker-config", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--pool-chunk-worker-config", type=Path, help=argparse.SUPPRESS)
@@ -246,6 +247,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--condition-code-revision", help=argparse.SUPPRESS)
     parser.add_argument("--condition-hagen-calibration-sha256", help=argparse.SUPPRESS)
     parser.add_argument("--condition-spiking-calibration-sha256", help=argparse.SUPPRESS)
+    parser.add_argument("--condition-neuron-weight-calibration-sha256", help=argparse.SUPPRESS)
     parser.add_argument("--condition-checkpoint-sha256", help=argparse.SUPPRESS)
     parser.add_argument("--condition-converted-sha256", help=argparse.SUPPRESS)
     return parser.parse_args()
@@ -260,6 +262,7 @@ _WORKER_PATH_FIELDS = {
     "output_dir",
     "hagen_calibration",
     "spiking_calibration",
+    "neuron_weight_calibration",
     "condition_worker_config",
     "pool_chunk_worker_config",
     "first_hidden_cache",
@@ -526,6 +529,11 @@ def _spiking_config(args: argparse.Namespace) -> BrainScaleS2PoolConfig:
         synapse_dac_bias=args.synapse_dac_bias,
         synaptic_weight=args.synaptic_weight,
         input_fan_in=args.input_fan_in,
+        neuron_weight_calibration_path=(
+            str(args.neuron_weight_calibration.resolve())
+            if args.neuron_weight_calibration is not None else None
+        ),
+        neuron_weight_calibration_sha256=file_sha256(args.neuron_weight_calibration),
         pool_sizes=tuple(args.pool_sizes),
         placements=("same-quadrant",),
         routings=("broadcast",),
@@ -553,6 +561,7 @@ def _deadline_margin_config(args: argparse.Namespace) -> DeadlineMarginConfig:
 
 def _deadline_margin_context(args: argparse.Namespace) -> dict[str, Any]:
     return {
+        "neuron_weight_calibration_sha256": file_sha256(getattr(args, "neuron_weight_calibration", None)),
         "task": args.task,
         "architecture": args.architecture,
         "activation": args.activation,
@@ -1764,6 +1773,7 @@ def _run_condition_subprocess(
             "condition_code_revision": _git_revision(),
             "condition_hagen_calibration_sha256": file_sha256(args.hagen_calibration),
             "condition_spiking_calibration_sha256": file_sha256(args.spiking_calibration),
+            "condition_neuron_weight_calibration_sha256": file_sha256(getattr(args, "neuron_weight_calibration", None)),
             "condition_checkpoint_sha256": file_sha256(args.checkpoint),
             "condition_converted_sha256": file_sha256(args.converted_checkpoint),
         }

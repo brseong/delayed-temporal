@@ -46,6 +46,8 @@ class BrainScaleS2PoolConfig:
     synapse_dac_bias: float = 600.0
     synaptic_weight: float = 63.0
     input_fan_in: int = 1
+    neuron_weight_calibration_path: str | None = None
+    neuron_weight_calibration_sha256: str | None = None
 
     pool_sizes: tuple[int, ...] = (1, 2, 4, 8, 16)
     placements: tuple[PlacementMode, ...] = (

@@ -132,6 +132,10 @@ Before formal evaluation, [[scripts/evaluation/brainscales2_toy_hil.py#margin_ca
 
 The selected margin extends only the observation deadline: the TTFS input window, UInt5 bounds, weights, and activation values are unchanged. Formal evaluation interleaves the selected margin and a zero-margin control over identical cached hidden inputs, every pool size, and both placements; the calibration context binds checkpoints, both calibration files, chip operating parameters, and the time grid before reuse.
 
+Digital synaptic weights can be calibrated for each physical neuron before timing calibration using [[scripts/evaluation/brainscales2_neuron_weights.py#main]]. The sweep uses the actual grouped graph and all 32 input codes without task labels. Separate validation trials test both varied and simultaneous input times, including quiet controls. Each candidate measurement runs in a disposable process with a timeout.
+
+[[utils/hardware/brainscales2/neuron_weights.py#load_neuron_weights]] binds the selected weights to the chip, analog calibration checksum, input timing, fan-in, pool size, and exact physical coordinates. Failed validation prevents inference. The optional `--neuron-weight-calibration` file is checksummed in worker configurations and deadline calibration context. It changes the input synapses driving the LIF replicas; trained ANN weights remain fixed.
+
 After temporal decoding, the physical Hagen readout also slices the flattened trial-sample row axis before each PWM call. When any all-miss position exists, original and oracle-repaired rows are concatenated and tagged as separate segments; the logits retain row order, and every chunk records calibration, chip, shape, and elapsed time.
 
 Formal multi-condition runs materialize each required physical Hagen hidden tensor once, then execute every placement and pool size in a fresh child process. Completed worker directories are resumable, and the parent rebuilds the combined artifact so process isolation does not change paired inputs or the result schema.
@@ -163,6 +167,12 @@ It configures the shared client from a writable `/tmp` checkout, isolates Hagen 
 ## Toy ANN2SNN Verification
 
 These test specifications protect the conversion and network-level hardware boundary without requiring hxtorch locally.
+
+### Neuron synaptic weight calibration
+
+Digital weight calibration must preserve grouped connectivity, reject invalid digital values, use separate validation observations, and reject a failed or mismatched physical calibration.
+
+Tests cover zero and maximum weights, source isolation, quiet activity, missing and multiple spikes, smallest passing candidate selection, reproducible input schedules, chip and coordinate identity, checksum changes, and failed validation.
 
 ### Host-mediated implicit ReLU boundary
 
