@@ -48,6 +48,8 @@ class BrainScaleS2PoolConfig:
     input_fan_in: int = 1
     neuron_weight_calibration_path: str | None = None
     neuron_weight_calibration_sha256: str | None = None
+    threshold_selection_path: str | None = None
+    threshold_selection_sha256: str | None = None
 
     pool_sizes: tuple[int, ...] = (1, 2, 4, 8, 16)
     placements: tuple[PlacementMode, ...] = (

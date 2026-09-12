@@ -822,6 +822,7 @@ class GroupedHardwarePoolBackend:
         spiking_config: BrainScaleS2PoolConfig,
         *,
         neuron_synaptic_weights: torch.Tensor | None = None,
+        physical_coordinates: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Execute one bounded raw-event graph and release hardware afterward."""
         spiking_config.require_reproducible_calibration()
@@ -837,6 +838,11 @@ class GroupedHardwarePoolBackend:
             config.placement,
             config.mapping,
         )
+        if physical_coordinates is not None:
+            from .thresholds import validate_coordinates
+            if config.mapping != "dedicated" or spiking_config.threshold_selection_path:
+                raise ValueError("coordinate override is only for unselected dedicated calibration")
+            coordinates = validate_coordinates(physical_coordinates, config.logical_neurons, config.pool_size)
         unique_coordinates = (
             coordinates.reshape(-1)
             if config.mapping == "dedicated"
@@ -862,6 +868,10 @@ class GroupedHardwarePoolBackend:
             get_identifier = getattr(hxtorch, "get_unique_identifier", None)
             if callable(get_identifier):
                 chip_identifier = [str(value) for value in get_identifier()]
+            if spiking_config.threshold_selection_path is not None:
+                from .thresholds import selected_coordinates
+                coordinates = selected_coordinates(spiking_config, config, chip_identifier)
+                unique_coordinates = coordinates.reshape(-1)
             if spiking_config.neuron_weight_calibration_path is not None:
                 if neuron_synaptic_weights is not None:
                     raise ValueError("cannot override a pinned neuron weight calibration")
@@ -945,6 +955,7 @@ class GroupedHardwarePoolBackend:
                     "grouped_broadcast": True,
                     "raw_batch_count": total_batches,
                     "neuron_weight_calibration_sha256": spiking_config.neuron_weight_calibration_sha256,
+                    "threshold_selection_sha256": spiking_config.threshold_selection_sha256,
                     "neuron_synaptic_weights": (
                         None if neuron_synaptic_weights is None
                         else neuron_synaptic_weights.tolist()

@@ -1501,7 +1501,10 @@ def verify_python311_and_notebook_contract() -> None:
     assert "Using probe-selected HAGEN_HIDDEN_SHIFT" in source
     assert "formal stages require a passing same-run smoke gate" in source
     assert "SMOKE_MAX_MULTI_SPIKE_RATE" in source
-    assert "SPIKING_INPUT_FAN_IN = 4" in source
+    assert "SPIKING_INPUT_FAN_IN = 1" in source
+    assert "RUN_THRESHOLD_CALIBRATION = True" in source
+    assert "--threshold-selection-json" in source
+    assert source.index("run_stage('threshold-calibration'") < source.index("run_stage('deadline-margin-calibration'")
     assert "'--input-fan-in', SPIKING_INPUT_FAN_IN" in source
     assert "RELU_BOUNDARY = 'implicit-lower-bound-host'" in source
     assert "'--relu-boundary', RELU_BOUNDARY" in source

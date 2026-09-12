@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+from types import SimpleNamespace
 import csv
 import json
 import math
@@ -392,7 +393,12 @@ def deadline_margin_comparisons(
             item.pool_result.mapping,
             item.pool_size,
             int(round(item.deadline_margin_s * 1.0e9)),
-        ): item
+        ): SimpleNamespace(
+            logits=item.logits, nominal_hidden_uint5=item.nominal_hidden_uint5,
+            pool_result=SimpleNamespace(all_miss=item.pool_result.all_miss),
+            base_deadline_s=item.base_deadline_s, deadline_margin_s=item.deadline_margin_s,
+            resolved_deadline_s=item.resolved_deadline_s,
+        )
         for item in evaluations
     }
     rows: list[dict[str, Any]] = []
@@ -457,6 +463,7 @@ def write_toy_artifacts(
     seed: int = 0,
     event_csv_sample_limit: int = 128,
     event_csv_trial_limit: int = 2,
+    tensor_shards: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Write network predictions, raw events, tensors, metrics, and figures."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -470,10 +477,12 @@ def write_toy_artifacts(
     )
     manifest = {
         **manifest,
+        "schema_version": 2 if tensor_shards is not None else 1,
         "event_csv_coverage": {
             "sample_limit_per_condition": event_csv_sample_limit,
             "trial_limit_per_condition": event_csv_trial_limit,
             "full_raw_tensor": "intermediates.pt",
+            "tensor_shards": tensor_shards,
         },
     }
     (output_dir / "manifest.json").write_text(
@@ -499,7 +508,24 @@ def write_toy_artifacts(
         activation_error_by_code(evaluations),
     )
 
-    prediction_rows: list[dict[str, Any]] = []
+    # Append rows directly to disk; 20 conditions need not retain 640k dicts.
+    class PredictionRows:
+        def __init__(self):
+            self.handle = (output_dir / "predictions.csv").open("w", newline="", encoding="utf-8")
+            self.writer = csv.DictWriter(self.handle, fieldnames=(
+                "condition", "analysis_variant", "trial", "sample", "label", "prediction", "correct", "logits"))
+            self.writer.writeheader()
+
+        def append(self, row):
+            self.writer.writerow(row)
+
+        def close(self):
+            self.handle.close()
+
+        def __del__(self):
+            self.close()
+
+    prediction_rows = PredictionRows()
     for sample in range(labels.numel()):
         prediction_rows.append(
             {
@@ -551,7 +577,7 @@ def write_toy_artifacts(
                             "logits": json.dumps(logits.tolist()),
                         }
                     )
-    _write_rows(output_dir / "predictions.csv", prediction_rows)
+    prediction_rows.close()
 
     event_fields = (
         "condition",
@@ -612,6 +638,8 @@ def write_toy_artifacts(
                             )
     torch.save(
         {
+            "schema_version": 2 if tensor_shards is not None else 1,
+            "condition_shards": tensor_shards,
             "labels": labels,
             "float_logits": float_logits,
             "ideal_logits": ideal_logits,
@@ -634,13 +662,26 @@ def write_toy_artifacts(
                         evaluation.torch_oracle_miss_repair_logits
                     ),
                 }
-                for evaluation in evaluations
+                for evaluation in ([] if tensor_shards is not None else evaluations)
             },
         },
         output_dir / "intermediates.pt",
     )
     _write_figures(output_dir, labels, evaluations, metrics)
     return metrics
+
+
+def iter_intermediate_conditions(path: Path):
+    """Read old monolithic archives and new bounded condition archives."""
+    archive = torch.load(path, weights_only=False, map_location="cpu")
+    if archive.get("condition_shards") is None:
+        yield from archive["conditions"].items()
+    else:
+        for key, relative in archive["condition_shards"].items():
+            shard = torch.load(path.parent / relative, weights_only=False, map_location="cpu")
+            if key not in shard["conditions"]:
+                raise ValueError("condition shard does not contain the declared key")
+            yield key, shard["conditions"][key]
 
 
 def _write_figures(

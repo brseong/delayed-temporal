@@ -144,6 +144,26 @@ Formal multi-condition runs materialize each required physical Hagen hidden tens
 
 Each child process is retried only up to a configured bound with increasing backoff. A no-output watchdog terminates the isolated process group when a native RPC call does not return. Retries restart the condition; only complete artifacts are reused, and attempt logs and status enter the manifest.
 
+### Physical threshold calibration
+
+Single input spikes use an explicitly calibrated analog threshold and a fixed validated placement; requested module parameters never replace physical calibration.
+
+[[scripts/evaluation/brainscales2_thresholds.py#run_threshold_experiment]] creates a new base calibration, repeats CADC calibration, and refines leak, reset and threshold. Candidate copies preserve time constants and capacitance. Development observations select a common threshold without task labels; independent validation cannot select another candidate on failure.
+
+The target grid is 125 down to 85 in steps of five, with unit steps between a passing candidate and the preceding failure. Each candidate records actual physical parameter values, native calibration, portable binary checksum and chip identifier. Initial calibration success does not establish successful threshold refinement: raw delivery validation is mandatory.
+
+[[utils/hardware/brainscales2/thresholds.py#allocate_validated_coordinates]] may replace unreliable physical circuits while preserving all 30 logical neurons. Both placements must support 30 pools of 16; smaller pools reuse replica prefixes. Local placement requires enough complete pools within quadrants, and cross-quadrant placement requires 120 valid circuits per quadrant. Excluded coordinates remain in the report.
+
+Development uses eight trials per code; fixed selection is validated using 64 trials per code and 512 quiet windows. Each physical neuron requires 99% single-spike delivery overall, at least 95% for each input time, and at most 1% quiet, premature or multiple-spike events. Wilson intervals accompany the rates but are not equated with the observed-rate acceptance cutoffs. Separate mixed and simultaneous inputs test the actual grouped graph at every pool size.
+
+The default notebook executes physical threshold calibration before fresh deadline calibration, smoke and full evaluation. Input fan-in is one and synaptic weight is 63. The optional digital weight calibration is not combined with this selection. A separate two-by-two threshold and fan-in diagnostic retains the old four-input condition without changing the primary experiment.
+
+[[utils/hardware/brainscales2/thresholds.py#selected_coordinates]] verifies the chip, calibration checksum and operating point before every physical execution. Deadline extensions are allowed only through the subsequent margin experiment; changed placement or calibration invalidates its context.
+
+Full aggregation reads one condition at a time and streams prediction rows. Its small `intermediates.pt` index points to the existing condition archives; [[utils/hardware/brainscales2/toy_artifacts.py#iter_intermediate_conditions]] reads this format and the previous monolithic format. Raw events are not discarded to meet the 2 GB session limit.
+
+The selected-threshold run also writes `estimator_controls.csv`: mean, raw-max and analytic-corrected-max decode identical physical events and use the frozen torch readout. These are explicitly readout controls, not additional physical Hagen measurements. The primary accuracy remains the physical Hagen result. Threshold workers record elapsed time and their maximum resident memory.
+
 ### Local mock and replay evidence
 
 Synthetic and artifact-replay backends validate accuracy propagation before hardware use but are not promoted to new physical evidence.
@@ -173,6 +193,18 @@ These test specifications protect the conversion and network-level hardware boun
 ### Neuron synaptic weight calibration
 
 Digital weight calibration must preserve grouped connectivity, reject invalid digital values, use separate validation observations, and reject a failed or mismatched physical calibration.
+
+### Physical threshold selection
+
+Tests cover separate candidate copies, unchanged time constants, actual threshold updates, code coverage, independent seeds, spare circuit capacity, nested coordinates, and calibration checksum and chip mismatch rejection.
+
+[[scripts/verification/verify_brainscales2_thresholds.py#verify_threshold_selection]] verifies these contracts without importing EBRAINS dependencies.
+
+### Bounded artifact aggregation
+
+Tests verify that both monolithic and indexed condition tensors can be read without changing events. Full aggregation reloads one condition at a time and writes prediction rows directly to disk.
+
+[[scripts/verification/verify_brainscales2_thresholds.py#verify_shard_reader]] compares raw values across both formats; the existing condition aggregation check covers paired metrics.
 
 Tests cover zero and maximum weights, source isolation, quiet activity, missing and multiple spikes, smallest passing candidate selection, reproducible input schedules, chip and coordinate identity, checksum changes, and failed validation.
 
@@ -290,6 +322,6 @@ The single canonical notebook remains a thin Python 3.11 launcher with explicit 
 
 Training must precede hardware allocation, the probe-selected shift must feed smoke, and formal stages must be gated by a passing same-run smoke artifact.
 
-The default resume path reuses the accepted checkpoint and explicit calibration files, skips redundant training and shift probing, then starts at margin calibration. Setting the resume source to `None` restores the fresh train-and-probe path.
+The default resume path reuses the accepted checkpoint and explicit Hagen calibration, skips redundant training and shift probing, then creates and validates a spiking threshold calibration before margin selection. Setting the resume source to `None` restores the fresh train-and-probe path.
 
 Before either hardware path, the shared-client handshake has bounded retries, while Hagen initialization runs in a disposable process with a fixed watchdog and always attempts release. Every CLI phase also has a process-group timeout, stage state is recorded, and full Yin-Yang evaluation still requires the same run's smoke gate. The notebook contains no credentials.

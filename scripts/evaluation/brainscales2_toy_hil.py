@@ -90,6 +90,7 @@ def parse_args() -> argparse.Namespace:
             "local-eval",
             "probe-hagen",
             "calibrate-margin",
+            "calibrate-threshold",
             "hardware-smoke",
             "hardware-eval",
         ),
@@ -234,6 +235,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--synaptic-weight", type=float, default=63.0)
     parser.add_argument("--input-fan-in", type=int, default=4)
     parser.add_argument("--neuron-weight-calibration", type=Path)
+    parser.add_argument("--threshold-selection-json", type=Path)
     parser.add_argument("--raw-time-scale-s", type=float)
     parser.add_argument("--condition-worker-config", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--pool-chunk-worker-config", type=Path, help=argparse.SUPPRESS)
@@ -248,6 +250,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--condition-hagen-calibration-sha256", help=argparse.SUPPRESS)
     parser.add_argument("--condition-spiking-calibration-sha256", help=argparse.SUPPRESS)
     parser.add_argument("--condition-neuron-weight-calibration-sha256", help=argparse.SUPPRESS)
+    parser.add_argument("--condition-threshold-selection-sha256", help=argparse.SUPPRESS)
     parser.add_argument("--condition-checkpoint-sha256", help=argparse.SUPPRESS)
     parser.add_argument("--condition-converted-sha256", help=argparse.SUPPRESS)
     return parser.parse_args()
@@ -263,6 +266,7 @@ _WORKER_PATH_FIELDS = {
     "hagen_calibration",
     "spiking_calibration",
     "neuron_weight_calibration",
+    "threshold_selection_json",
     "condition_worker_config",
     "pool_chunk_worker_config",
     "first_hidden_cache",
@@ -534,6 +538,9 @@ def _spiking_config(args: argparse.Namespace) -> BrainScaleS2PoolConfig:
             if args.neuron_weight_calibration is not None else None
         ),
         neuron_weight_calibration_sha256=file_sha256(args.neuron_weight_calibration),
+        threshold_selection_path=(str(args.threshold_selection_json.resolve())
+                                  if args.threshold_selection_json is not None else None),
+        threshold_selection_sha256=file_sha256(args.threshold_selection_json),
         pool_sizes=tuple(args.pool_sizes),
         placements=("same-quadrant",),
         routings=("broadcast",),
@@ -561,6 +568,7 @@ def _deadline_margin_config(args: argparse.Namespace) -> DeadlineMarginConfig:
 
 def _deadline_margin_context(args: argparse.Namespace) -> dict[str, Any]:
     return {
+        "threshold_selection_sha256": file_sha256(getattr(args, "threshold_selection_json", None)),
         "neuron_weight_calibration_sha256": file_sha256(getattr(args, "neuron_weight_calibration", None)),
         "task": args.task,
         "architecture": args.architecture,
@@ -1774,6 +1782,7 @@ def _run_condition_subprocess(
             "condition_hagen_calibration_sha256": file_sha256(args.hagen_calibration),
             "condition_spiking_calibration_sha256": file_sha256(args.spiking_calibration),
             "condition_neuron_weight_calibration_sha256": file_sha256(getattr(args, "neuron_weight_calibration", None)),
+            "condition_threshold_selection_sha256": file_sha256(getattr(args, "threshold_selection_json", None)),
             "condition_checkpoint_sha256": file_sha256(args.checkpoint),
             "condition_converted_sha256": file_sha256(args.converted_checkpoint),
         }
@@ -1919,21 +1928,35 @@ def _aggregate_isolated_conditions(
     worker_dirs: list[Path],
     first_hidden_dirs: dict[int, Path],
 ) -> None:
-    evaluations: list[ToyConditionEvaluation] = []
+    class DiskEvaluations:
+        def __iter__(self):
+            for directory in worker_dirs:
+                yield _load_isolated_condition(directory)[0]
+
+        def __len__(self):
+            return len(worker_dirs)
+
+        def __getitem__(self, index):
+            return _load_isolated_condition(worker_dirs[index])[0]
+
+    evaluations = DiskEvaluations()
+    tensor_shards = {}
     manifests: list[dict[str, Any]] = []
     runtimes: dict[str, Any] = {}
     reference_archive: dict[str, Any] | None = None
     for worker_dir in worker_dirs:
         evaluation, archive, manifest, runtime = _load_isolated_condition(worker_dir)
         if reference_archive is None:
-            reference_archive = archive
+            reference_archive = {key: archive[key] for key in (
+                "labels", "float_logits", "ideal_logits", "ideal_hidden_uint5")}
         else:
             for key in ("labels", "float_logits", "ideal_logits", "ideal_hidden_uint5"):
                 if not torch.equal(reference_archive[key], archive[key]):
                     raise ValueError(f"isolated workers disagree on {key}")
-        evaluations.append(evaluation)
+        tensor_shards[evaluation.key] = str((worker_dir / "intermediates.pt").relative_to(args.output_dir))
         manifests.append(manifest)
         runtimes[evaluation.key] = runtime
+        del evaluation, archive
     if reference_archive is None:
         raise ValueError("no isolated condition workers were produced")
     margin_payload = _load_deadline_margin_payload(args)
@@ -2026,6 +2049,7 @@ def _aggregate_isolated_conditions(
         },
         bootstrap_iterations=args.bootstrap_iterations,
         seed=args.seed,
+        tensor_shards=tensor_shards,
     )
     float_accuracy = next(row["accuracy"] for row in metrics if row["condition"] == "float-ann")
     ideal_accuracy = next(
@@ -2036,6 +2060,46 @@ def _aggregate_isolated_conditions(
         f"float_accuracy={float_accuracy:.4f}, ideal_accuracy={ideal_accuracy:.4f}",
         flush=True,
     )
+    if getattr(args, "threshold_selection_json", None) is not None:
+        _write_estimator_controls(args, worker_dirs)
+
+
+def _write_estimator_controls(args: argparse.Namespace, worker_dirs: list[Path]) -> None:
+    """Compare decoders on identical events using only the frozen torch readout."""
+    from utils.hardware.brainscales2.toy_artifacts import _paired_accuracy_ci
+    from utils.hardware.brainscales2.toy_pooling import decode_pool_observations
+    converted = deserialize_converted_model(torch.load(args.converted_checkpoint, weights_only=False, map_location="cpu"))
+    rows, correctness = [], {}
+    for directory in worker_dirs:
+        evaluation, archive, manifest, _ = _load_isolated_condition(directory)
+        timing = _load_timing_calibration(directory / "pool_calibration" / "timing_calibration.pt")
+        values = dict(manifest["spiking_config"])
+        values["calibration_path"] = Path(values["calibration_path"])
+        spiking = BrainScaleS2PoolConfig(**values)
+        result = evaluation.pool_result
+        for estimator in ("mean", "raw-max", "analytic-corrected-max"):
+            pool = ToyPoolConfig(logical_neurons=30, pool_size=result.pool_size,
+                                 placement=result.placement, estimator=estimator)
+            decoded = decode_pool_observations(result.first_spike_s, result.nominal_input_s,
+                        timing, result.physical_coordinates, pool, spiking, spike_count=result.spike_count)
+            _, logits = converted.output_from_hidden(decoded.decoded_uint5)
+            correct = logits.argmax(-1) == archive["labels"]
+            group = (result.placement, evaluation.deadline_margin_s, estimator)
+            correctness[(*group, result.pool_size)] = correct
+            error = decoded.decoded_uint5.double() - evaluation.nominal_hidden_uint5.double()
+            rows.append({"condition": evaluation.key, "placement": result.placement,
+                         "pool_size": result.pool_size, "deadline_margin_s": evaluation.deadline_margin_s,
+                         "estimator": estimator, "readout": "torch", "accuracy": float(correct.float().mean()),
+                         "activation_mae_uint5": float(error.abs().mean()),
+                         "activation_bias_uint5": float(error.mean()),
+                         "recovery_vs_m1": None, "recovery_ci_low": None, "recovery_ci_high": None})
+    for row in rows:
+        group = (row["placement"], row["deadline_margin_s"], row["estimator"])
+        current, baseline = correctness[(*group, row["pool_size"])], correctness[(*group, 1)]
+        row["recovery_vs_m1"] = float(current.float().mean() - baseline.float().mean())
+        row["recovery_ci_low"], row["recovery_ci_high"] = _paired_accuracy_ci(
+            current, baseline, seed=args.seed, iterations=args.bootstrap_iterations)
+    _write_csv(args.output_dir / "estimator_controls.csv", rows)
 
 
 def _write_deadline_margin_figure(output_dir: Path, rows: list[dict[str, Any]]) -> None:
@@ -2277,6 +2341,14 @@ def probe_phase(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = _apply_condition_worker_config(parse_args())
+    if args.phase == "calibrate-threshold":
+        if args.task != "yinyang" or args.architecture != "yy-30":
+            raise ValueError("threshold calibration currently validates Yin-Yang yy-30 only")
+        from scripts.evaluation.brainscales2_thresholds import run_threshold_experiment
+        run_threshold_experiment(args.output_dir.resolve())
+        return
+    from utils.hardware.brainscales2.thresholds import apply_selection_to_args
+    apply_selection_to_args(args)
     _validate_architecture(args)
     if args.pool_chunk_worker_config is not None:
         pool_chunk_worker_phase(args)
