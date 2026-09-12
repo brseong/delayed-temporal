@@ -44,10 +44,11 @@ def make_inputs(pool, spiking, *, seed, trials, mode):
     nominal[2:-2] = times
     if mode == "isolated":
         # One source group at a time, keeping the physical graph identical.
-        nominal = torch.full((32 * trials * pool.logical_neurons + 4, pool.logical_neurons), torch.nan, dtype=torch.float64)
+        times = times.reshape(trials, 32, pool.logical_neurons)[:, [0, 15, 31]].reshape(-1, pool.logical_neurons)
+        nominal = torch.full((3 * trials * pool.logical_neurons + 4, pool.logical_neurons), torch.nan, dtype=torch.float64)
         for logical in range(pool.logical_neurons):
-            start = 2 + logical * 32 * trials
-            nominal[start : start + 32 * trials, logical] = times[:, logical]
+            start = 2 + logical * 3 * trials
+            nominal[start : start + 3 * trials, logical] = times[:, logical]
     inputs = torch.zeros((spiking.runtime_steps, nominal.shape[0], pool.logical_neurons * spiking.input_fan_in))
     for row, logical in torch.isfinite(nominal).nonzero().tolist():
         step = round(float(nominal[row, logical]) / spiking.dt_s)
@@ -114,7 +115,7 @@ def main():
     parser.add_argument("--logical-neurons", type=int, default=30)
     parser.add_argument("--pool-sizes", type=int, nargs="+", default=[1])
     parser.add_argument("--placements", nargs="+", choices=["local-pool", "cross-quadrant"], default=["local-pool", "cross-quadrant"])
-    parser.add_argument("--input-fan-in", type=int, default=6)
+    parser.add_argument("--input-fan-in", type=int, default=4)
     parser.add_argument("--weights", type=int, nargs="+", default=[32, 36, 40, 44, 48, 52, 56, 60, 63])
     parser.add_argument("--trials", type=int, default=2)
     parser.add_argument("--validation-trials", type=int, default=4)

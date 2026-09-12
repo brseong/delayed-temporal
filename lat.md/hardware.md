@@ -134,6 +134,8 @@ The selected margin extends only the observation deadline: the TTFS input window
 
 Digital synaptic weights can be calibrated for each physical neuron before timing calibration using [[scripts/evaluation/brainscales2_neuron_weights.py#main]]. The sweep uses the actual grouped graph and all 32 input codes without task labels. Separate validation trials test both varied and simultaneous input times, including quiet controls. Each candidate measurement runs in a disposable process with a timeout.
 
+The default uses four input lanes per logical source. On the tested 30-neuron graph, six lanes could not be routed. Sequential diagnostic inputs exercise three code values per source to compare delivery with simultaneous traffic without changing the graph.
+
 [[utils/hardware/brainscales2/neuron_weights.py#load_neuron_weights]] binds the selected weights to the chip, analog calibration checksum, input timing, fan-in, pool size, and exact physical coordinates. Failed validation prevents inference. The optional `--neuron-weight-calibration` file is checksummed in worker configurations and deadline calibration context. It changes the input synapses driving the LIF replicas; trained ANN weights remain fixed.
 
 After temporal decoding, the physical Hagen readout also slices the flattened trial-sample row axis before each PWM call. When any all-miss position exists, original and oracle-repaired rows are concatenated and tagged as separate segments; the logits retain row order, and every chunk records calibration, chip, shape, and elapsed time.
