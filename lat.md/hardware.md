@@ -164,6 +164,12 @@ Full aggregation reads one condition at a time and streams prediction rows. Its 
 
 The selected-threshold run also writes `estimator_controls.csv`: mean, raw-max and analytic-corrected-max decode identical physical events and use the frozen torch readout. These are explicitly readout controls, not additional physical Hagen measurements. The primary accuracy remains the physical Hagen result. Threshold workers record elapsed time and their maximum resident memory.
 
+### Gain diagnostic
+
+A diagnostic on sixteen neurons compares gain 500 with a fully recalibrated gain 700 using identical coordinates, input counts and threshold targets, without changing network acceptance.
+
+[[scripts/evaluation/brainscales2_gain_diagnostic.py#run_diagnostic]] records paired quiet and stimulated CADC traces at 15 microseconds and raw delivery for all 32 input codes. It compares fan-in one and four at thresholds 125 and 100. Traces containing spikes are flagged because reset changes measured PSP amplitude. Every condition also runs with CADC recording disabled. Full calibration is mandatory when gain changes; potential refinement rejects a different gain. Separate workers and retained raw artifacts respect the 2 GB session limit. This diagnostic does not select a network operating point or start full inference.
+
 ### Local mock and replay evidence
 
 Synthetic and artifact-replay backends validate accuracy propagation before hardware use but are not promoted to new physical evidence.
@@ -193,6 +199,10 @@ These test specifications protect the conversion and network-level hardware boun
 ### Neuron synaptic weight calibration
 
 Digital weight calibration must preserve grouped connectivity, reject invalid digital values, use separate validation observations, and reject a failed or mismatched physical calibration.
+
+### Gain diagnostic checks
+
+Tests verify simultaneous input counts, silent control windows, fixed quadrant coverage, rejection of gain changes during potential refinement, and raw event summaries for misses and repeated spikes.
 
 ### Physical threshold selection
 

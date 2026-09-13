@@ -44,9 +44,12 @@ def calibrate_worker(request, output):
     from dlens_vx_v3 import hxcomm, sta, halco
     import quantities as pq
 
+    gain = float(request.get("i_synin_gm", 500))
+    if not 0 < gain <= 1022:
+        raise ValueError("invalid calibration gain")
     target = NeuronCalibTarget(leak=80, reset=80, threshold=request["threshold"],
                               tau_mem=20 * pq.us, tau_syn=1 * pq.us,
-                              i_synin_gm=500, membrane_capacitance=63,
+                              i_synin_gm=gain, membrane_capacitance=63,
                               refractory_time=1 * pq.us, synapse_dac_bias=600)
     print(f"Calix physical threshold target {request['threshold']}", flush=True)
     with hxcomm.ManagedConnection() as connection:
@@ -64,6 +67,7 @@ def calibrate_worker(request, output):
                 raise ValueError("base calibration checksum changed")
             with parent.open("rb") as handle:
                 result = pickle.load(handle)
+            validate_refinement_gain(result.target.neuron_target.i_synin_gm, gain)
             builder = base.WriteRecordingPlaybackProgramBuilder()
             result.apply(builder)
             base.run(state, builder)
@@ -85,6 +89,7 @@ def calibrate_worker(request, output):
                              "leak": int(neuron.leak.v_leak), "reset": int(neuron.reset.v_reset)})
         write_json(output.with_suffix(".json"), {
             "chip_identifier": chip, "threshold": request["threshold"],
+            "i_synin_gm": gain,
             "calibration_sha256": calibration_sha256(output.with_suffix(".pbin")),
             "native_sha256": calibration_sha256(output.with_suffix(".pkl")),
             "targets": str(result.target), "physical_parameters": physical,
@@ -92,6 +97,11 @@ def calibrate_worker(request, output):
             "refinement_requires_delivery_validation": True,
         })
         del state
+
+
+def validate_refinement_gain(previous_gain, requested_gain):
+    if not bool((torch.as_tensor(previous_gain) == requested_gain).all()):
+        raise ValueError("gain change requires full calibration, not potential refinement")
 
 
 def code_schedule(logical, trials, mode, seed, quiet_windows):
@@ -348,6 +358,9 @@ def main():
         output = args.worker.with_name(args.worker.name.removesuffix(".request.json"))
         if request["action"] == "calibrate":
             calibrate_worker(request, output)
+        elif request["action"] == "cadc":
+            from scripts.evaluation.brainscales2_gain_diagnostic import cadc_worker
+            cadc_worker(request, output)
         else:
             measure_worker(request, output)
     elif args.output_dir is not None:

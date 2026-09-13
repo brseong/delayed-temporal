@@ -24,6 +24,16 @@ from .config import (
 from .encoding import encode_potential_for_brainscales2
 
 
+def _cadc_inputs(config: BrainScaleS2PoolConfig) -> torch.Tensor:
+    """Alternate quiet windows with simultaneous input channels."""
+    step = int(round(config.input_early_s / config.dt_s))
+    if not 1 <= step < config.runtime_steps - 1:
+        raise ValueError("diagnostic stimulus must leave pre/post CADC samples")
+    inputs = torch.zeros((config.runtime_steps, 2 * config.trials, config.input_fan_in))
+    inputs[step, 1::2, :] = 1
+    return inputs
+
+
 class PoolBackend(Protocol):
     """Common execution contract shared by the physical and mock backends."""
 
@@ -449,6 +459,7 @@ class BrainScaleS2PoolBackend:
         *,
         pool_size: int = 4,
         placement: PlacementMode = "same-quadrant",
+        capture_raw: bool = False,
     ) -> CADCDiagnosticResult:
         """Record paired baseline and one-input PSP traces on fixed neurons."""
         config.require_reproducible_calibration()
@@ -482,7 +493,7 @@ class BrainScaleS2PoolBackend:
                 )
 
             synapse = hxsnn.Synapse(
-                in_features=1,
+                in_features=config.input_fan_in,
                 out_features=pool_size,
                 experiment=experiment,
             )
@@ -507,14 +518,23 @@ class BrainScaleS2PoolBackend:
 
             # Each trial is a paired no-input/stimulated batch entry.
             batch_count = 2 * config.trials
-            inputs = torch.zeros(
-                (config.runtime_steps, batch_count, 1),
-                dtype=torch.float32,
-            )
-            inputs[stimulus_step, 1::2, 0] = 1.0
+            inputs = _cadc_inputs(config)
             synapse_output = synapse(hxsnn.LIFObservables(spikes=inputs))
             observables = lif(synapse_output)
-            hxsnn.run(experiment, config.runtime_steps)
+            run_output = hxsnn.run(experiment, config.runtime_steps)
+            raw_metadata = {}
+            if capture_raw:
+                raw, raw_api = _find_raw_spikes(
+                    _legacy_experiment_observables(experiment, lif),
+                    lif, observables, run_output, experiment,
+                )
+                first, _, count = _raw_events_to_tensors(
+                    raw, batch_count=batch_count, pool_size=pool_size,
+                    raw_time_scale_s=config.raw_time_scale_s,
+                    deadline_s=config.observation_deadline_s,
+                )
+                raw_metadata = {"raw_api": raw_api, "first_spike_s": first.tolist(),
+                                "spike_count": count.tolist()}
 
             cadc = getattr(observables, "membrane_cadc", None)
             spikes = getattr(observables, "spikes", None)
@@ -564,6 +584,8 @@ class BrainScaleS2PoolBackend:
                     "chip_identifier": chip_identifier,
                     "calibration_sha256": calibration_sha256(config.calibration_path),
                     "calibration_loader": calibration_loader,
+                    "input_fan_in": config.input_fan_in,
+                    **raw_metadata,
                 },
             )
         finally:
