@@ -247,6 +247,8 @@ When adjacent results have the same classification, the next proposed scale move
 
 조건 전환 시 점유 검사에 걸리면 해당 장치에서 대기 후 재검사하며 전체 실험을 실패 처리하지 않는다. 검증은 연속 조건 실행과 일시적인 사용률 상승 후 재개, 완료 결과 재사용을 포함한다.
 
+이전 승인된 메모리 1GiB 이하·사용률 5% 이하 기준은 현재 [[evaluation#Calibrated Three Sweep Distribution]]에도 유지한다. 프로세스 존재만으로 사용을 막는 규칙으로 되돌리지 않는다. 각 캠페인 작업의 단일 GPU 배정과 중복 실행 방지는 별도로 유지한다.
+
 ## Calibrated Threshold and Noise Sweeps
 
 The current campaign repeats threshold selection with calibration and output bounds policy 3 before evaluating separate timing noise and deadline margin sweeps; previous threshold-40 results remain historical evidence.

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -26,6 +27,7 @@ from scripts.experiments.calibrated_three_sweeps import (
 )
 
 LOCAL_GPUS = (4, 5, 6, 7)
+GPU_ADMISSION_POLICY = {'max_memory_used_mib': 1024.0, 'max_utilization_gpu_percent': 5.0}
 ASSETS = Path('/data/delayed-temporal/artifacts/assets/theta-selection-v1')
 REMOTE_BASE = '/home1/sizz1997/myubai'
 MAIN_TASKS = 80
@@ -151,6 +153,60 @@ def gpu_occupancy() -> dict[int, set[int]]:
     return parse_gpu_occupancy(query('index,uuid', 'gpu'), query('gpu_uuid,pid', 'compute-apps'))
 
 
+def parse_gpu_activity(devices: str, applications: str) -> dict[int, dict[str, Any]]:
+    identities, activity = [], {}
+    seen_uuids = set()
+    for line in devices.strip().splitlines():
+        index_text, uuid, memory_text, utilization_text = [part.strip() for part in line.split(',')]
+        index, memory, utilization = int(index_text), float(memory_text), float(utilization_text)
+        if index in activity or uuid in seen_uuids or not uuid:
+            raise ValueError('Duplicate or missing GPU identity')
+        if not math.isfinite(memory) or memory < 0 or not math.isfinite(utilization) or not 0 <= utilization <= 100:
+            raise ValueError('GPU memory and utilization must be finite and valid')
+        activity[index] = {'gpu_uuid': uuid, 'memory_used_mib': memory,
+                           'utilization_gpu_percent': utilization}
+        identities.append(f'{index},{uuid}')
+        seen_uuids.add(uuid)
+    pids = parse_gpu_occupancy('\n'.join(identities), applications)
+    return {index: {**activity[index], 'pids': sorted(pids[index])} for index in LOCAL_GPUS}
+
+
+def gpu_activity() -> dict[int, dict[str, Any]]:
+    def query(fields: str, kind: str) -> str:
+        return subprocess.check_output(['nvidia-smi', f'--query-{kind}={fields}',
+                                        '--format=csv,noheader,nounits'], text=True, timeout=15)
+    return parse_gpu_activity(query('index,uuid,memory.used,utilization.gpu', 'gpu'),
+                              query('gpu_uuid,pid', 'compute-apps'))
+
+
+def gpu_available(sample: dict[str, Any]) -> bool:
+    try:
+        memory, utilization = float(sample['memory_used_mib']), float(sample['utilization_gpu_percent'])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (math.isfinite(memory) and math.isfinite(utilization)
+            and 0 <= memory <= GPU_ADMISSION_POLICY['max_memory_used_mib']
+            and 0 <= utilization <= GPU_ADMISSION_POLICY['max_utilization_gpu_percent'])
+
+
+def controller_identity(experiment: dict[str, Any]) -> dict[str, Any]:
+    head = subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip()
+    dirty = subprocess.check_output(['git', '-C', str(REPO), 'status', '--porcelain', '--untracked-files=no'], text=True).strip()
+    if dirty:
+        raise ValueError('The controller must run from a clean tracked checkout')
+    # Only scheduling may differ from the frozen experiment implementation.
+    for relative in ('scripts/experiments/calibrated_three_sweeps.py',
+                     'scripts/experiments/run_calibrated_three_sweep_task.py',
+                     'scripts/analysis/summarize_calibrated_three_sweeps.py',
+                     'scripts/experiments/ubai/prepare_calibrated_three_sweeps_ubai.py'):
+        if sha256_file(REPO / relative) != experiment['runtime_sha256'][relative]:
+            raise ValueError(f'Controller import differs from the frozen experiment: {relative}')
+    return {'source_commit': head, 'source_root': str(REPO),
+            'controller_sha256': sha256_file(Path(__file__)),
+            'evaluator_source_commit': experiment['source_commit'],
+            'gpu_admission_policy': GPU_ADMISSION_POLICY}
+
+
 def default_host(task: dict, ordinal: int) -> str:
     if task.get('host_label'):
         return task['host_label']
@@ -222,6 +278,10 @@ class Controller:
         self.gpu_locks: dict[str, Any] = {}
         self.prep_verified = False
         self.root.joinpath('worker_logs').mkdir(parents=True, exist_ok=True)
+        identity = controller_identity(self.experiment)
+        write_immutable_json(self.root / 'controllers' / (identity['source_commit'] + '.json'), identity)
+        self.state['controller_identity'] = identity
+        self.event('controller_started', **identity)
 
     def save(self) -> None:
         self.state['updated_at_utc'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
@@ -293,6 +353,9 @@ class Controller:
     def start_local(self, task: dict, gpu: int) -> bool:
         if gpu not in LOCAL_GPUS:
             raise ValueError('Local GPU is not allowed')
+        if any(row.get('host') == 'local' and row.get('gpu') == gpu
+               and row['status'] in {'starting', 'running'} for row in self.state['tasks'].values()):
+            return False
         shared_locks = Path('/data/delayed-temporal/artifacts/runtime/gpu-locks')
         shared_locks.mkdir(parents=True, exist_ok=True)
         lock = (shared_locks / f'gpu-{gpu}.lock').open('a')
@@ -301,11 +364,18 @@ class Controller:
         except BlockingIOError:
             lock.close()
             return False
-        if gpu_occupancy()[gpu]:
+        try:
+            admission = gpu_activity()[gpu]
+        except (subprocess.SubprocessError, OSError, ValueError) as exc:
+            self.state['local_wait_reason'] = str(exc)
+            lock.close()
+            return False
+        if not gpu_available(admission):
             lock.close()
             return False
         row = self.state['tasks'][task['run_id']]
-        row.update(status='starting', host='local', gpu=gpu, attempt=row['attempt'] + 1)
+        row.update(status='starting', host='local', gpu=gpu, attempt=row['attempt'] + 1,
+                   gpu_admission=admission)
         self.save()
         environment = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu), OMP_NUM_THREADS='4',
                            MKL_NUM_THREADS='4', OPENBLAS_NUM_THREADS='4', WANDB_MODE='disabled',
@@ -325,7 +395,8 @@ class Controller:
         self.gpu_locks[task['run_id']] = lock
         row.update(status='running', pid=process.pid, started_at=time.time(), cpu_ids=assigned_cpus)
         self.save()
-        self.event('task_started', run_id=task['run_id'], host='local', gpu=gpu, attempt=row['attempt'])
+        self.event('task_started', run_id=task['run_id'], host='local', gpu=gpu,
+                   attempt=row['attempt'], gpu_admission=admission)
         return True
 
     def start_remote(self, task: dict, queue: list[dict]) -> None:
@@ -458,6 +529,7 @@ class Controller:
             'phase': phase, 'experiment_sha256': task_sha256(self.experiment),
             'tasks': [{'run_id': task['run_id'], 'task_sha256': task_sha256(task)} for task in tasks]})
         self.state['phase'] = phase
+        self.state.pop('reason', None)
         self.save()
         done = {}
         last_summary_count = -1
@@ -467,6 +539,7 @@ class Controller:
                 queue = parse_queue(self.remote(['squeue', '-h', '-r', '-u', 'sizz1997', '-o', '%i|%T|%j|%b']))
                 if self.check_preparation():
                     remote_slots = quota_available(queue, self.prefix)
+                    self.state.pop('remote_wait_reason', None)
             except (subprocess.SubprocessError, OSError) as exc:
                 self.state['remote_wait_reason'] = str(exc)
             for task in tasks:
@@ -482,10 +555,17 @@ class Controller:
             if len(done) != last_summary_count:
                 self.report()
                 last_summary_count = len(done)
-            occupied = gpu_occupancy()
+            try:
+                activity = gpu_activity()
+                self.state['local_gpu_activity'] = activity
+                self.state.pop('local_wait_reason', None)
+            except (subprocess.SubprocessError, OSError, ValueError) as exc:
+                # Missing telemetry prevents new local work, not existing cluster work.
+                activity = {}
+                self.state['local_wait_reason'] = str(exc)
             reserved = {r['gpu'] for r in self.state['tasks'].values()
                         if r['status'] in {'starting', 'running'} and r.get('host') == 'local'}
-            local_free = [g for g in LOCAL_GPUS if not occupied[g] and g not in reserved]
+            local_free = [g for g in LOCAL_GPUS if g in activity and gpu_available(activity[g]) and g not in reserved]
             pending = [task for task in tasks if self.state['tasks'][task['run_id']]['status'] == 'pending']
             # Start each host's planned share first; only unsubmitted tasks can move.
             for allow_move in (False, True):

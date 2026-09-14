@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import sys
 import tempfile
 from unittest.mock import patch
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from scripts.experiments.calibrated_three_sweeps import make_task, make_tasks, task_sha256
 from scripts.experiments.run_calibrated_three_sweeps import (
-    Controller, LOCAL_GPUS, NeedsAttention, assert_seed_barrier, default_host,
-    parse_gpu_occupancy, parse_queue, quota_available, seed_range_reason,
+    Controller, LOCAL_GPUS, NeedsAttention, assert_seed_barrier, controller_identity, default_host,
+    gpu_available, parse_gpu_activity, parse_gpu_occupancy, parse_queue, quota_available, seed_range_reason,
 )
 from scripts.verification.verify_calibrated_three_sweep_contract import experiment_fixture, result_fixture
 
@@ -54,7 +56,7 @@ def verify_default_distribution_and_order(experiment: dict) -> None:
 
 def verify_occupancy_and_quota(experiment: dict) -> None:
     devices = "\n".join(f"{i}, GPU-{i}" for i in range(8))
-    # NVIDIA host PIDs remain occupied even when /proc in this container lacks them.
+    # Host PIDs remain in diagnostics even when /proc in this container lacks them.
     with patch.object(Path, "exists", return_value=False):
         occupied = parse_gpu_occupancy(devices, "GPU-0, 999999990\nGPU-4, 999999991\nGPU-7, 999999992")
     assert set(occupied) == {4, 5, 6, 7}
@@ -84,6 +86,73 @@ def verify_occupancy_and_quota(experiment: dict) -> None:
         assert len(queue) + capacity <= 20
         assert sum(row["state"] not in {"PENDING", "CONFIGURING"} for row in queue) + capacity <= 10
         assert sum(row["gpus"] for row in queue) + capacity <= 12
+
+
+def activity_fixture(memory: float = 262, utilization: float = 0) -> dict:
+    return {gpu: {"gpu_uuid": f"GPU-{gpu}", "memory_used_mib": memory,
+                  "utilization_gpu_percent": utilization, "pids": [999999900 + gpu]}
+            for gpu in LOCAL_GPUS}
+
+
+def verify_activity_admission() -> None:
+    devices = "\n".join(f"{i},GPU-{i},262,0" for i in range(8))
+    applications = "GPU-0,999999990\nGPU-4,999999994\nGPU-4,999999995\nGPU-7,999999997"
+    samples = parse_gpu_activity(devices, applications)
+    assert set(samples) == {4, 5, 6, 7}
+    assert samples[4]["pids"] == [999999994, 999999995]
+    assert samples[4]["memory_used_mib"] == 262
+    assert samples[4]["utilization_gpu_percent"] == 0
+    assert gpu_available(samples[4])  # PID presence alone no longer blocks admission.
+    sample = activity_fixture()[4]
+    assert gpu_available({**sample, "memory_used_mib": 1024, "utilization_gpu_percent": 5})
+    assert gpu_available({**sample, "memory_used_mib": 0, "utilization_gpu_percent": 0})
+    assert not gpu_available({**sample, "memory_used_mib": 1025})
+    assert not gpu_available({**sample, "utilization_gpu_percent": 6})
+    assert not gpu_available({**sample, "memory_used_mib": 1024.01})
+    assert not gpu_available({**sample, "utilization_gpu_percent": 5.01})
+    for key in ("memory_used_mib", "utilization_gpu_percent"):
+        for value in (float("nan"), float("inf"), -1):
+            assert not gpu_available({**sample, key: value})
+    assert not gpu_available({**sample, "utilization_gpu_percent": 101})
+    assert not gpu_available({})
+    assert not gpu_available({"memory_used_mib": 262})
+    for bad_devices in ("\n".join(devices.splitlines()[:7]),
+                        devices + "\n4,GPU-4,262,0",
+                        devices + "\n8,GPU-4,262,0",
+                        devices.replace("4,GPU-4,262,0", "4,GPU-4,N/A,0"),
+                        devices.replace("4,GPU-4,262,0", "4,GPU-4,262,N/A"),
+                        devices.replace("4,GPU-4,262,0", "4,GPU-4,nan,0")):
+        must_reject(lambda bad_devices=bad_devices: parse_gpu_activity(bad_devices, applications))
+    must_reject(lambda: parse_gpu_activity(devices, "GPU-9,1"))
+    must_reject(lambda: parse_gpu_activity(devices, "GPU-4,N/A"))
+
+
+def verify_separate_controller_identity(experiment: dict) -> None:
+    helpers = (
+        "scripts/experiments/calibrated_three_sweeps.py",
+        "scripts/experiments/run_calibrated_three_sweep_task.py",
+        "scripts/analysis/summarize_calibrated_three_sweeps.py",
+        "scripts/experiments/ubai/prepare_calibrated_three_sweeps_ubai.py",
+    )
+    identity_experiment = {**experiment, "runtime_sha256": {path: "c" * 64 for path in helpers}}
+
+    def content_hash(path):
+        return "d" * 64 if path.name == "run_calibrated_three_sweeps.py" else "c" * 64
+
+    with patch("subprocess.check_output", side_effect=["b" * 40 + "\n", ""]), patch(
+            "scripts.experiments.run_calibrated_three_sweeps.sha256_file", side_effect=content_hash):
+        identity = controller_identity(identity_experiment)
+    assert identity["source_commit"] == "b" * 40
+    assert identity["evaluator_source_commit"] == experiment["source_commit"]
+    assert identity["controller_sha256"] == "d" * 64
+    assert identity["gpu_admission_policy"] == {"max_memory_used_mib": 1024, "max_utilization_gpu_percent": 5}
+    with patch("subprocess.check_output", side_effect=["b" * 40 + "\n", " M file.py\n"]):
+        must_reject(lambda: controller_identity(identity_experiment))
+    for helper in helpers:
+        changed = {**identity_experiment, "runtime_sha256": {**identity_experiment["runtime_sha256"], helper: "e" * 64}}
+        with patch("subprocess.check_output", side_effect=["b" * 40 + "\n", ""]), patch(
+                "scripts.experiments.run_calibrated_three_sweeps.sha256_file", side_effect=content_hash):
+            must_reject(lambda: controller_identity(changed))
 
 
 def verify_range_checks(experiment: dict) -> None:
@@ -176,9 +245,9 @@ class FakeController(Controller):
 
 
 def verify_resume_retries_and_reassignment(experiment: dict, root: Path) -> None:
-    free = {gpu: set() for gpu in LOCAL_GPUS}
+    free = activity_fixture()
     tasks = noise_tasks(experiment)
-    with patch("scripts.experiments.run_calibrated_three_sweeps.gpu_occupancy", return_value=free), patch("time.sleep"):
+    with patch("scripts.experiments.run_calibrated_three_sweeps.gpu_activity", return_value=free), patch("time.sleep"):
         controller = FakeController(root / "resume", experiment)
         controller.outputs[tasks[0]["run_id"]] = result_fixture(experiment, tasks[0])
         results = controller.run_tasks("noise-seed-0", tasks)
@@ -208,11 +277,69 @@ def verify_resume_retries_and_reassignment(experiment: dict, root: Path) -> None
         remote_full.outputs[tasks[0]["run_id"]] = result_fixture(experiment, tasks[0])
         remote_full.run_tasks("move-local", tasks[:2])
         assert remote_full.starts == [(tasks[1]["run_id"], "local", 4)]
-    busy = {gpu: {999999900 + gpu} for gpu in LOCAL_GPUS}
-    with patch("scripts.experiments.run_calibrated_three_sweeps.gpu_occupancy", return_value=busy), patch("time.sleep"):
+    busy = activity_fixture(memory=1025)
+    with patch("scripts.experiments.run_calibrated_three_sweeps.gpu_activity", return_value=busy), patch("time.sleep"):
         local_full = FakeController(root / "local-full", experiment)
         local_full.run_tasks("move-remote", tasks[:1])
         assert local_full.starts == [(tasks[0]["run_id"], "ubai", None)]
+    with patch("scripts.experiments.run_calibrated_three_sweeps.gpu_activity", side_effect=ValueError("Invalid GPU measurements")), patch("time.sleep"):
+        unavailable = FakeController(root / "no-measurements", experiment)
+        unavailable.run_tasks("move-after-invalid-measurements", tasks[:1])
+        assert unavailable.starts == [(tasks[0]["run_id"], "ubai", None)]
+        assert "Invalid GPU measurements" in unavailable.state["local_wait_reason"]
+
+
+def verify_owned_worker_reservation(experiment: dict, root: Path) -> None:
+    tasks = noise_tasks(experiment)
+    controller = FakeController(root / "reserved", experiment)
+    controller.state["tasks"]["existing-worker"] = {
+        "status": "running", "host": "local", "gpu": 4, "attempt": 1}
+    with patch("scripts.experiments.run_calibrated_three_sweeps.gpu_activity", return_value=activity_fixture()), patch("time.sleep"):
+        controller.run_tasks("reserved-device", tasks[:1], force_hosts={tasks[0]["run_id"]: "local"})
+    assert controller.starts == [(tasks[0]["run_id"], "local", 5)]
+
+
+def verify_locked_launch_recheck(experiment: dict, root: Path) -> None:
+    controller = FakeController(root / "locked-launch", experiment)
+    controller.root.joinpath("worker_logs").mkdir()
+    task = noise_tasks(experiment)[0]
+    controller.prepare_task(task, 0)
+    lock_root = Path("/data/delayed-temporal/artifacts/runtime/gpu-locks")
+    original_open, original_mkdir = Path.open, Path.mkdir
+
+    def local_open(path, *args, **kwargs):
+        if path.parent == lock_root:
+            return tempfile.TemporaryFile(dir=controller.root)
+        return original_open(path, *args, **kwargs)
+
+    def local_mkdir(path, *args, **kwargs):
+        if path == lock_root:
+            return None
+        return original_mkdir(path, *args, **kwargs)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(Path, "open", local_open))
+        stack.enter_context(patch.object(Path, "mkdir", local_mkdir))
+        activity = stack.enter_context(patch("scripts.experiments.run_calibrated_three_sweeps.gpu_activity", return_value=activity_fixture()))
+        spawn = stack.enter_context(patch("subprocess.Popen", return_value=SimpleNamespace(pid=123456789)))
+        stack.enter_context(patch("os.sched_getaffinity", return_value=set(range(16))))
+        stack.enter_context(patch("os.sched_setaffinity"))
+        with patch("fcntl.flock", side_effect=BlockingIOError):
+            assert not Controller.start_local(controller, task, 4)
+        spawn.assert_not_called()
+        activity.assert_not_called()  # A held lock blocks even an otherwise eligible device.
+        activity.return_value = activity_fixture(memory=1025)
+        assert not Controller.start_local(controller, task, 4)
+        spawn.assert_not_called()
+        activity.return_value = activity_fixture(memory=1024, utilization=5)
+        assert Controller.start_local(controller, task, 4)
+        assert spawn.call_count == 1
+        assert spawn.call_args.kwargs["env"]["CUDA_VISIBLE_DEVICES"] == "4"
+        assert controller.state["tasks"][task["run_id"]]["status"] == "running"
+        assert not Controller.start_local(controller, task, 4)
+        assert spawn.call_count == 1  # Own running assignment prevents another worker.
+        for handle in controller.gpu_locks.values():
+            handle.close()
 
 
 class FakeCampaign(FakeController):
@@ -270,13 +397,17 @@ def main() -> None:
     experiment = experiment_fixture()
     verify_default_distribution_and_order(experiment)
     verify_occupancy_and_quota(experiment)
+    verify_activity_admission()
+    verify_separate_controller_identity(experiment)
     verify_range_checks(experiment)
     runtime = ROOT / "artifacts/runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="verify-three-sweep-runner-", dir=runtime) as temporary:
         verify_resume_retries_and_reassignment(experiment, Path(temporary))
+        verify_owned_worker_reservation(experiment, Path(temporary))
+        verify_locked_launch_recheck(experiment, Path(temporary))
         verify_campaign_seed_order(experiment, Path(temporary))
-    print("Calibrated three-sweep scheduling checks passed (5 groups).")
+    print("Calibrated three-sweep scheduling checks passed (9 groups).")
 
 
 if __name__ == "__main__":
