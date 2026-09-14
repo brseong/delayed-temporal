@@ -110,23 +110,25 @@ Signed identity-code PWM은 $l_x\le0\le u_x$를 요구한다. $t(x)=u_x-x$, $t(0
 
 LayerNorm은 internal positive range와 final affine output range를 분리해야 한다.
 
-`clip_margin=m`, upper threshold가 $\theta$이면 dual-rail input range와 variance encoding range는 현재 composition에서
+현재 `output_bounds_version=3`에서 실제 양/음 magnitude는 `[0, theta]`다. 양의 log 입력 하한을 $m=\texttt{clip\_margin}$, 상한을 $\theta$라 두면 log 입력과 분산 인코딩 범위는
 
 $$
-x_k^{+},x_k^{-}\in[m,\theta-m],
+x_k^{+},x_k^{-}\in[m,\theta],
 \qquad
-V_{\sigma^2}\in[m^2,(\theta-m)^2],
+V_{\sigma^2}\in[m^2,\theta^2],
 $$
 
 이며 두 negative-log encoding은 같은 time window를 갖는다.
 
 $$
 T_0
-=\tau_s\log\frac{\theta-m}{m}
-=\frac{\tau_s}{2}\log\frac{(\theta-m)^2}{m^2}.
+=\tau_s\log\frac{\theta}{m}
+=\frac{\tau_s}{2}\log\frac{\theta^2}{m^2}.
 $$
 
-Variance에 $\epsilon$을 더한 raw value가 upper bound를 넘으면 range를 넓히지 말고 clipping으로 기록해야 한다. 이는 finite-window LayerNorm approximation의 일부다.
+Variance에 $\epsilon$을 더한 raw value가 upper bound를 넘으면 range를 넓히지 말고 clipping으로 기록해야 한다. 0인 magnitude는 분산에서도 0이며, 하한 미만의 양의 magnitude는 그대로 분산에 포함한다. Log 계산에만 양의 하한을 적용하고 하한 미만 입력의 기여는 최종 signed 출력에서 제거한다. 이는 finite-window LayerNorm approximation의 일부다.
+
+이 정의는 [[calibration#Layer-wise Calibration#Frozen Execution#LayerNorm Positive Input Range]]의 코드 변경 이후에 적용한다. 이전 고정 source 648af9bb 및 version 2까지의 실험은 상한 `theta - clip_margin`을 유지한 기록으로 보존한다. 새 결과 없이 그 실험의 원고 설명을 소급 수정하지 않는다.
 
 $\psi_{\mathrm{ED}}$가 반환한 두 range를 $Y^{+}\in[l_+,u_+]$, $Y^{-}\in[l_-,u_-]$라 하면 signed result는
 

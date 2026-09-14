@@ -375,3 +375,86 @@ The implementation work covers every maintained transform and model adapter, not
 - [x] Remove live activation extrema from deterministic `SpikingLayerNorm.forward` with the same operator intervals and finite-feature dense bound.
 - [x] Remove live output extrema from ordinary `nn.LayerNorm` calls in `_apply_norm` with the finite-feature bound and learned affine endpoint propagation.
 - [x] Verify bounds are identical across batch contents, ordering, and batch size, and add a final source audit that rejects runtime tensor-extrema domain construction in maintained paths.
+
+
+## LayerNorm Upper Endpoint Proposal
+
+사용자 승인에 따라 상한에서만 `clip_margin`을 빼던 정의를 코드에 수정했다. 양의 하한과 기존 실험 기록은 유지한다. 아래 비교는 변경 전후를 기록하며, 추가 실험이나 원고 변경은 수행하지 않는다.
+
+### Direct Changes
+
+공유 [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm]]의 입력 범위 정의만 바꾼다. 아래에서 $m$은 현재 `clip_margin` 값이며 기본값은 계속 $10^{-5}$다.
+
+| 변경 대상 | 변경 전 코드 | 적용 코드 |
+| --- | --- | --- |
+| 실제 양/음 magnitude 범위 | `PotentialBounds(0.0, theta - clip_margin)` | `PotentialBounds(0.0, theta)` |
+| log 계산용 범위 | `PotentialBounds(clip_margin, theta - clip_margin)` | `PotentialBounds(clip_margin, theta)` |
+| margin 유효성 검사 | `margin >= theta / 2.0`이면 거부 | `margin >= theta`이면 거부 |
+
+앞의 두 범위는 [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#_gaussian_forward]]와 [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#forward]]에 각각 있어 총 네 곳이다. 검사도 constructor와 [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#freeze_parameter_bounds]]의 두 곳에서 일치시킨다. Constructor의 변수명은 `normalized_margin`이며, 기존 finite/positive 검사는 유지한다.
+
+문서 문자열, 주석, 오류 메시지의 "양 끝점을 안쪽으로 이동"과 `theta/2` 설명을 "양의 log 입력 하한" 및 `0 < clip_margin < theta`로 바꾼다. 호출부와 설정 파일의 `clip_margin` 이름은 이번 범위에서 바꾸지 않는다.
+
+### Derived Bounds
+
+분산 범위와 시간창은 log 입력 구간의 끝점에서 이미 계산되므로, 별도 상수를 추가하거나 파생 수식을 중복 수정하지 않는다.
+
+| 파생값 | 변경 전 | 적용 후 |
+| --- | --- | --- |
+| 분산 인코딩 범위 | $[m^2,(\theta - m)^2]$ | $[m^2,\theta^2]$ |
+| magnitude 인코딩 시간창 길이 | $\tau_s\log((\theta - m)/m)$ | $\tau_s\log(\theta/m)$ |
+
+기존 `domain_var = PotentialBounds(domain_err.min ** 2, domain_err.max ** 2)`와 `T0 = tau_s * math.log(domain_err.max / domain_err.min)`는 그대로 둔다. 분산 인코더의 시간상수 $\tau_s/2$도 유지하면 제곱된 구간으로부터 같은 시간창과 log 기준값이 나온다. 직접 로그를 계산하는 ablation 역시 `domain_err.max`와 그 제곱을 사용하므로 새 상한을 자동으로 따른다.
+
+### Unchanged Behavior
+
+하한의 의미, signed 값의 처리와 LayerNorm의 최종 출력 제한은 이번 변경 대상이 아니다.
+
+- `clip_margin=0`으로 바꾸지 않는다. 실제 magnitude에는 0을 허용하되 log 계산용 값에만 양의 하한을 적용한다.
+- `positive_active`와 `negative_active`의 하한 판정, 비활성 경로의 출력 기여 제거, 분산 계산에 쓰는 0 magnitude를 유지한다.
+- 분산에 더하는 `eps`, 시간상수, 가중치와 bias, normalized 및 최종 affine 출력 bound를 유지한다.
+- [[utils/transforms/potential_to_spike.py#neg_log_transform]], [[utils/transforms/spike_to_potential.py#exponential_difference_operator]], 일반 곱셈의 정의는 바꾸지 않는다.
+- GELU의 magnitude 하한, 전역 theta 선택 절차, calibration 수집 위치와 표본 선택은 바꾸지 않는다.
+- 공통 LayerNorm 클래스 변경이므로 ViT만의 변경으로 설명하지 않는다. 이 클래스를 사용하는 다른 모델과 ablation에도 적용된다.
+
+### Verification Changes
+
+기존 검사의 하드코딩된 내부 범위를 갱신하고, 새로 허용되는 상한을 실제로 밟는 경계 검사를 보강한다. 테스트가 기존 상한보다 작은 값만 사용하면 변경을 검증하지 못한다.
+
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_layernorm]]의 `PotentialBounds(0.0, 3.9)`를 `PotentialBounds(0.0, 4.0)`, `PotentialBounds(0.1, 3.9)`를 `PotentialBounds(0.1, 4.0)`로 바꾼다. 나머지 파생 variance와 deadline은 같은 계산식을 유지한다. Event 수와 miss 수 기대값을 새 결과에 맞춰 무작정 고치지 않는다.
+
+- theta=4에서 평균이 0인 `[-4,-1,1,4]` 및 상한 초과 입력으로 magnitude/log 상한이 4인지 확인한다. 모든 원소가 같은 비율로 잘려 normalization에서 차이가 상쇄되는 입력만 사용하지 않는다.
+- 0, 양의 하한 미만, 하한과 같은 입력에서 log 계산용 값과 비활성 경로를 구분한다. 상수 입력의 출력이 bias가 되는 기존 검사를 보존한다.
+- Constructor와 bounds freeze가 theta=4에서 margin=2 또는 3을 허용하고, 0 이하, 4 이상, NaN/Inf는 거부하는지 확인한다.
+- float32/float64, 세 LayerNorm ablation flag의 8개 조합, 노이즈를 끈 경로와 표준편차가 0인 Gaussian 경로의 일치를 검사한다. 노이즈가 있는 경로의 유한성, 고정 bounds, event/miss 처리는 별도로 검사한다.
+- [[scripts/verification/verify_layernorm_affine_bounds.py#verify_paired_bounds_and_parity]]의 최종 출력 범위 기대값은 log 상한에서 나온 값이 아니므로 유지한다. [[scripts/verification/verify_layernorm_affine_bounds.py#verify_cache_and_single_feature]]의 캐시 검사를 보존하고 margin 변경 후 refresh 조건을 확인한다.
+
+구현 후에는 위 두 검증 파일과 `verify_calibration.py`를 실행한다. 공통 연산자나 연산 수 정의는 바꾸지 않으므로 이번 계획만으로 새로운 연산 수 모델을 도입하지 않는다. 모델 전체 성능 및 노이즈 결과의 동일성은 이 단위 검사로 주장하지 않는다.
+
+### Artifact And Manuscript Changes
+
+같은 theta와 clip_margin 숫자라도 상한의 의미가 달라지므로 구버전 calibration 표를 새 구현에서 조용히 재사용하지 않도록 한다.
+
+ViT/GPT-2 metadata의 [[utils/transforms/functions.py#OUTPUT_BOUNDS_VERSION]]을 2에서 3으로 올렸다. 파일 구조를 바꾸는 것이 아니므로 calibration의 `format_version`은 유지한다. 구버전 metadata 거부와 새 버전의 저장/복원 검증은 [[calibration#Layer-wise Calibration#Frozen Execution#LayerNorm Positive Input Range]]에서 관리한다.
+
+진행 중인 별도 실행기는 source commit도 metadata에 넣지만, 기본 모델별 수집 경로 전체가 이를 보장하는 것은 아니다. 기존 고정 source, calibration 표, 결과 파일은 수정하지 않는다. 새 코드로 평가하기로 한 경우에만 별도 source와 결과 경로를 사용하고, 필요한 calibration 표를 다시 수집한다. 이 계획은 실행 중인 작업을 중단하거나 재시작하라는 지시가 아니다.
+
+실제로 새 정의를 적용하고 그 설정으로 얻은 결과를 보고할 때만 ICLR 실험 문단의 상한을 바꾼다. 기존 source 648af9bb 결과를 설명하는 문장은 이전 상한을 유지한다. 구현 변경 시 [[domain#Signed Values and Dual Rails]], [[domain#Scale Parameters]], [[bounds-audit#Fixed Range의 수식 계약#Layer Normalization]] 및 관련 calibration 설명도 갱신하되 과거 결과의 정의를 소급 수정하지 않는다.
+
+### Verification Already Performed
+
+변경 가능성을 확인하기 위해 source를 고치지 않고 새 구간을 기본 연산자에 직접 전달한 작은 CPU 검사만 수행했다.
+
+theta=40과 양의 하한 $10^{-5}$에서 float32/float64 모두 상한의 log 시각이 0이고, magnitude와 variance의 시간창이 일치하며, log 뒤 exponential difference가 기대한 나눗셈을 복원하고 제곱 연산이 상한을 처리하는 것을 확인했다. 이는 완성된 LayerNorm 클래스 변경, 모든 Gaussian 분기, 전체 모델 정확도 또는 기존 결과와의 동일성을 검증한 것이 아니다.
+
+### Implementation Verification
+
+2026-09-14 코드 변경 후 CPU 검증을 통과했다. 새 정확도 실험, 기존 작업 재시작, 원고 수정 또는 UBAI 배포는 수행하지 않았다.
+
+- [x] 실제 magnitude와 log 입력의 상한 네 곳 및 유효성 검사 두 곳을 수정했다. 파생 분산·시간창 수식과 variance의 시간상수는 유지했다.
+- [x] [[scripts/verification/verify_layernorm_upper_endpoint.py#verify_upper_endpoint_and_ablations]]의 3개 검증 그룹을 통과했다. 8개 ablation, float32/float64, 시간상수 1과 0.75, 노이즈 유무 및 경계 입력을 포함한다.
+- [x] float32 직접 log 계산이 고정 시간창을 반올림 오차만큼 넘는 경우를 발견해 두 직접 log 분기에서 계산 시각을 기존 시간창 안으로 제한했다. 시간창을 넓히거나 기본 연산자 정의를 바꾸지 않았다.
+- [x] 기존 Gaussian 전체 검증, LayerNorm affine 4개 그룹, calibration 18개 그룹, GELU 4개 그룹 및 calibrated ViT evaluator 검증을 통과했다.
+- [x] ViT/GPT-2의 version 3 표 저장·복원과 적용, version 2 표의 validation/inference 적용 거부를 확인했다. 변경된 규칙과 검증을 [[calibration#Layer-wise Calibration#Frozen Execution#LayerNorm Positive Input Range]]에 연결했다.
+
+전체 모델의 정확도 변화는 이 검사로 주장하지 않는다. 이후 새 구현으로 평가할 때에만 별도 calibration 수집과 결과 경로를 사용한다.

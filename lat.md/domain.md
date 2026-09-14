@@ -76,7 +76,7 @@ Operations with positive-only logarithmic encoding represent a signed centered v
 
 [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm]] centers the input, creates positive and negative rails, processes each through logarithmic and exponential-difference stages, and subtracts the results. This allows signed normalization while keeping each logarithmic encoder input positive.
 
-`clip_margin` independently insets both potential endpoints to form `[clip_margin, theta - clip_margin]`, while `eps` only stabilizes the LayerNorm variance. Inactive rails remain clamped to the margin, so their finite residual is distinct from denominator regularization.
+Actual magnitudes use `[0, theta]`; `clip_margin` supplies only the positive floor of logarithmic inputs, `[clip_margin, theta]`. Zero magnitudes remain zero in the variance; positive magnitudes below the floor still enter the variance but their normalized output contribution is masked to zero. The separate `eps` stabilizes the variance. See [[calibration#Layer-wise Calibration#Frozen Execution#LayerNorm Positive Input Range]] for the versioned policy and checks.
 
 ## Scale Parameters
 
@@ -86,7 +86,7 @@ Operations with positive-only logarithmic encoding represent a signed centered v
 - GPT-2 may override that default with `attention_theta` for Q/K score coding, softmin, and V readout only. LayerNorm, affine/MLP paths, and the global Gaussian-noise conversion continue to use `theta`; omission makes the two thresholds identical.
 - `tau_s` controls log-encoding and exponential-difference scale.
 - `tau_m` remains the generic exponential-operator parameter. Softmin and attention expose one `tau`, derived from the model-wide `tau_s`, and have no separate `tau_m` or `tau_s` keyword.
-- `clip_margin` keeps LayerNorm logarithmic rails away from zero and below `theta`, while `eps` independently stabilizes its variance denominator.
+- `clip_margin` keeps LayerNorm logarithmic inputs away from zero without reducing their `theta` upper endpoint, while `eps` independently stabilizes its variance denominator.
 
 These quantities are configuration and calibration assumptions, not learned circuit characteristics. Their trade-offs are discussed in [[decisions#Explicit Finite Domains and Clamping]].
 

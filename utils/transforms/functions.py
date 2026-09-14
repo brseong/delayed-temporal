@@ -863,8 +863,9 @@ def _tanh_sigmoid_gate(
 # This is an enforced output limit, including when timing noise is enabled.
 GELU_OUTPUT_MIN = -0.170041
 
-# Include the output-bound policy in frozen calibration identity.
-OUTPUT_BOUNDS_VERSION = 2
+# Version 3 retains theta as the LayerNorm logarithmic input upper endpoint.
+# Reject calibration collected with the previous theta - clip_margin maximum.
+OUTPUT_BOUNDS_VERSION = 3
 SWISH_OUTPUT_MIN = -0.278465
 
 

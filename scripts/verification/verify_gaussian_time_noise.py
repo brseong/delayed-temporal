@@ -3100,10 +3100,10 @@ def verify_gaussian_spiking_layernorm() -> None:
         # Reconstruct the nominal log times and deadline carriers independently from
         # the production branch, then apply d_err-d_sigma before the direct exp call.
         x_err = value - value.mean(dim=-1, keepdim=True)
-        magnitude_domain = PotentialBounds(0.0, 3.9)
+        magnitude_domain = PotentialBounds(0.0, 4.0)
         x_err_pos_magnitude = magnitude_domain.clamp(x_err.clamp_min(0.0))
         x_err_neg_magnitude = magnitude_domain.clamp((-x_err).clamp_min(0.0))
-        domain_err = PotentialBounds(0.1, 3.9)
+        domain_err = PotentialBounds(0.1, 4.0)
         x_err_pos = domain_err.clamp(x_err_pos_magnitude)
         x_err_neg = domain_err.clamp(x_err_neg_magnitude)
         positive_active = x_err_pos_magnitude >= domain_err.min

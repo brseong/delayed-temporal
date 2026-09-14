@@ -43,23 +43,23 @@ class SpikingLayerNorm(nn.Module):
         """Initialize a dual-rail spiking LayerNorm module.
 
         ``eps`` is exclusively the numerical stabilizer added to the feature
-        variance. ``clip_margin`` independently moves both endpoints of the
-        positive TTFS rail inward, keeping logarithmic inputs away from zero and
-        the upper endpoint below ``theta``.
+        variance. ``clip_margin`` independently sets the positive logarithmic
+        input floor. Actual magnitudes include zero, and both magnitude and
+        logarithmic input domains retain ``theta`` as their upper endpoint.
 
         Args:
             normalized_shape: Feature shape normalized by LayerNorm.
             eps: Non-negative variance stabilizer used by LayerNorm arithmetic.
             theta: Upper scale from which the positive encoding rail is formed.
             tau_s: Temporal scale used by logarithmic and exponential operators.
-            clip_margin: Positive inset applied to both TTFS potential endpoints.
+            clip_margin: Positive logarithmic input floor, strictly below theta.
             use_spiking_mul: Whether variance squaring uses the spiking product.
             use_spiking_log: Whether magnitudes use the logarithmic encoder.
             use_spiking_expdiff: Whether normalization uses exponential difference.
 
         Raises:
             ValueError: If ``clip_margin`` is non-finite, non-positive, or too
-                large to leave a non-empty interval below ``theta``.
+                large to leave a non-empty interval ending at ``theta``.
         """
         # Normalize the feature shape exactly once so scalar and tuple construction
         # retain the parameter layout expected by pretrained LayerNorm checkpoints.
@@ -67,17 +67,17 @@ class SpikingLayerNorm(nn.Module):
         if isinstance(normalized_shape, int):
             normalized_shape = (normalized_shape,)
 
-        # The positive dual rail will be [margin, theta - margin]. Keeping the margin
-        # below theta/2 guarantees a strictly ordered domain for logarithmic coding.
+        # Logarithmic inputs use [margin, theta]. Keeping the margin strictly below
+        # theta guarantees an ordered positive domain without reducing its maximum.
         normalized_margin = float(clip_margin)
         if (
             not math.isfinite(normalized_margin)
             or normalized_margin <= 0.0
-            or normalized_margin >= float(theta) / 2.0
+            or normalized_margin >= float(theta)
         ):
             raise ValueError(
                 "clip_margin must be finite and satisfy "
-                "0 < clip_margin < theta / 2"
+                "0 < clip_margin < theta"
             )
 
         # Store the variance stabilizer and clipping margin separately so changing a
@@ -137,9 +137,9 @@ class SpikingLayerNorm(nn.Module):
         eps = float(self.eps)
         if not math.isfinite(theta) or theta <= 0.0:
             raise ValueError("SpikingLayerNorm theta must be finite and positive")
-        if not math.isfinite(margin) or margin <= 0.0 or margin >= theta / 2.0:
+        if not math.isfinite(margin) or margin <= 0.0 or margin >= theta:
             raise ValueError(
-                "SpikingLayerNorm clip_margin must satisfy 0 < margin < theta / 2"
+                "SpikingLayerNorm clip_margin must satisfy 0 < clip_margin < theta"
             )
         if not math.isfinite(tau_s) or tau_s <= 0.0:
             raise ValueError("SpikingLayerNorm tau_s must be finite and positive")
@@ -310,14 +310,14 @@ class SpikingLayerNorm(nn.Module):
         # rails. Only the later logarithmic carrier copies receive the strictly
         # positive encoder floor; inactive rails remain zero in the variance.
         x_err = x - x.mean(dim=-1, keepdim=True)
-        magnitude_domain = PotentialBounds(0.0, theta - clip_margin)
+        magnitude_domain = PotentialBounds(0.0, theta)
         x_err_pos_magnitude = magnitude_domain.clamp(
             x_err.clamp_min(0.0), name="x_err_pos_magnitude"
         )
         x_err_neg_magnitude = magnitude_domain.clamp(
             (-x_err).clamp_min(0.0), name="x_err_neg_magnitude"
         )
-        domain_err = PotentialBounds(clip_margin, theta - clip_margin)
+        domain_err = PotentialBounds(clip_margin, theta)
         x_err_pos = domain_err.clamp(
             x_err_pos_magnitude, name="x_err_pos_log_carrier"
         )
@@ -401,6 +401,11 @@ class SpikingLayerNorm(nn.Module):
             t_err_neg = tau_s * torch.log(hi_t / x_err_neg)
             tb_sigma = TimeBounds(0.0, T0)
             tb_err = TimeBounds(0.0, T0)
+            # Floating-point logarithms can round just beyond the fixed time window.
+            # Clamp numerical timestamps without extending the observation deadline.
+            t_sigma = t_sigma.clamp(0.0, T0)
+            t_err_pos = t_err_pos.clamp(0.0, T0)
+            t_err_neg = t_err_neg.clamp(0.0, T0)
 
         if self.use_spiking_expdiff:
             # The event-aware operator owns both causal external rails, internal
@@ -598,9 +603,9 @@ class SpikingLayerNorm(nn.Module):
         # if max_val > theta:
         #     print(f"[DEBUG] x_err max {max_val:.2f} exceeds theta {theta}")
             
-        # The clip margin defines only the representable positive dual-rail domain;
-        # it is independent of the epsilon later added to the feature variance.
-        magnitude_domain = PotentialBounds(0.0, theta - clip_margin)
+        # The clip margin sets only the positive logarithmic input floor; magnitudes
+        # retain zero and theta. Epsilon is added separately to the feature variance.
+        magnitude_domain = PotentialBounds(0.0, theta)
         x_err_pos_magnitude = magnitude_domain.clamp(
             x_err.clamp_min(0.0), name="x_err_pos_magnitude"
         )
@@ -609,7 +614,7 @@ class SpikingLayerNorm(nn.Module):
         )
         domain_err: PotentialBounds = PotentialBounds(
             clip_margin,
-            theta - clip_margin,
+            theta,
         )
         x_err_pos = domain_err.clamp(
             x_err_pos_magnitude, name="x_err_pos_log_carrier"
@@ -647,11 +652,9 @@ class SpikingLayerNorm(nn.Module):
 
         T0 = tau_s * math.log(domain_err.max / domain_err.min)
         if self.use_spiking_log:
-            # First, we need tau_s/2 for sigma, to get sqrt of variance.
-            # Thus, to match the bias terms between sigma and x_err terms
-            # in the exponential difference operator, we also need to use tau_s/2 for x_err:
-            # tau_s/2 * log(hi^2) = tau_s * log(hi).
-            # hi^2 is the upper bound of variance, and hi is the upper bound of x_err, so this ensures the same bias term of tau_s * log(hi) for both sigma and x_err in the expdiff operator.
+            # Only variance encoding uses tau_s/2 to obtain its square root.
+            # Magnitudes use tau_s, giving the same reference and time window:
+            # (tau_s/2) * log(hi^2) = tau_s * log(hi).
             t_sigma, tb_sigma = neg_log_transform(var_x, domain_var, tau_s=tau_s/2)
             t_err_pos, tb_err = neg_log_transform(x_err_pos, domain_err, tau_s=tau_s)
             t_err_neg, _ = neg_log_transform(x_err_neg, domain_err, tau_s=tau_s)
@@ -663,6 +666,11 @@ class SpikingLayerNorm(nn.Module):
             t_err_neg = tau_s * torch.log(_hi_t / x_err_neg)
             tb_sigma = TimeBounds(0.0, T0)
             tb_err = TimeBounds(0.0, T0)
+            # Match the Gaussian direct-log ablation's numerical time-window guard.
+            # The analytic deadline and logarithmic reference remain unchanged.
+            t_sigma = t_sigma.clamp(0.0, T0)
+            t_err_pos = t_err_pos.clamp(0.0, T0)
+            t_err_neg = t_err_neg.clamp(0.0, T0)
 
         if self.use_spiking_expdiff:
             # Preserve both exponential output domains rather than recovering a rail

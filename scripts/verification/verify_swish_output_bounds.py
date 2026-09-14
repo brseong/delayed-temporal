@@ -6,6 +6,7 @@ from dataclasses import replace
 import math
 from pathlib import Path
 import sys
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -15,7 +16,20 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from utils.transforms.calibration import validate_calibration_metadata
+from utils.transforms.calibration import (
+    CalibrationHistogram,
+    CalibrationMode,
+    CalibrationRange,
+    CalibrationRangePolicy,
+    LayerCalibrationSpec,
+    MinMaxObserverState,
+    create_calibration_runtime,
+    create_calibration_table,
+    create_layer_calibration,
+    load_calibration_table,
+    save_calibration_table,
+    validate_calibration_metadata,
+)
 from utils.transforms.functions import (
     GELU_OUTPUT_MIN,
     OUTPUT_BOUNDS_VERSION,
@@ -175,7 +189,7 @@ def verify_output_bounds_calibration_identity() -> None:
         **common, tokenizer=SimpleNamespace(),
         config=GPT2Config(n_positions=4, theta=40.0, tau_s=1.0), max_length=4,
     )
-    assert OUTPUT_BOUNDS_VERSION == 2
+    assert OUTPUT_BOUNDS_VERSION == 3
     for metadata in (vit_metadata, gpt2_metadata):
         assert dict(metadata.model_options)["gelu_output_min"] == GELU_OUTPUT_MIN
         assert dict(metadata.model_options)["output_bounds_version"] == OUTPUT_BOUNDS_VERSION
@@ -184,7 +198,8 @@ def verify_output_bounds_calibration_identity() -> None:
         for options in (
             remaining,
             tuple(sorted((*remaining, ("output_bounds_version", 1)))),
-            tuple(sorted((*remaining, ("output_bounds_version", 3)))),
+            tuple(sorted((*remaining, ("output_bounds_version", 2)))),
+            tuple(sorted((*remaining, ("output_bounds_version", 4)))),
         ):
             try:
                 validate_calibration_metadata(replace(metadata, model_options=options), metadata)
@@ -192,6 +207,66 @@ def verify_output_bounds_calibration_identity() -> None:
                 assert "model_options" in str(error)
             else:
                 raise AssertionError("old output bounds calibration identity was accepted")
+
+        # Persist one valid layer with each default model identity, then exercise
+        # the same compatibility check used before frozen inference. Reading an old
+        # file remains supported for inspection; installing its bounds must fail.
+        layer = create_layer_calibration(
+            LayerCalibrationSpec(
+                module_name="block",
+                tensor_name="output",
+                range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
+                lower_quantile=0.0,
+                upper_quantile=1.0,
+                margin_fraction=0.0,
+            ),
+            MinMaxObserverState(-1.0, 1.0, 4),
+            CalibrationHistogram(
+                bounds=CalibrationRange(-1.0, 1.0),
+                bin_counts=(2, 2),
+                num_values=4,
+                underflows=0,
+                overflows=0,
+            ),
+        )
+        table = create_calibration_table(metadata, (layer,))
+        runtime_root = REPOSITORY_ROOT / "artifacts" / "runtime"
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            dir=runtime_root, prefix="layernorm-bound-identity-"
+        ) as directory:
+            path = Path(directory) / f"{metadata.model_family}.json"
+            save_calibration_table(table, path)
+            loaded = load_calibration_table(path)
+            assert loaded == table
+            for mode in (CalibrationMode.VALIDATE, CalibrationMode.INFERENCE):
+                runtime = create_calibration_runtime(
+                    mode, loaded, expected_metadata=metadata
+                )
+                assert runtime.table == table
+
+            obsolete_metadata = replace(
+                metadata,
+                model_options=tuple(
+                    sorted((*remaining, ("output_bounds_version", 2)))
+                ),
+            )
+            obsolete_table = create_calibration_table(obsolete_metadata, (layer,))
+            obsolete_path = Path(directory) / f"{metadata.model_family}-v2.json"
+            save_calibration_table(obsolete_table, obsolete_path)
+            obsolete_loaded = load_calibration_table(obsolete_path)
+            assert obsolete_loaded == obsolete_table
+            for mode in (CalibrationMode.VALIDATE, CalibrationMode.INFERENCE):
+                try:
+                    create_calibration_runtime(
+                        mode, obsolete_loaded, expected_metadata=metadata
+                    )
+                except ValueError as error:
+                    assert "model_options" in str(error)
+                else:
+                    raise AssertionError(
+                        "obsolete persisted output bounds were accepted for frozen inference"
+                    )
 
 
 def main() -> None:

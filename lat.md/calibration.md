@@ -116,9 +116,21 @@ GELU outputs use a constant lower endpoint and the nonnegative input upper endpo
 
 The fixed clean minimum is enforced as an output limit under timing noise, not assumed to follow automatically from a perturbed gate. This changes noisy output clamping and can change later approximation through narrower bounds. ViT and GPT-2 calibration metadata include `gelu_output_min`, rejecting tables collected under the former output rule. Existing frozen experiment checkouts and their results remain unchanged and must not be combined with results from this policy; a new calibrated evaluation requires new collection.
 
-ViT and GPT-2 metadata also require `output_bounds_version=2` for the subsequent attention, LayerNorm, Swish, and intermediate activation bounds in [[bounds-audit#2026-09-14 Bound Corrections]]. Matching only the GELU floor is insufficient: missing, older, or unknown policy versions fail metadata comparison.
+ViT and GPT-2 metadata require `output_bounds_version=3`. Version 2 introduced the attention, LayerNorm affine, Swish, and intermediate activation bounds in [[bounds-audit#2026-09-14 Bound Corrections]]; version 3 additionally changes the LayerNorm log upper endpoint as described below. Matching only the GELU floor is insufficient: missing, older, or unknown policy versions fail metadata comparison.
 
 Verification checks the safe lower endpoint, upper-endpoint propagation and the all-negative-input case, batch-independent domains, clean reference values, noisy clipping counts, unchanged random state, and matching GELU variants on CPU.
+
+### LayerNorm Positive Input Range
+
+LayerNorm uses `[0, theta]` for actual magnitudes and `[clip_margin, theta]` for logarithmic inputs. The positive floor does not reduce the upper endpoint; constructor and frozen bounds require `0 < clip_margin < theta`.
+
+Both Gaussian and deterministic execution use these domains in [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm]]. The variance range and log time window continue to derive from the log input endpoints, with half the magnitude encoder's time constant for variance. The default floor `1e-5`, variance `eps`, inactive output masks, final normalized and affine bounds, and GELU settings are unchanged. The fully dense ablation retains ordinary PyTorch normalization without timing events.
+
+[[scripts/verification/verify_layernorm_upper_endpoint.py#verify_upper_endpoint_and_ablations]] checks exact and exceeded upper endpoints, zero and positive-floor inputs, all eight ablations in float32 and float64, clean versus zero-standard-deviation Gaussian results, noisy finite outputs and event counts, constructor/frozen validation, and cache refresh after margin changes. Final affine bounds remain covered independently by [[scripts/verification/verify_layernorm_affine_bounds.py#verify_paired_bounds_and_parity]].
+
+Direct logarithms may round just beyond the declared time window in float32, including at `tau_s=0.75`. Both direct-log ablations clamp their computed times to the existing window before use; the endpoint formulas and observation deadline do not change. Verification includes `tau_s=1` and `0.75`.
+
+[[utils/transforms/functions.py#OUTPUT_BOUNDS_VERSION]] is 3 in ViT and GPT-2 metadata. Verification also checks persisted current-table reuse and rejection of version 2 tables under the new implementation. Existing frozen checkouts, calibration tables, and experiment results retain their earlier definition. New evaluation requires new calibration collection; this code change does not restart experiments or change manuscript claims.
 
 ### BERT Fixed Range Flow
 
