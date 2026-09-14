@@ -44,7 +44,7 @@ from transformers.utils.generic import can_return_tuple, merge_with_config_defau
 from transformers.utils.output_capturing import capture_outputs
 from .configuration_bert import BertConfig
 
-from utils.transforms.functions import gelu_approximation, tanh
+from utils.transforms.functions import clamp_gelu_output, gelu_approximation, tanh
 from utils.transforms.types import Potential, PotentialBounds
 from utils.transformers.calibration import (
     calibrated_potential,
@@ -485,10 +485,9 @@ class BertIntermediate(nn.Module):
     def forward(self, pot: Potential) -> Potential:
         """Apply the BERT feed-forward activation on a fixed analytic range.
 
-        The spiking GELU composition already returns its propagated interval. ReLU
-        maps the affine endpoints monotonically, while dense GELU remains between
-        its input and zero because it multiplies the input by a gate in ``[0, 1]``.
-        No branch may derive physical metadata from the current output tensor.
+        Direct and composed GELU use the same fixed lower bound and input maximum.
+        ReLU maps the affine endpoints monotonically. No branch derives range
+        metadata from the current output tensor.
 
         Args:
             pot: Normalized hidden states paired with a fixed input range.
@@ -503,8 +502,7 @@ class BertIntermediate(nn.Module):
         # range. All activation branches below consume only those fixed endpoints.
         pot_z = self.dense(pot)
 
-        # The operator-backed GELU propagates the intervals of its multiplication,
-        # Tanh, and addition stages directly, so no additional envelope is needed.
+        # The composed GELU already applies the shared fixed output range.
         if self._use_spiking_mlp:
             if isinstance(self.intermediate_act_fn, GELUActivation):
                 return Potential(*gelu_approximation(*pot_z))
@@ -518,15 +516,11 @@ class BertIntermediate(nn.Module):
                     ),
                 )
 
-        # Dense execution still needs the same physical range contract. Standard
-        # GELU is x times a normal-CDF gate, so its output lies between x and zero;
-        # dense ReLU uses the same monotone endpoint mapping as the spiking branch.
+        # Dense execution uses the same fixed GELU output range as the composed
+        # path; dense ReLU keeps its monotone endpoint mapping.
         out = self.intermediate_act_fn(pot_z.value)
         if isinstance(self.intermediate_act_fn, GELUActivation):
-            output_domain = PotentialBounds(
-                min(float(pot_z.domain.min), 0.0),
-                max(float(pot_z.domain.max), 0.0),
-            )
+            return Potential(*clamp_gelu_output(out, pot_z.domain))
         elif isinstance(self.intermediate_act_fn, nn.ReLU):
             output_domain = PotentialBounds(
                 max(0.0, float(pot_z.domain.min)),

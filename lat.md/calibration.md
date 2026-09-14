@@ -94,7 +94,7 @@ Collection requires the clean spiking checkpoint in evaluation mode with sequent
 
 ViT direct GELU approximations, dense GELU, ReLU, SiLU, and Tanh branches derive output ranges from fixed affine input bounds. These output mappings add no calibration sites; they do not establish that every affine input range is sufficiently narrow.
 
-ReLU and Tanh map interval endpoints directly. GELU-family and SiLU-family outputs remain between the input and zero because their gates lie in $[0,1]$; the operator-composed GELU continues to propagate its own interval.
+ReLU and Tanh map interval endpoints directly. Swish outputs use the fixed lower endpoint described in [[bounds-audit#2026-09-14 Bound Corrections#Swish Output Bounds]]. GELU outputs use the shared constant lower endpoint and upper endpoint from the input as described in [[calibration#Layer-wise Calibration#Frozen Execution#Fixed GELU Output Bounds]].
 
 ### ViT GELU Pre-activation Calibration
 
@@ -102,9 +102,23 @@ With frozen calibration enabled, each composed ViT GELU layer uses a measured sy
 
 Collection records the raw affine output under the stable `ViTIntermediate` module identity and continues with its analytic safety range. Frozen validation and inference count strict excursions, clamp to the persisted range, and pass that unchanged range into the GELU composition.
 
-The final GELU output still uses its analytic gate-derived interval. Calibration therefore limits the layer input distribution and reports approximation clipping; it does not infer the bounded activation output from runtime tensors.
+The final GELU output does not inherit the symmetric interval from the last multiplication. Its lower endpoint is fixed independently of calibration, and its upper endpoint uses the declared GELU input maximum, including the calibrated maximum when enabled.
 
 The deterministic exponential removes the negative-identity encoder offset inside the exponent before decoding. This computes the same normalized response without constructing a larger intermediate exponential that may overflow even when the final result is representable.
+
+### Fixed GELU Output Bounds
+
+GELU outputs use a constant lower endpoint and the nonnegative input upper endpoint, without output calibration or observed tensor extrema. Values are clamped to the same interval in clean and noisy execution.
+
+[[utils/transforms/functions.py#gelu_output_bounds]] returns `[-0.170041, max(0, input_domain.max)]`. The lower endpoint rounds below the tanh approximation minimum near -0.170040750571254 and also contains the exact GELU minimum. Current ViT input maxima are positive and therefore pass through unchanged. Zero is used only when the input domain has a negative upper endpoint, because negative GELU outputs may approach zero and exceed their inputs.
+
+[[utils/transforms/functions.py#clamp_gelu_output]] synchronizes values and metadata and records clipping as `gelu.output`, without another timing event or random draw. The composed, direct, and analysis GELU paths share this rule; SiLU and Swish retain their separate bounds. Intermediate TTFS domains remain necessary for encoders and are not removed.
+
+The fixed clean minimum is enforced as an output limit under timing noise, not assumed to follow automatically from a perturbed gate. This changes noisy output clamping and can change later approximation through narrower bounds. ViT and GPT-2 calibration metadata include `gelu_output_min`, rejecting tables collected under the former output rule. Existing frozen experiment checkouts and their results remain unchanged and must not be combined with results from this policy; a new calibrated evaluation requires new collection.
+
+ViT and GPT-2 metadata also require `output_bounds_version=2` for the subsequent attention, LayerNorm, Swish, and intermediate activation bounds in [[bounds-audit#2026-09-14 Bound Corrections]]. Matching only the GELU floor is insufficient: missing, older, or unknown policy versions fail metadata comparison.
+
+Verification checks the safe lower endpoint, upper-endpoint propagation and the all-negative-input case, batch-independent domains, clean reference values, noisy clipping counts, unchanged random state, and matching GELU variants on CPU.
 
 ### BERT Fixed Range Flow
 

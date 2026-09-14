@@ -22,6 +22,7 @@ from scripts.evaluation.error_analysis_vit import (
 from utils.transformers.models.spiking_vit import modeling_spiking_vit
 from utils.transforms.functions import (
     _tanh_sigmoid_gate,
+    clamp_gelu_output,
     multiplication_operator,
 )
 from utils.transforms.noise import get_gaussian_time_noise
@@ -225,13 +226,14 @@ def gelu_with_phi_nl_psi_ed_cube(
         tau_s=tau_s,
         theta=theta,
     )
-    return multiplication_operator(
+    result, _ = multiplication_operator(
         input_clamped,
         domain,
         gate,
         gate_domain,
         theta,
     )
+    return clamp_gelu_output(result, domain)
 
 
 def install_phi_nl_psi_ed_cube(*, magnitude_floor: float) -> None:

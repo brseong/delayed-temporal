@@ -19,6 +19,7 @@ from utils.transforms.calibration import (
     finalize_calibration_collection,
     start_histogram_calibration_pass,
 )
+from utils.transforms.functions import GELU_OUTPUT_MIN, OUTPUT_BOUNDS_VERSION
 from utils.transforms.noise import get_gaussian_time_noise
 from utils.transforms.types import PotentialBounds
 from utils.transformers.calibration import (
@@ -529,6 +530,8 @@ def build_vit_calibration_metadata(
         sorted(
             (
                 ("attention_implementation", attention_implementation),
+                ("gelu_output_min", GELU_OUTPUT_MIN),
+                ("output_bounds_version", OUTPUT_BOUNDS_VERSION),
                 ("hidden_act", str(getattr(config, "hidden_act", ""))),
                 ("spiking_ln_expdiff", bool(getattr(config, "spiking_ln_expdiff", True))),
                 ("spiking_ln_log", bool(getattr(config, "spiking_ln_log", True))),

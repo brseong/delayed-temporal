@@ -102,6 +102,25 @@ def _expect_raises(
     raise AssertionError(f"expected {exception_type.__name__}")
 
 
+def _verify_gelu_metadata_identity(metadata: CalibrationMetadata) -> None:
+    """Reject calibration metadata collected without the fixed GELU lower bound."""
+    assert dict(metadata.model_options)["gelu_output_min"] == -0.170041
+    original_options = tuple(
+        item for item in metadata.model_options if item[0] != "gelu_output_min"
+    )
+    for options in (
+        original_options,
+        tuple(sorted((*original_options, ("gelu_output_min", -0.17)))),
+    ):
+        _expect_raises(
+            ValueError,
+            lambda options=options: validate_calibration_metadata(
+                replace(metadata, model_options=options), metadata
+            ),
+            "model_options",
+        )
+
+
 def _make_layer(module_name: str, counts: tuple[int, ...]):
     """Construct a compact valid layer record for persistence checks."""
     num_values = sum(counts)
@@ -1064,6 +1083,7 @@ def verify_deterministic_training_subset() -> None:
     assert metadata.dataset_split == "train"
     assert metadata.input_shape == (3, 4, 4)
     assert first._fingerprint in metadata.preprocessing
+    _verify_gelu_metadata_identity(metadata)
 
     class CalibrationDataset(Dataset):
         """Return deterministic preprocessed tensors to the two-pass driver."""
@@ -1275,6 +1295,8 @@ def verify_vit_fixed_activation_ranges() -> None:
         second = module(Potential(second_value, input_domain))
         assert first.domain == second.domain
         assert first.domain.min <= 0.0 <= first.domain.max
+        if hidden_act == "gelu":
+            assert first.domain.min == -0.170041
 
 
     # The final response exp(-x) over [-80, 80] is representable in float32 even
@@ -1366,6 +1388,7 @@ def verify_vit_fixed_activation_ranges() -> None:
     )
     frozen_output = calibrated_module(excursion_input)
     assert bool(torch.isfinite(frozen_output.value).all())
+    assert frozen_output.domain == PotentialBounds(-0.170041, activation_record.bounds.max)
     clipping_report = get_calibration_clipping_report(runtime)
     assert len(clipping_report) == 1
     assert (
@@ -1725,6 +1748,7 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
     assert "filtered-selected-v1" in metadata.preprocessing
     assert metadata.input_shape == (4,)
     assert dict(metadata.model_options)["attention_theta"] == 2.0
+    _verify_gelu_metadata_identity(metadata)
 
     # The local threshold affects only attention's score/value code window. Affine
     # projections retain the global rail, and score calibration uses the local cap.

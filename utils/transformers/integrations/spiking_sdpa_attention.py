@@ -1,7 +1,7 @@
 import torch
 import math
 import wandb
-from functools import cache
+from functools import cache, lru_cache
 from typing import cast
 
 from transformers.utils.import_utils import is_torch_greater_or_equal
@@ -44,34 +44,31 @@ def use_gqa_in_sdpa(attention_mask: torch.Tensor | None, key: torch.Tensor) -> b
     return _is_torch_greater_or_equal_than_2_5 and attention_mask is None
 
 
-@cache
+@lru_cache(maxsize=None, typed=True)
 def attention_output_bounds(
     theta: float,
     source_length_max: int,
 ) -> PotentialBounds:
-    """Return the fixed potential rails for attention value integration.
+    """Return the fixed value interval for attention output.
 
-    Each source weight is constrained to ``[0, 1]`` and each encoded value uses
-    the symmetric ``[-theta, theta]`` rail. Summing over the configured maximum
-    source length defines one ideal output rail that is independent of the current
-    request length and of whether Gaussian timing noise is enabled. Identical
-    configuration pairs reuse the same immutable bounds object. Noisy raw readouts
-    outside that rail are counted as saturation before they are clamped.
+    With noise and dropout disabled, normalized nonnegative weights preserve the
+    encoded value interval ``[-theta, theta]``. Both execution paths enforce that
+    same interval on the output; noisy weights and value readouts need not preserve
+    a weighted average. Source capacity remains validated but does not widen the
+    output interval. Identical configuration pairs reuse one immutable object.
 
     Args:
         theta: Positive finite magnitude of the symmetric value rail.
         source_length_max: Positive configured maximum number of source positions.
 
     Returns:
-        The symmetric fixed attention-output envelope
-        ``[-source_length_max * theta, source_length_max * theta]``.
+        The symmetric fixed output interval ``[-theta, theta]``.
 
     Raises:
         TypeError: If ``source_length_max`` is not an integer.
         ValueError: If either input cannot define finite, non-empty output rails.
     """
-    # Validate configuration values before multiplying them so malformed model
-    # metadata cannot silently become a request-dependent or infinite domain.
+    # Keep source-capacity validation even though only theta defines this interval.
     theta_value = float(theta)
     if not math.isfinite(theta_value) or theta_value <= 0.0:
         raise ValueError("attention theta must be finite and positive")
@@ -83,13 +80,7 @@ def attention_output_bounds(
     if source_length_max <= 0:
         raise ValueError("attention source_length_max must be positive")
 
-    # Form the rail once from the configured maximum rather than inspecting the
-    # current key/value tensor shape. Reject overflow before constructing the object
-    # retained by the process-local memoization table.
-    output_max = theta_value * source_length_max
-    if not math.isfinite(output_max):
-        raise ValueError("attention output bound must be finite")
-    return PotentialBounds(-output_max, output_max)
+    return PotentialBounds(-theta_value, theta_value)
 
 
 @cache
@@ -176,12 +167,11 @@ def _gaussian_attention_value_readout(
         value_clamped: Value tensor already restricted to the symmetric TTFS rail.
         attn_weight: Attention weights whose source dimension matches the values.
         domain_v: Fixed symmetric value domain defining the identity-code window.
-        output_domain: Fixed attention-output rail derived from the configured
-            maximum source length, not the current tensor shape.
+        output_domain: Fixed output interval equal to the encoded value interval.
 
     Returns:
-        The physical observation-time attention output clamped to its conservative
-        ideal summed rail envelope.
+        The physical observation-time attention output clamped to the fixed value
+        interval after recording the raw output saturation counts.
 
     Raises:
         RuntimeError: If either event-aware encoder call fails to return a
@@ -258,8 +248,8 @@ def _gaussian_attention_value_readout(
     bounded_weight = attn_weight.clamp(0.0, 1.0)
     attn_output = torch.matmul(bounded_weight, signed_pulse_width)
 
-    # The caller supplies one configuration-derived envelope for every request.
-    # Record raw saturation before enforcing those fixed ideal output rails.
+    # Record raw saturation before enforcing the fixed value interval. Do not
+    # renormalize noisy weights or change their preceding event computation.
     return clamp_gaussian_output(
         attn_output,
         output_domain,
@@ -300,8 +290,8 @@ def spiking_scaled_dot_product_attention(
         tau: Temporal scale used by the softmin composition.
         theta: Symmetric potential rail used by affine TTFS encoders.
         training: Training-state flag forwarded to deterministic value encoding.
-        source_length_max: Configured source-position maximum used to derive one
-            output rail for every request handled by this attention module.
+        source_length_max: Configured source-position maximum used for capacity
+            validation and the representable score interval, not output widening.
         score_calibration_module: Optional bound attention module owning the frozen
             ``attention_score`` calibration site.
 
@@ -319,8 +309,8 @@ def spiking_scaled_dot_product_attention(
     if enable_gqa:
         raise NotImplementedError("GQA is not implemented yet.")
 
-    # A fixed physical output rail requires an explicit configuration maximum.
-    # Current tensor length may validate that contract but must never define it.
+    # Capacity remains explicit for validation and the fixed score interval.
+    # The output interval depends on theta, never the current tensor length.
     if source_length_max is None:
         raise ValueError("attention source_length_max must be configured")
     output_domain = attention_output_bounds(theta, source_length_max)
@@ -476,7 +466,12 @@ def spiking_scaled_dot_product_attention(
     # Noise-free and Gaussian execution share the same configured physical rail.
     # Clamping here keeps the returned tensor consistent with the domain that model
     # adapters will attach in the following integration step.
-    return output_domain.clamp(attn_output, name="attention_value_output")
+    return clamp_gaussian_output(
+        attn_output,
+        output_domain,
+        site="attention.value_output",
+        name="attention_value_output",
+    )
 
 def spiking_sdpa_attention_forward(
     module: torch.nn.Module,

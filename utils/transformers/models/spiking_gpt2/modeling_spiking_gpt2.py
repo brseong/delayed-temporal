@@ -48,7 +48,11 @@ from transformers.utils.output_capturing import OutputRecorder, capture_outputs
 from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
 
 from utils.transforms import neg_identity_transform
-from utils.transforms.functions import gelu_approximation
+from utils.transforms.functions import (
+    clamp_gelu_output,
+    clamp_swish_output,
+    gelu_approximation,
+)
 from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_noise
 from utils.transforms.types import Potential, PotentialBounds, SpikeSample
 from utils.transformers.calibration import (
@@ -613,9 +617,9 @@ class GPT2MLP(nn.Module):
         """Apply GPT-2's feed-forward network with fixed analytic ranges.
 
         Dense and spiking projections share pretrained parameters and exact frozen
-        affine intervals. ReLU and Tanh map endpoints directly; GELU-family and SiLU
-        activations multiply their input by a gate in ``[0, 1]``. Evaluation dropout
-        preserves the projection range, while training scaling is analytic.
+        affine intervals. GELU and SiLU use their fixed lower bounds and input
+        upper endpoints. ReLU and Tanh map endpoints directly. Evaluation
+        dropout preserves the projection range, while training scaling is analytic.
 
         Args:
             hidden_states: Pre-normalized block activation with fixed bounds.
@@ -656,12 +660,13 @@ class GPT2MLP(nn.Module):
             "gelu_new",
             "gelu_pytorch_tanh",
             "quick_gelu",
-            "silu",
-            "swish",
         }:
-            activated_domain = PotentialBounds(
-                min(float(projected.domain.min), 0.0),
-                max(float(projected.domain.max), 0.0),
+            activated_value, activated_domain = clamp_gelu_output(
+                activated_value, projected.domain
+            )
+        elif self._activation_name in {"silu", "swish"}:
+            activated_value, activated_domain = clamp_swish_output(
+                activated_value, projected.domain
             )
         else:
             raise ValueError(

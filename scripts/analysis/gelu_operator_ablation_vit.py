@@ -19,6 +19,9 @@ from scripts.evaluation.error_analysis_vit import (
 )
 from utils.transformers.models.spiking_vit import modeling_spiking_vit
 from utils.transforms.functions import (
+    clamp_gelu_output,
+    clamp_gelu_square_output,
+    clamp_sigmoid_exponential_input,
     division_function,
     exponential_function,
     multiplication_operator,
@@ -348,6 +351,7 @@ def gelu_operator_ablation(
         input_clamped,
         domain,
     )
+    x2, domain_x2 = clamp_gelu_square_output(x2, domain, theta=theta)
     x3, domain_x3 = multiply(x2, domain_x2, input_clamped, domain)
 
     # Apply both fixed polynomial coefficients through the selected multiplication
@@ -385,14 +389,8 @@ def gelu_operator_ablation(
         exponent_scale_tensor,
         PotentialBounds(exponent_scale, exponent_scale),
     )
-    stability_cap = 80.0 * float(tau_s)
-    scaled_tanh_input = scaled_tanh_input.clamp(
-        min=-stability_cap,
-        max=stability_cap,
-    )
-    scaled_tanh_domain = PotentialBounds(
-        max(scaled_tanh_domain.min, -stability_cap),
-        min(scaled_tanh_domain.max, stability_cap),
+    scaled_tanh_input, scaled_tanh_domain = clamp_sigmoid_exponential_input(
+        scaled_tanh_input, scaled_tanh_domain, tau_s=tau_s, limit=80.0,
     )
 
     # The exponential bypass removes only its encoder sample; otherwise the normal
@@ -435,7 +433,8 @@ def gelu_operator_ablation(
             tau_s=tau_s,
         )
     # The normalized ratio is the GELU gate; no explicit tanh output is formed.
-    return multiply(input_clamped, domain, ratio, ratio_domain)
+    result, _ = multiply(input_clamped, domain, ratio, ratio_domain)
+    return clamp_gelu_output(result, domain)
 
 
 def install_gelu_operator_ablation(dense_operators: frozenset[str]) -> None:

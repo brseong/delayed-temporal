@@ -791,6 +791,33 @@ def division_function(
     )
 
 
+def clamp_sigmoid_exponential_input(
+    value: torch.Tensor,
+    domain: PotentialBounds,
+    *,
+    tau_s: float,
+    limit: float,
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Apply the fixed exponential cap and preserve a usable encoding interval."""
+    cap = float(limit) * float(tau_s)
+    if not isfinite(cap) or cap <= 0.0:
+        raise ValueError("exponential cap must be finite and positive")
+    lower = min(max(float(domain.min), -cap), cap)
+    upper = min(max(float(domain.max), -cap), cap)
+    # Map each endpoint through clamp, not interval intersection. A saturated or
+    # numerically constant interval cannot define a positive-width time code. The
+    # following division also needs 1 + exp(-lower/tau_s) distinguishable from 1.
+    # Reuse the existing fixed cap in those cases, without skipping noisy events
+    # or choosing a window from observed activation values.
+    epsilon = torch.finfo(value.dtype).eps
+    if (
+        upper - lower <= epsilon * max(abs(lower), abs(upper))
+        or exp(-lower / float(tau_s)) <= epsilon
+    ):
+        lower, upper = -cap, cap
+    return value.clamp(-cap, cap), PotentialBounds(lower, upper)
+
+
 def _tanh_sigmoid_gate(
     input_value: Float[torch.Tensor, "*batch dims"],
     domain: PotentialBounds,
@@ -816,14 +843,8 @@ def _tanh_sigmoid_gate(
         scale_const * domain.max,
     )
 
-    stability_cap = 80.0 * tau_value
-    scaled_input_clamped = scaled_input.clamp(
-        min=-stability_cap,
-        max=stability_cap,
-    )
-    scaled_domain_clamped = PotentialBounds(
-        max(scaled_domain.min, -stability_cap),
-        min(scaled_domain.max, stability_cap),
+    scaled_input_clamped, scaled_domain_clamped = clamp_sigmoid_exponential_input(
+        scaled_input, scaled_domain, tau_s=tau_value, limit=80.0,
     )
     neg_exp_out, neg_exp_domain = exponential_function(
         scaled_input_clamped,
@@ -835,6 +856,90 @@ def _tanh_sigmoid_gate(
         Y=1.0 + neg_exp_out,
         joint_domain=PotentialBounds(1.0, neg_exp_domain.max + 1.0),
         tau_s=tau_s,
+    )
+
+
+# Rounded below the tanh approximation's minimum (-0.170040750571254...).
+# This is an enforced output limit, including when timing noise is enabled.
+GELU_OUTPUT_MIN = -0.170041
+
+# Include the output-bound policy in frozen calibration identity.
+OUTPUT_BOUNDS_VERSION = 2
+SWISH_OUTPUT_MIN = -0.278465
+
+
+def swish_output_bounds(
+    input_domain: PotentialBounds, *, beta: float = 1.0,
+) -> PotentialBounds:
+    """Return the fixed Swish endpoint and input-dependent opposite endpoint."""
+    if isinstance(beta, bool) or not isinstance(beta, Real):
+        raise TypeError("beta must be a real scalar")
+    beta = float(beta)
+    if not isfinite(beta):
+        raise ValueError("beta must be finite")
+    if beta > 0.0:
+        return PotentialBounds(SWISH_OUTPUT_MIN / beta, max(0.0, float(input_domain.max)))
+    if beta < 0.0:
+        return PotentialBounds(min(0.0, float(input_domain.min)), SWISH_OUTPUT_MIN / beta)
+    return PotentialBounds(0.5 * input_domain.min, 0.5 * input_domain.max)
+
+
+def clamp_swish_output(
+    value: torch.Tensor, input_domain: PotentialBounds, *, beta: float = 1.0,
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Enforce the Swish interval after either direct or composed evaluation."""
+    output_domain = swish_output_bounds(input_domain, beta=beta)
+    return (
+        clamp_gaussian_output(value, output_domain, site="swish.output", name="swish_output"),
+        output_domain,
+    )
+
+
+def clamp_gelu_square_output(
+    value: torch.Tensor, input_domain: PotentialBounds, *, theta: float,
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Bound the repeated-input product without changing generic multiplication."""
+    theta_value = float(theta)
+    if not isfinite(theta_value) or theta_value <= 0.0:
+        raise ValueError("theta must be finite and positive")
+    # Only the second factor is encoded and clipped to [-theta, theta].
+    magnitude = max(abs(float(input_domain.min)), abs(float(input_domain.max)))
+    output_domain = PotentialBounds(0.0, magnitude * min(magnitude, theta_value))
+    return (
+        clamp_gaussian_output(value, output_domain, site="gelu.square_output", name="gelu_square_output"),
+        output_domain,
+    )
+
+
+def gelu_output_bounds(input_domain: PotentialBounds) -> PotentialBounds:
+    """Use a constant GELU lower endpoint and the nonnegative input upper endpoint.
+
+    The current ViT inputs have positive upper endpoints, which pass through
+    unchanged. Zero is a safe upper endpoint for an entirely negative interval:
+    GELU can approach zero from below and therefore exceed its negative input.
+    No observed activation values or intermediate product bounds are needed.
+    """
+    return PotentialBounds(GELU_OUTPUT_MIN, max(0.0, float(input_domain.max)))
+
+
+def clamp_gelu_output(
+    value: torch.Tensor,
+    input_domain: PotentialBounds,
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Enforce the fixed GELU output interval without sampling another event.
+
+    The clean function minimum alone does not constrain a noisy composition.
+    Count output clipping before enforcing the same interval in both modes.
+    """
+    output_domain = gelu_output_bounds(input_domain)
+    return (
+        clamp_gaussian_output(
+            value,
+            output_domain,
+            site="gelu.output",
+            name="gelu_output",
+        ),
+        output_domain,
     )
 
 
@@ -851,9 +956,9 @@ def gelu_approximation(
 
     For ``a = sqrt(2/pi) * (x + 0.044715 * x^3)``, the identity
     ``0.5 * (1 + tanh(a)) = 1 / (1 + exp(-2a))`` makes the division result the
-    gate directly. Every intermediate carries an analytic interval derived from
-    ``domain``; endpoint clamps remove only payload-dtype roundoff before the next
-    domain check.
+    gate directly. Intermediate operators retain their own interval contracts;
+    the final output uses a constant lower endpoint and the input upper endpoint
+    through ``clamp_gelu_output``, independently of product interval propagation.
 
     Args:
         input_value: Activation tensor contained by ``domain``.
@@ -863,12 +968,13 @@ def gelu_approximation(
         theta: Symmetric identity-code rail used by multiplication.
 
     Returns:
-        The composed GELU approximation and its analytic output domain.
+        The composed GELU approximation clamped to its fixed output domain.
     """
     input_clamped = domain.clamp(input_value, name="gelu_x")
 
     # x^2 and x^3 via f_M
     x2, domain_x2 = multiplication_operator(input_clamped, domain, input_clamped, domain, theta)
+    x2, domain_x2 = clamp_gelu_square_output(x2, domain, theta=theta)
     x3, domain_x3 = multiplication_operator(x2, domain_x2, input_clamped, domain, theta)
 
     # 0.044715 * x^3
@@ -901,8 +1007,8 @@ def gelu_approximation(
     )
 
     # x * gate
-    gelu_approx, gelu_domain = multiplication_operator(input_clamped, domain, gate, gate_domain, theta)
-    return gelu_approx, gelu_domain
+    gelu_approx, _ = multiplication_operator(input_clamped, domain, gate, gate_domain, theta)
+    return clamp_gelu_output(gelu_approx, domain)
 
 
 @check_domain
@@ -929,8 +1035,7 @@ def gelu_approximation_sigmoid(
         theta: Symmetric identity-code rail used by multiplication.
 
     Returns:
-        The sigmoid-form GELU approximation and its interval-arithmetic output
-        domain derived from ``domain`` and the fixed gate interval ``[0, 1]``.
+        The sigmoid-form GELU approximation with the shared fixed output domain.
     """
     # Pre-scale the fixed sigmoid coefficient by tau_s. Exponential decoding
     # divides by the same value, leaving the pretrained gate slope unchanged.
@@ -951,17 +1056,9 @@ def gelu_approximation_sigmoid(
         scale_const * domain.max,
     )
 
-    # Step 2: intersect both the value and declared interval with the established
-    # exponential stability cap. Keeping these two views synchronized prevents the
-    # encoder metadata from claiming a wider range than the tensor it receives.
-    stability_cap = 80.0 * tau_value
-    scaled_input_clamped = scaled_input.clamp(
-        min=-stability_cap,
-        max=stability_cap,
-    )
-    scaled_domain_clamped = PotentialBounds(
-        max(scaled_domain.min, -stability_cap),
-        min(scaled_domain.max, stability_cap),
+    # Step 2: apply the fixed cap without creating an invalid encoding interval.
+    scaled_input_clamped, scaled_domain_clamped = clamp_sigmoid_exponential_input(
+        scaled_input, scaled_domain, tau_s=tau_value, limit=80.0,
     )
 
     # Step 3: construct exp(-1.702v/tau_s). The constant numerator one and the
@@ -991,13 +1088,14 @@ def gelu_approximation_sigmoid(
 
     # Step 5: the final product consumes only the fixed gate domain. Its endpoint
     # arithmetic therefore cannot inherit the division window's exponential growth.
-    return multiplication_operator(
+    result, _ = multiplication_operator(
         domain.clamp(input_value, name="gelu_x"),
         domain,
         gate,
         gate_domain,
         theta=theta,
     )
+    return clamp_gelu_output(result, domain)
 
 
 @check_domain
@@ -1093,17 +1191,11 @@ def _gaussian_swiglu_function(
     gate_scale = beta * tau_value
     scaled_u = gate_scale * u
     scaled_domain_u = PotentialBounds(
-        gate_scale * domain_u.min,
-        gate_scale * domain_u.max,
+        min(gate_scale * domain_u.min, gate_scale * domain_u.max),
+        max(gate_scale * domain_u.min, gate_scale * domain_u.max),
     )
-    stability_cap = 20.0 * tau_value
-    scaled_u_clamped = scaled_u.clamp(
-        min=-stability_cap,
-        max=stability_cap,
-    )
-    scaled_domain_u_clamped = PotentialBounds(
-        max(scaled_domain_u.min, -stability_cap),
-        min(scaled_domain_u.max, stability_cap),
+    scaled_u_clamped, scaled_domain_u_clamped = clamp_sigmoid_exponential_input(
+        scaled_u, scaled_domain_u, tau_s=tau_value, limit=20.0,
     )
 
     # Step 2: Apply phi_NP(beta*u) at the shared encoder boundary. One sampled event
@@ -1190,6 +1282,7 @@ def _gaussian_swiglu_function(
         sigmoid_domain,
         theta=theta,
     )
+    swish_out, swish_domain = clamp_swish_output(swish_out, domain_u, beta=beta)
 
     # Step 5: psi_M(v, swish) completes v*u*sigmoid using a second independently
     # sampled multiplication call while preserving the propagated potential bounds.
@@ -1245,6 +1338,9 @@ def swiglu_function(
     Returns:
         Tuple of (output, output_domain)
     """
+    # Reject invalid gate scaling before any event is sampled.
+    swish_output_bounds(domain_u, beta=beta)
+
     # Keep direct event decoding, miss handling, and nested noisy operators isolated
     # in the private implementation while callers retain this single public surface.
     if get_gaussian_time_noise().enabled:
@@ -1266,16 +1362,14 @@ def swiglu_function(
     gate_scale = beta * tau_value
     scaled_u = gate_scale * u
     scaled_domain_u = PotentialBounds(
-        gate_scale * domain_u.min, gate_scale * domain_u.max
+        min(gate_scale * domain_u.min, gate_scale * domain_u.max),
+        max(gate_scale * domain_u.min, gate_scale * domain_u.max),
     )
 
     # Stability cap is expressed in potential units and scales with tau_s,
     # keeping the final exponential argument inside the same [-20, 20] rail.
-    _STABILITY_CAP = 20.0 * tau_value
-    scaled_u_clamped = scaled_u.clamp(min=-_STABILITY_CAP, max=_STABILITY_CAP)
-    scaled_domain_u_clamped = PotentialBounds(
-        max(scaled_domain_u.min, -_STABILITY_CAP),
-        min(scaled_domain_u.max, _STABILITY_CAP)
+    scaled_u_clamped, scaled_domain_u_clamped = clamp_sigmoid_exponential_input(
+        scaled_u, scaled_domain_u, tau_s=tau_value, limit=20.0,
     )
     
     # Step 2: Encode z = beta*u as t_z = z_max-z, then observe the ordinary decaying
@@ -1331,6 +1425,7 @@ def swiglu_function(
         sigmoid_out, sigmoid_domain,
         theta=theta
     )
+    swish_out, swish_domain = clamp_swish_output(swish_out, domain_u, beta=beta)
     
     # Step 5: Final multiplication: ψ_M(v, swish_out) = v * u * σ(β u)
     final_out, final_domain = multiplication_operator(

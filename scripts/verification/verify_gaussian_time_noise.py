@@ -98,14 +98,14 @@ def verify_immutable_memoized_bounds() -> None:
             raise AssertionError("ClosedBounds endpoints must be immutable")
 
     # Repeated calls with one normalized configuration must return the exact cached
-    # object. A different maximum source length must retain a separate physical rail.
+    # object. Distinct source capacities retain separate configuration cache entries.
     first = attention_output_bounds(2.0, 5)
     repeated = attention_output_bounds(2.0, 5)
     distinct = attention_output_bounds(2.0, 6)
     assert repeated is first
     assert distinct is not first
-    assert first == PotentialBounds(-10.0, 10.0)
-    assert distinct == PotentialBounds(-12.0, 12.0)
+    assert first == PotentialBounds(-2.0, 2.0)
+    assert distinct == PotentialBounds(-2.0, 2.0)
 
     # Gaussian seed selects only the sampled physical event stream. Run the same
     # multiplication under two replicas with enough events to make an identical
@@ -2039,7 +2039,7 @@ def verify_gaussian_sigmoid_gelu_function() -> None:
     gate saturation, and finite rail-clamped output.
 
     Raises:
-        AssertionError: If analytic parity, fixed gate-derived output bounds,
+        AssertionError: If analytic parity, fixed GELU output bounds,
             nested event topology, saturation accounting, or clamping regresses.
     """
     value = torch.tensor(
@@ -2049,22 +2049,11 @@ def verify_gaussian_sigmoid_gelu_function() -> None:
     domain = PotentialBounds(-2.0, 2.0)
     expected = value * torch.sigmoid(1.702 * value)
 
-    # Multiplying the declared signed input by a gate in [0,1] yields [-2,2].
-    # This expected domain is reconstructed independently of the production
-    # division metadata and therefore detects any reintroduced generic gate rail.
-    gate_domain = PotentialBounds(0.0, 1.0)
-    product_candidates = (
-        domain.min * gate_domain.min,
-        domain.min * gate_domain.max,
-        domain.max * gate_domain.min,
-        domain.max * gate_domain.max,
-    )
-    expected_domain = PotentialBounds(
-        min(product_candidates),
-        max(product_candidates),
-    )
+    # The output uses the fixed GELU lower endpoint and the declared input maximum,
+    # independently of the broader interval of the internal multiplication.
+    expected_domain = PotentialBounds(-0.170041, domain.max)
 
-    # Establish the deterministic composed reference and its structural gate-derived
+    # Establish the deterministic composed reference and its fixed GELU
     # output interval before any process-wide Gaussian state is enabled.
     set_gaussian_time_noise(enabled=False)
     try:
@@ -2143,7 +2132,7 @@ def verify_gaussian_sigmoid_gelu_function() -> None:
         assert structural_saturations > 0
 
         # The final multiplication consumes the fixed gate and returns a finite value
-        # inside the independently reconstructed product interval.
+        # inside the independently specified GELU interval.
         assert torch.isfinite(shifted).all()
         assert bool(
             (
@@ -3286,38 +3275,14 @@ def verify_gaussian_spiking_layernorm() -> None:
                             else weight
                         )
 
-                    # The spiking final multiplication propagates one global gamma
-                    # interval, whereas dense and direct branches apply gamma and
-                    # beta featurewise. Mirror those distinct mathematical contracts
-                    # without reading any production cache or activation extrema.
-                    if use_spiking_expdiff and not all_dense:
-                        product_candidates = (
-                            -result_limit * effective_weight.min().item(),
-                            -result_limit * effective_weight.max().item(),
-                            result_limit * effective_weight.min().item(),
-                            result_limit * effective_weight.max().item(),
-                        )
-                        expected_output_domain = PotentialBounds(
-                            min(product_candidates) + bias.min().item(),
-                            max(product_candidates) + bias.max().item(),
-                        )
-                    else:
-                        lower_candidate = (
-                            effective_weight * -result_limit + bias
-                        )
-                        upper_candidate = (
-                            effective_weight * result_limit + bias
-                        )
-                        expected_output_domain = PotentialBounds(
-                            torch.minimum(
-                                lower_candidate,
-                                upper_candidate,
-                            ).min().item(),
-                            torch.maximum(
-                                lower_candidate,
-                                upper_candidate,
-                            ).max().item(),
-                        )
+                    # Match each feature's scale and bias before reducing endpoints;
+                    # final output clamping enforces this interval in every branch.
+                    lower_candidate = effective_weight * -result_limit + bias
+                    upper_candidate = effective_weight * result_limit + bias
+                    expected_output_domain = PotentialBounds(
+                        torch.minimum(lower_candidate, upper_candidate).min().item(),
+                        torch.maximum(lower_candidate, upper_candidate).max().item(),
+                    )
 
                     # First freeze publishes one tuple containing all three immutable
                     # domains. A second lookup must return that exact tuple rather
@@ -3446,7 +3411,7 @@ def verify_gaussian_spiking_attention() -> None:
         theta=2.0,
         source_length_max=source_length_max,
     )
-    assert output_domain == PotentialBounds(-10.0, 10.0)
+    assert output_domain == PotentialBounds(-2.0, 2.0)
 
     # With all tensors inside the symmetric rail and scores below the softmin cap,
     # the composed operator must equal ordinary scaled dot-product attention.

@@ -203,29 +203,16 @@ class SpikingLayerNorm(nn.Module):
         if not math.isfinite(result_limit) or result_limit < 0.0:
             raise ValueError("SpikingLayerNorm normalized bound must be finite")
 
-        # Dense and direct branches apply gamma featurewise. The spiking final
-        # multiplication propagates one global gamma interval; pre-affine Gaussian
-        # excursions are already saturated at the finite-feature normalization rail.
-        if self.use_spiking_expdiff and not all_dense:
-            effective_min = effective_weight.min().item()
-            effective_max = effective_weight.max().item()
-            product_candidates = (
-                -result_limit * effective_min,
-                -result_limit * effective_max,
-                result_limit * effective_min,
-                result_limit * effective_max,
-            )
-            output_domain = PotentialBounds(
-                min(product_candidates) + bias_domain.min,
-                max(product_candidates) + bias_domain.max,
-            )
-        else:
-            lower_candidate = effective_weight * -result_limit + bias
-            upper_candidate = effective_weight * result_limit + bias
-            output_domain = PotentialBounds(
-                torch.minimum(lower_candidate, upper_candidate).min().item(),
-                torch.maximum(lower_candidate, upper_candidate).max().item(),
-            )
+        # Each learned scale has its own matching bias, including when the final
+        # multiplication consumes one global weight interval. Preserve those pairs
+        # before taking the global output endpoints. The final output clamp below
+        # enforces the same frozen interval when timing noise changes the product.
+        lower_candidate = effective_weight * -result_limit + bias
+        upper_candidate = effective_weight * result_limit + bias
+        output_domain = PotentialBounds(
+            torch.minimum(lower_candidate, upper_candidate).min().item(),
+            torch.maximum(lower_candidate, upper_candidate).max().item(),
+        )
         if not math.isfinite(float(output_domain.min)) or not math.isfinite(
             float(output_domain.max)
         ):
@@ -309,8 +296,9 @@ class SpikingLayerNorm(nn.Module):
                 self.eps,
             )
 
-            # Even though this branch has no sampled temporal stage, it shares the
-            # same frozen metadata lifecycle as every other ablation combination.
+            # Preserve the event-free dense bypass; this only clips numerical
+            # roundoff beyond the analytic interval and creates no Gaussian site.
+            out = output_domain.clamp(out, name="layernorm_affine")
             return Potential(out, output_domain)
 
         eps = self.eps
@@ -550,8 +538,15 @@ class SpikingLayerNorm(nn.Module):
             )
             out = self.weight * result + self.bias
 
-        # Every Gaussian ablation combination now returns the same immutable object
-        # until parameters or bound-defining configuration are explicitly refreshed.
+        # The shared multiplication can be wider than the final interval calculated
+        # from matching scales and biases. Enforce that final interval without
+        # changing the sampled events or their random stream.
+        out = clamp_gaussian_output(
+            out,
+            output_domain,
+            site="layernorm.affine_output",
+            name="layernorm_affine",
+        )
         return Potential(out, output_domain)
     
     def forward(self, pot: Potential) -> Potential:
@@ -587,8 +582,8 @@ class SpikingLayerNorm(nn.Module):
         if not self.use_spiking_mul and not self.use_spiking_log and not self.use_spiking_expdiff:
             out = nn.functional.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
 
-            # The dense value remains PyTorch-exact, while its finite-feature affine
-            # envelope comes from the precomputed contract shared with Gaussian mode.
+            # Match the dense Gaussian bypass without adding an event or a site.
+            out = output_domain.clamp(out, name="layernorm_affine")
             return Potential(out, output_domain)
 
         eps = self.eps
@@ -745,8 +740,14 @@ class SpikingLayerNorm(nn.Module):
             # scalar endpoint propagation and learned affine reduction were already
             # completed once by ``freeze_parameter_bounds``.
 
-        # Noise configuration now changes only value-generation semantics; both
-        # execution modes attach the exact same frozen metadata object.
+        # Deterministic execution uses the identical final output interval. This
+        # clamp does not create Gaussian statistics while timing noise is disabled.
+        out = clamp_gaussian_output(
+            out,
+            output_domain,
+            site="layernorm.affine_output",
+            name="layernorm_affine",
+        )
         return Potential(out, output_domain)
 
 

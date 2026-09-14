@@ -572,3 +572,55 @@ Migration 완료는 numerical output뿐 아니라 declared potential range의 �
 재검토 결과 maintained inference 구현은 fixed potential range contract의 핵심 조건인 live activation extrema 비의존성과 noise-independent declared bounds를 만족한다.
 
 Transform algebra, time window, attention, LayerNorm, affine, embedding, activation, residual의 maintained forward range는 모두 static하며 ViT와 GPT-2 artifact lifecycle, AST source audit, batch partition 및 Gaussian seed 불변성 검증이 연결되었다. 구현상 남은 calibration blocker는 없고 ViT-S, BERT, RoBERTa, GPT-2의 실제 checkpoint 및 held-out audit도 완료되었다. 남은 publication caveat와 handoff 상태는 [[todo#2026-08-31 Session Handoff]]에 기록한다.
+
+## 2026-09-14 Output Bound Audit
+
+일괄 수정 승인 전 GELU 작업 트리의 함수별 고정 출력 범위와 범위 축소 적용을 재검토한 기록이다. 아래 판단은 역사적 감사이며 후속 적용 상태는 [[bounds-audit#2026-09-14 Bound Corrections]]가 대체한다.
+
+자세한 함수군 목록, CPU counterexample과 우선순위는 [검산 노트](../paper/neurips_2026/reviewer_technical_verification_notes_ko.md#2026-09-14-함수별-고정-출력-범위와-범위-축소-적용-전수-감사)에 기록했다. 이 절은 앞의 역사적 감사에서 남아 있는 과거형 구현 설명과 구분한다.
+
+- GELU는 [[calibration#Layer-wise Calibration#Frozen Execution#Fixed GELU Output Bounds]]로 수정됐고, division/softmin/gate/tanh/LayerNorm의 고정 출력 제한도 적용돼 있다.
+- ViT/GPT-2 직접 Swish 분기와 SwiGLU 내부 Swish는 고정 하한을 활용하지 않는다. 현재 ViT GELU 실험에서는 사용하지 않으므로 추가 실험을 요구하지 않는다.
+- [[utils/transformers/integrations/spiking_sdpa_attention.py#attention_output_bounds]]는 clean normalized weighted sum보다 넓은 공통 구간을 쓴다. Noisy weight 합은 1을 벗어나므로 더 좁은 bound로 바꾸려면 출력 clamp 정책을 함께 결정해야 한다.
+- 지수 입력 cap이 한쪽 범위를 포화시키는 경우 metadata 교집합 때문에 endpoint가 역전되거나 길이 0인 encoding interval로 실패하는 경계 버그를 재현했다. 현재 대칭 ViT 조건에서는 발생하지 않는다.
+- Square와 LayerNorm learned affine의 추가 범위 축소는 현재 실험의 필수 변경으로 채택하지 않았다. 조사는 소스 수정·실험 재시작·추가 sweep을 승인하거나 수행하지 않는다.
+
+## 2026-09-14 Bound Corrections
+
+사용자의 일괄 수정 승인에 따라 고정 출력 제한과 범위 축소 누락을 수정했다. 값도 같은 범위로 제한하며, 노이즈로 생긴 초과를 수학적 clean 범위 안에 있다고 가정하지 않는다.
+
+출력 제한만 추가하며 weight 재정규화나 새로운 timing event는 추가하지 않는다. ViT/GPT-2 calibration metadata의 `output_bounds_version=2`가 이 정책을 식별한다. 이전 표는 거부하고 새 평가에는 다시 collection한다. 기존 고정 소스 실험과 그 결과는 변경하거나 혼합하지 않는다.
+
+### Attention Output Bounds
+
+Attention은 source capacity와 무관하게 encoded value의 고정 범위를 출력에 적용한다. Clean weighted sum과 noisy 출력 모두 같은 범위로 제한하고 기존 출력 통계에 초과를 기록한다.
+
+[[utils/transformers/integrations/spiking_sdpa_attention.py#attention_output_bounds]]는 `[-theta, theta]`를 반환한다. Capacity 검증과 immutable cache는 유지하지만 capacity를 bound에 곱하지 않는다. Noisy weight의 합을 다시 1로 맞추지 않으며 value/reference event도 변경하지 않는다. `attention.value_output`은 최종 clamp 전 count를 보존한다.
+
+검증은 clean reference, 서로 다른 capacity, mask, noisy 초과 count, 동일 seed의 이벤트와 난수 상태 보존을 확인한다. 학습 dropout은 평균의 범위 보존을 보장하지 않으므로 최종 clamp 대상이며, 유지하는 평가에서는 dropout을 끈다.
+
+### LayerNorm Affine Bounds
+
+LayerNorm은 각 feature의 learned scale과 bias를 짝지어 양 끝 출력을 계산한 뒤 전체 최소·최대를 취한다. 별도로 구한 scale 구간과 bias 구간을 결합하지 않는다.
+
+[[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#freeze_parameter_bounds]]는 기존 normalized bound와 spiking branch의 theta 제한 scale을 유지한다. 최종 출력은 그 paired interval에 clamp하며 mixed/spiking 경로는 `layernorm.affine_output`에 초과를 기록한다. Fully dense 경로는 timing event나 Gaussian 통계를 만들지 않는다.
+
+검증은 8개 ablation 조합, float32/float64, signed scale, nonzero bias, cache refresh, 노이즈를 끈 결과와 표준편차 0인 결과의 일치 및 강제 초과 count를 확인한다. 이벤트와 난수 추출 횟수는 변경하지 않는다.
+
+### Swish Output Bounds
+
+SiLU/Swish의 직접 분기와 SwiGLU 내부 Swish는 함수의 고정 한쪽 endpoint를 사용한다. SwiGLU의 마지막 독립 입력 곱에는 상수 하한을 잘못 적용하지 않는다.
+
+[[utils/transforms/functions.py#swish_output_bounds]]는 beta=1에서 `[-0.278465, max(0, input_domain.max)]`를 반환한다. Positive beta는 하한을 beta로 나누며 negative beta는 입력 하한과 반사된 상한을 사용한다. Beta=0은 정확한 입력 구간의 절반이다. [[utils/transforms/functions.py#clamp_swish_output]]은 `swish.output`에 초과 count를 기록한 뒤 값을 제한한다.
+
+지수 입력 cap 때문에 큰 음수 입력의 합성 Swish가 이상적인 함수 하한을 벗어날 수 있으므로 metadata만 줄이지 않는다. 최종 SwiGLU는 제한된 중간 Swish와 독립 입력의 곱 범위를 계속 전파한다. 검증은 beta 부호와 0, 직접 ViT/GPT-2 분기, clipping과 난수 상태 보존, 구버전 calibration 표 거부를 포함한다.
+
+### Activation Intermediate Bounds
+
+GELU square는 같은 입력을 두 번 곱한다는 관계를 반영하고, 지수 입력 cap은 두 endpoint를 각각 제한한다. 한 점으로 줄어든 입력에도 양의 길이인 고정 인코딩 구간을 유지한다.
+
+[[utils/transforms/functions.py#clamp_gelu_square_output]]은 두 번째 인자만 theta에 제한되는 곱셈을 고려해 비음수 출력 구간을 만든다. 입력 절댓값의 최대치를 `magnitude`라 하면 상한은 `magnitude * min(magnitude, theta)`다. `gelu.square_output`에 초과를 기록하며 일반 signed 곱셈은 변경하지 않는다. GELU operator ablation에도 같은 규칙을 적용한다.
+
+[[utils/transforms/functions.py#clamp_sigmoid_exponential_input]]은 tensor와 domain endpoint에 동일 cap을 적용한다. 구간 길이가 payload dtype 정밀도로 구별되지 않거나 `1 + exp(...)`가 1로 반올림되면 기존 full cap interval을 인코딩에 사용한다. 이는 live activation 통계나 임의 epsilon에서 구한 bound가 아니며, event를 생략하지 않는다. 일반적인 비퇴화 구간은 기존 범위를 유지한다.
+
+검증은 cap 밖 양·음 구간, singleton, float32/float64 분모 반올림, negative/zero beta, 반복 입력의 square, noisy 초과 count와 노이즈를 끈 결과의 재현을 확인한다. 이 제한은 원래 수학적 함수에 새로운 정확도 보장을 추가하지 않는다.

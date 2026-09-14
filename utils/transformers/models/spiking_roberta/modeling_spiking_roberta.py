@@ -43,7 +43,7 @@ from transformers.utils.generic import can_return_tuple, merge_with_config_defau
 from transformers.utils.output_capturing import capture_outputs
 from .configuration_roberta import RobertaConfig
 
-from utils.transforms.functions import gelu_approximation, tanh
+from utils.transforms.functions import clamp_gelu_output, gelu_approximation, tanh
 from utils.transforms.types import Potential, PotentialBounds
 from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear, _apply_norm
@@ -545,8 +545,8 @@ class RobertaIntermediate(nn.Module):
     def forward(self, pot: Potential) -> Potential:
         """Apply the RoBERTa feed-forward activation on a fixed affine range.
 
-        Operator GELU propagates its composed interval. Dense GELU lies between its
-        input and zero, while ReLU maps affine endpoints monotonically. The dense
+        Direct and composed GELU use the same fixed lower bound and input maximum.
+        ReLU maps affine endpoints monotonically. The dense
         ablation retains functional PyTorch arithmetic and never measures its output
         to define a physical range.
 
@@ -587,10 +587,7 @@ class RobertaIntermediate(nn.Module):
         projected_domain = self.dense.freeze_parameter_bounds(pot.domain)
         out = self.intermediate_act_fn(projected)
         if isinstance(self.intermediate_act_fn, GELUActivation):
-            output_domain = PotentialBounds(
-                min(float(projected_domain.min), 0.0),
-                max(float(projected_domain.max), 0.0),
-            )
+            return Potential(*clamp_gelu_output(out, projected_domain))
         elif isinstance(self.intermediate_act_fn, nn.ReLU):
             output_domain = PotentialBounds(
                 max(0.0, float(projected_domain.min)),
@@ -940,8 +937,7 @@ class RobertaLMHead(nn.Module):
         else:
             raise TypeError("features must be Potential or torch.Tensor")
 
-        # Dense ablation retains functional linear and GELU values, while range
-        # metadata comes from fixed affine endpoints and the [0,1] GELU gate.
+        # Dense and spiking GELU use the same fixed output range.
         if self.use_spiking_mlp:
             pot_z = self.dense(pot)
             pot_act = Potential(*gelu_approximation(*pot_z))
@@ -953,13 +949,7 @@ class RobertaLMHead(nn.Module):
             )
             dense_domain = self.dense.freeze_parameter_bounds(pot.domain)
             x = nn.functional.gelu(x)
-            pot_act = Potential(
-                x,
-                PotentialBounds(
-                    min(float(dense_domain.min), 0.0),
-                    max(float(dense_domain.max), 0.0),
-                ),
-            )
+            pot_act = Potential(*clamp_gelu_output(x, dense_domain))
 
         # LayerNorm eliminates the potentially broad GELU envelope through its fixed
         # normalized range. The final decoder is dense and does not emit spike metadata.

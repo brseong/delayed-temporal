@@ -40,7 +40,11 @@ from transformers.models.vit.configuration_vit import ViTConfig
 
 from torch.profiler import profile, record_function, ProfilerActivity
 
-from utils.transforms.functions import gelu_approximation
+from utils.transforms.functions import (
+    clamp_gelu_output,
+    clamp_swish_output,
+    gelu_approximation,
+)
 from utils.transforms.types import Potential, PotentialBounds
 from utils.transformers.calibration import (
     calibrated_potential,
@@ -431,9 +435,9 @@ class ViTIntermediate(nn.Module):
 
         An explicitly bound operator-composed GELU observes the raw affine output
         during collection and consumes its frozen layer-wise range during validation
-        or inference. Direct tanh-GELU, standard GELU, ReLU, SiLU, and Tanh retain
-        conservative envelopes derived only from their fixed affine ranges, so no
-        activation constructs metadata from the current tensor.
+        or inference. Direct and composed GELU outputs use the shared constant lower
+        bound and the fixed input maximum. ReLU, SiLU, and Tanh keep their respective
+        fixed range rules, without constructing metadata from the current tensor.
 
         Args:
             pot: Normalized block activation on a fixed zero-containing range.
@@ -468,21 +472,11 @@ class ViTIntermediate(nn.Module):
                 x = pot_z.value
                 sqrt_2_over_pi = 0.7978845608028654
                 out = 0.5 * x * (1.0 + torch.tanh(sqrt_2_over_pi * (x + 0.044715 * x ** 3)))
-                # The tanh gate lies in [0, 1]. Negative inputs therefore remain
-                # between x and zero, while positive inputs remain between zero and x.
-                return Potential(
-                    out,
-                    PotentialBounds(
-                        min(float(pot_z.domain.min), 0.0),
-                        max(float(pot_z.domain.max), 0.0),
-                    ),
-                )
+                return Potential(*clamp_gelu_output(out, pot_z.domain))
             else:
                 return Potential(*gelu_approximation(*pot_z, theta=self._theta))
 
-        # Dense ReLU and Tanh have standard monotone endpoint mappings. GELU-family
-        # and SiLU-family activations multiply x by a gate in [0, 1], giving the same
-        # conservative sign-preserving envelope used by the direct tanh-GELU branch.
+        # GELU and SiLU use their fixed lower bounds and input upper endpoints.
         out = self.intermediate_act_fn(pot_z.value)
         if self._hidden_act_name == "relu":
             output_domain = PotentialBounds(
@@ -494,13 +488,10 @@ class ViTIntermediate(nn.Module):
             "gelu_fast",
             "gelu_new",
             "gelu_pytorch_tanh",
-            "silu",
-            "swish",
         }:
-            output_domain = PotentialBounds(
-                min(float(pot_z.domain.min), 0.0),
-                max(float(pot_z.domain.max), 0.0),
-            )
+            return Potential(*clamp_gelu_output(out, pot_z.domain))
+        elif self._hidden_act_name in {"silu", "swish"}:
+            return Potential(*clamp_swish_output(out, pot_z.domain))
         elif self._hidden_act_name == "tanh":
             output_domain = PotentialBounds(
                 math.tanh(float(pot_z.domain.min)),

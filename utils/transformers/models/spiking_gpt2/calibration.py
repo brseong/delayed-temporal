@@ -16,6 +16,7 @@ from utils.transforms.calibration import (
     finalize_calibration_collection,
     start_histogram_calibration_pass,
 )
+from utils.transforms.functions import GELU_OUTPUT_MIN, OUTPUT_BOUNDS_VERSION
 from utils.transforms.noise import get_gaussian_time_noise
 from utils.transformers.calibration import (
     bind_model_calibration,
@@ -274,6 +275,8 @@ def build_gpt2_calibration_metadata(
                     resolve_gpt2_attention_theta(config),
                 ),
                 ("attention_implementation", attention_implementation),
+                ("gelu_output_min", GELU_OUTPUT_MIN),
+                ("output_bounds_version", OUTPUT_BOUNDS_VERSION),
                 ("attn_pdrop", float(getattr(config, "attn_pdrop", 0.0))),
                 ("embd_pdrop", float(getattr(config, "embd_pdrop", 0.0))),
                 ("resid_pdrop", float(getattr(config, "resid_pdrop", 0.0))),
