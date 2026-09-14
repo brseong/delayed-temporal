@@ -46,6 +46,7 @@ class GaussianTimeNoiseConfig:
     enabled: bool = False  # Select the event-aware Gaussian path at encoder boundaries.
     time_std: float = 0.0  # Absolute standard deviation applied to every encoded time.
     time_mean: float = 0.0  # Absolute additive bias applied before deadline classification.
+    deadline_margin: float = 0.0  # Absolute late-arrival grace before declaring a miss.
     seed: int = 0  # Replica seed used once when constructing the dedicated generator.
     generator: torch.Generator | None = None  # Stateful RNG owned by this configuration.
 
@@ -53,13 +54,16 @@ class GaussianTimeNoiseConfig:
 class GaussianNoiseCounts(TypedDict):
     """Statically known schema for one site's mutable Gaussian measurements.
 
-    The set of metric names is fixed for type checking, while each integer remains
-    mutable so repeated encoder and readout observations can accumulate in place.
-    Event and output totals are intentionally separate statistical denominators.
+    The set of metric names is fixed for type checking while repeated encoder and
+    readout observations accumulate in place. Event and output totals are separate
+    statistical denominators; deadline diagnostics retain scalar timing metadata.
     """
 
     events: int  # Number of sampled spike events at this site.
     misses: int  # Number of sampled events arriving after the fixed deadline.
+    deadline_events: int  # Nominal codewords exactly at the inclusive deadline.
+    deadline_ulp_min: float  # Smallest deadline ULP observed for this site.
+    deadline_ulp_max: float  # Largest deadline ULP observed for this site.
     outputs: int  # Number of analog readout values observed before rail clamping.
     output_underflows: int  # Readouts strictly below the declared output minimum.
     output_overflows: int  # Readouts strictly above the declared output maximum.
@@ -142,6 +146,9 @@ def _stats_for(site: str) -> GaussianNoiseCounts:
     counts = {
         "events": 0,
         "misses": 0,
+        "deadline_events": 0,
+        "deadline_ulp_min": math.inf,
+        "deadline_ulp_max": 0.0,
         "outputs": 0,
         "output_underflows": 0,
         "output_overflows": 0,
@@ -209,6 +216,7 @@ def set_gaussian_time_noise(
     enabled: bool,
     time_std: float = 0.0,
     time_mean: float = 0.0,
+    deadline_margin: float = 0.0,
     seed: int = 0,
     device: torch.device | str = "cpu",
 ) -> None:
@@ -223,6 +231,9 @@ def set_gaussian_time_noise(
         enabled: Whether event-aware encoders apply direct Gaussian timing noise.
         time_std: Non-negative standard deviation in absolute time units.
         time_mean: Additive Gaussian mean in absolute time units.
+        deadline_margin: Non-negative absolute late-arrival grace. Events inside
+            the grace interval are delivered at the upper code rail so existing
+            decoder bounds and clean arithmetic remain unchanged.
         seed: Integer seed used once to initialize the replica generator.
         device: Device on which the encoder's spike-time samples will be drawn.
 
@@ -244,10 +255,16 @@ def set_gaussian_time_noise(
     # creating random state or disturbing the currently installed configuration.
     normalized_std = float(time_std)
     normalized_mean = float(time_mean)
-    if not math.isfinite(normalized_std) or not math.isfinite(normalized_mean):
+    normalized_margin = float(deadline_margin)
+    if not all(
+        math.isfinite(value)
+        for value in (normalized_std, normalized_mean, normalized_margin)
+    ):
         raise ValueError("Gaussian time-noise parameters must be finite")
     if normalized_std < 0.0:
         raise ValueError("time_std must be non-negative")
+    if normalized_margin < 0.0:
+        raise ValueError("deadline_margin must be non-negative")
 
     # A disabled configuration owns no generator. An enabled replica gets exactly
     # one device-matched stream seeded here and advanced later by encoder sampling.
@@ -262,6 +279,7 @@ def set_gaussian_time_noise(
         enabled=enabled,
         time_std=normalized_std,
         time_mean=normalized_mean,
+        deadline_margin=normalized_margin,
         seed=seed,
         generator=generator,
     )
@@ -378,6 +396,7 @@ def gaussian_deadline_miss_probability(
     time_std: Tensor | float,
     domain: TimeBounds,
     time_mean: Tensor | float = 0.0,
+    deadline_margin: float = 0.0,
 ) -> Tensor:
     """Return the analytic probability that a Gaussian event misses its deadline.
 
@@ -404,9 +423,14 @@ def gaussian_deadline_miss_probability(
         domain=domain,
     )
 
-    # Tensorize the fixed deadline beside the inputs to avoid CPU scalar promotion
-    # and to preserve the nominal tensor's floating dtype on accelerators.
-    deadline = nominal.new_tensor(float(domain.max))
+    normalized_margin = float(deadline_margin)
+    if not math.isfinite(normalized_margin) or normalized_margin < 0.0:
+        raise ValueError("deadline_margin must be finite and non-negative")
+
+    # The receiver may accept events for a fixed grace interval after the nominal
+    # code endpoint. This changes delivery classification without widening the code
+    # rail exposed to downstream operators.
+    deadline = nominal.new_tensor(float(domain.max) + normalized_margin)
 
     # The closed-form Gaussian tail divides by sigma. Substitute one only for the
     # unused zero-sigma elements so the vectorized expression remains finite.
@@ -431,6 +455,7 @@ def _sample_gaussian_spike_time(
     domain: TimeBounds,
     generator: torch.Generator,
     time_mean: Tensor | float = 0.0,
+    deadline_margin: float = 0.0,
 ) -> SpikeSample:
     """Sample one Gaussian timing error and classify event delivery.
 
@@ -483,19 +508,27 @@ def _sample_gaussian_spike_time(
             generator=generator,
         )
 
-    # The upper endpoint is inclusive: arrival exactly at the observation deadline
-    # is a delivered event, while any later raw timestamp is a deadline miss.
+    normalized_margin = float(deadline_margin)
+    if not math.isfinite(normalized_margin) or normalized_margin < 0.0:
+        raise ValueError("deadline_margin must be finite and non-negative")
+
+    # The upper endpoint is inclusive. A positive grace interval accepts a late
+    # arrival before the receiver deadline, but its stored carrier still saturates
+    # at the nominal code rail to preserve downstream bounds and clean arithmetic.
     start = nominal.new_tensor(float(domain.min))
-    deadline = nominal.new_tensor(float(domain.max))
-    fired = raw_time <= deadline
+    code_deadline = nominal.new_tensor(float(domain.max))
+    receiver_deadline = nominal.new_tensor(
+        float(domain.max) + normalized_margin
+    )
+    fired = raw_time <= receiver_deadline
 
     # Events earlier than the modeled interval are observable from its start. Do
     # not upper-clamp here because late samples must first remain identifiable misses.
-    delivered_time = torch.clamp(raw_time, min=start)
+    delivered_time = torch.clamp(raw_time, min=start, max=code_deadline)
 
     # Replace every missed raw timestamp with a finite deadline carrier. Consumers
     # must use fired—not the stored value—to distinguish misses from on-time arrivals.
-    stored_time = torch.where(fired, delivered_time, deadline)
+    stored_time = torch.where(fired, delivered_time, code_deadline)
     return SpikeSample(time=stored_time, domain=domain, fired=fired)
 # ---------------------------------------------------------------------------
 # Gaussian encoder injection boundary
@@ -575,6 +608,7 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
             domain=out_domain,
             generator=gaussian_cfg.generator,
             time_mean=gaussian_cfg.time_mean,
+            deadline_margin=gaussian_cfg.deadline_margin,
         )
 
         # Attribute exactly the sampled events consumed by downstream readout. Event
@@ -583,7 +617,29 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
         site = kwargs.get("noise_site", func.__name__)
         counts = _stats_for(site)
         counts["events"] += sample.time.numel()
-        counts["misses"] += int((~sample.fired).sum().item())
+        deadline = nominal_time.new_tensor(float(out_domain.max))
+        miss_and_endpoint_counts = torch.stack(
+            ((~sample.fired).sum(), (nominal_time == deadline).sum())
+        ).to(device="cpu")
+        counts["misses"] += int(miss_and_endpoint_counts[0].item())
+        counts["deadline_events"] += int(miss_and_endpoint_counts[1].item())
+        cpu_deadline = torch.tensor(
+            float(out_domain.max),
+            dtype=nominal_time.dtype,
+            device="cpu",
+        )
+        deadline_ulp = float(
+            (
+                torch.nextafter(cpu_deadline, cpu_deadline.new_tensor(math.inf))
+                - cpu_deadline
+            ).item()
+        )
+        counts["deadline_ulp_min"] = min(
+            counts["deadline_ulp_min"], deadline_ulp
+        )
+        counts["deadline_ulp_max"] = max(
+            counts["deadline_ulp_max"], deadline_ulp
+        )
         return sample
 
     return wrapper
@@ -599,26 +655,37 @@ def _mismatch_pre_hook(module, args):
     return (Potential(pot.value + module._mismatch_offset, pot.domain),) + tuple(args[1:])
 
 
-def install_device_mismatch(model, theta_std: float, enabled: bool = True):
+def install_device_mismatch(
+    model,
+    theta_std: float,
+    enabled: bool = True,
+    *,
+    seed: int = 0,
+):
     """Attach static device mismatch to every spiking encoder module via forward pre-hooks.
 
     θ_i = θ·(1+N(0,σ_θ)) is realised as a fixed potential shift −δ_i per encoding neuron, so the
     interval-arithmetic / domain-clamp machinery keeps a scalar θ (per-neuron *saturation* is
-    intentionally not modelled). Offsets are sampled once (reproducible via the caller's torch
-    seed) and frozen as non-persistent buffers — not resampled per forward, and excluded from
-    `state_dict`. Call after the model is built, weights loaded, and moved to its device.
+    intentionally not modelled). Offsets are sampled once from a dedicated generator seeded by
+    ``seed`` and frozen as non-persistent buffers — not resampled per forward, excluded from
+    ``state_dict``, and independent of the caller's global RNG stream. Call after the model is
+    built, weights loaded, and moved to its device.
 
     Returns the list of hook handles (for optional removal); empty when disabled.
     """
     if not enabled or theta_std <= 0.0:
         return []
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise TypeError("mismatch seed must be an integer")
+    if seed < 0:
+        raise ValueError("mismatch seed must be non-negative")
 
     # Lazy import to avoid a package import cycle (spiking_ops imports utils.transforms).
     from utils.transformers.models.spiking_ops import (
         SpikingLayerNorm, SpikingLinear, SpikingConv2d,
     )
 
-    handles = []
+    targets = []
     for _, m in model.named_modules():
         if isinstance(m, SpikingLayerNorm):
             shape = tuple(m.normalized_shape)          # broadcasts over the trailing feature dim
@@ -629,8 +696,27 @@ def install_device_mismatch(model, theta_std: float, enabled: bool = True):
         else:
             continue
 
+        targets.append((m, shape))
+
+    if not targets:
+        return []
+
+    devices = {m.weight.device for m, _ in targets}
+    if len(devices) != 1:
+        raise ValueError("static mismatch requires all target modules on one device")
+    generator = torch.Generator(device=next(iter(devices)))
+    generator.manual_seed(seed)
+
+    handles = []
+    for m, shape in targets:
+
         w = m.weight
-        offset = torch.randn(*shape, device=w.device, dtype=w.dtype) * (float(m.theta) * float(theta_std))
+        offset = torch.randn(
+            *shape,
+            device=w.device,
+            dtype=w.dtype,
+            generator=generator,
+        ) * (float(m.theta) * float(theta_std))
         m.register_buffer("_mismatch_offset", offset, persistent=False)
         handles.append(m.register_forward_pre_hook(_mismatch_pre_hook))
 

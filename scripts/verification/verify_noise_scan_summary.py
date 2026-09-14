@@ -25,9 +25,9 @@ from scripts.analysis.summarize_noise_scan import (
 def verify_noise_scan_summary() -> None:
     """Verify manifest validation, pooled counts, Student-t CI, and rendering.
 
-    A synthetic five-run scan avoids datasets and GPUs while exercising the same
+    A synthetic seven-run scan avoids datasets and GPUs while exercising the same
     log syntax emitted by the ViT evaluator. The fixture contains one baseline,
-    three Gaussian seeds, and one static mismatch point.
+    three Gaussian seeds, and three static-mismatch seeds.
 
     Raises:
         AssertionError: If parsing, aggregation, output creation, or incomplete-log
@@ -59,13 +59,16 @@ def verify_noise_scan_summary() -> None:
                 }
                 for seed in (0, 1, 2)
             ],
-            {
-                "axis": "mismatch",
-                "magnitude": "1e-5",
-                "seed": "",
-                "experiment_name": "test-mismatch",
-                "log_file": "mismatch.log",
-            },
+            *[
+                {
+                    "axis": "mismatch",
+                    "magnitude": "1e-5",
+                    "seed": str(seed),
+                    "experiment_name": f"test-mismatch-{seed}",
+                    "log_file": f"mismatch_{seed}.log",
+                }
+                for seed in (0, 1, 2)
+            ],
         ]
         with manifest.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(
@@ -78,31 +81,43 @@ def verify_noise_scan_summary() -> None:
             writer.writeheader()
             writer.writerows(manifest_rows)
 
-        # Baseline and mismatch logs expose accuracy plus a finalized W&B URL but no
-        # Gaussian counters, matching their intentionally deterministic interfaces.
+        metadata = (
+            "Evaluation metadata — model: /models/vit-base, dataset: imagenet-1k, "
+            "split: validation, samples: 5000, theta: 2000.0, precision: float32\n"
+        )
         (log_dir / "noise_off_baseline.log").write_text(
-            "wandb: 🚀 View run baseline at: "
+            metadata + "wandb: 🚀 View run baseline at: "
             "https://wandb.ai/CIDA/project/runs/baseline\n"
             "Accuracy: 0.82\n",
             encoding="utf-8",
         )
-        (log_dir / "mismatch.log").write_text(
-            "wandb: 🚀 View run mismatch at: "
-            "https://wandb.ai/CIDA/project/runs/mismatch\n"
-            "Accuracy: 0.70\n",
-            encoding="utf-8",
-        )
+        for seed, accuracy in zip((0, 1, 2), (0.69, 0.70, 0.71), strict=True):
+            (log_dir / f"mismatch_{seed}.log").write_text(
+                metadata
+                + f"Static threshold mismatch — enabled: True, theta_std: 1e-05, seed: {seed}\n"
+                "wandb: 🚀 View run mismatch at: "
+                f"https://wandb.ai/CIDA/project/runs/mismatch-{seed}\n"
+                f"Accuracy: {accuracy}\n",
+                encoding="utf-8",
+            )
 
         # Each Gaussian replica contributes two sites so pooling is tested across
         # both operator sites and seeds rather than merely copying emitted rates.
         for seed, accuracy in zip((0, 1, 2), (0.79, 0.80, 0.81), strict=True):
             (log_dir / f"gaussian_{seed}.log").write_text(
-                "Gaussian time noise — enabled: True, std_frac: 1e-06, "
-                f"identity_window: 4000.0, std_abs: 0.004, mean_abs: 0.0, seed: {seed}\n"
+                metadata + "Gaussian time noise — enabled: True, std_frac: 1e-06, "
+                f"identity_window: 4000.0, std_abs: 0.004, mean_abs: 0.0, seed: {seed}, "
+                "identity_deadline_ulp: 0.00048828125, std_to_identity_ulp: 8.192\n"
                 "Gaussian[linear.data] events=60, misses=1 (rate=0.0166667), "
+                "deadline_events=3 (rate=0.05), deadline_ulp_min=0.000244140625, "
+                "deadline_ulp_max=0.00048828125, std_to_ulp_min=8.192, "
+                "std_to_ulp_max=16.384, "
                 "outputs=30, underflows=1 (rate=0.0333333), "
                 "overflows=2 (rate=0.0666667)\n"
                 "Gaussian[linear.reference] events=40, misses=0 (rate=0), "
+                "deadline_events=0 (rate=0), deadline_ulp_min=0.00048828125, "
+                "deadline_ulp_max=0.00048828125, std_to_ulp_min=8.192, "
+                "std_to_ulp_max=8.192, "
                 "outputs=20, underflows=0 (rate=0), overflows=0 (rate=0)\n"
                 f"wandb: 🚀 View run gaussian at: "
                 f"https://wandb.ai/CIDA/project/runs/gaussian-{seed}\n"
@@ -125,7 +140,7 @@ def verify_noise_scan_summary() -> None:
 
         # The three accuracies have mean 0.8 and sample standard deviation 0.01.
         # Student-t with df=2 supplies the exact expected 95% half-width.
-        assert len(raw_runs) == 5
+        assert len(raw_runs) == 7
         gaussian = next(row for row in summary if row["axis"] == "gaussian")
         assert gaussian["replicas"] == 3
         assert math.isclose(float(gaussian["accuracy_mean"]), 0.8, abs_tol=1e-15)
@@ -136,6 +151,10 @@ def verify_noise_scan_summary() -> None:
             0.8 - expected_half_width,
             rel_tol=1e-12,
         )
+        mismatch = next(row for row in summary if row["axis"] == "mismatch")
+        assert mismatch["replicas"] == 3
+        assert math.isclose(float(mismatch["accuracy_mean"]), 0.70)
+        assert math.isclose(float(mismatch["accuracy_std"]), 0.01)
         assert math.isclose(
             float(gaussian["accuracy_ci95_high"]),
             0.8 + expected_half_width,
@@ -147,6 +166,10 @@ def verify_noise_scan_summary() -> None:
         assert gaussian["events"] == 300
         assert gaussian["misses"] == 3
         assert math.isclose(float(gaussian["miss_rate"]), 0.01)
+        assert gaussian["deadline_events"] == 9
+        assert math.isclose(float(gaussian["deadline_event_rate"]), 0.03)
+        assert math.isclose(float(gaussian["deadline_ulp_min"]), 0.000244140625)
+        assert math.isclose(float(gaussian["deadline_ulp_max"]), 0.00048828125)
         assert gaussian["outputs"] == 150
         assert gaussian["output_underflows"] == 3
         assert gaussian["output_overflows"] == 6
@@ -172,8 +195,9 @@ def verify_noise_scan_summary() -> None:
         # fails instead of publishing a Gaussian accuracy without mechanism data.
         invalid_log = log_dir / "gaussian_0.log"
         invalid_log.write_text(
-            "Gaussian time noise — enabled: True, std_frac: 1e-06, "
-            "identity_window: 4000.0, std_abs: 0.004, mean_abs: 0.0, seed: 0\n"
+            metadata + "Gaussian time noise — enabled: True, std_frac: 1e-06, "
+            "identity_window: 4000.0, std_abs: 0.004, mean_abs: 0.0, seed: 0, "
+            "identity_deadline_ulp: 0.00048828125, std_to_identity_ulp: 8.192\n"
             "wandb: 🚀 View run gaussian at: "
             "https://wandb.ai/CIDA/project/runs/gaussian-0\n"
             "Accuracy: 0.79\n",

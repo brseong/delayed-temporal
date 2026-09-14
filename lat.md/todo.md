@@ -1,6 +1,184 @@
 # TODO
 
-This file tracks concrete follow-up work that is intentionally deferred from the maintained architecture and operator implementation.
+This file tracks work required for the current manuscript and maintained implementation. Optional experiment ideas are kept separately in [[deferred-experiments]] without checkboxes.
+
+## Active Experiment Work
+
+Only unchecked boxes in this section authorize their explicitly described work. Conditional compute is authorized only after its stated gate passes; other observations do not add runs.
+
+### ViT-B Timing Robustness
+
+The active scope is the fixed 5,000-image validation subset at $\theta=40$, a deadline margin/noise standard deviation ratio of 4, and timing seeds 0, 1, and 2.
+
+- [x] Aggregate the completed `v3` pilot through its first transition bracket: $r_t=10^{-5}$ remains near clean accuracy while $r_t=10^{-4}$ is degraded. Larger completed scales add no evidence to the first-transition decision.
+- [x] Implement constant synaptic scaling at `0eec3e2`, bind the adaptive evaluator and reporting tools to completed logs at `f48dfc3`, and correct GPU process tracking across execution namespaces at experiment source commit `67de065`.
+- [ ] Use the implemented diagnostic in the new clean 5,000-image pass to record the count and rate of scalar values entering the GELU cubic term outside $[-\theta,\theta]$ before clamping. Report it as metadata for interpretation, not as an acceptance gate or authorization for further runs; replace the preliminary smoke value only after the clean 5,000-image pass completes.
+- [ ] Run the corrected sweep one scale at a time, starting with $r_t=10^{-5}$ and seeds 0, 1, and 2. Report each complete scale and require explicit user approval before creating the next round; never submit a larger scale after collapse.
+- [ ] Keep the pilot and accepted results from the changed source in separate CSV files and figures, and never aggregate them into one statistical series. State that 50,000-image validation was omitted and retain $\theta=2000$ artifacts as provenance only.
+
+## Manuscript Revision Master Checklist
+
+This is the canonical status ledger for manuscript-facing work; the former review checklist remains a provenance record, and duplicate actions are consolidated here.
+
+Source details and reviewer labels remain in [the legacy Korean review checklist](../paper/neurips_2026/neurips_2026_review_checklist_ko.md). Update task status here first, then reflect completed claims in `paper/neurips_2026/neurips_2026.tex` and the submission checklist.
+
+### Current ViT-B Noise and Time-Scale Update
+
+This manuscript checklist records only reporting decisions required by the active 5k result; it does not authorize additional sweeps.
+
+The completed theta selection below belongs to source `bc973317`. The current `648af9bb` GELU campaign reuses 40 without a new candidate search and disables layer-wise calibration; see [[noise#Timing Noise Scale Sweep at Ratio 4]].
+
+- [x] Select the clean ViT-B/16 threshold on the fixed training 5k subset and close the lower boundary with $\theta\in\{10,20,40,80,\ldots,4000\}$.
+- [x] Replay the selected $\theta=40$ condition and confirm it against neighboring $\theta\in\{20,40,80\}$ on the fixed validation 5k prefix.
+- [ ] Report why theta 40 was the smallest acceptable candidate for the selection source, using the predefined 0.5 percentage-point tolerance from the best spiking candidate; distinguish the later GELU implementation and its reuse of 40.
+- [ ] Describe the selected threshold as an intentional tradeoff between accuracy and input domain size, not a constraint requiring zero clipping; distinguish scalar GELU counts collected before clamping from image fractions and measured top-1 accuracy loss.
+- [ ] Explain that the results at theta 20 and 10 close the lower candidate range for the original selection source, not a repeated search under the corrected GELU implementation.
+- [ ] State that the current noise result omits layer-wise calibration and retains fixed log lower endpoints and the limit on the GELU exponential input; do not report it as validation of the full design for selecting layer-wise ranges.
+- [ ] Explain how the dimensionless code interval maps to a declared physical duration and state that every time constant must be rescaled consistently; list timing resolution, timing error, leakage, synchronization, and realizable time constants as limitations.
+- [ ] State that the physical timing-error standard deviation and margin follow from the declared mapping rather than treating $\theta$ as a hardware time constant.
+- [ ] Report the timing-noise configuration, injection scope, seeds, confidence interval, and empirical miss statistics from the accepted logs.
+- [ ] Mark the old $\theta=2000$ robustness evidence as superseded for manuscript support and label the current result as applying only to the fixed 5,000-image validation subset.
+
+### P0 Claims, Novelty, and Structure
+
+The central claim must describe the demonstrated fixed-form operator composition without implying unverified biological or hardware realization.
+
+- [ ] Fix the one-sentence research question and contribution around composing Transformer operations from a small library of fixed continuous-time operator forms rather than claiming the first nonlinear or TTFS Transformer realization.
+- [ ] Replace `standard primitives`, `biologically standard`, `hardware-native`, `directly hardware-compatible`, `readily implementable`, and comparable completion claims with evidence-bounded language.
+- [ ] Describe TTFSFormer and other conversion baselines by verifiable construction differences; acknowledge their existing softmax, LayerNorm, GELU-family, and TTFS contributions.
+- [ ] Replace subjective comparison columns such as `Bio primitives only` with function-specific kernels, fixed operator library, explicit dynamics, circuit validation, and device-assumption columns.
+- [ ] Audit `lossless`, `near-lossless`, `exact`, and `highly accurate`; use constructive or approximate language unless a quantitative bound supports the stronger term.
+- [ ] Describe the MatMul $O(3MKN)$ to $O(MKN)$ change as a constant-factor operation-count reduction, not an asymptotic complexity improvement.
+- [ ] Fairly describe the latency and efficient-simulation benefits of small-$T$ discrete-time methods.
+- [ ] Rebuild the paper in the order: problem and gap, model and assumptions, fixed operators, constructive composition, deterministic error, conversion evidence, perturbation sensitivity, and hardware limitations.
+- [ ] Map each current paragraph, theorem, table, and figure to keep, shorten, move to appendix, delete, or rewrite before polishing the abstract and introduction.
+
+### P0 Mathematical and Operator Audit
+
+Every retained theorem and operator claim must match the implemented equations, domains, finite-window behavior, and failure conditions.
+
+- [ ] Reclassify Theorem 1 as a quantitative theorem with conditions and bounds, a conditional theorem, or a constructive proposition.
+- [ ] Tabulate each primitive and composition with input domain, clipping condition, scale, zero-error condition, and worst-case or empirical error.
+- [ ] Derive an $L$-block error relation where defensible; otherwise state why no useful end-to-end bound is available and limit the claim to empirical evidence.
+- [ ] Present all four signed multiplication sign cases and the causal source--sink routing used by the two parallel causal integration paths.
+- [ ] Define $\psi_{\mathrm{Int}}$ as a time-window integration mechanism based on an NMDA plateau rather than equating it with a validated biological spike or completed circuit.
+- [ ] Update the signed multiplication definition, proof, and SOP accounting for two parallel causal paths without duplicating encoder spikes.
+- [ ] Recheck softmax stability, exponent scaling, normalization, lower and upper clipping, deadline behavior, and the meaning and calibration of $\alpha$ against the implementation.
+- [ ] Re-derive the GELU relation involving $1/(1+\kappa e^{-\beta x})$, state the required $\kappa$ and time-constant conditions, and quantify finite-window error.
+- [ ] Write LayerNorm's actual target as $\sqrt{v+\epsilon_{\mathrm{LN}}}$ and keep $\epsilon_{\mathrm{LN}}$ distinct from the encoder floor $\epsilon_{\mathrm{enc}}$.
+- [ ] Unify the LayerNorm references as $H$ and $H^2$, including the finite-domain definition used in code.
+- [ ] Resolve the residual $1/\sqrt{\theta}$ explanation against any statement that no residual scale remains.
+- [ ] Add deterministic boundary tests for zero variance, centered values close to zero, symmetric inputs of both signs, and declared upper bounds in the LayerNorm configuration used for publication.
+- [ ] Have a human audit every retained lemma, theorem, and appendix proof line by line and record the verifier and status.
+- [ ] Move routine statements to the appendix and foreground the genuinely new composition and failure conditions.
+- [ ] Disclose accurately whether LLM assistance affected proof generation, transformation, verification, or only prose editing.
+
+### P0 Conversion Fidelity and Comparison Fairness
+
+Performance tables must use comparable protocols and expose degradation rather than selecting only favorable model sizes.
+
+- [ ] Recompute every ANN-to-SNN absolute result and delta from generated artifacts, including the current GPT-2 metric policy and the new ViT-B operating point.
+- [ ] Show checkpoint, preprocessing, training method, split, precision, and evaluation differences for every literature comparison.
+- [ ] Remove ranking and superiority language unless an existing result already matches the checkpoint and protocol exactly.
+- [ ] Summarize ViT-S, ViT-B/L, and GPT-2 together so the smallest observed degradation is not presented as universally representative.
+- [ ] Describe the current GPT-2 batch-mean metric precisely and do not call it token-weighted corpus perplexity.
+
+### P0 Energy, Latency, and Hardware Claims
+
+Energy and feasibility claims must expose their system boundary and remain proxies unless supported by hardware-level evidence.
+
+- [ ] Cite the source and conditions for $E_{\mathrm{AC}}=0.9$ pJ, including process, voltage, circuit type, and whether it is measured or estimated.
+- [ ] Label the present calculation as an idealized SOP-only estimate and list omitted memory, routing, fanout, synchronization, static current, comparator, calibration, conversion, mismatch, and integration-time costs.
+- [ ] Define the target substrate and a consistent system boundary before comparing against ANN or neuromorphic baselines.
+- [ ] Estimate per-operator and end-to-end latency, including the selected code window and the physical-time rescaling assumption.
+- [ ] Do not infer energy superiority from operation-count equality; use a comparable ANN energy boundary or narrow the claim.
+- [ ] Audit external energy numbers such as SpikeZIP's 100.8 mJ for boundary compatibility before making direct comparisons.
+- [ ] Keep hardware-level superiority outside the claim because SPICE, FPGA, device-level, and silicon evidence are absent.
+
+### P1 Robustness and Non-Ideality Evidence
+
+Computational stress tests must be separated from calibrated device models and from one another.
+
+- [ ] Document each timing-noise distribution, magnitude, injection site, seed, repetition count, and confidence interval.
+- [ ] Treat additive jitter with deadline misses as the maintained computational model; do not describe it as a calibrated neuronal noise process.
+- [ ] Report accuracy against empirical miss rate and the available counts by operator site as simulator diagnostics only; do not interpret them as a physical event population or energy estimate.
+- [ ] State whether timing error is injected at encoder outputs or at every internal $\Phi/\Psi$ boundary, and describe the latter coverage explicitly.
+- [ ] State that frozen threshold mismatch and every other uncertainty axis in [[deferred-experiments#Additional Robustness Axes]] are outside the current result.
+- [ ] Package the clean baseline, checkpoint, evaluator, manifests, and current jitter evidence before requesting analog hardware collaboration.
+
+### P1 Scalability and Exposition
+
+The paper must explain the computation to an ML reader and bound extrapolation beyond evaluated models.
+
+- [ ] Add one end-to-end potential-to-time-to-potential flow diagram and a small numerical example.
+- [ ] Tabulate each primitive's input, output, units, time constants, threshold, scale, and proposed neuron or circuit interpretation.
+- [ ] Explain one complete $\Psi$-after-$\Phi$ composition at the ANN-layer level.
+- [ ] Emphasize causal masking by omitted synapses and the logarithmic LayerNorm construction without overstating biological realization.
+- [ ] Estimate SOP, memory, fanout, communication, calibration, latency, and energy bottlenecks for ViT-H/14 or billion-parameter scale.
+- [ ] Discuss how 3D and multimodal Transformers change sequence length, operators, routing, and temporal-window constraints.
+
+### P2 Limitations and Reproducibility
+
+The release must make unsupported scope and reproducibility boundaries explicit.
+
+- [ ] List deployment obstacles: mismatch, calibration, leakage, routing, fanout, synchronization, interfaces, latency, and hardware-dependent timing.
+- [ ] List conversion losses: accuracy, numeric stability, dynamic range, clipping, depth-wise accumulation, and hardware dependence.
+- [ ] State unvalidated scope: silicon, SPICE/FPGA, large models, multimodal models, and calibrated analog non-idealities.
+- [ ] Generate every SOP total and publication table through checked scripts.
+- [ ] Publish per-model time constants, thresholds, windows, clipping ranges, calibration, and precision.
+- [ ] Publish checkpoint identifiers, preprocessing, splits, seeds, repetitions, evaluator commands, and baseline provenance.
+- [ ] Validate each configuration used for publication with operator fixtures and existing artifact identity checks; any new dataset evaluation belongs to [[deferred-experiments]].
+- [ ] Record compute device, memory, per-run duration, total successful compute, and material failed or preliminary compute.
+- [ ] Verify licenses and usage terms for datasets, libraries, checkpoints, and released derived artifacts.
+
+### NeurIPS Submission Checklist Audit
+
+Submission-form answers must be revalidated after the manuscript changes rather than inherited from the withdrawn version.
+
+- [ ] Reconcile Claims, Limitations, Assumptions/Proofs, Reproducibility, and Experimental Details answers with the final section references.
+- [ ] Update the statistical-significance answer: deterministic conversion results are singletons, while stochastic robustness results use three replicas and explicitly defined 95% Student-t intervals.
+- [ ] Complete the currently unfinished compute-resources justification with hardware, memory, wall time, and aggregate compute.
+- [ ] Recheck code/data access, anonymous-release URLs, exact commands, environment versions, and which experiments are omitted.
+- [ ] Audit ethics, broader impacts, safeguards, licenses, new assets, human-subject and IRB `N/A` answers against the final released assets.
+- [ ] Make the declaration of LLM use match the actual use in prose, code, derivation, and verification.
+
+### Recommended Execution Order
+
+Work should proceed by evidence dependency so prose never outruns mathematical or empirical support.
+
+1. Complete the reviewer-issue ledger and classify every issue as valid, partly valid, misunderstanding, or requiring evidence.
+2. Fix the central question, claim boundary, paper outline, and keep/move/delete map.
+3. Complete the mathematical and operator audit before changing theorem language.
+4. Isolate deterministic conversion errors and settle metric and baseline policy.
+5. Finalize the $\theta$ and physical-time interpretation, then run only the approved robustness diagnostics.
+6. Rebuild the energy and latency section using an explicit system boundary.
+7. Prepare the collaborator package before adding calibrated device claims.
+8. Rewrite the abstract and introduction last, then update the NeurIPS submission checklist.
+
+### Final Release Gate
+
+The next public version is ready only when claims, equations, generated evidence, and disclosure documents agree.
+
+- [ ] Abstract, introduction, theorem statements, experiments, limitations, and conclusion use the same claim strength.
+- [ ] Every major equation has an independent verification record.
+- [ ] Every table and figure is reproducible from preserved generated artifacts.
+- [ ] Every comparison declares whether checkpoints and protocols are directly comparable.
+- [ ] Every energy table states its system boundary and included and excluded costs.
+- [ ] The NeurIPS LLM-use answer matches the actual workflow.
+- [ ] Limitations include hardware non-validation, approximation error, scaling limits, and analog non-ideality scope.
+- [ ] The paper is understandable without reviewer responses or internal notes.
+- [ ] Negative settings and failure conditions are reported alongside favorable results.
+
+### Imported Completed Foundations
+
+These completed items are retained here so the migrated checklist does not lose the legacy status record.
+
+- [x] Separate LayerNorm's denominator regularizer from the finite-window encoder floor.
+- [x] Separate actual dual-rail magnitude from floor-clamped logarithm inputs and preserve inactive-rail no-spike semantics.
+- [x] Compute LayerNorm variance from actual magnitudes rather than floor-clamped rails.
+- [x] Publish the tensor versus spiking execution topology for the LayerNorm stages and model configurations.
+- [x] Decompose the current GPT-2 degradation across attention, LayerNorm, MLP affine, residual, and wrapper paths.
+
 
 ## 2026-08-31 Session Handoff
 
@@ -22,7 +200,7 @@ The reviewed precision-control tooling, appendix note, and knowledge-graph updat
 - `main` contains `44ddb0b` plus the precision-control handoff commit. Their remote publication state must be checked explicitly before assuming they are pushed.
 - The requested `/root/.codex/worktrees/a4c5/delayed-temporal` worktree is removed. Other detached and EBRAINS/toy worktrees remain registered and were outside this session's scope.
 - The handoff commit adds GPT-2 dtype control, its float32-only calibration guard, verification, the precision sweep, the strict summarizer, and the updated evaluation graph.
-- `paper/gpt2_fp_precision_appendix_results_ko.md` is force-tracked as an appendix-ready table and English draft. `artifacts/precision_gpt2/` remains ignored and contains the local raw logs and generated CSV/Markdown.
+- `paper/neurips_2026/gpt2_fp_precision_appendix_results_ko.md` is force-tracked as an appendix-ready table and English draft. `artifacts/precision_gpt2/` remains ignored and contains the local raw logs and generated CSV/Markdown.
 - The calibration verifier passes all 18 groups, the float64 full-model smoke and held-out run complete, Python and shell syntax pass, `git diff --check` passes, and `lat check` passes. Ruff was unavailable in the active environment.
 - Importing custom Transformer families emits pre-existing auto-docstring diagnostics labeled `[ERROR]` for unregistered custom configs and undocumented parameters even though verification exits successfully. This noise should be cleaned or filtered so it cannot hide a real failure.
 
@@ -33,19 +211,19 @@ The evidence supports a limited finite-precision claim, but several protocol and
 - The current GPT-2 metric is $\exp$ of an unweighted mean of 181 per-batch losses, not token-weighted corpus perplexity. Every reported comparison uses identical batching, but a publication-facing PPL table should disclose this or be rerun with token-weighted NLL.
 - The float64 $\theta=2000$ reference also widens the softmin execution score radius from 40.242257 to 350.772, so it corroborates but does not independently prove a pure dtype intervention. The fixed-radius float32 window sweep is the primary causal control.
 - Attention-score excursion counts are recorded before causal-mask overwrite and include future positions. Their absolute rate is an upper-bound diagnostic; only like-for-like sweep comparisons are currently justified.
-- `paper/neurips_2026.tex` still reports the old GPT-2 row 22.40 to 23.43 ($+1.03$) and presents one GPT-2 threshold, while the current representative run is 22.7076 to 22.8991 with global/attention thresholds 2,000/100.
-- `paper/reviewer_technical_verification_notes_ko.md` still cites the earlier dense value 22.4057 and $+2.6267$ shared-window gap. The current simultaneous dense reference makes that gap $+2.3248$.
+- `paper/neurips_2026/neurips_2026.tex` still reports the old GPT-2 row 22.40 to 23.43 ($+1.03$) and presents one GPT-2 threshold, while the current representative run is 22.7076 to 22.8991 with global/attention thresholds 2,000/100.
+- `paper/neurips_2026/reviewer_technical_verification_notes_ko.md` still cites the earlier dense value 22.4057 and $+2.6267$ shared-window gap. The current simultaneous dense reference makes that gap $+2.3248$.
 - “The entire conversion gap is caused by floating-point precision” is unsupported. The safe claim is that the additional degradation from sharing $\theta=2000$ with attention is predominantly a float32 timestamp-subtraction effect; roughly 0.81--0.84% relative PPL remains.
 
 ### Next Session
 
-The next session should resolve metric policy and publication consistency before treating the appendix evidence as final.
+The next session should resolve publication consistency without silently expanding the experiment matrix. Optional reruns are catalogued in [[deferred-experiments]].
 
-1. Decide whether to preserve and disclose batch-mean aggregation or implement token-weighted NLL and rerun the full dense, wrapper, attention-window, and float64 matrix.
+1. Preserve and disclose the batch-mean aggregation; do not label it token-weighted corpus perplexity.
 2. Reconcile the manuscript and reviewer notes with one canonical simultaneous protocol, including separate global and attention thresholds; manuscript rewriting remains intentionally deferred until authorized.
 3. Decide whether the tracked appendix drafting note should be incorporated into the manuscript or retained as a separate internal record.
 4. Push `44ddb0b` and the precision-control handoff commit after confirming the intended remote branch.
-5. If a reviewer requires a pure dtype intervention, add a reviewed diagnostic that holds the softmin score radius fixed across float32 and float64 rather than over-interpreting the present float64 reference.
+5. Do not use the present float64 reference as a pure dtype intervention; the optional control that holds the softmin score radius fixed is in [[deferred-experiments#Mechanism and Operator Ablations]].
 
 ## Causal Signed PWM Migration
 
@@ -87,7 +265,7 @@ Static bounds turn domains into predeclared physical and mathematical contracts 
 
 Calibration and interval arithmetic establish an immutable bound table before evaluation, after which forward execution may only consume, propagate, compare, and clamp against those bounds.
 
-The objective is not to replace every runtime range with the widest possible analytic interval. Analytic propagation is used only where it stays meaningful and depth-independent; calibration fixes sites whose bounds are difficult to derive, data-dependent, or inflated by repeated residual interval addition.
+The objective is not to replace every runtime range with the widest possible analytic interval. The three cases in [[domain#Domain Propagation]] retain practical structural bounds, use calibration at selected finite but widening boundaries, and restrict domains with no finite output or timing bound. The implementation also supports disabled calibration with conservative analytic propagation; this mode does not exercise the intended layer-wise limits.
 
 This range reset is necessary even when every individual operation has a finite formula. For a layer with Lipschitz constant $L_i>1$, $\lVert\delta x_{i+1}\rVert\le L_i\lVert\delta x_i\rVert+\lVert e_i\rVert$, so propagated intervals and upstream clipping error can grow with depth. Fixed layer boundaries deliberately clamp that growth, and validation must report both layer clipping rates and final task accuracy.
 
@@ -99,9 +277,9 @@ Calibration uncertainty is an engineering tolerance rather than a reason to rest
 
 Calibration measurement uses two deterministic collection passes before frozen validation. The first pass records signed min/max values; the second replays the same dataset into fixed-bin histograms whose edges come from the first pass. The histogram and margin determine the immutable range table, after which validation applies inference clamps and reports clipping without updating any range.
 
-Calibration sites use one of three policies. Signed-symmetric sites calibrate both tails and enforce a zero-centered rail; lower-bounded and upper-bounded sites preserve their finite analytic endpoint and calibrate only the unbounded direction. Fully bounded operators retain analytic propagation and are not calibration sites.
+Selected calibration sites use signed-symmetric, lower-bounded, or upper-bounded endpoint policies. These are distinct from the three reasons for selecting a range in [[domain#Domain Propagation]]. Practical structural bounds remain analytic, but a finite interval that grows excessively can still require calibration.
 
-Nonnegative domains use the globally fixed lower endpoint zero and calibrate only their upper endpoint. Strictly positive logarithmic domains keep a separately configured positive lower rail because a zero endpoint is invalid for logarithmic encoding.
+For nonnegative sites selected for one-sided calibration, the lower endpoint stays at zero and only the upper endpoint is calibrated. Logarithmic domains keep a separately configured positive lower endpoint; current ViT/GPT-2 bindings do not select that endpoint from data.
 
 ### Acceptance Criteria
 
@@ -111,7 +289,7 @@ The migration is complete only when static-domain behavior is invariant under ev
 - [x] Changing the Gaussian seed changes sampled events and outputs but never changes any declared potential or time bound.
 - [x] Every calibrated or Gaussian out-of-envelope value increments pre-clamp underflow or overflow statistics without mutating the envelope.
 - [x] Evaluation fails clearly when a required calibrated bound is absent or incompatible instead of silently measuring the current tensor.
-- [x] Pre-norm ViT and GPT-2 residual bounds come from fixed per-block calibration entries and therefore do not widen through recursive interval addition during frozen inference.
+- [x] With frozen calibration enabled, selected ViT and GPT-2 residual boundaries use persisted ranges for each block instead of accumulating analytic interval sums; disabled calibration retains those sums.
 - [x] A final AST source audit and direct tests reject `PotentialBounds` or `TimeBounds` constructed directly or through local aliases from live forward-tensor extrema.
 
 ### Follow-up After Bound Re-Audit
@@ -153,18 +331,18 @@ The implementation work covers every maintained transform and model adapter, not
 - [x] Canonicalize calibration tables by stable layer identity, require exact metadata compatibility, and provide strict versioned JSON save, load, and setup-time lookup.
 - [x] Permanently verify observer invariants, quantile and margin selection, frozen clipping, schema rejection, tamper detection, and deterministic persistence round trips.
 - [x] Separate two-pass collection from frozen validation and inference with explicit state, one-way phase transitions, missing-site failure, and immutable clipping-report snapshots.
-- [x] Declare calibration targets and range policy per layer: symmetric signed rails calibrate both tails, one-sided analytic rails calibrate only the unbounded direction, and fully bounded operators bypass calibration.
+- [x] Declare calibration targets and endpoint policy per layer: signed-symmetric sites calibrate both sides, one-sided sites preserve their known endpoint, and practical structural bounds remain analytic; finiteness alone does not exclude a site.
 - [x] Bind calibration state to stable model-module identities without checkpoint keys, use analytic safety rails during collection, and return persisted clamp rails as `PotentialBounds` during validation and inference.
 - [x] Select a fixed-size prefix of a seeded training-split permutation for ViT calibration, replay the exact subset sequentially in both passes, and persist its split, seed, sample count, fingerprint, preprocessing, dtype, and model-path identity.
 - [x] Add ViT collection, frozen-validation, and inference CLI modes with strict clean-collection constraints, exact metadata validation, missing-entry failure, and per-layer frozen clipping reports.
-- [x] Replace all ViT live activation-derived ranges with preprocessing-derived input bounds, an analytic encoder-entry rail, analytic activation intervals, and two calibrated residual boundaries per block.
+- [x] Replace ViT bounds from live activation extrema with preprocessing and analytic intervals plus two optional residual calibration boundaries per block; disabled calibration retains fixed residual interval sums.
 - [x] Replace BERT intermediate GELU and ReLU live output extrema with ranges derived from the fixed affine input interval.
 - [x] Propagate the fixed BERT encoder range through first-token pooling and use a configuration-derived standalone encoder fallback without live extrema.
 - [x] Freeze BERT word, token-type, and position table ranges, sum their intervals before embedding LayerNorm, and preserve the resulting `Potential` through the internal encoder API.
 - [x] Remove all RoBERTa live bounds by freezing embedding and affine ranges, propagating `Potential` through the encoder and pooler, and carrying the final range into local LM and classification heads without changing public model outputs.
 - [x] Remove all GPT-2 live bounds with frozen embedding and Conv1D intervals, an analytic model-entry range, analytic MLP activation ranges, residual endpoint addition, and two-per-block calibration bindings.
 - [x] Add GPT-2 collection, frozen-validation, and inference evaluator modes using filtered WikiText training subsets, fixed tokenizer/sequence metadata, sequential two-pass replay, and per-site clipping reports.
-- [x] Prefer operator-derived interval arithmetic whenever the input bounds and transformation provide a conservative static result in the maintained execution path.
+- [x] Use operator interval arithmetic where it provides a practical bound; retain calibration at selected boundaries whose finite ranges become excessively wide.
 - [x] For paths without a practical tight analytic envelope, calibrate only ViT/GPT-2 pre-norm residual resets, ViT composed-GELU pre-activations, and spiking attention scores; analytic model entries bypass calibration.
 - [x] Make maintained calibration retain observed min/max without tail truncation and add a 5% per-side margin; keep interior quantiles only as explicit diagnostic overrides.
 - [x] Persist stable site identifiers together with the checkpoint, dataset split, preprocessing, model family, and active ablation configuration used for calibration.
@@ -183,12 +361,12 @@ The implementation work covers every maintained transform and model adapter, not
 - [x] Permanently verify all eight `SpikingLayerNorm` ablation domains, deterministic/zero-noise metadata identity, stale-cache rejection, and explicit refresh.
 - [x] Initialize every model-family entry potential bound from frozen embedding/preprocessing intervals or explicit calibration rather than measuring the first or current batch.
 - [x] Clamp every calibrated out-of-envelope value against its fixed bound and report underflow and overflow counts without widening that bound at runtime; Gaussian operator rails use their separate saturation counters.
-- [x] Keep LayerNorm outside calibration because its pre-affine normalized result has the finite analytic envelope $|z_i|\leq\sqrt{d-1}$; derive and freeze the post-affine envelope from scale and bias endpoints.
-- [x] Calibrate and clamp every ViT and GPT-2 pre-norm residual output per block, recording raw underflow and overflow before attaching the frozen output range.
+- [x] Use the implemented LayerNorm normalization bounds that do not accumulate growth of input ranges across layers, then derive the output interval from scale and bias; a tighter output calibration remains a separate extension.
+- [x] Support residual collection for each ViT/GPT-2 block and, when frozen calibration is enabled, count values outside the interval and clamp to the persisted interval.
 - [x] Connect both ViT pre-norm residual boundaries to optional explicit calibration bindings while retaining batch-independent analytic interval addition when calibration is absent.
-- [x] Calibrate one symmetric pre-clamp softmin score range per ViT and GPT-2 attention layer, constrain it by the dtype-, temporal-scale-, and sequence-capacity-derived representability ceiling, and retain separate Gaussian value-readout saturation validation.
+- [x] Support one measured symmetric score range per ViT/GPT-2 attention layer, subject to the analytic representability ceiling; without calibration, use the fixed score limit and retain separate Gaussian validation of value readout.
 - [x] Replace the attention-specific `tau_m` and `tau_s` names with one `tau`; model adapters derive it from their shared `tau_s` configuration, and the ViT-only `tau_m` field is removed.
-- [x] Calibrate each operator-composed ViT GELU affine pre-activation per layer, retain an analytic final activation interval, and remove avoidable deterministic exponential intermediate overflow without changing the operator equation.
+- [x] Support optional layer-wise calibration of affine inputs to composed GELU, retain an analytic final activation interval, and remove avoidable deterministic exponential overflow without changing the operator equation.
 - [x] Keep spike-time windows configuration-derived: LayerNorm log windows remain fixed by `clip_margin`, `theta`, and `tau_s`, while affine identity encoding uses each declared zero-containing fixed interval.
 - [x] Make declared potential and time bounds immutable so cached or propagated endpoints cannot be widened in place.
 - [x] Keep masked attention scores inside the declared softmin range and clamp both Gaussian and noise-free value readouts to a rail derived from fixed $S_{\max}$ and $\theta$.

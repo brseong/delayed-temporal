@@ -20,7 +20,15 @@ Bounds serve three roles:
 
 The intended model-wide policy combines tight, depth-independent interval arithmetic with per-site calibration for nonlinear or recursively widening ranges.
 
-For example, spiking linear layers derive local output bounds from fixed input and weight intervals. Pre-norm residual streams do not recursively add those intervals across all blocks; each post-add block output instead uses a frozen calibrated range and records excursions before clamping.
+Range selection distinguishes three cases; whether a range is fixed is a separate question from whether it needs calibration:
+
+1. A practical analytic range that does not grow through the network is retained, such as the normalized attention weight interval.
+2. A range that is finite but becomes too wide through weights, reductions, or repeated residual addition is a calibration target at selected boundaries. A finite formula alone does not make calibration unnecessary.
+3. A mapping with no finite output or timing bound on its original domain requires a restricted representable domain. Log encoding near zero is one example. Setting a finite limit is not, by itself, evidence that the limit was selected from data.
+
+Spiking linear layers derive output intervals from fixed input bounds and loaded weights. With frozen layer-wise calibration enabled, selected residual boundaries replace interval sums with persisted ranges after counting values outside the interval and clamping. With calibration disabled, those boundaries retain analytic interval addition. Both modes avoid bounds derived from the current batch, but only the former applies the layer-wise limits intended to control growth.
+
+The three cases describe why a range needs attention, not the signed or one-sided record policies used to select its endpoints; see [[calibration#Two-pass Collection#Quantile and Margin Policy]]. Current experiment settings are recorded separately in [[noise#Timing Noise Scale Sweep at Ratio 4]].
 
 Maintained paths no longer construct bounds from observed forward-output extrema. Analytic intervals and frozen calibration records now define every production envelope; some remain intentionally conservative and require empirical clipping and accuracy validation.
 

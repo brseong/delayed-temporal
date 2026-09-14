@@ -22,19 +22,23 @@ Min-max and histogram accumulation must be independent of batch order and partit
 
 ### Quantile and Margin Policy
 
-Maintained calibration selects the observed minimum and maximum (`q=0/1`) and then adds a 5% per-side margin; interior histogram quantiles remain explicit diagnostic overrides, and fully analytic operators bypass calibration.
+At selected sites, calibration retains observed min/max (`q=0/1`) and adds 5% of the selected interval width per calibrated side. Interior quantiles are diagnostic overrides; practical structural bounds remain analytic.
 
-A signed-symmetric site uses the larger absolute observed endpoint for a zero-centered rail. A lower-bounded or upper-bounded site preserves its finite analytic endpoint and calibrates only the opposite direction. Margin is proportional to the pre-margin width and expands only calibrated endpoints, never a fixed analytic endpoint.
+A signed-symmetric site uses the larger absolute observed endpoint to center the interval on zero. A lower-bounded or upper-bounded site preserves its finite analytic endpoint and calibrates only the opposite direction. Margin is proportional to the width before expansion and changes only calibrated endpoints. For example, a symmetric interval from -10 to 10 becomes -11 to 11 at the default margin.
+
+These endpoint policies implement, rather than replace, the three cases in [[domain#Domain Propagation]]. A finite but excessively wide interval can still require calibration. Collection chooses ranges from activation statistics; it does not search endpoints or time constants until an accuracy tolerance is met. Task accuracy is evaluated separately.
 
 The fixed-bin histogram and outward bin-edge rule remain in the artifact lifecycle for reproducibility and explicit interior-quantile diagnostics. Canonical collection does not discard either observed tail before applying its margin.
 
-For a nonnegative domain the shared lower endpoint is globally fixed at zero and only the upper endpoint is calibrated. Strictly positive logarithmic domains instead retain their separately configured positive lower rail; zero is not substituted into a logarithmic encoder.
+For a nonnegative site selected for one-sided calibration, the lower endpoint stays at zero and only the upper endpoint is calibrated. Positive logarithmic domains retain a separately configured positive lower endpoint. The current ViT/GPT-2 bindings do not select that log lower endpoint from data.
 
 ### Deterministic Training Subset
 
 Calibration uses a fixed-size prefix of a seeded training-split permutation and replays that exact subset sequentially in both collection passes, keeping validation examples outside range selection.
 
-The artifact stores the selected dataset fingerprint, split, seed, sample count, processor configuration, image geometry, dtype, and model-path options. A changed data revision or preprocessing configuration therefore fails frozen metadata validation.
+The artifact stores the selected dataset fingerprint, split, seed, sample count, recorded processor fields, image geometry, dtype, and model options. Changes to recorded fields fail frozen metadata validation.
+
+Metadata equality covers only serialized settings. The separate GELU cubic wrapper's implementation choice and magnitude floor are not currently included in ViT artifact identity, so changing them can leave metadata and site specifications unchanged. Compatibility checks alone do not establish that an existing table matches those changes; table reuse versus recollection must be an explicit experiment choice. This limitation does not affect a run that disables layer-wise calibration.
 
 ## Frozen Execution
 
@@ -72,9 +76,9 @@ Processor geometry may be represented by Transformers dataclasses such as `SizeD
 
 ### ViT Residual Range Reset
 
-Each ViT block calibrates its attention residual and final MLP residual as separate signed-symmetric layer ranges, preventing analytic interval addition from widening recursively through depth.
+When frozen calibration is enabled, each ViT block uses separate persisted ranges for its attention and MLP residuals, limiting growth from repeated interval addition. Disabled calibration retains the analytic sums.
 
-Collection retains each exact interval sum as a safety rail and observes the raw residual. Frozen validation or inference counts strict excursions, clamps to the persisted layer range, and propagates that range into the next normalization and block.
+Collection observes raw residuals while retaining their analytic interval sums. Frozen validation or inference counts values outside the interval, clamps to the persisted layer range, and propagates that range into the next normalization and block.
 
 Residual specifications discover `ViTLayer` instances from the complete unwrapped model and persist their actual `named_modules()` paths, so bare models and task wrappers do not rely on guessed prefixes.
 
@@ -82,19 +86,19 @@ Residual specifications discover `ViTLayer` instances from the complete unwrappe
 
 The ViT evaluator exposes disabled, collection, frozen-validation, and inference calibration modes through one explicit artifact path.
 
-The artifact persists histogram, endpoint-selection, margin, subset-size, and subset-seed controls. Defaults retain observed extrema and add 5% per side.
+The artifact persists histogram, endpoint selection, margin, subset size, and subset seed controls. Defaults retain observed extrema and add 5% of the selected width per calibrated side. Disabled mode loads no table and keeps bounds computed from configuration and parameters; it does not restore runtime activation extrema.
 
-Collection requires the clean spiking checkpoint in evaluation mode with sequential training-subset replay and no timing noise, mismatch, or parameter perturbation. Frozen modes validate metadata and the current 48-site topology before applying optional robustness axes and reporting clipping.
+Collection requires the clean spiking checkpoint in evaluation mode with sequential replay of the training subset and no timing noise, mismatch, or parameter perturbation. Frozen modes validate recorded metadata and the enabled site topology before applying optional robustness axes and reporting clipping. A 12-block ViT with all supported calibration paths enabled has 48 sites.
 
 ### ViT Fixed Activation Ranges
 
-ViT direct tanh-GELU, dense GELU, ReLU, SiLU, and Tanh branches derive conservative output ranges only from their fixed affine input bounds, so fully bounded activation mappings bypass calibration.
+ViT direct GELU approximations, dense GELU, ReLU, SiLU, and Tanh branches derive output ranges from fixed affine input bounds. These output mappings add no calibration sites; they do not establish that every affine input range is sufficiently narrow.
 
 ReLU and Tanh map interval endpoints directly. GELU-family and SiLU-family outputs remain between the input and zero because their gates lie in $[0,1]$; the operator-composed GELU continues to propagate its own interval.
 
 ### ViT GELU Pre-activation Calibration
 
-Each operator-composed ViT GELU layer freezes a signed-symmetric range for its affine pre-activation, preventing a broad parameter-derived safety interval from controlling the composed exponential window.
+With frozen calibration enabled, each composed ViT GELU layer uses a measured symmetric range for its affine input. Disabled calibration retains the interval derived from weights and upstream bounds.
 
 Collection records the raw affine output under the stable `ViTIntermediate` module identity and continues with its analytic safety range. Frozen validation and inference count strict excursions, clamp to the persisted range, and pass that unchanged range into the GELU composition.
 
@@ -144,7 +148,7 @@ The permanent runtime check covers shared linear, convolution, GPT-2 Conv1D, Lay
 
 ### Attention Score Range Calibration
 
-Each spiking attention layer covered by the ViT or GPT-2 artifact lifecycle freezes one symmetric softmin score range from a noise-free pre-clamp score distribution, while an analytic representability ceiling prevents exponential underflow.
+When layer-wise calibration is enabled, each supported ViT/GPT-2 attention layer selects one symmetric score range from noise-free scores before clamping, subject to an analytic ceiling that prevents exponential underflow.
 
 For layer $\ell$, let $q_\ell=\max(|\min s_\ell|,|\max s_\ell|)$ over the clean calibration population. Because the configured per-side margin $m$ is a fraction of the full symmetric width $2q_\ell$, calibration selects $c_{\ell,\mathrm{cal}}=q_\ell+2mq_\ell=(1+2m)q_\ell$. With dtype minimum normal $f_{\min}$, temporal scale $\tau$, source capacity $S_{\max}$, and log safety margin $\eta$, the representable radius is
 
@@ -156,11 +160,13 @@ The frozen layer radius is $c_\ell=\min(c_{\ell,\mathrm{cal}},c_{\mathrm{repr}},
 
 Masked positions are overwritten with $+c_\ell$ after score clamping in the negated-score convention. The artifact persists endpoint-selection parameters, margin, symmetric analytic ceiling, dtype, model-wide `tau_s`, and $S_{\max}$; attention uses $\tau=\tau_s$, and the common metadata schema mirrors that value in its `tau_m` slot. A precision, scale, or capacity change invalidates reuse.
 
+Without a calibration binding, attention uses the symmetric interval limited by its analytic score bounds, configured theta, dtype, time constant, and maximum source count. It does not measure current scores to choose that interval.
+
 The maintained scalar bound contract supports one calibrated radius per attention layer. Per-head calibration would require vector-valued domain metadata and is outside this lifecycle.
 
 ## Persistence
 
-Calibration artifacts use a versioned immutable schema with complete model, data, numerical, capacity, and ablation metadata.
+Calibration artifacts use a versioned immutable schema for recorded model, data, numerical, capacity, and ablation settings. Compatibility checks cannot detect configuration choices omitted from that schema.
 
 Repository persistence is deny-by-default for generated artifacts. Only `artifacts/calibration/vit_small_fixed_domain_minmax_margin5.json`, the reviewed ViT-S min/max-plus-margin configuration, is whitelisted as a representative table; logs and alternative runs remain local outputs.
 

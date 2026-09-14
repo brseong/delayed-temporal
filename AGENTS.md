@@ -6,15 +6,39 @@ This is the canonical instruction file for coding agents working in this reposit
 
 This repository contains the research code and manuscript for *Biologically Plausible Dual Operators for TTFS-Coded Analog Spiking Transformers*. It converts pretrained Transformer operations into composable time-to-first-spike (TTFS) operators and evaluates deterministic approximation error, task accuracy, operation cost, and robustness to non-idealities. The main workflow evaluates converted pretrained models; it does not train them.
 
-The current manuscript is `paper/neurips_2026.tex`. Supporting review translations, verification notes, and improvement checklists are also kept under `paper/`.
+The withdrawn NeurIPS submission and its supporting review material are archived under `paper/neurips_2026/`. The official ICLR 2027 template is kept under `paper/iclr_2027/`; the venue-specific paper tree remains untracked.
 
 ## Environment
 
+This paper's experiments are split across two execution environments: the local GPU host `baekryun` and the UOS UBAI supercomputing cluster reached through the `gate1`/`gate2` login hosts. Several agents work across both, so confirm which host you are on with `hostname` before running anything. Their execution rules are not interchangeable.
+
+Shared expectations:
+
 - Use Python 3.12 as specified by `.python-version`.
 - Install dependencies with `pip install -r requirements.txt`. The requirements include editable checkouts of Hugging Face Transformers and a SpikingJelly fork.
-- Pretrained ViT checkpoints and ImageNet data are expected outside the repository under `/data/nas/` by the existing experiment scripts.
 - Evaluations may require CUDA, local datasets and checkpoints, W&B credentials, and sufficient GPU memory. Do not assume every full experiment can run in a lightweight development environment.
 - Some scripts activate `./venv/bin/activate`, but a repository-local virtual environment is not guaranteed. Plain `python3` is valid when the active environment already has the dependencies.
+
+### baekryun (local GPU host)
+
+`hostname` returns `baekryun-cuda129`. Jobs run directly with no scheduler, so an agent must check device occupancy itself before launching anything.
+
+- Eight NVIDIA RTX A6000 (49 GB) devices are present as indices 0--7. The maintained sweep scripts restrict themselves to GPUs 4--7 through `allowed_gpu_list` and refuse to start on an occupied device.
+- The maintained interpreter is `/opt/conda/envs/dt/bin/python` (conda environment `dt`), overridable through `PYTHON_BIN`.
+- Pretrained ViT checkpoints and ImageNet data are expected outside the repository under `/data/nas/` by the existing experiment scripts.
+
+### UBAI cluster (gate1/gate2)
+
+The cluster's canonical rules live in `/home1/sizz1997/myubai/wagner2026philtrans/AGENTS.md` on `gate1.hpc`. Follow them whenever work targets the cluster instead of the local GPU host.
+
+- Gate nodes are login nodes. Use them only for SSH and file transfer, `git`, light editing and log inspection, and Slurm commands (`sbatch`, `squeue`, `sinfo`, `scancel`).
+- Never run training, inference, builds, or bulk data processing on a gate node. Heavy processes block other users and are terminated by administrators.
+- Submit every compute job to Slurm with `sbatch`. Allocate a compute node with `srun --pty bash` even for interactive debugging.
+- `enroot` 3.5.0 and the Slurm `pyxis` plugin v0.23.0 exist only on compute nodes; gate nodes have neither.
+- `#SBATCH --container-image` is rejected at submission because the gate `sbatch` does not load `pyxis`. Put container options on the `srun` call inside the job script instead.
+- Home directories are not mounted inside containers by default. Pass `--container-mounts=$HOME:$HOME` or `--container-mount-home`. The container keeps the user's uid/gid and is not root unless `--container-remap-root` is given.
+- The `/enroot` image cache is node-local, so `--container-name` reuse does not survive a different node assignment. Save frequently used images to a squashfs file under the home directory with `--container-save` from inside a submitted job, then reference that path.
+- From `baekryun` the login hosts are reachable as `ssh gate1` and `ssh gate2` once `~/.ssh/config` defines them. SSH keys and host configuration are machine-local setup and must never be committed to this repository.
 
 ## Repository layout
 
@@ -28,7 +52,7 @@ The current manuscript is `paper/neurips_2026.tex`. Supporting review translatio
 - `scripts/notebooks/`: exploratory notebooks and figure-generation notebooks.
 - `analysis/`: focused local analysis and figure-generation programs.
 - `artifacts/`: generated figures, W&B exports, quantiles, and experiment logs. Treat these as outputs, not source code.
-- `paper/`: manuscript source, review notes, references, and publication-ready figure assets.
+- `paper/`: untracked, venue-specific manuscript snapshots, templates, review notes, references, and publication-ready figure assets.
 - `lat.md/`: structured architecture, design-decision, domain, and verification documentation.
 
 Vendored or reference implementations such as `TTFSFormer/`, `src/transformers`, `src/spikingjelly`, and the `SpikingBERT` submodule should generally not be modified unless the task explicitly concerns them.
@@ -85,7 +109,7 @@ Preserve these invariants when making changes:
 - Treat global noise configuration and clamp logging as mutable process-wide state; do not assume scoped changes are thread-safe or `DataParallel`-safe.
 - Match validation effort to the changed layer. Operator changes need reference-value and boundary checks; noise changes need seeded distribution and injection-scope checks; model changes need at least a smoke evaluation when dependencies permit.
 
-The `theta` threshold controls the representable potential interval, and out-of-range values are clamped. Quantile collection writes calibration data under `artifacts/quantiles/`. W&B exports used by notebooks live under `artifacts/wandb/`, generated plots under `artifacts/figures/`, and publication copies under `paper/figures/`.
+The `theta` threshold controls the representable potential interval, and out-of-range values are clamped. Quantile collection writes calibration data under `artifacts/quantiles/`. W&B exports used by notebooks live under `artifacts/wandb/`, generated plots under `artifacts/figures/`, and NeurIPS snapshot copies under `paper/neurips_2026/figures/`.
 
 ## Coding conventions
 
@@ -97,9 +121,15 @@ The `theta` threshold controls the representable potential interval, and out-of-
 
 ## Paper-review discussions
 
-- When a paper-review or mathematical-verification answer contains several equations, a long derivation, or multiple technical cases, write the detailed material into the relevant Markdown note under `paper/` instead of presenting the full derivation only in chat.
+- Use only terminology explicitly defined or deliberately adopted in `paper/neurips_2026/neurips_2026.tex` in manuscript-facing prose, figures, captions, documentation, and user-facing reports. Do not treat an incidental undefined phrase as canonical terminology, and never use the phrase "rail excursion." If the manuscript has no suitable defined term, ask the user to approve a term before introducing it.
+- **REQUIRED terminology and notation preflight:** This gate applies even when the `terminology-preflight` skill was not selected automatically.
+  - Before applying a mutation that introduces or changes manuscript-facing wording, equations, symbols, figure or table labels, exported field names, or report strings, run `python3 scripts/verification/check_terminology.py --lexicon scripts/verification/terminology_lexicon.json --surface manuscript --candidates` with the proposed files or draft text supplied as paths or standard input.
+  - Immediately after the mutation, run the same checker on the exact added lines by supplying their unified diff to `--diff`, before running a generator, promoting an artifact, or reporting completion. Do not substitute the whole dirty worktree when it contains unrelated user changes.
+  - Exit code 1 or 2 is a blocker: do not continue or claim completion.
+  - Review every `CANDIDATE` against `paper/neurips_2026/neurips_2026.tex`; unresolved candidates also block progress until rewritten with an established form or explicitly approved by the user.
+- When a paper-review or mathematical-verification answer contains several equations, a long derivation, or multiple technical cases, write the detailed material into the relevant Markdown note under `paper/neurips_2026/` instead of presenting the full derivation only in chat.
 - Use Markdown/LaTeX math syntax (`$...$` and `$$...$$`) for equations. Do not put mathematical expressions in fenced code blocks unless the user explicitly requests plain-text math.
-- Keep sequential reviewer-issue verification in `paper/reviewer_technical_verification_notes_ko.md` and improvement actions in `paper/neurips_2026_review_checklist_ko.md` unless the user requests another file.
+- Keep sequential reviewer-issue verification in `paper/neurips_2026/reviewer_technical_verification_notes_ko.md` and improvement actions in `paper/neurips_2026/neurips_2026_review_checklist_ko.md` unless the user requests another file.
 - In chat, give only a concise conclusion and a clickable link to the detailed note. Continue discussing reviewer issues one at a time.
 
 %% lat:begin %%

@@ -40,9 +40,11 @@ $$
 
 ## Fixed Range의 수식 계약
 
-Fixed range는 calibration 또는 interval arithmetic으로 inference 전에 정해지고, forward는 그 range를 읽고 clipping할 수만 있어야 한다.
+Fixed range는 설정, 가중치, interval arithmetic 또는 calibration으로 결정하며 현재 batch의 activation extrema로 정하지 않는다.
 
-목표는 모든 위치에 가장 넓은 analytic interval을 강제하는 것이 아니다. 수식으로 tight하고 depth-independent하게 정해지는 operator는 interval arithmetic을 사용하고, nonlinear range가 어렵거나 residual 반복으로 interval이 누적 확대되는 위치는 module/site별 calibration으로 고정한다.
+목표는 모든 위치에 가장 넓은 analytic interval을 강제하는 것이 아니다. [[domain#Domain Propagation]]처럼 좁은 해석적 범위를 유지할 경우, 유한하지만 가중치나 층 반복으로 확대되어 calibration이 필요한 경우, 원래 domain에서 유한 범위가 없어 제한해야 할 경우를 구분한다. 고정 bound라는 사실만으로 calibration이 불필요해지지는 않는다.
+
+이것은 범위 선택의 설계 원칙이다. 구현은 층별 calibration 미사용 실행도 지원하며, 이때 가중치에서 계산한 범위와 residual의 구간 합을 유지한다. 현재 noise 실험의 해당 선택은 [[noise#Timing Noise Scale Sweep at Ratio 4]]에 별도로 기록한다.
 
 각 layer의 Lipschitz constant가 $L_i>1$이면 $\lVert\delta x_{i+1}\rVert\le L_i\lVert\delta x_i\rVert+\lVert e_i\rVert$에 따라 이전 clipping error와 propagated range가 함께 증폭될 수 있다. 따라서 calibration clamp는 unbounded output만 잘라내는 보조 기능이 아니라 depth 방향의 range를 다시 고정하는 경계이며, layer별 clipping rate와 최종 task accuracy를 함께 검증해야 한다.
 
@@ -158,7 +160,7 @@ $$
 \subset[-1,1].
 $$
 
-논문의 tanh-based GELU approximation은 각 $f_{\mathrm{Mul}}$, Tanh, addition의 range를 전달하되, ViT affine pre-activation은 layer-wise calibration으로 고정해 넓은 parameter-derived safety interval을 실행 range로 사용하지 않는다. Direct GELU, `gelu_new`, SiLU는 $x$와 $[0,1]$ gate의 곱이므로 fixed input interval $[l,u]$에서 보수적 output interval $[\min(l,0),\max(u,0)]$을 사용할 수 있다.
+Composed GELU는 내부 연산의 구간을 전파한다. Frozen calibration을 활성화하면 ViT affine 입력 구간을 관측 분포로 정한 층별 구간으로 교체한다. 미사용 시에는 가중치에서 계산한 고정 구간을 그대로 전달한다. Direct GELU, `gelu_new`, SiLU는 입력과 0 사이에 출력이 놓이는 gate 성질로 보수적 출력 구간을 계산할 수 있다. 이 출력 성질만으로 입력 구간이 충분히 좁다고 보장하지는 않는다.
 
 ### Attention
 
@@ -304,7 +306,7 @@ $$
 +[l_{F,\ell},u_{F,\ell}]
 $$
 
-를 반복하여 width가 depth에 따라 누적된다. ViT와 GPT-2는 post-add block output을 calibration site로 고정했으며, analytic residual sum은 collection 중 safety/diagnostic range로만 유지한다. BERT와 RoBERTa의 post-norm 경계는 LayerNorm이 depth-independent range를 다시 제공하지만 calibrated LayerNorm output을 쓰면 더 tight하게 유지할 수 있다.
+를 반복하여 width가 depth에 따라 누적된다. ViT와 GPT-2는 덧셈 뒤의 block 출력을 calibration 대상으로 지원한다. Analytic residual sum은 collection과 calibration 미사용 실행에서 유지하고, frozen calibration을 활성화한 경우에만 저장된 층별 구간으로 교체한다. BERT와 RoBERTa의 post-norm 경계는 LayerNorm이 이전 층의 구간 확대와 무관한 범위를 제공하며, 더 좁은 출력 calibration은 별도 확장 대상이다.
 
 ### 우선순위 판정
 
@@ -321,7 +323,7 @@ Bound 증폭은 operator contract 오류와 calibration 대상이 섞여 있으�
 | Complete | scaled dot product | $\theta^2\sqrt D$ analytic safety bound가 넓음 | dtype/$\tau$/$S_{\max}$ ceiling과 optional layer score calibration 적용 완료 |
 | Partial validation | attention value integration | fixed ideal rail $S_{\max}\theta$가 sequence capacity와 함께 증가하고 one-sided miss는 raw positive excursion을 만들 수 있음 | ViT-S 5,000-image audit는 miss와 saturation 0; 다른 model family 검증 필요 |
 | Partial validation | affine, convolution, MLP projection | exact parameter-derived safety bound는 static하지만 activation distribution보다 넓을 수 있음 | ViT-S clean affine/embedding clamps와 Gaussian affine saturation은 0; 다른 family 검증 필요 |
-| Complete | ViT/GPT-2 residual | interval width가 block depth와 함께 누적됨 | block별 post-add frozen calibration과 clamp 완료 |
+| Complete | ViT/GPT-2 residual | interval width가 block depth와 함께 누적됨 | block별 frozen calibration과 clamp 지원 구현 완료; 미사용 실행은 구간 합 유지 |
 | Open extension | BERT/RoBERTa residual and LayerNorm | post-norm analytic rail이 depth-independent하므로 static contract는 만족 | tighter artifact lifecycle이 필요하면 evaluator별 calibration을 별도 추가 |
 | Partial validation | dense LayerNorm, embeddings, task heads | finite하고 static하지만 model width 또는 parameter table extrema에 비해 넓을 수 있음 | ViT-S embedding rail은 clean excursion 0이고 conventional classifier는 80.54% task accuracy로 검증; 다른 family 검증 필요 |
 
@@ -386,14 +388,14 @@ LayerNorm internal ranges $[m,\theta-m]$, $[m^2,(\theta-m)^2]$와 $T_0$는 confi
 
 ### ViT
 
-ViT의 activation-derived call site는 모두 제거되었다. Fully bounded activation과 encoder entry는 analytic interval을 사용하고 두 residual 경계는 frozen layer-wise calibration으로 depth별 range를 reset한다.
+ViT는 현재 activation extrema로 구간을 정하지 않는다. 두 residual 경계는 frozen calibration 사용 시에만 저장 구간으로 교체하며, 미사용 시 구간 합을 유지한다.
 
 | 함수 | 수 | 현재 동작 | 교체 |
 |---|---:|---|---|
 | [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTPatchEmbeddings#forward]] | 0 | image processor metadata에서 channel normalization endpoint를 계산해 fixed Conv2d input range로 사용 | 완료 |
 | [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTIntermediate#forward]] | 0 | ReLU/Tanh endpoint와 GELU/SiLU의 $[0,1]$ gate envelope를 fixed affine input range에서 계산 | 완료 |
 | [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTEncoder#forward]] | 0 | 모든 phase에서 fixed $[-\theta,\theta]$ entry rail을 사용하고 calibration site를 만들지 않음 | 완료 |
-| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTLayer#forward]] | 0 | attention residual과 block output에 각각 frozen layer-wise range를 적용하고 strict excursion을 기록 | 완료 |
+| [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTLayer#forward]] | 0 | frozen calibration 활성화 시 두 residual에 저장된 구간을 적용하고 초과를 기록; 미사용 시 고정 구간 합 유지 | 완료 |
 
 Image processor가 channel별 $x_c=(r_c-\mu_c)/\sigma_c$, $r_c\in[0,1]$을 사용하면 pixel range는 preprocessing metadata에서 직접 계산할 수 있다. Custom preprocessing 또는 `inputs_embeds`는 별도 calibration identity가 필요하다.
 
@@ -463,15 +465,15 @@ Variable sequence length에서는 current $S$로 range를 바꾸면 같은 modul
 | 위치 | 현재 동작 | 판정 및 남은 범위 |
 |---|---|---|
 | [[scripts/evaluation/error_analysis_vit.py#evaluate_vit_model]] | clean training subset을 두 번 순차 replay해 stable module/site별 immutable artifact를 저장하거나 frozen artifact를 검증·적용 | 완료; absolute-quantile hook은 별도 진단 경로 |
-| [[scripts/evaluation/error_analysis_bert.py#evaluate_bert_model]] | configuration- 및 analytic-derived fixed range와 global diagnostic quantile을 사용 | static contract 완료; tighter task-specific artifact는 optional extension |
-| [[scripts/evaluation/error_analysis_roberta.py#evaluate_roberta_model]] | configuration- 및 analytic-derived fixed range와 global diagnostic quantile을 사용 | static contract 완료; tighter task-specific artifact는 optional extension |
+| [[scripts/evaluation/error_analysis_bert.py#evaluate_bert_model]] | configuration- 및 analytic-derived fixed range와 global diagnostic quantile을 사용 | static contract 완료; tighter task-specific artifact는 [[deferred-experiments#Scale and Generality]]에 보류 |
+| [[scripts/evaluation/error_analysis_roberta.py#evaluate_roberta_model]] | configuration- 및 analytic-derived fixed range와 global diagnostic quantile을 사용 | static contract 완료; tighter task-specific artifact는 [[deferred-experiments#Scale and Generality]]에 보류 |
 | [[scripts/evaluation/error_analysis_gpt2.py#evaluate_gpt2_model]] | 빈 문장을 제거한 clean WikiText training subset을 두 번 순차 replay하고 tokenizer, sequence capacity, model path를 고정한 artifact를 저장·검증·적용 | 완료; cache를 끈 fixed-length calibration이며 absolute-quantile hook은 별도 진단 경로 |
 
 Calibration은 Gaussian timing noise를 반드시 disable하고 `model.eval()`에서 수행해야 한다. ViT collection은 timing noise, mismatch, parameter perturbation, `DataParallel`을 거부하고 GPT-2 collection은 현재 존재하는 timing-noise axis와 `DataParallel`을 거부한다. Frozen validation과 inference는 clean artifact를 검증한 뒤 robustness axis를 독립적으로 적용한다.
 
 Calibration 측정은 deterministic한 두 collection pass로 분리하고 그 뒤 frozen validation을 수행한다. 첫 pass는 clamp 전 activation의 signed min/max를 기록하고, 두 번째 pass는 같은 dataset을 다시 실행하여 첫 pass endpoint에 고정한 histogram을 누적한다. 기본 정책은 min/max를 절단 없이 선택하고 양쪽에 5% margin을 더한다. Validation은 excursion을 먼저 집계하고 clamp하며 실행 중 range를 넓히지 않는다.
 
-Pre-norm ViT와 GPT-2의 residual stream은 post-add raw value를 block별 site로 측정하고 frozen range로 clamp한다. BERT와 RoBERTa의 post-norm 출력은 analytic LayerNorm range로 다음 block 경계를 다시 정하며, 더 tight한 artifact가 필요하면 같은 frozen-site 규칙을 확장할 수 있다.
+Pre-norm ViT와 GPT-2는 collection에서 덧셈 뒤 raw value를 측정하고 frozen calibration 실행에서 저장된 구간으로 clamp한다. Calibration 미사용 시에는 구간 합을 유지한다. BERT와 RoBERTa의 post-norm 출력은 analytic LayerNorm range를 다음 block으로 전달한다. 더 좁은 출력 범위 수집은 [[deferred-experiments#Scale and Generality]]에 보류한다.
 
 ViT의 [[scripts/evaluation/error_analysis_vit.py#apply_parameter_noise]]는 static weight/bias perturbation을 model loading 뒤에 적용한다. 따라서 affine parameter range는 `from_pretrained`, dtype/device conversion, static parameter perturbation이 끝난 뒤 고정해야 한다. Static threshold mismatch는 input potential을 shift하지만 encoder range $[-\theta,\theta]$는 유지하고 clipping 통계로 관측한다.
 
@@ -526,7 +528,7 @@ Dependency 순서대로 fixed range를 도입하면 각 단계에서 current ten
 2. ViT와 GPT-2 evaluator의 collection, frozen validation, inference lifecycle은 완료되었다. BERT와 RoBERTa는 static analytic contract를 만족하며 layer-wise artifact lifecycle은 optional tightening extension이다.
 3. Learned parameter와 embedding-table interval은 versioned freeze/cache 경로로 전환되었다. Linear, Conv2d, Conv1D와 ordinary/spiking LayerNorm은 repeated forward에서 parameter extrema를 다시 읽지 않는다.
 4. Attention score representability ceiling, frozen score calibration, mask cap, fixed value-output rail, four-family adapter propagation은 완료되었다.
-5. ViT/GPT-2 model entry는 analytic range를 유지하고 residual reset, ViT GELU pre-activation, spiking attention score에만 calibration을 적용한다. BERT/RoBERTa도 analytic/frozen interval을 전달한다.
+5. ViT/GPT-2 model entry는 analytic range를 유지하고 residual, ViT GELU 입력, spiking attention score에 선택적 층별 calibration을 지원한다. 미사용 실행은 해당 구간을 관측 분포로 교체하지 않는다. BERT/RoBERTa도 analytic/frozen interval을 전달한다.
 6. Direct/local-alias live-extrema AST audit, representative batch order/partition invariance, Gaussian seed 및 noise-mode bound invariance verification은 permanent suite에 연결되었다.
 7. 남은 작업은 위 비-calibration contract 정리와 real checkpoint/dataset full evaluation이다.
 

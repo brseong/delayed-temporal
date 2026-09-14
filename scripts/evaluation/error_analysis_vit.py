@@ -1,7 +1,9 @@
 from dataclasses import dataclass
+import hashlib
 import math
 from pathlib import Path
 import sys
+import time
 from typing import Literal
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -13,7 +15,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from utils.transformers.optional_tensorboard import create_summary_writer
 from torch.nn.parallel import DataParallel
-from datasets import load_dataset
+from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
 from transformers import AttentionInterface, AutoModelForImageClassification
 from transformers.models.vit import ViTImageProcessor
 from utils.transformers.models.spiking_vit.modeling_spiking_vit import (
@@ -52,7 +54,6 @@ from utils.transformers.models.spiking_vit.calibration import (
     vit_calibration_specs,
 )
 from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
-import evaluate
 from tqdm import tqdm
 
 _TB_LOG_BATCHES = 10  # 처음 N 배치에서만 히스토그램 로그
@@ -79,10 +80,14 @@ class Arguments:
     model_backend: Literal["hf", "spiking"]
     model_id: str
     dataset_id: str
+    evaluation_dataset_path: str
+    evaluation_split: str
     batch_size: int
     device: Literal["cuda", "cpu"]
     precision: Literal["float32", "float64", "bfloat16", "float16"]
     max_eval_batches: int
+    benchmark_warmup_batches: int
+    benchmark_measure_batches: int
     spiking_layernorm: bool
     spiking_attention: bool
     spiking_ln_mul: bool
@@ -111,12 +116,14 @@ class Arguments:
     gaussian_time_noise: bool
     time_noise_std_frac: float
     time_noise_mean: float
+    time_noise_deadline_margin_std: float
     time_noise_seed: int
 
     # Static device and parameter non-idealities remain separate from event timing
     # so their effects can be swept and attributed independently.
     mismatch_enabled: bool
     mismatch_theta_std: float
+    mismatch_seed: int
     weight_noise_std: float
     bias_noise_std: float
 
@@ -124,6 +131,9 @@ class Arguments:
     collect_quantiles: bool
     report_clamp_stats: bool
     quick_test: bool
+    tensorboard: bool
+    source_commit: str
+    checkpoint_sha256: str
 
 def parse_arguments() -> Arguments:
     """Parse the ViT evaluator command line into its typed configuration.
@@ -148,10 +158,40 @@ def parse_arguments() -> Arguments:
                         help="Pretrained ViT model ID from Hugging Face.")
     parser.add_argument("--dataset_id", type=str, default="cifar10",
                         help="Dataset ID from Hugging Face datasets library.")
+    parser.add_argument(
+        "--evaluation-dataset-path",
+        type=str,
+        default="",
+        help=(
+            "Optional datasets.save_to_disk artifact. When supplied, evaluation "
+            "does not call load_dataset or access a remote dataset registry."
+        ),
+    )
+    parser.add_argument(
+        "--evaluation-split",
+        type=str,
+        default="",
+        help=(
+            "Split key for a saved DatasetDict and metadata label for a saved "
+            "Dataset; defaults to the dataset configuration's evaluation split."
+        ),
+    )
     parser.add_argument("--batch_size", type=int, default=32,
                         help="Batch size for evaluation.")
     parser.add_argument("--max_eval_batches", type=int, default=0,
                         help="If > 0, stop after this many evaluation batches for smoke testing.")
+    parser.add_argument(
+        "--benchmark-warmup-batches",
+        type=int,
+        default=0,
+        help="CUDA benchmark warm-up batches excluded from accuracy and timing.",
+    )
+    parser.add_argument(
+        "--benchmark-measure-batches",
+        type=int,
+        default=0,
+        help="If > 0, time exactly this many batches after benchmark warm-up.",
+    )
     parser.add_argument("--device", type=str, choices=["cuda", "cpu"], default="cuda",
                         help="Device to run the evaluation on (e.g., 'cuda' or 'cpu').")
     parser.add_argument("--precision", type=str, choices=["float32", "float64", "bfloat16", "float16"], default="float32",
@@ -258,6 +298,15 @@ def parse_arguments() -> Arguments:
         help="Gaussian timing mean in absolute time units (default: 0.0).",
     )
     parser.add_argument(
+        "--time-noise-deadline-margin-std",
+        type=float,
+        default=0.0,
+        help=(
+            "Late-arrival grace as a multiple of Gaussian sigma; accepted late "
+            "events saturate at the nominal code endpoint."
+        ),
+    )
+    parser.add_argument(
         "--time-noise-seed",
         type=int,
         default=0,
@@ -270,6 +319,12 @@ def parse_arguments() -> Arguments:
                         help="[C] Static per-neuron threshold mismatch (frozen).")
     parser.add_argument("--mismatch-theta-std", type=float, default=0.0,
                         help="[C] σ_θ: per-neuron θ offset std, relative to θ.")
+    parser.add_argument(
+        "--mismatch-seed",
+        type=int,
+        default=0,
+        help="Seed for the dedicated frozen threshold-mismatch replica.",
+    )
     parser.add_argument("--weight-noise-std", type=float, default=0.0,
                         help="Standard deviation of Gaussian noise to add to weights (default: 0.0).")
     parser.add_argument("--bias-noise-std", type=float, default=0.0,
@@ -284,6 +339,24 @@ def parse_arguments() -> Arguments:
     )
     parser.add_argument("--quick-test", action="store_true",
                         help="Run a quick test with a small subset of the dataset and fewer batches.")
+    parser.add_argument(
+        "--tensorboard",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write TensorBoard histograms (disable on storage-constrained sweeps).",
+    )
+    parser.add_argument(
+        "--source-commit",
+        type=str,
+        default="unspecified",
+        help="Immutable source revision recorded in the evaluation log.",
+    )
+    parser.add_argument(
+        "--checkpoint-sha256",
+        type=str,
+        default="unspecified",
+        help="Precomputed checkpoint artifact digest recorded in the log.",
+    )
 
     # Parse once, then copy every field explicitly into the dataclass so omissions
     # or stale option names fail visibly during this staged interface migration.
@@ -293,10 +366,14 @@ def parse_arguments() -> Arguments:
         model_backend=args.model_backend,
         model_id=args.model_id,
         dataset_id=args.dataset_id,
+        evaluation_dataset_path=args.evaluation_dataset_path,
+        evaluation_split=args.evaluation_split,
         batch_size=args.batch_size,
         device=args.device,
         precision=args.precision,
         max_eval_batches=args.max_eval_batches,
+        benchmark_warmup_batches=args.benchmark_warmup_batches,
+        benchmark_measure_batches=args.benchmark_measure_batches,
         spiking_layernorm=args.spiking_layernorm,
         spiking_attention=args.spiking_attention,
         spiking_ln_mul=args.spiking_ln_mul,
@@ -318,14 +395,19 @@ def parse_arguments() -> Arguments:
         gaussian_time_noise=args.gaussian_time_noise,
         time_noise_std_frac=args.time_noise_std_frac,
         time_noise_mean=args.time_noise_mean,
+        time_noise_deadline_margin_std=args.time_noise_deadline_margin_std,
         time_noise_seed=args.time_noise_seed,
         mismatch_enabled=args.mismatch_enabled,
         mismatch_theta_std=args.mismatch_theta_std,
+        mismatch_seed=args.mismatch_seed,
         weight_noise_std=args.weight_noise_std,
         bias_noise_std=args.bias_noise_std,
         collect_quantiles=args.collect_quantiles,
         report_clamp_stats=args.report_clamp_stats,
         quick_test=args.quick_test,
+        tensorboard=args.tensorboard,
+        source_commit=args.source_commit,
+        checkpoint_sha256=args.checkpoint_sha256,
     )
 
 
@@ -419,6 +501,67 @@ def validate_vit_calibration_arguments(
             "perturbations to be disabled"
         )
     return mode
+
+
+def validate_vit_runtime_arguments(args: Arguments) -> None:
+    """Reject ambiguous offline-dataset and benchmark configurations early."""
+
+    for name, value in (
+        ("max_eval_batches", args.max_eval_batches),
+        ("benchmark_warmup_batches", args.benchmark_warmup_batches),
+        ("benchmark_measure_batches", args.benchmark_measure_batches),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+    if args.benchmark_warmup_batches and not args.benchmark_measure_batches:
+        raise ValueError(
+            "benchmark warm-up batches require benchmark measure batches"
+        )
+    if args.benchmark_measure_batches and args.max_eval_batches:
+        raise ValueError(
+            "benchmark measure batches and max_eval_batches are mutually exclusive"
+        )
+    if args.evaluation_dataset_path:
+        dataset_path = Path(args.evaluation_dataset_path).expanduser()
+        if not dataset_path.exists():
+            raise ValueError(
+                f"evaluation dataset path does not exist: {dataset_path}"
+            )
+
+
+def load_evaluation_dataset(
+    args: Arguments,
+    *,
+    configured_split: str,
+) -> tuple[Dataset, str, str]:
+    """Load the registry dataset or an offline ``save_to_disk`` artifact."""
+
+    split = args.evaluation_split.strip() or configured_split
+    if not args.evaluation_dataset_path:
+        dataset = load_dataset(
+            args.dataset_id,
+            split=split,
+            cache_dir="/data/nas/datasets/",
+        )
+        if not isinstance(dataset, Dataset):
+            raise TypeError("evaluation split did not resolve to a Dataset")
+        return dataset, split, f"registry:{args.dataset_id}"
+
+    dataset_path = Path(args.evaluation_dataset_path).expanduser().resolve()
+    loaded = load_from_disk(str(dataset_path))
+    if isinstance(loaded, DatasetDict):
+        if split not in loaded:
+            raise ValueError(
+                f"saved DatasetDict has no split {split!r}: {dataset_path}"
+            )
+        dataset = loaded[split]
+    elif isinstance(loaded, Dataset):
+        dataset = loaded
+    else:
+        raise TypeError(
+            "evaluation dataset path must contain a saved Dataset or DatasetDict"
+        )
+    return dataset, split, f"disk:{dataset_path}"
 
 DATASET_CONFIGS = {
     "cifar10": {
@@ -540,6 +683,7 @@ def evaluate_vit_model(args: Arguments) -> None:
     # 0. 시드 설정
     # ---------------------------------------------------------
     torch.manual_seed(42)
+    validate_vit_runtime_arguments(args)
     calibration_mode = validate_vit_calibration_arguments(args)
     
     # Precision mapping
@@ -569,7 +713,7 @@ def evaluate_vit_model(args: Arguments) -> None:
             "label_key": "label",
         },
     )
-    split = ds_config["split"]
+    split = args.evaluation_split.strip() or ds_config["split"]
     calibration_split = ds_config["calibration_split"]
     image_key = ds_config["image_key"]
     label_key = ds_config["label_key"]
@@ -581,9 +725,47 @@ def evaluate_vit_model(args: Arguments) -> None:
     # duration. Every decorated encoder then receives this same absolute sigma_t.
     identity_time_window = 2.0 * float(args.theta)
     time_noise_std = float(args.time_noise_std_frac) * identity_time_window
+    time_noise_deadline_margin = (
+        float(args.time_noise_deadline_margin_std) * time_noise_std
+    )
+    identity_deadline = torch.tensor(identity_time_window, dtype=dtype)
+    identity_deadline_ulp = float(
+        (
+            torch.nextafter(
+                identity_deadline,
+                identity_deadline.new_tensor(math.inf),
+            )
+            - identity_deadline
+        ).item()
+    )
+    time_noise_std_to_identity_ulp = (
+        time_noise_std / identity_deadline_ulp
+        if identity_deadline_ulp > 0.0
+        else math.inf
+    )
     gaussian_enabled = bool(
         model_backend == "spiking" and args.gaussian_time_noise
     )
+    mismatch_enabled = bool(
+        model_backend == "spiking"
+        and args.mismatch_enabled
+        and args.mismatch_theta_std > 0.0
+    )
+
+    if gaussian_enabled and mismatch_enabled:
+        raise ValueError(
+            "Gaussian timing noise and static threshold mismatch must be "
+            "evaluated as separate experiment axes"
+        )
+    if args.mismatch_seed < 0:
+        raise ValueError("mismatch seed must be non-negative")
+    if (
+        not math.isfinite(float(args.time_noise_deadline_margin_std))
+        or args.time_noise_deadline_margin_std < 0.0
+    ):
+        raise ValueError(
+            "time-noise deadline margin must be finite and non-negative"
+        )
 
     # Per-layer selection has meaning only inside the temporal MLP path. Reject
     # combinations that would otherwise record a requested but inactive ablation.
@@ -608,6 +790,11 @@ def evaluate_vit_model(args: Arguments) -> None:
             "Gaussian spike-time noise does not support DataParallel; "
             "run one evaluation process per GPU"
         )
+    if mismatch_enabled and use_data_parallel:
+        raise RuntimeError(
+            "static threshold mismatch does not support DataParallel; "
+            "run one evaluation process per GPU"
+        )
     if calibration_mode is not None and use_data_parallel:
         raise RuntimeError(
             "layer-wise calibration does not support DataParallel; "
@@ -625,6 +812,7 @@ def evaluate_vit_model(args: Arguments) -> None:
         enabled=gaussian_enabled,
         time_std=time_noise_std,
         time_mean=args.time_noise_mean,
+        deadline_margin=time_noise_deadline_margin,
         seed=args.time_noise_seed,
         device=device,
     )
@@ -636,6 +824,10 @@ def evaluate_vit_model(args: Arguments) -> None:
         "gaussian_time_noise_effective": gaussian_enabled,
         "identity_time_window": identity_time_window,
         "time_noise_std": time_noise_std,
+        "time_noise_deadline_margin": time_noise_deadline_margin,
+        "identity_deadline_ulp": identity_deadline_ulp,
+        "time_noise_std_to_identity_ulp": time_noise_std_to_identity_ulp,
+        "mismatch_effective": mismatch_enabled,
     }
     effective_attn_impl = "eager"
     if model_backend == "spiking" and device.type != "cpu" and args.spiking_attention:
@@ -646,6 +838,13 @@ def evaluate_vit_model(args: Arguments) -> None:
     print(f"Using device: {device}")
     print(f"Model backend: {model_backend}")
     print(f"Model: {model_id}, Dataset: {dataset_id} ({split})")
+    print(
+        "Artifact identity — "
+        f"source_commit: {args.source_commit}, "
+        f"checkpoint_sha256: {args.checkpoint_sha256}"
+    )
+    if device.type == "cuda":
+        print(f"GPU model: {torch.cuda.get_device_name(device)}")
     print(f"Precision: {args.precision}")
     print(
         "Gaussian time noise — "
@@ -654,7 +853,17 @@ def evaluate_vit_model(args: Arguments) -> None:
         f"identity_window: {identity_time_window}, "
         f"std_abs: {time_noise_std}, "
         f"mean_abs: {args.time_noise_mean}, "
-        f"seed: {args.time_noise_seed}"
+        f"seed: {args.time_noise_seed}, "
+        f"identity_deadline_ulp: {identity_deadline_ulp}, "
+        f"std_to_identity_ulp: {time_noise_std_to_identity_ulp}, "
+        f"deadline_margin_std: {args.time_noise_deadline_margin_std}, "
+        f"deadline_margin_abs: {time_noise_deadline_margin}"
+    )
+    print(
+        "Static threshold mismatch — "
+        f"enabled: {mismatch_enabled}, "
+        f"theta_std: {args.mismatch_theta_std}, "
+        f"seed: {args.mismatch_seed}"
     )
     
     if model_backend == "spiking":
@@ -674,15 +883,22 @@ def evaluate_vit_model(args: Arguments) -> None:
     # the training subset, while validate/inference additionally load the untouched
     # evaluation split used for task accuracy and clipping reports.
     dataset = None
+    dataset_source = "none"
     if calibration_mode is not CalibrationMode.COLLECT:
         print(f"Loading evaluation dataset: {dataset_id} ({split})...")
-        dataset = load_dataset(
-            dataset_id,
-            split=split,
-            cache_dir="/data/nas/datasets/",
+        dataset, split, dataset_source = load_evaluation_dataset(
+            args,
+            configured_split=ds_config["split"],
         )
         if args.quick_test:
             dataset = dataset.select(range(min(5000, len(dataset))))
+        print(
+            "Evaluation metadata — "
+            f"model: {model_id}, dataset: {dataset_id}, split: {split}, "
+            f"samples: {len(dataset)}, theta: {args.theta}, "
+            f"precision: {args.precision}, source: {dataset_source}, "
+            f"fingerprint: {dataset._fingerprint}"
+        )
 
     calibration_dataset = None
     if calibration_mode is not None:
@@ -706,14 +922,6 @@ def evaluate_vit_model(args: Arguments) -> None:
         processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
     else:
         processor = ViTImageProcessor.from_pretrained(model_id)
-
-    # Collection writes an artifact and exits without touching validation labels or
-    # metrics. Frozen and calibration-free evaluation retain the existing accuracy.
-    metric_int = None
-    metric_tot = None
-    if calibration_mode is not CalibrationMode.COLLECT:
-        metric_int = evaluate.load("accuracy")
-        metric_tot = evaluate.load("accuracy")
 
     # ---------------------------------------------------------
     # 3. 데이터 전처리 함수 정의
@@ -816,11 +1024,19 @@ def evaluate_vit_model(args: Arguments) -> None:
     if (
         calibration_mode is not CalibrationMode.COLLECT
         and model_backend == "spiking"
-        and args.mismatch_enabled
-        and args.mismatch_theta_std > 0
+        and mismatch_enabled
     ):
-        handles = install_device_mismatch(model, theta_std=args.mismatch_theta_std, enabled=True)
-        print(f"Installed static device mismatch on {len(handles)} spiking modules (σ_θ={args.mismatch_theta_std}).")
+        handles = install_device_mismatch(
+            model,
+            theta_std=args.mismatch_theta_std,
+            enabled=True,
+            seed=args.mismatch_seed,
+        )
+        print(
+            "Installed static device mismatch on "
+            f"{len(handles)} spiking modules "
+            f"(σ_θ={args.mismatch_theta_std}, seed={args.mismatch_seed})."
+        )
 
     # Collection executes the deterministic training subset twice and terminates
     # after atomically writing the artifact. No validation example or task metric is
@@ -888,7 +1104,10 @@ def evaluate_vit_model(args: Arguments) -> None:
     # ---------------------------------------------------------
     # 5. TensorBoard 히스토그램 훅 등록
     # ---------------------------------------------------------
-    tb_writer = create_summary_writer(log_dir=f"runs/{args.experiment_name}")
+    tb_writer = create_summary_writer(
+        log_dir=f"runs/{args.experiment_name}",
+        enabled=args.tensorboard,
+    )
     log_step = [0]
     hooks = []
 
@@ -974,11 +1193,21 @@ def evaluate_vit_model(args: Arguments) -> None:
     # ---------------------------------------------------------
     # 6. 평가 루프 (Evaluation Loop)
     # ---------------------------------------------------------
-    if dataloader is None or metric_int is None or metric_tot is None:
-        raise RuntimeError("evaluation dataset or accuracy metric setup is incomplete")
+    if dataloader is None:
+        raise RuntimeError("evaluation dataset setup is incomplete")
     print("Starting evaluation...")
 
-    for batch in tqdm(dataloader):
+    correct_count = 0
+    evaluated_count = 0
+    prediction_digest = hashlib.sha256()
+    benchmark_enabled = args.benchmark_measure_batches > 0
+    benchmark_started_at: float | None = None
+    benchmark_seconds: float | None = None
+    benchmark_images = 0
+    if benchmark_enabled and device.type != "cuda":
+        raise ValueError("benchmark measurement requires a CUDA device")
+
+    for batch_index, batch in enumerate(tqdm(dataloader)):
         # 데이터를 디바이스(GPU/CPU)로 이동
         pixel_values = batch["pixel_values"].to(device, dtype=dtype)
         labels = batch["labels"].to(device)
@@ -1002,16 +1231,45 @@ def evaluate_vit_model(args: Arguments) -> None:
                     aggregate[field] += stats[field]
             transform_types.set_current_module_name(None)
 
-        log_step[0] += 1
-
         # Logits에서 가장 높은 확률을 가진 클래스 인덱스 추출
         predictions = torch.argmax(outputs.logits, dim=-1)
+        measured_batch = (
+            not benchmark_enabled
+            or batch_index >= args.benchmark_warmup_batches
+        )
+        if (
+            benchmark_enabled
+            and batch_index == args.benchmark_warmup_batches
+        ):
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
+            benchmark_started_at = time.perf_counter()
+        if measured_batch:
+            predictions_cpu = predictions.detach().to("cpu", dtype=torch.int64)
+            labels_cpu = labels.detach().to("cpu", dtype=torch.int64)
+            correct_count += int((predictions_cpu == labels_cpu).sum().item())
+            evaluated_count += int(labels_cpu.numel())
+            prediction_digest.update(predictions_cpu.contiguous().numpy().tobytes())
+            if benchmark_enabled:
+                benchmark_images += int(labels_cpu.numel())
 
-        # 배치 단위로 메트릭에 추가
-        metric_tot.add_batch(predictions=predictions, references=labels)
-        wandb.log({"Intermediate accuracy": metric_int.compute(predictions=predictions, references=labels)["accuracy"]})
+        log_step[0] += 1
+        if measured_batch and evaluated_count:
+            wandb.log(
+                {"Intermediate accuracy": correct_count / evaluated_count}
+            )
 
-        if args.max_eval_batches > 0 and log_step[0] >= args.max_eval_batches:
+        if (
+            benchmark_enabled
+            and batch_index + 1
+            >= args.benchmark_warmup_batches + args.benchmark_measure_batches
+        ):
+            torch.cuda.synchronize(device)
+            if benchmark_started_at is None:
+                raise RuntimeError("benchmark timer was not initialized")
+            benchmark_seconds = time.perf_counter() - benchmark_started_at
+            break
+        if not benchmark_enabled and args.max_eval_batches > 0 and log_step[0] >= args.max_eval_batches:
             break
 
     for h in hooks:
@@ -1031,14 +1289,37 @@ def evaluate_vit_model(args: Arguments) -> None:
     # ---------------------------------------------------------
     # 6. 최종 결과 계산 및 출력
     # ---------------------------------------------------------
-    final_score = metric_tot.compute()
+    if evaluated_count <= 0:
+        raise RuntimeError("evaluation produced no measured examples")
+    final_accuracy = correct_count / evaluated_count
     print("-" * 30)
     print(f"Evaluation Results for {model_id}:")
-    print(f"Accuracy: {final_score['accuracy']:.4f}")
-    wandb.log({"Final Accuracy": final_score["accuracy"]})
+    print(f"Correct: {correct_count}")
+    print(f"Evaluated samples: {evaluated_count}")
+    print(f"Prediction SHA256: {prediction_digest.hexdigest()}")
+    print(f"Accuracy: {final_accuracy:.8f}")
+    wandb.log(
+        {
+            "Final Accuracy": final_accuracy,
+            "Correct": correct_count,
+            "Evaluated samples": evaluated_count,
+        }
+    )
+    if benchmark_enabled:
+        if benchmark_seconds is None or benchmark_seconds <= 0.0:
+            raise RuntimeError("benchmark did not produce a positive duration")
+        peak_bytes = int(torch.cuda.max_memory_allocated(device))
+        print(
+            "Benchmark — "
+            f"warmup_batches: {args.benchmark_warmup_batches}, "
+            f"measure_batches: {args.benchmark_measure_batches}, "
+            f"images: {benchmark_images}, seconds: {benchmark_seconds:.9g}, "
+            f"seconds_per_image: {benchmark_seconds / benchmark_images:.9g}, "
+            f"peak_memory_bytes: {peak_bytes}"
+        )
 
-    # Report event delivery and physical rail saturation with their own denominators.
-    # The stored statistics remain limited to the five maintained raw count fields.
+    # Report event delivery, nominal endpoint occupancy, numerical resolution, and
+    # physical rail saturation with their own denominators.
     if gaussian_enabled:
         for site, counts in sorted(get_gaussian_noise_stats().items()):
             events = counts["events"]
@@ -1050,9 +1331,24 @@ def evaluate_vit_model(args: Arguments) -> None:
             overflow_rate = (
                 counts["output_overflows"] / outputs if outputs else 0.0
             )
+            deadline_rate = (
+                counts["deadline_events"] / events if events else 0.0
+            )
+            ulp_min = counts["deadline_ulp_min"]
+            if not math.isfinite(ulp_min):
+                ulp_min = 0.0
+            ulp_max = counts["deadline_ulp_max"]
+            std_to_ulp_min = time_noise_std / ulp_max if ulp_max > 0.0 else math.inf
+            std_to_ulp_max = time_noise_std / ulp_min if ulp_min > 0.0 else math.inf
             print(
                 f"Gaussian[{site}] events={events}, misses={counts['misses']} "
-                f"(rate={miss_rate:.6g}), outputs={outputs}, "
+                f"(rate={miss_rate:.6g}), "
+                f"deadline_events={counts['deadline_events']} "
+                f"(rate={deadline_rate:.6g}), "
+                f"deadline_ulp_min={ulp_min:.9g}, "
+                f"deadline_ulp_max={ulp_max:.9g}, "
+                f"std_to_ulp_min={std_to_ulp_min:.9g}, "
+                f"std_to_ulp_max={std_to_ulp_max:.9g}, outputs={outputs}, "
                 f"underflows={counts['output_underflows']} "
                 f"(rate={underflow_rate:.6g}), "
                 f"overflows={counts['output_overflows']} "
@@ -1062,6 +1358,12 @@ def evaluate_vit_model(args: Arguments) -> None:
                 f"Gaussian/{site}/events": events,
                 f"Gaussian/{site}/misses": counts["misses"],
                 f"Gaussian/{site}/miss_rate": miss_rate,
+                f"Gaussian/{site}/deadline_events": counts["deadline_events"],
+                f"Gaussian/{site}/deadline_event_rate": deadline_rate,
+                f"Gaussian/{site}/deadline_ulp_min": ulp_min,
+                f"Gaussian/{site}/deadline_ulp_max": ulp_max,
+                f"Gaussian/{site}/std_to_ulp_min": std_to_ulp_min,
+                f"Gaussian/{site}/std_to_ulp_max": std_to_ulp_max,
                 f"Gaussian/{site}/outputs": outputs,
                 f"Gaussian/{site}/output_underflows": counts["output_underflows"],
                 f"Gaussian/{site}/output_underflow_rate": underflow_rate,

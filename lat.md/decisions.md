@@ -93,3 +93,13 @@ Paper-level operation counts treat multiplication by a known scalar as a synapti
 The reference code may call a generic multiplication function for constants to keep domain handling uniform, so raw Python call counts intentionally differ from the cost abstraction. [[scripts/verification/verify_sop.py#free_scale]] encodes the paper rule explicitly.
 
 Any reported energy estimate must declare this abstraction and its excluded interface, routing, memory, synchronization, and static costs.
+
+## Separate Complete Reasoning from Manuscript Exposition
+
+Complete argument chains live in a dedicated ICLR logic note, while the submission includes only the steps needed to support its stated claims.
+
+Preserve the author's paragraph order, examples, and wording when correcting logical inconsistencies. Expand derivations in the logic note; restructure manuscript prose only when explicitly requested.
+
+The [ICLR logic-flow note](../paper/iclr_2027/iclr2027_conference_logic_ko.md) records full derivations, assumptions, failure conditions, implementation grounding, and the manuscript-visible subset for each section. Its details must not be copied into the submission merely because they exist.
+
+Implementation and verification remain the technical authority. The logic note organizes their implications, but it does not turn an algebraic possibility, unselected ablation, or unvalidated hardware interpretation into a paper claim.

@@ -790,6 +790,54 @@ def division_function(
         result_domain,
     )
 
+
+def _tanh_sigmoid_gate(
+    input_value: Float[torch.Tensor, "*batch dims"],
+    domain: PotentialBounds,
+    *,
+    tau_s: float,
+    theta: float,
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Return ``1 / (1 + exp(-2v))`` from the shared tanh primitives."""
+    tau_value = float(tau_s)
+    if not isfinite(tau_value) or tau_value <= 0.0:
+        raise ValueError("tau_s must be finite and positive")
+    scale_const = 2.0 * tau_value
+    scale_bound = PotentialBounds(scale_const, scale_const)
+    scaled_input, _ = multiplication_operator(
+        input_value,
+        domain,
+        input_value.new_tensor(scale_const).expand_as(input_value),
+        scale_bound,
+        theta,
+    )
+    scaled_domain = PotentialBounds(
+        scale_const * domain.min,
+        scale_const * domain.max,
+    )
+
+    stability_cap = 80.0 * tau_value
+    scaled_input_clamped = scaled_input.clamp(
+        min=-stability_cap,
+        max=stability_cap,
+    )
+    scaled_domain_clamped = PotentialBounds(
+        max(scaled_domain.min, -stability_cap),
+        min(scaled_domain.max, stability_cap),
+    )
+    neg_exp_out, neg_exp_domain = exponential_function(
+        scaled_input_clamped,
+        scaled_domain_clamped,
+        tau_m=tau_s,
+    )
+    return division_function(
+        X=torch.full_like(neg_exp_out, 1.0),
+        Y=1.0 + neg_exp_out,
+        joint_domain=PotentialBounds(1.0, neg_exp_domain.max + 1.0),
+        tau_s=tau_s,
+    )
+
+
 @check_domain
 def gelu_approximation(
     input_value: Float[torch.Tensor, "*batch dims"],
@@ -799,12 +847,13 @@ def gelu_approximation(
     theta: float = 400.0,
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Approximate GELU with the composed tanh-form TTFS operators.
+    """Approximate GELU with the reduced cubic-tanh TTFS composition.
 
-    The implementation evaluates ``0.5 * x * (1 + tanh(sqrt(2/pi) *
-    (x + 0.044715 * x^3)))`` through multiplication and tanh operators. Every
-    intermediate carries an analytic interval derived from ``domain``; endpoint
-    clamps remove only payload-dtype roundoff before the next domain check.
+    For ``a = sqrt(2/pi) * (x + 0.044715 * x^3)``, the identity
+    ``0.5 * (1 + tanh(a)) = 1 / (1 + exp(-2a))`` makes the division result the
+    gate directly. Every intermediate carries an analytic interval derived from
+    ``domain``; endpoint clamps remove only payload-dtype roundoff before the next
+    domain check.
 
     Args:
         input_value: Activation tensor contained by ``domain``.
@@ -842,20 +891,14 @@ def gelu_approximation(
     scale_domain = PotentialBounds(scale_const, scale_const)
     tanh_in, tanh_in_domain = multiplication_operator(inner, inner_domain, scale_tensor, scale_domain, theta)
 
-    # tanh(sqrt(2/pi) * (x + 0.044715 * x^3))
-    tanh_out, tanh_domain = tanh(tanh_in, tanh_in_domain, tau_s=tau_s, theta=theta)
-
-    # 0.5 * (1 + tanh(...)). Apply the same endpoint correction before the
-    # value enters the next TTFS operator, whose contract checks its domain.
-    one_plus_domain = PotentialBounds(1.0 + tanh_domain.min, 1.0 + tanh_domain.max)
-    one_plus = one_plus_domain.clamp(
-        1.0 + tanh_out,
-        name="gelu_one_plus",
+    # The tanh affine output and the following half scaling cancel exactly. Reuse
+    # the normalized ratio as the [0, 1] GELU gate and avoid an extra encoded event.
+    gate, gate_domain = _tanh_sigmoid_gate(
+        tanh_in,
+        tanh_in_domain,
+        tau_s=tau_s,
+        theta=theta,
     )
-    half = 0.5
-    half_tensor = input_value.new_tensor(half).expand_as(input_value)
-    half_domain = PotentialBounds(half, half)
-    gate, gate_domain = multiplication_operator(one_plus, one_plus_domain, half_tensor, half_domain, theta)
 
     # x * gate
     gelu_approx, gelu_domain = multiplication_operator(input_clamped, domain, gate, gate_domain, theta)
@@ -969,7 +1012,7 @@ def tanh(
     """Approximate tanh with a fixed structural output interval.
 
     According to Lemma 4.4, the composed approximation is
-    ``f_tanh(v) := 2 * f_Div(1, 1 + f_Exp(-2v)) - 1``. The internal division
+    ``f_Tanh(v) := 2 * f_Div(1, 1 + f_Exp(2v)) - 1``. The internal division
     operator may carry a conservative generic ratio interval, but the completed
     activation is mathematically bounded by ``[-1, 1]``. Gaussian observation-time
     excursions are counted before the final activation clamp.
@@ -984,54 +1027,14 @@ def tanh(
         The composed tanh approximation clamped to ``[-1, 1]`` together with that
         fixed structural potential domain.
     """
-    # Pre-scale the tanh coefficient by tau_s. Exponential decoding divides by
-    # the same value, so the final argument remains exp(-2v).
-    tau_value = float(tau_s)
-    if not isfinite(tau_value) or tau_value <= 0.0:
-        raise ValueError("tau_s must be finite and positive")
-    scale_const = 2.0 * tau_value
-    scale_bound = PotentialBounds(scale_const, scale_const)
-    scaled_input, _ = multiplication_operator(
+    div_out, _ = _tanh_sigmoid_gate(
         input_value,
         domain,
-        input_value.new_tensor(scale_const).expand_as(input_value),
-        scale_bound,
-        theta,
-    )
-    scaled_domain = PotentialBounds(
-        scale_const * domain.min,
-        scale_const * domain.max,
-    )
-
-    # Step 2: constrain the direct exponential argument to the established numerical
-    # stability interval. The declared domain follows the same endpoint intersection
-    # so the encoder and tensor value retain one synchronized potential contract.
-    stability_cap = 80.0 * tau_value
-    scaled_input_clamped = scaled_input.clamp(
-        min=-stability_cap,
-        max=stability_cap,
-    )
-    scaled_domain_clamped = PotentialBounds(
-        max(scaled_domain.min, -stability_cap),
-        min(scaled_domain.max, stability_cap),
-    )
-
-    # Step 3: construct exp(-2v) with the same temporal scale used by division. The
-    # returned exponential domain defines a positive joint log-encoding interval for
-    # the constant numerator and its one-plus-exponential denominator.
-    neg_exp_out, neg_exp_domain = exponential_function(
-        scaled_input_clamped,
-        scaled_domain_clamped,
-        tau_m=tau_s,
-    )
-    div_out, _ = division_function(
-        X=torch.full_like(neg_exp_out, 1.0),
-        Y=1.0 + neg_exp_out,
-        joint_domain=PotentialBounds(1.0, neg_exp_domain.max + 1.0),
         tau_s=tau_s,
+        theta=theta,
     )
 
-    # Step 4: map the sigmoid-like ratio from [0,1] onto the tanh interval [-1,1].
+    # Map the sigmoid-like ratio from [0,1] onto the tanh interval [-1,1].
     # Timing misses may place the raw physical ratio outside its ideal rail, so count
     # any resulting activation excursion before enforcing the structural bound.
     tanh_value = 2.0 * div_out - 1.0

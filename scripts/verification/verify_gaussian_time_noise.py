@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import FrozenInstanceError
 import math
 from pathlib import Path
@@ -25,6 +26,7 @@ from utils.transforms.noise import (
     gaussian_deadline_miss_probability,
     get_gaussian_noise_stats,
     get_gaussian_time_noise,
+    install_device_mismatch,
     set_gaussian_time_noise,
 )
 from utils.transforms.potential_to_spike import (
@@ -589,6 +591,62 @@ def verify_gaussian_deadline_probability() -> None:
     )
 
 
+def verify_gaussian_deadline_margin() -> None:
+    """Verify late-arrival grace while retaining the nominal code interval."""
+    domain = TimeBounds(0.0, 4.0)
+    nominal = torch.full((200_000,), 4.0, dtype=torch.float64)
+    time_std = 0.25
+    margin = 2.0 * time_std
+
+    probability = gaussian_deadline_miss_probability(
+        nominal[:1],
+        time_std=time_std,
+        domain=domain,
+        deadline_margin=margin,
+    )
+    expected = torch.tensor(
+        [0.5 * math.erfc(2.0 / math.sqrt(2.0))],
+        dtype=torch.float64,
+    )
+    assert torch.allclose(probability, expected, atol=1e-15, rtol=1e-12)
+
+    sample = _sample_gaussian_spike_time(
+        nominal,
+        time_std=time_std,
+        domain=domain,
+        generator=torch.Generator().manual_seed(2026),
+        deadline_margin=margin,
+    )
+    empirical = float((~sample.fired).to(torch.float64).mean().item())
+    assert abs(empirical - expected.item()) < 8e-4
+    assert sample.domain == domain
+    assert bool((sample.time >= domain.min).all())
+    assert bool((sample.time <= domain.max).all())
+    assert bool((sample.time[sample.fired] == domain.max).any())
+
+    for invalid in (-1.0, float("nan"), float("inf")):
+        try:
+            gaussian_deadline_miss_probability(
+                nominal[:1],
+                time_std=time_std,
+                domain=domain,
+                deadline_margin=invalid,
+            )
+        except ValueError as error:
+            assert "deadline_margin" in str(error)
+        else:
+            raise AssertionError(f"accepted invalid deadline margin {invalid}")
+
+    set_gaussian_time_noise(
+        enabled=True,
+        time_std=time_std,
+        deadline_margin=margin,
+        seed=2026,
+    )
+    assert get_gaussian_time_noise().deadline_margin == margin
+    set_gaussian_time_noise(enabled=False)
+
+
 def verify_exponential_time_constant_scaling() -> None:
     """Verify non-unit exponential scales and invalid-scale rejection.
 
@@ -1113,6 +1171,21 @@ def verify_gaussian_encoder_boundary() -> None:
         assert parity_counts == {
             "events": 3,
             "misses": 0,
+            "deadline_events": 1,
+            "deadline_ulp_min": float(
+                torch.nextafter(
+                    torch.tensor(4.0, dtype=torch.float64),
+                    torch.tensor(math.inf, dtype=torch.float64),
+                )
+                - 4.0
+            ),
+            "deadline_ulp_max": float(
+                torch.nextafter(
+                    torch.tensor(4.0, dtype=torch.float64),
+                    torch.tensor(math.inf, dtype=torch.float64),
+                )
+                - 4.0
+            ),
             "outputs": 0,
             "output_underflows": 0,
             "output_overflows": 0,
@@ -1219,6 +1292,9 @@ def verify_gaussian_statistics_contract() -> None:
         assert counts == {
             "events": 0,
             "misses": 0,
+            "deadline_events": 0,
+            "deadline_ulp_min": math.inf,
+            "deadline_ulp_max": 0.0,
             "outputs": 5,
             "output_underflows": 1,
             "output_overflows": 1,
@@ -1404,6 +1480,9 @@ def verify_gaussian_multiplication_operator() -> None:
         assert saturation_stats["multiplication.output"] == {
             "events": 0,
             "misses": 0,
+            "deadline_events": 0,
+            "deadline_ulp_min": math.inf,
+            "deadline_ulp_max": 0.0,
             "outputs": 1,
             "output_underflows": 0,
             "output_overflows": 1,
@@ -1513,6 +1592,9 @@ def verify_gaussian_exponential_function() -> None:
         assert missed_stats["exponential.output"] == {
             "events": 0,
             "misses": 0,
+            "deadline_events": 0,
+            "deadline_ulp_min": math.inf,
+            "deadline_ulp_max": 0.0,
             "outputs": 1,
             "output_underflows": 0,
             "output_overflows": 0,
@@ -1651,6 +1733,9 @@ def verify_gaussian_exponential_difference_operator() -> None:
         assert internal_stats["exponential_difference.output"] == {
             "events": 0,
             "misses": 0,
+            "deadline_events": 0,
+            "deadline_ulp_min": math.inf,
+            "deadline_ulp_max": 0.0,
             "outputs": 1,
             "output_underflows": 0,
             "output_overflows": 0,
@@ -1712,6 +1797,9 @@ def verify_gaussian_division_function() -> None:
         assert zero_stats["division.output"] == {
             "events": 0,
             "misses": 0,
+            "deadline_events": 0,
+            "deadline_ulp_min": math.inf,
+            "deadline_ulp_max": 0.0,
             "outputs": numerator.numel(),
             "output_underflows": 0,
             "output_overflows": 0,
@@ -1772,6 +1860,9 @@ def verify_gaussian_division_function() -> None:
         assert denominator_stats["division.output"] == {
             "events": 0,
             "misses": 0,
+            "deadline_events": 0,
+            "deadline_ulp_min": math.inf,
+            "deadline_ulp_max": 0.0,
             "outputs": 1,
             "output_underflows": 0,
             "output_overflows": 1,
@@ -1798,6 +1889,9 @@ def verify_gaussian_division_function() -> None:
         assert internal_stats["division.output"] == {
             "events": 0,
             "misses": 0,
+            "deadline_events": 0,
+            "deadline_ulp_min": math.inf,
+            "deadline_ulp_max": 0.0,
             "outputs": 1,
             "output_underflows": 0,
             "output_overflows": 0,
@@ -2502,6 +2596,68 @@ def verify_gaussian_spiking_linear() -> None:
     finally:
         # Restore process-wide state before the convolutional adapter regression.
         set_gaussian_time_noise(enabled=False)
+
+
+def verify_static_mismatch_rng_contract() -> None:
+    """Verify dedicated mismatch replay, independence, and frozen offsets."""
+    base = torch.nn.Sequential(
+        SpikingLinear(3, 2, bias=True, theta=2.0, dtype=torch.float64),
+        SpikingLinear(2, 1, bias=True, theta=2.0, dtype=torch.float64),
+    )
+    same_a = copy.deepcopy(base)
+    same_b = copy.deepcopy(base)
+    different = copy.deepcopy(base)
+
+    # Installing mismatch must not consume the process-wide RNG used for model and
+    # data reproducibility. Equal dedicated seeds reproduce every module offset.
+    torch.manual_seed(1701)
+    global_state = torch.random.get_rng_state().clone()
+    handles_a = install_device_mismatch(same_a, 0.05, seed=11)
+    assert torch.equal(global_state, torch.random.get_rng_state())
+    handles_b = install_device_mismatch(same_b, 0.05, seed=11)
+    handles_different = install_device_mismatch(different, 0.05, seed=12)
+    assert len(handles_a) == len(handles_b) == len(handles_different) == 2
+
+    offsets_a = [module._mismatch_offset.clone() for module in same_a]
+    offsets_b = [module._mismatch_offset.clone() for module in same_b]
+    offsets_different = [module._mismatch_offset.clone() for module in different]
+    assert all(
+        torch.equal(first, second)
+        for first, second in zip(offsets_a, offsets_b, strict=True)
+    )
+    assert any(
+        not torch.equal(first, second)
+        for first, second in zip(offsets_a, offsets_different, strict=True)
+    )
+    assert not any("_mismatch_offset" in key for key in same_a.state_dict())
+
+    # Repeated forwards reuse the installed buffers rather than resampling them.
+    set_gaussian_time_noise(enabled=False)
+    potential = Potential(
+        torch.tensor([[0.5, -0.25, 1.0]], dtype=torch.float64),
+        PotentialBounds(-2.0, 2.0),
+    )
+    first_output = same_a(potential)
+    second_output = same_a(potential)
+    assert torch.equal(first_output.value, second_output.value)
+    assert all(
+        torch.equal(before, module._mismatch_offset)
+        for before, module in zip(offsets_a, same_a, strict=True)
+    )
+
+    # Disabled installation is a no-op, while malformed seeds fail before sampling.
+    assert install_device_mismatch(copy.deepcopy(base), 0.05, enabled=False) == []
+    for invalid_seed, expected_error in ((True, TypeError), (-1, ValueError)):
+        try:
+            install_device_mismatch(
+                copy.deepcopy(base),
+                0.05,
+                seed=invalid_seed,
+            )
+        except expected_error:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid mismatch seed {invalid_seed!r}")
 
 
 def verify_gaussian_spiking_conv2d() -> None:
@@ -3450,6 +3606,7 @@ if __name__ == "__main__":
     verify_gaussian_sampler_rng_contract()
     verify_gaussian_sampler_deadline_contract()
     verify_gaussian_deadline_probability()
+    verify_gaussian_deadline_margin()
     verify_exponential_time_constant_scaling()
     verify_gaussian_encoder_boundary()
     verify_gaussian_statistics_contract()
@@ -3461,6 +3618,7 @@ if __name__ == "__main__":
     verify_gaussian_sigmoid_gelu_function()
     verify_gaussian_softmin_function()
     verify_gaussian_swiglu_function()
+    verify_static_mismatch_rng_contract()
     verify_affine_fixed_domain_contracts()
     verify_gaussian_spiking_layernorm()
     verify_gaussian_spiking_attention()

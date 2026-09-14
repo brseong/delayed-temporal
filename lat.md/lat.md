@@ -9,4 +9,5 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[calibration]] — Deterministic layer-wise collection, immutable ranges, clipping accounting, and strict persistence.
 - [[evaluation]] — Experiment entry points, metrics, diagnostics, sweeps, and verification boundaries.
 - [[bounds-audit]] — Complete audit of fixed potential ranges, runtime extrema, calibration cases, and migration formulas.
-- [[todo]] — Deferred implementation work with explicit completion and validation requirements.
+- [[todo]] — Required manuscript and implementation work, including the only active experiment checklist.
+- [[deferred-experiments]] — Optional experiment ideas with explicit promotion conditions and no active checkboxes.

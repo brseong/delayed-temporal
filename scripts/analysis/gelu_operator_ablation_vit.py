@@ -139,9 +139,9 @@ def _dense_gelu_exponential(
     *,
     tau_s: float,
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Evaluate the GELU tanh exponential densely with identical endpoint bounds.
+    """Evaluate the GELU gate exponential densely with identical endpoint bounds.
 
-    GELU's tanh construction requests the normalized exponential composition, whose
+    GELU's direct gate requests the normalized exponential composition, whose
     deterministic value is exp(-x/tau_s). Computing the same endpoint exponents in
     the payload dtype retains float overflow and underflow behavior while removing
     only the exponential input event and its deadline decision.
@@ -199,7 +199,7 @@ def _dense_gelu_division(
     *,
     tau_s: float,
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Evaluate the GELU tanh ratio densely while retaining Gaussian-path rails.
+    """Evaluate the GELU gate ratio densely while retaining Gaussian-path rails.
 
     The ratio bypass removes numerator, denominator, and internal exponential-
     difference events as one atomic division operator. Its output retains the
@@ -297,7 +297,7 @@ def gelu_operator_ablation(
 
     This analysis-only implementation preserves the production GELU formula and
     operator order. Selecting multiplication replaces every GELU-local product,
-    selecting exponential replaces tanh's exp(-2z), and selecting division replaces
+    selecting exponential replaces the gate's exp(-2z), and selecting division replaces
     its complete log-time ratio including internal exponential difference. Any
     unselected operator remains on the ordinary event-aware Gaussian path.
 
@@ -305,7 +305,7 @@ def gelu_operator_ablation(
         input_value: GELU input tensor from the first MLP affine layer.
         domain: Propagated input bounds used by the production composition.
         dense_operators: Atomic operator names bypassed only inside this GELU call.
-        tau_s: Shared temporal scale used by tanh exponential and division.
+        tau_s: Shared temporal scale used by the gate exponential and division.
         theta: Symmetric multiplication encoder rail.
 
     Returns:
@@ -375,16 +375,17 @@ def gelu_operator_ablation(
         PotentialBounds(0.7978845608028654, 0.7978845608028654),
     )
 
-    # Expand tanh as 2/(1+exp(-2z))-1. Keeping this decomposition local permits
-    # exponential and division ablations without changing the shared tanh operator.
-    two = input_value.new_tensor(2.0).expand_as(input_value)
+    # Construct the direct gate 1/(1+exp(-2z)) locally so exponential and division
+    # can be ablated independently while matching the production composition.
+    exponent_scale = 2.0 * float(tau_s)
+    exponent_scale_tensor = input_value.new_tensor(exponent_scale).expand_as(input_value)
     scaled_tanh_input, scaled_tanh_domain = multiply(
         tanh_input,
         tanh_input_domain,
-        two,
-        PotentialBounds(2.0, 2.0),
+        exponent_scale_tensor,
+        PotentialBounds(exponent_scale, exponent_scale),
     )
-    stability_cap = 80.0
+    stability_cap = 80.0 * float(tau_s)
     scaled_tanh_input = scaled_tanh_input.clamp(
         min=-stability_cap,
         max=stability_cap,
@@ -433,31 +434,8 @@ def gelu_operator_ablation(
             division_domain,
             tau_s=tau_s,
         )
-    tanh_output = 2.0 * ratio - 1.0
-    tanh_output_domain = PotentialBounds(
-        2.0 * ratio_domain.min - 1.0,
-        2.0 * ratio_domain.max - 1.0,
-    )
-
-    # Finish 0.5*x*(1+tanh) through the same two multiplication stages. Their
-    # inclusion is important because the final product determines whether a gate
-    # error is amplified by the original MLP activation magnitude.
-    one_plus_tanh_domain = PotentialBounds(
-        1.0 + tanh_output_domain.min,
-        1.0 + tanh_output_domain.max,
-    )
-    one_plus_tanh = one_plus_tanh_domain.clamp(
-        1.0 + tanh_output,
-        name="gelu_ablation_one_plus",
-    )
-    half = input_value.new_tensor(0.5).expand_as(input_value)
-    gate, gate_domain = multiply(
-        one_plus_tanh,
-        one_plus_tanh_domain,
-        half,
-        PotentialBounds(0.5, 0.5),
-    )
-    return multiply(input_clamped, domain, gate, gate_domain)
+    # The normalized ratio is the GELU gate; no explicit tanh output is formed.
+    return multiply(input_clamped, domain, ratio, ratio_domain)
 
 
 def install_gelu_operator_ablation(dense_operators: frozenset[str]) -> None:
