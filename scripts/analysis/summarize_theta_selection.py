@@ -304,7 +304,7 @@ def plot_selection(path_prefix: Path, runs: Sequence[Run], selected: float) -> N
 
     rail_axis = accuracy_axis.twinx()
     rail_axis.semilogx(thetas, [run.semantic_max_rate for run in candidates], "s--", color="#f1a208", alpha=0.75)
-    rail_axis.set_ylabel("Max semantic rail excursion rate")
+    rail_axis.set_ylabel("Max pre-clamp rail-saturation rate")
     figure.tight_layout()
     path_prefix.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path_prefix.with_suffix(".pdf"), bbox_inches="tight")

@@ -790,6 +790,7 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--log-dir", type=Path, required=True)
+    parser.add_argument("--allow-noncanonical-manifest", action="store_true")
     parser.add_argument("--wandb-dir", type=Path)
     parser.add_argument("--check-run-id")
     parser.add_argument("--write-pending", type=Path)
@@ -805,7 +806,10 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_arguments()
-    specs = read_manifest(args.manifest)
+    specs = read_manifest(
+        args.manifest,
+        require_canonical=not args.allow_noncanonical_manifest,
+    )
     if args.check_run_id:
         matching = [spec for spec in specs if spec.run_id == args.check_run_id]
         if len(matching) != 1:

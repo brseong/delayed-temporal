@@ -1,0 +1,408 @@
+{
+  "schema_version": 1,
+  "description": "Preflight patterns for manuscript-facing terminology and mathematical notation. Entries index reviewed decisions and do not override the manuscript.",
+  "entries": [
+    {
+      "id": "prohibited-rail-related-label",
+      "term": "prohibited rail-related label",
+      "description": "Repository instructions prohibit this label in manuscript-facing content.",
+      "disposition": "forbid",
+      "surfaces": [
+        "manuscript",
+        "internal"
+      ],
+      "patterns": [
+        "\\brail[ -]excursions?\\b"
+      ],
+      "ignore_case": true,
+      "source": "AGENTS.md#Paper-review discussions"
+    },
+    {
+      "id": "fixed-rail-family",
+      "term": "fixed, safety, output, or code rail",
+      "description": "These are internal implementation labels and are not approved manuscript terminology.",
+      "disposition": "internal-only",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\b(?:fixed|safety|output|code) rails?\\b"
+      ],
+      "ignore_case": true,
+      "source": "paper/neurips_2026/neurips_2026_terminology_audit_ko.md#\ub0b4\ubd80 \uc804\uc6a9\uc73c\ub85c \uaca9\ub9ac\ud560 \ud45c\ud604\uad70"
+    },
+    {
+      "id": "event-aware-label",
+      "term": "event-aware",
+      "description": "This internal qualifier requires an approved manuscript definition before publication-facing use.",
+      "disposition": "internal-only",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\bevent-aware\\b"
+      ],
+      "ignore_case": true,
+      "source": "paper/neurips_2026/neurips_2026_terminology_audit_ko.md#\ub0b4\ubd80 \uc804\uc6a9\uc73c\ub85c \uaca9\ub9ac\ud560 \ud45c\ud604\uad70"
+    },
+    {
+      "id": "maintained-noise-label",
+      "term": "maintained noise",
+      "description": "This implementation-contract label is not approved manuscript terminology.",
+      "disposition": "internal-only",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\bmaintained noise\\b"
+      ],
+      "ignore_case": true,
+      "source": "paper/neurips_2026/neurips_2026_terminology_audit_ko.md#\ub0b4\ubd80 \uc804\uc6a9\uc73c\ub85c \uaca9\ub9ac\ud560 \ud45c\ud604\uad70"
+    },
+    {
+      "id": "noise-off-parity-label",
+      "term": "noise-off parity",
+      "description": "This implementation-contract label is not approved manuscript terminology.",
+      "disposition": "internal-only",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\bnoise-off parity\\b"
+      ],
+      "ignore_case": true,
+      "source": "paper/neurips_2026/neurips_2026_terminology_audit_ko.md#\ub0b4\ubd80 \uc804\uc6a9\uc73c\ub85c \uaca9\ub9ac\ud560 \ud45c\ud604\uad70"
+    },
+    {
+      "id": "observation-time-potential-invariant-label",
+      "term": "observation-time potential invariant",
+      "description": "This implementation-contract label is not approved manuscript terminology.",
+      "disposition": "internal-only",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\bobservation-time potential invariant\\b"
+      ],
+      "ignore_case": true,
+      "source": "paper/neurips_2026/neurips_2026_terminology_audit_ko.md#\ub0b4\ubd80 \uc804\uc6a9\uc73c\ub85c \uaca9\ub9ac\ud560 \ud45c\ud604\uad70"
+    },
+    {
+      "id": "missing-or-silence-semantics-label",
+      "term": "missing-event or silence semantics",
+      "description": "These implementation-contract labels are not approved manuscript terminology.",
+      "disposition": "internal-only",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\b(?:missing-event|silence) semantics\\b"
+      ],
+      "ignore_case": true,
+      "source": "paper/neurips_2026/neurips_2026_terminology_audit_ko.md#\ub0b4\ubd80 \uc804\uc6a9\uc73c\ub85c \uaca9\ub9ac\ud560 \ud45c\ud604\uad70"
+    },
+    {
+      "id": "structural-bookkeeping-label",
+      "term": "structural bookkeeping",
+      "description": "This implementation label is not approved manuscript terminology.",
+      "disposition": "internal-only",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\bstructural bookkeeping\\b"
+      ],
+      "ignore_case": true,
+      "source": "paper/neurips_2026/neurips_2026_terminology_audit_ko.md#\ub0b4\ubd80 \uc804\uc6a9\uc73c\ub85c \uaca9\ub9ac\ud560 \ud45c\ud604\uad70"
+    },
+    {
+      "id": "grace-label-family",
+      "term": "deadline or receiver grace",
+      "description": "These diagnostic labels require an approved definition before manuscript-facing use.",
+      "disposition": "internal-only",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\b(?:deadline|receiver) grace\\b"
+      ],
+      "ignore_case": true,
+      "source": "paper/neurips_2026/neurips_2026_terminology_audit_ko.md#\ub0b4\ubd80 \uc804\uc6a9\uc73c\ub85c \uaca9\ub9ac\ud560 \ud45c\ud604\uad70"
+    },
+    {
+      "id": "score-rail-family",
+      "term": "score rail or score excursion",
+      "description": "These internal numerical labels are not approved manuscript terminology.",
+      "disposition": "internal-only",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\bscore (?:rail|excursions?)\\b"
+      ],
+      "ignore_case": true,
+      "source": "paper/neurips_2026/neurips_2026_terminology_audit_ko.md#\ub0b4\ubd80 \uc804\uc6a9\uc73c\ub85c \uaca9\ub9ac\ud560 \ud45c\ud604\uad70"
+    },
+    {
+      "id": "timestamp-ulp-label",
+      "term": "timestamp ULP",
+      "description": "This numerical diagnostic needs a manuscript definition before publication-facing use.",
+      "disposition": "internal-only",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\btimestamp ULP\\b"
+      ],
+      "ignore_case": true,
+      "source": "paper/neurips_2026/neurips_2026_terminology_audit_ko.md#\ub0b4\ubd80 \uc804\uc6a9\uc73c\ub85c \uaca9\ub9ac\ud560 \ud45c\ud604\uad70"
+    },
+    {
+      "id": "psi-int-lowercase-variant",
+      "term": "\\psi_{\\mathrm{Int}}",
+      "description": "The lowercase operator subscript conflicts with the formal operator notation.",
+      "disposition": "forbid",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\\\psi_(?:\\{int\\}|int\\b)"
+      ],
+      "replacement": "\\psi_{\\mathrm{Int}}",
+      "source": "User-approved notation decision (2026-09-09)"
+    },
+    {
+      "id": "psi-int-approved-form",
+      "term": "\\psi_{\\mathrm{Int}}",
+      "description": "Approved integration operator; its supplied current waveform already contains the weight and is integrated without a repeated external factor.",
+      "disposition": "allow",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\\\psi_\\{\\\\mathrm\\{Int\\}\\}"
+      ],
+      "source": "User-approved operator definition (2026-09-09)"
+    },
+    {
+      "id": "psi-int-duplicated-weight",
+      "term": "duplicated weight in \\psi_{\\mathrm{Int}}",
+      "description": "The integration operator must not multiply by the same weight both outside the integral and inside its current waveform.",
+      "disposition": "forbid",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "(?<![A-Za-z])w\\s*\\\\int_\\{t_1\\}\\^\\{t_2\\}\\s*w\\(t\\)"
+      ],
+      "replacement": "\\int_{t_1}^{t_2}w(t)\\,dt",
+      "source": "User-approved operator definition (2026-09-09)"
+    },
+    {
+      "id": "psi-ne-plain-subscript-variant",
+      "term": "\\psi_{\\mathrm{NE}}",
+      "description": "Plain, lowercase, or text subscripts conflict with the formal negative exponential operator notation.",
+      "disposition": "forbid",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\\\psi_(?:\\{(?:NE|Ne|ne)\\}|(?:NE|Ne|ne)\\b|\\{\\\\text\\{NE\\}\\})"
+      ],
+      "replacement": "\\psi_{\\mathrm{NE}}",
+      "source": "User-approved notation decision (2026-09-09)"
+    },
+    {
+      "id": "psi-ne-approved-form",
+      "term": "\\psi_{\\mathrm{NE}}",
+      "description": "Approved negative exponential operator; an adjustable effective weight multiplies its exponential response.",
+      "disposition": "allow",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\\\psi_\\{\\\\mathrm\\{NE\\}\\}"
+      ],
+      "source": "User-approved operator definition (2026-09-09)"
+    },
+    {
+      "id": "tanh-operator-noncanonical-form",
+      "term": "f_{\\mathrm{Tanh}}",
+      "description": "The composed operator uses a capitalized descriptive subscript, distinct from the lowercase mathematical function.",
+      "disposition": "forbid",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "f_(?:\\{(?:Tanh|tanh)\\}|(?:Tanh|tanh)\\b|\\{\\\\mathrm\\{tanh\\}\\}|\\{\\\\text\\{Tanh\\}\\})"
+      ],
+      "replacement": "f_{\\mathrm{Tanh}}",
+      "source": "User-approved notation decision (2026-09-09)"
+    },
+    {
+      "id": "tanh-operator-manuscript-internal",
+      "term": "f_{\\mathrm{Tanh}}",
+      "description": "The standalone composed tanh operator remains internal implementation support and is not exposed in the manuscript composition table.",
+      "disposition": "internal-only",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "f_\\{\\\\mathrm\\{Tanh\\}\\}"
+      ],
+      "replacement": "use the direct division gate in the activation composition",
+      "source": "User-approved manuscript scope decision (2026-09-09)"
+    },
+    {
+      "id": "tanh-function-noncanonical-form",
+      "term": "\\tanh",
+      "description": "The mathematical hyperbolic tangent function uses the standard lowercase LaTeX operator.",
+      "disposition": "forbid",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "(?<!f_\\{)\\\\mathrm\\{(?:Tanh|tanh)\\}"
+      ],
+      "replacement": "\\tanh",
+      "source": "User-approved notation decision (2026-09-09)"
+    },
+    {
+      "id": "tanh-function-approved-form",
+      "term": "\\tanh",
+      "description": "Approved standard notation for the mathematical hyperbolic tangent function.",
+      "disposition": "allow",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\\\tanh\\b"
+      ],
+      "source": "User-approved notation decision (2026-09-09)"
+    },
+    {
+      "id": "gelu-coefficient-long-form",
+      "term": "c_{\\mathrm{GELU}}",
+      "description": "The table-local GELU approximation coefficient does not need a descriptive subscript.",
+      "disposition": "forbid",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "c_\\{\\\\mathrm\\{GELU\\}\\}"
+      ],
+      "replacement": "c",
+      "source": "User-approved notation decision (2026-09-09)"
+    },
+    {
+      "id": "gelu-function-approved-form",
+      "term": "\\mathrm{GELU}",
+      "description": "Approved notation for the mathematical GELU function in the cubic tanh approximation stated in the table caption.",
+      "disposition": "allow",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\\\mathrm\\{GELU\\}"
+      ],
+      "source": "User-approved composition-table caption (2026-09-09)"
+    },
+    {
+      "id": "gelu-coefficient-local-form",
+      "term": "c=0.044715",
+      "description": "Approved table-local definition of the cubic coefficient in the tanh approximation to GELU.",
+      "disposition": "allow",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "(?<![A-Za-z])c\\s*=\\s*0\\.044715(?![0-9])"
+      ],
+      "source": "User-approved notation decision (2026-09-09)"
+    },
+    {
+      "id": "gelu-redundant-tanh-gate",
+      "term": "expanded GELU tanh gate",
+      "description": "The GELU component row consumes the normalized division result directly; constructing an affine tanh value and then applying half scaling is obsolete.",
+      "disposition": "forbid",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\\\tfrac\\s*1\\s*2\\s*\\+\\s*\\\\tfrac\\s*1\\s*2\\s*f_\\{\\\\mathrm\\{Tanh\\}\\}"
+      ],
+      "replacement": "f_{\\\\mathrm{Div}}\\\\!\\\\left(1,1+f_{\\\\mathrm{Exp}}(\\\\sqrt{8/\\\\pi}(v+cv^3))\\\\right)",
+      "source": "User-approved GELU composition (2026-09-09)"
+    },
+    {
+      "id": "gelu-direct-division-gate",
+      "term": "direct GELU division gate",
+      "description": "Approved GELU component form that feeds the normalized division result directly to the final multiplication.",
+      "disposition": "allow",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "f_\\{\\\\mathrm\\{Mul\\}\\}.*f_\\{\\\\mathrm\\{Div\\}\\}.*f_\\{\\\\mathrm\\{Exp\\}\\}.*\\\\sqrt\\{8/\\\\pi\\}"
+      ],
+      "source": "User-approved GELU composition (2026-09-09)"
+    },
+    {
+      "id": "fixed-synaptic-gain-notation",
+      "term": "\\cdot_{\\mkern-2mu\\scriptscriptstyle\\Psi}",
+      "description": "Approved compact manuscript notation for a fixed gain implemented by the receiving Psi operator rather than a composed multiplication.",
+      "disposition": "allow",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\\\cdot_\\{\\\\mkern-2mu\\\\scriptscriptstyle\\\\Psi\\}"
+      ],
+      "source": "User-approved compact fixed-gain notation (2026-09-09)"
+    },
+    {
+      "id": "lower-bound-potential-italic-subscript",
+      "term": "V_{lb}",
+      "description": "The italic descriptive subscript conflicts with the approved roman lower-bound notation.",
+      "disposition": "forbid",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "V_\\{lb\\}"
+      ],
+      "replacement": "V_{\\mathrm{lb}}",
+      "source": "User-approved notation decision (2026-09-09)"
+    },
+    {
+      "id": "lower-bound-potential-roman-subscript",
+      "term": "V_{\\mathrm{lb}}",
+      "description": "Approved lower-bound potential notation with a roman descriptive subscript.",
+      "disposition": "allow",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "V_\\{\\\\mathrm\\{lb\\}\\}"
+      ],
+      "source": "User-approved notation decision (2026-09-09)"
+    }
+  ],
+  "candidate_patterns": [
+    {
+      "id": "unreviewed-acronym",
+      "description": "Uppercase abbreviation not covered by a reviewed lexicon entry.",
+      "regex": "(?<![A-Za-z0-9])[A-Z][A-Z0-9]{1,}(?![A-Za-z0-9])"
+    },
+    {
+      "id": "unreviewed-hyphenated-label",
+      "description": "Hyphenated English label not covered by a reviewed lexicon entry.",
+      "regex": "\\b[A-Za-z]+(?:-[A-Za-z]+)+\\b"
+    },
+    {
+      "id": "unreviewed-indexed-latex-symbol",
+      "description": "Indexed LaTeX symbol not covered by a reviewed lexicon entry.",
+      "regex": "(?<![A-Za-z0-9_])(?:\\\\[A-Za-z]+|[A-Za-z])_(?:\\{[^{}\\n]+\\}|[A-Za-z0-9]+)"
+    }
+  ]
+}

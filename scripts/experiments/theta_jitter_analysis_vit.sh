@@ -62,6 +62,6 @@ done
     --figure-prefix "$figure_prefix"
 
 if [[ "${PUBLISH_PAPER_FIGURE:-0}" == "1" ]]; then
-    cp "$figure_prefix.pdf" "$repo_root/paper/figures/noise-theta-vit-base.pdf"
-    echo "Published validated appendix figure: paper/figures/noise-theta-vit-base.pdf"
+    cp "$figure_prefix.pdf" "$repo_root/paper/neurips_2026/figures/noise-theta-vit-base.pdf"
+    echo "Published validated appendix figure: paper/neurips_2026/figures/noise-theta-vit-base.pdf"
 fi

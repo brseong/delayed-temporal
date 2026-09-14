@@ -30,6 +30,10 @@ from scripts.analysis.summarize_sigma_margin_sweep import (
     write_pending_manifest,
     write_provenance,
 )
+from scripts.analysis.preview_sigma_margin_sweep import (
+    collect_complete_cells,
+    write_preview_outputs,
+)
 from scripts.experiments.ubai.build_sigma_margin_manifest import (
     PILOT_RUN_IDS,
     build_rows,
@@ -330,6 +334,51 @@ def verify_manifest_aggregation_and_resume(root: Path) -> None:
         raise AssertionError("mixed GPU-family log was accepted")
 
 
+def verify_partial_preview(root: Path) -> None:
+    root = root / "partial-preview"
+    root.mkdir()
+    rows = build_rows(theta=Decimal("40"), common=common_identity(),
+                      fractions=("1.000e-10", "1.250e-10"),
+                      margins=("0", "1"), seeds=(0, 1, 2))
+    manifest = root / "preview-manifest.tsv"
+    manifest.write_text(serialized_tsv(rows), encoding="utf-8")
+    specs = read_manifest(manifest, require_canonical=False)
+    for spec in specs:
+        complete_cell = (
+            spec.stage == "baseline"
+            or (spec.time_noise_std_frac == 1.0e-10 and spec.deadline_margin_std == 0.0)
+        )
+        partial_cell = (
+            spec.time_noise_std_frac == 1.25e-10
+            and spec.deadline_margin_std == 0.0
+            and spec.seed in {0, 1}
+        )
+        if complete_cell or partial_cell:
+            write_log(root / spec.log_file, spec, correct=4400 + (spec.seed or 0))
+    accepted, metadata = collect_complete_cells(specs, root)
+    assert metadata["valid_runs_at_snapshot"] == 7
+    assert metadata["accepted_runs"] == 5
+    assert metadata["complete_stochastic_cells"] == 1
+    assert metadata["incomplete_stochastic_cells"] == 3
+    assert {run.time_noise_std_frac for run in accepted if run.stage == "sigma_margin"} == {1e-10}
+    output = root / "preview"
+    figure = output / "figure"
+    write_preview_outputs(
+        accepted,
+        metadata,
+        manifest=manifest,
+        raw_csv=output / "raw.csv",
+        summary_csv=output / "summary.csv",
+        site_csv=output / "site.csv",
+        snapshot_json=output / "snapshot.json",
+        figure_prefix=figure,
+    )
+    snapshot = json.loads((output / "snapshot.json").read_text(encoding="utf-8"))
+    assert snapshot["paper_promotion_allowed"] is False
+    assert figure.with_suffix(".pdf").is_file()
+    assert figure.with_suffix(".png").is_file()
+
+
 def verify_canonical_cardinality() -> None:
     rows = build_rows(theta=Decimal("40"), common=common_identity())
     assert len(rows) == 470 and len({row["run_id"] for row in rows}) == 470
@@ -347,6 +396,7 @@ def verify_slurm_contract() -> None:
     submit = (ROOT / "scripts/experiments/ubai/submit_sigma_margin_ubai.sh").read_text()
     reducer = (ROOT / "scripts/experiments/ubai/sigma_margin_reduce.sbatch").read_text()
     continuation = (ROOT / "scripts/experiments/ubai/continue_sigma_margin_ubai.sh").read_text()
+    preview = (ROOT / "scripts/experiments/ubai/sigma_margin_preview.sbatch").read_text()
     assert "#SBATCH --gres=gpu:1" in task
     assert "#SBATCH --cpus-per-task=4" in task and "#SBATCH --mem=64G" in task
     assert "DataParallel" not in task and "/usr/bin/env -u WANDB_API_KEY" in task
@@ -369,11 +419,16 @@ def verify_slurm_contract() -> None:
     assert 'glob("disabled-batch-*.tsv")' in continuation
     assert '--array="0-${array_end}%8"' in continuation
     assert "WANDB" not in continuation
+    assert "#SBATCH --partition=cpu1" in preview
+    assert "SLURM_TMPDIR" not in preview
+    assert 'enroot_data="/enroot/$(id -u)/data"' in preview
+    assert 'trap cleanup EXIT' in preview
     for path in (
         ROOT / "scripts/experiments/ubai/sigma_margin_task.sbatch",
         ROOT / "scripts/experiments/ubai/submit_sigma_margin_ubai.sh",
         ROOT / "scripts/experiments/ubai/sigma_margin_reduce.sbatch",
         ROOT / "scripts/experiments/ubai/continue_sigma_margin_ubai.sh",
+        ROOT / "scripts/experiments/ubai/sigma_margin_preview.sbatch",
     ):
         subprocess.run(["bash", "-n", str(path)], check=True)
 
@@ -386,6 +441,7 @@ def main() -> None:
         verify_builder_cli(root)
         verify_submit_dry_run(root)
         verify_manifest_aggregation_and_resume(root)
+        verify_partial_preview(root)
     verify_canonical_cardinality()
     verify_slurm_contract()
     print("sigma-margin sweep verification passed")

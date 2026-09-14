@@ -48,6 +48,49 @@ def verify_gelu_operator_ablation() -> None:
         domain,
         theta=2000.0,
     )
+    exact_input = input_value.to(torch.float64)
+    exact_value, _ = gelu_approximation(
+        exact_input,
+        domain,
+        theta=2000.0,
+    )
+    cubic_argument = (2.0 / torch.pi) ** 0.5 * (
+        exact_input + 0.044715 * exact_input.pow(3)
+    )
+    expected_value = 0.5 * exact_input * (1.0 + torch.tanh(cubic_argument))
+    torch.testing.assert_close(
+        exact_value,
+        expected_value,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+
+    # Scaling the exponential input by tau_s must cancel the decoder scale. The
+    # direct GELU path stops at the division gate without recording a separate
+    # tanh output.
+    for tau_s in (0.5, 1.0, 2.0):
+        set_gaussian_time_noise(
+            enabled=True,
+            time_std=0.0,
+            seed=5,
+            device="cpu",
+        )
+        scaled_value, scaled_domain = gelu_approximation(
+            exact_input,
+            domain,
+            tau_s=tau_s,
+            theta=2000.0,
+        )
+        torch.testing.assert_close(
+            scaled_value,
+            expected_value,
+            rtol=1.0e-12,
+            atol=1.0e-12,
+        )
+        assert scaled_domain == reference_domain
+        assert "tanh.output" not in get_gaussian_noise_stats()
+
+    set_gaussian_time_noise(enabled=False)
 
     # Exhaust all eight subsets, including the fully temporal and fully dense ends
     # of the experiment matrix. Bounds are checked exactly because their propagation
@@ -123,13 +166,13 @@ def verify_gelu_operator_event_selection() -> None:
             )
             stats = get_gaussian_noise_stats()
 
-            # GELU contains seven multiplication calls. Each call samples one event
+            # GELU contains six multiplication calls. Each call samples one event
             # per tensor element plus one scalar reference shared by the call.
             expected_multiplication_events = (
-                0 if "multiplication" in selected else 7 * element_count
+                0 if "multiplication" in selected else 6 * element_count
             )
             expected_multiplication_references = (
-                0 if "multiplication" in selected else 7
+                0 if "multiplication" in selected else 6
             )
             assert stats.get("multiplication.data", {}).get("events", 0) == (
                 expected_multiplication_events

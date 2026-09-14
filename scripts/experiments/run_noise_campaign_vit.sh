@@ -238,12 +238,12 @@ validate_and_publish() {
 
     install -m 0644 \
         "$repo_root/artifacts/figures/noise_robustness_vit_base_quick_float64_v2.pdf" \
-        "$repo_root/paper/figures/noise-robustness-vit-base.pdf"
+        "$repo_root/paper/neurips_2026/figures/noise-robustness-vit-base.pdf"
     install -m 0644 \
         "$repo_root/artifacts/figures/noise_theta_vit_base_5k_float64_v2.pdf" \
-        "$repo_root/paper/figures/noise-theta-vit-base.pdf"
+        "$repo_root/paper/neurips_2026/figures/noise-theta-vit-base.pdf"
     (
-        cd "$repo_root/paper"
+        cd "$repo_root/paper/neurips_2026"
         latexmk -pdf -interaction=nonstopmode -halt-on-error neurips_2026.tex
     ) 2>&1 | tee -a "$campaign_log"
     record_status "complete" "validated PDFs published and manuscript built"

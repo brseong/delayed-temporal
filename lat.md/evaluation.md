@@ -31,15 +31,17 @@ Quick tests and `max_eval_batches` are smoke-test controls, not final evaluation
 
 ## ViT and GPT-2 Calibration Workflow
 
-The ViT and GPT-2 runners separate clean range collection from frozen validation and inference so validation examples never influence a physical range.
+The optional ViT/GPT-2 layer-wise calibration workflow selects activation ranges from training data and freezes them before validation. Global theta selection is a separate workflow with its own accuracy checks.
 
 `--calibration-mode collect` selects a fixed-size prefix of a seeded training-split permutation, replays it sequentially for min-max and fixed-bin histogram passes, writes one JSON artifact, and exits without loading validation metrics. Timing noise, mismatch, parameter perturbation, and `DataParallel` are rejected in this mode.
 
 `--calibration-mode validate` and `--calibration-mode inference` reconstruct the same training-subset and model metadata, require an exact artifact match, bind only declared residual, ViT GELU-input, and spiking-attention score ranges, and report strict layer underflow and overflow after the run. GPT-2 metadata records effective `attention_theta` separately from global `theta`, so artifacts cannot cross those numerical contracts. Analytic model-entry ranges bypass calibration.
 
-The maintained defaults select the observed minimum and maximum (`0/1`) without tail truncation, then add a 5% per-side margin. Interior quantiles remain available only as explicit diagnostic overrides.
+The maintained defaults select observed min/max (`0/1`) without tail truncation, then add 5% of the selected width per calibrated side. Interior quantiles remain explicit diagnostic overrides. Collection does not optimize endpoints against task accuracy; validation reports the effect of the frozen ranges.
 
-The artifact path is explicit through `--calibration-path`. ViT records image processing and geometry; GPT-2 records empty-text filtering, tokenizer controls, padded sequence length, and dataset configuration. Both record the seeded training subset, checkpoint, TTFS constants, attention path, and active ablations.
+`--calibration-mode none` loads no layer-wise table. It retains fixed configuration limits, intervals derived from weights, and analytic residual sums. This preserves static bounds but omits the measured layer limits intended to control range growth. The current ViT-B noise campaign uses this mode; see [[noise#Timing Noise Scale Sweep at Ratio 4]].
+
+The artifact path is explicit through `--calibration-path`. ViT records image processing and geometry; GPT-2 records filtering of empty texts, tokenizer controls, padded sequence length, and dataset configuration. Both record the seeded training subset, checkpoint, TTFS constants, attention path, and supported ablation settings. The separate ViT cubic implementation and floor are not part of the current artifact identity; see [[calibration#Two-pass Collection#Deterministic Training Subset]].
 
 ## Diagnostics and Instrumentation
 
@@ -166,11 +168,15 @@ The deterministic selection workflow chooses the smallest accurate global thresh
 
 The training candidates are $\theta\in\{10,20,40,80,160,320,640,1000,1400,2000,2800,4000\}$. If 10 remains within 0.005 of the best accuracy, the lower boundary is unresolved and must be halved again until the first lower candidate fails; unresolved boundaries cannot be confirmed. Every run uses the seed-0 shuffled ImageNet training subset of exactly 5,000 images, float64, batch size 32, analytic ranges, all maintained ViT spiking paths, and zero timing noise, mismatch, deadline margin, weight noise, and bias noise.
 
-[[scripts/analysis/summarize_theta_selection.py#choose_theta]] selects the smallest candidate whose accuracy is within 0.005 of the best candidate accuracy. A gain above 0.001 from 2,800 to 4,000 requires 5,600 and 8,000; a further gain above 0.001 from 5,600 to 8,000 marks the search range insufficient rather than approving an endpoint.
+[[scripts/analysis/summarize_theta_selection.py#choose_theta]] selects the smallest candidate whose accuracy is within 0.005 of the best spiking candidate, not the dense ANN reference. A gain above 0.001 from 2,800 to 4,000 requires 5,600 and 8,000; a further gain above 0.001 from 5,600 to 8,000 marks the search range insufficient rather than approving an endpoint.
+
+The completed selection used source `bc973317` with layer-wise calibration disabled. The corrected GELU campaign at source `648af9bb` reuses the selected theta of 40; it did not repeat the candidate search. Its clean validation result confirms accuracy at 40, not that 40 remains the smallest acceptable candidate under the new implementation. Neither this global search nor its replay selects the positive log lower endpoint. See [[noise#Timing Noise Scale Sweep at Ratio 4]] for the actual fixed input bounds.
+
+Threshold selection is based on accuracy rather than a requirement of zero clipping. At $\theta=40$, clipping at the finite potential domain is an intended part of the selected bounded implementation; its frequency is reported as a diagnostic and does not by itself invalidate selection.
 
 The selected training condition must replay with the identical correct count and prediction digest. The selected candidate and its immediate available neighbors are then evaluated on the first 5,000 examples of the self-contained validation artifact; selection fails if the chosen value is more than 0.005 below that local validation maximum. Full-validation approval additionally requires selected-spiking and dense-reference runs on all 50,000 validation images. `THETA_SKIP_FULL_VALIDATION=1` explicitly stops after successful 5k confirmation, records `full_validation=skipped`, and retains `confirmed` rather than `approved` status.
 
-Clamp reports retain the maximum semantic excursion rate and its site as diagnostics. Inactive dual rails named `x_err_neg` or `x_err_pos` and multiplication's `multiplication_result` reset rail are counted separately as structural bookkeeping and cannot change the accuracy-based choice.
+Clamp reports retain the maximum pre-clamp rail-saturation rate and its site as diagnostics. Inactive dual rails named `x_err_neg` or `x_err_pos` and multiplication's `multiplication_result` reset rail are counted separately as structural bookkeeping and cannot change the accuracy-based choice.
 
 UBAI execution benchmarks RTX 3090, A10, RTX 6000 Ada, and RTX A6000 twice with five warm-up and twenty measured batches. [[scripts/analysis/select_ubai_gpu_family.py#choose_family]] rejects OOM, incomplete timing, wrong hardware identity, replica disagreement, and predictions differing from the RTX A6000 reference. It chooses the lowest median seconds per image; families within 5% use current free-GPU capacity as the tie-break.
 
@@ -180,7 +186,9 @@ The UBAI task contract uses one GPU, four CPUs, 64 GB RAM, no `DataParallel`, an
 
 ## Noise and Ablation Sweeps
 
-Shell scripts under `scripts/experiments` run isolated sweeps for Gaussian spike-time noise, static mismatch, activation variants, and module-level conversion ablations.
+Shell scripts under `scripts/experiments` retain isolated sweep and ablation tooling, but their presence does not make every matrix active work.
+
+Descriptions below record available or historical tooling, not an experiment queue. Active compute is limited by [[todo#Active Experiment Work]], and optional reruns are centralized in [[deferred-experiments]].
 
 `scripts/experiments/noise_analysis_vit.sh` and `scripts/experiments/noise_scan_vit.sh` sweep Gaussian timing scale for ViT. The maintained fine scan targets ViT-B/16, preserves completed outputs, records its expected-run manifest, and resumes only incomplete tagged logs.
 
@@ -196,13 +204,13 @@ Both stochastic axes use independent dedicated generators while holding the mode
 
 [[scripts/analysis/summarize_noise_scan.py#summarize_noise_scan]] rejects missing, failed, identity-mixed, or parameter-inconsistent logs before publishing raw and aggregate CSV files. Both noise axes use 95% Student-t intervals; Gaussian event, endpoint, and saturation rates pool raw denominators across sites and replicas.
 
-`scripts/experiments/theta_jitter_analysis_vit.sh` runs Gaussian-only scans for $\theta\in\{40,400,2000\}$ using transition grids scaled by $2000/\theta$. [[scripts/analysis/summarize_theta_noise_scan.py#summarize_theta_noise]] validates their shared identity and produces the appendix CSV and figure.
+`scripts/experiments/theta_jitter_analysis_vit.sh` can run Gaussian-only scans for $\theta\in\{40,400,2000\}$ using transition grids scaled by $2000/\theta$. The multi-theta scan is not scheduled; [[scripts/analysis/summarize_theta_noise_scan.py#summarize_theta_noise]] remains available to validate historical or explicitly promoted results.
 
-`scripts/experiments/run_noise_campaign_vit.sh` supervises the publication campaign. It waits until at least one of GPUs 4--7 is idle for two consecutive 60-second samples, fixes that idle subset for one stage, and runs smoke, quick, full, and theta stages in order. A lock rejects duplicate supervisors; every stage remains resumable through its child manifest.
+`scripts/experiments/run_noise_campaign_vit.sh` is the legacy publication-campaign supervisor. It waits until at least one of GPUs 4--7 is idle for two consecutive 60-second samples, fixes that idle subset for one stage, and runs smoke, quick, full, and theta stages in order. A lock rejects duplicate supervisors; every stage remains resumable through its child manifest.
 
-The supervisor keeps generated PDFs under `artifacts/` until all summaries, numerical-resolution checks, seeded verifications, and `lat check` pass. Only then does it install the main and appendix PDFs under `paper/figures/` and rebuild the manuscript.
+The supervisor keeps generated PDFs under `artifacts/` until all summaries, numerical-resolution checks, seeded verifications, and `lat check` pass. Only then does it install the main and appendix PDFs under `paper/neurips_2026/figures/` and rebuild the manuscript.
 
-`scripts/experiments/deadline_margin_sweep_vit.sh` holds ViT-B/16 at $r_t=10^{-10}$ and adaptively sweeps the diagnostic receiver grace in units of $\sigma_t$. Seed zero locates the first 5k condition within one percentage point of clean accuracy; that candidate must also pass the same mean threshold across seeds 0, 1, and 2 before the sweep stops.
+`scripts/experiments/deadline_margin_sweep_vit.sh` preserves the earlier adaptive margin diagnostic at $r_t=10^{-10}$. It is not part of the active fixed-ratio scale sweep.
 
 [[scripts/verification/verify_theta_noise_summary.py#verify_theta_noise_summary]] checks the three-theta identity contract plus combined CSV and PDF/PNG rendering with dataset-independent fixtures.
 
@@ -218,13 +226,38 @@ The ViT GELU layer scan isolates where temporal activation errors become task-cr
 
 Recovery relative to the fully temporal noisy run estimates that block's timing-error contribution; it is not an architecture or activation-function comparison. The default seed-zero scan ranks all blocks before additional seeds are assigned to the most influential conditions.
 
-The original float32 layer scan at $r_t=3.162\times10^{-10}$ is precision-limited: its absolute $\sigma_t=1.2648\times10^{-6}$ is below float32 spacing near the GELU log-division deadline. Its block ranking is exploratory and must be repeated under a numerically resolved timing representation before supporting a mechanism claim.
+The original float32 layer scan at $r_t=3.162\times10^{-10}$ is precision-limited: its absolute $\sigma_t=1.2648\times10^{-6}$ is below float32 spacing near the GELU log-division deadline. Its block ranking is exploratory and cannot support a mechanism claim; a new layer scan is deferred unless that claim is restored.
 
 `scripts/experiments/diagnose_gaussian_endpoint_vit.sh` reruns the same 5,000-image condition in float64 using baseline, full Gaussian, block-10 GELU bypass, all-GELU bypass, and all-GELU-plus-LayerNorm-log bypass. These controls determine whether a layer ranking remains identifiable after continuous endpoint behavior is numerically resolved.
 
-The float64 diagnostic places full Gaussian, block-10 bypass, and all-GELU bypass at classification floor, while bypassing both temporal GELU and LayerNorm log restores baseline accuracy. The prior block ranking is therefore not identifiable under resolved continuous endpoint sampling; the endpoint-heavy encodings must be corrected before another layer sweep.
+The float64 diagnostic places full Gaussian, block-10 bypass, and all-GELU bypass at classification floor, while bypassing both temporal GELU and LayerNorm log restores baseline accuracy. The prior block ranking is therefore not identifiable under resolved continuous endpoint sampling, so no further layer sweep is scheduled.
 
 [[scripts/verification/verify_vit_gelu_layer_ablation.py#verify_vit_gelu_layer_ablation]] checks sparse selection, empty-selection behavior, invalid indices, duplicate rejection, and all-or-nothing failure when the expected local ViT topology is absent.
+
+### GELU Cubic Construction Comparison
+
+The deterministic ViT comparison changes only construction of the cubic term in the maintained tanh-based GELU approximation.
+
+[[scripts/analysis/gelu_cubic_phi_nl_vit.py#phi_nl_psi_ed_cube]] splits the signed input into positive and negative magnitudes, applies $\phi_{\mathrm{NL}}$ with $3\tau_s$, and evaluates each encoded time against one domain upper endpoint with $\psi_{\mathrm{ED}}$ at $\tau_s$. The resulting normalized cubes receive the fixed magnitude gain before signed recombination.
+
+The `multiplication` condition retains the production $x^2$ and $x^3$ chain. The `phi_nl_psi_ed` condition replaces only that chain; coefficient scaling, membrane superposition, the tanh gate, final multiplication by the input, propagated domains, checkpoint, dataset order, and all other model paths remain fixed.
+
+The deterministic construction comparison keeps direct Gaussian timing error disabled so its accuracy result isolates the cubic implementation. The alternative construction also supports robustness experiments: both signed magnitude encoders, their shared domain endpoint reference, and the internal encoding inside $\psi_{\mathrm{ED}}$ receive the replica Gaussian timing draws.
+
+The alternative limits each signed magnitude to `theta` before log encoding, matching the bounded log domain used by LayerNorm and accepting wider analytic upstream bounds. [[scripts/verification/verify_gelu_cubic_phi_nl.py#verify_phi_nl_psi_ed_cube]] checks signed cubic values, invariance across positive time constants, finite domain floor behavior, threshold limiting, float32 GELU agreement, propagated bounds, parity without noise, seeded replay, seed independence, and patch isolation in the local ViT adapter.
+
+#### Observed ViT-S Result
+
+On the fixed first 5,000 ImageNet-1k validation images, the alternative cubic construction produced six more correct predictions and did not reduce top-1 accuracy.
+
+| Cubic implementation | Correct | Accuracy | Difference from multiplication |
+|---|---:|---:|---:|
+| `multiplication` | 4,020 / 5,000 | 80.40% | 0 |
+| `phi_nl_psi_ed` | 4,026 / 5,000 | 80.52% | +0.12 percentage points |
+
+Both runs used the same checkpoint, float32 precision, batch size 32, $\theta=2{,}000$, calibration from the observed minimum and maximum with a 5% margin on each side, validation order, and disabled Gaussian spike-time error, mismatch, weight noise, and bias noise. The dataset fingerprint was `260dc8e69ecaea24`; prediction digests differed, while the complete calibration underflow and overflow reports for every site were identical.
+
+This single deterministic 5,000-image comparison establishes that the alternative does not cause an observed accuracy drop under this condition. It is not evidence of a general accuracy improvement. Full validation and additional checkpoints belong to [[deferred-experiments#Scale and Generality]] and are needed only if that broader claim is retained.
 
 ### GELU-Internal Operator Attribution
 
@@ -232,19 +265,19 @@ The GELU operator scan attributes task-level timing sensitivity among multiplica
 
 [[scripts/analysis/gelu_operator_ablation_vit.py#gelu_operator_ablation]] reproduces the maintained cubic-tanh composition while allowing selected GELU-local atomic operators to use their nominal, noise-free temporal carriers. Every unselected GELU operator and every non-GELU use of the same primitive remains on the run-wide Gaussian path.
 
-The `multiplication` unit covers all seven products in one GELU call, including polynomial coefficients and the final input-gate product. The `exponential` unit is tanh's $\exp(-2z)$ stage. The `division` unit includes both negative-log operand encoders and their internal exponential-difference stage because those events jointly implement one ratio.
+The `multiplication` unit covers all six products in one GELU call, including fixed polynomial scaling and the final input-gate product. The prior half-gate product is absent because the affine tanh map cancels it exactly. The `exponential` unit is the $\exp(-2z)$ stage. The `division` unit includes both negative-log operand encoders and their internal exponential-difference stage because those events jointly implement one ratio.
 
 The eight-condition matrix contains the fully noisy composition, three leave-one-operator-dense conditions, three only-one-operator-noisy conditions, and the all-dense control. Comparing both directions distinguishes an operator whose removal is sufficient for recovery from one whose isolated noise is sufficient for failure.
 
 The dense helpers retain the noise-off temporal arithmetic order, including float32 carrier rounding, and preserve Gaussian-compatible downstream rails. Direct mathematical products or ratios are not used because they would also remove nominal time-code quantization and confound attribution.
 
-The dense helpers also apply the production analytic endpoint clamps after the cubic inner sum and the one-plus-tanh gate, so a selected operator changes event delivery without changing fixed-domain containment.
+The dense helpers apply the production analytic endpoint clamp after the cubic inner sum, while constrained division supplies the fixed $[0,1]$ gate interval. A selected operator therefore changes event delivery without changing fixed-domain containment.
 
 Selected operators shadow-consume the same Gaussian draws in the same tensor/scalar order but do not apply or count those events. This common-random-number coupling keeps every later GELU and non-GELU event aligned across variants, reducing paired seed variance without representing shadow draws as physical activity.
 
 `scripts/experiments/ablation_gelu_operators_vit.sh` runs one condition per process and GPU, holds model, 5,000-image subset, absolute timing scale, and seed fixed, and resumes only complete logs. [[scripts/analysis/gelu_operator_ablation_vit.py#install_gelu_operator_ablation]] patches only the local ViT GELU symbol, leaving production implementations and other model families unchanged.
 
-This scan deliberately leaves endpoint placement and calibration unchanged. At the existing float32 transition point it is an implementation-level attribution conditioned on [[noise#Numerical Precision and Endpoint Caveat]], not a calibrated continuous-noise robustness result; the matrix must be repeated after a separately reviewed margin calibration becomes canonical.
+This scan deliberately leaves endpoint placement and calibration unchanged. At the existing float32 transition point it is an implementation-level attribution conditioned on [[noise#Numerical Precision and Endpoint Caveat]], not a calibrated continuous-noise robustness result. Repeating the matrix belongs to [[deferred-experiments#Mechanism and Operator Ablations]] and is needed only for a retained mechanism claim.
 
 [[scripts/verification/verify_gelu_operator_ablation.py#verify_gelu_operator_ablation]] checks all eight noise-off subsets for value parity, rejects unknown operator labels, and verifies that installation changes only the local ViT adapter symbol. [[scripts/verification/verify_gelu_operator_ablation.py#verify_gelu_operator_event_selection]] checks physical event topology and equal post-GELU generator state across all dense selections.
 
@@ -258,9 +291,11 @@ Across the three seeds, mean accuracy is 56.353% for fully noisy GELU, 56.360% w
 
 In the complete seed-zero matrix, removing multiplication or exponential alone changes no classifications relative to fully noisy GELU. Leaving only multiplication noisy matches the all-dense accuracy, while leaving only exponential noisy differs from the dense-division control by no classifications. The remaining three-seed dense-division versus all-dense mean difference is only 0.020 percentage points.
 
-The GELU-local division numerator contributes 18,155,520,000 events per 5,000-image run. It misses 23,254,914, 23,250,225, and 23,249,362 times across seeds 0, 1, and 2, respectively, for a mean miss rate of 0.12807%. A numerator opening miss resets the ratio to zero, drives the tanh output to -1, and closes the GELU gate, explaining why sparse misses erase activations and compound through the model.
+The GELU-local division numerator contributes 18,155,520,000 events per 5,000-image run. It misses 23,254,914, 23,250,225, and 23,249,362 times across seeds 0, 1, and 2, respectively, for a mean miss rate of 0.12807%. A numerator opening miss resets the ratio to zero and directly closes the GELU gate, explaining why sparse misses erase activations and compound through the model.
 
-These measurements identify the division numerator deadline boundary—not continuous multiplication or exponential perturbation—as the dominant implementation-level GELU failure in this configuration. Because $\sigma_t$ is sub-ULP near relevant float32 deadlines, this mechanism statement remains conditional on the current endpoint representation and must be rechecked after margin calibration.
+These measurements predate the direct division gate and its six multiplication calls, so they remain historical and are not scheduled for repetition.
+
+These measurements identify the division numerator deadline boundary—not continuous multiplication or exponential perturbation—as the dominant implementation-level GELU failure in this configuration. Because $\sigma_t$ is sub-ULP near relevant float32 deadlines, this statement remains historical rather than a current mechanism claim.
 
 ## Gaussian Spike-Time Verification
 
@@ -332,6 +367,20 @@ Timing-noise analyses use the same run-wide Gaussian configuration as model eval
 
 Generated figures and run logs are experiment artifacts rather than architecture sources. Reproducing a figure requires the checkpoint, dataset cache, environment, and command described by the corresponding analysis script.
 
+## Hidden Activation Bounds Inspection
+
+The CPU diagnostic captures declared hidden activation bounds from the frozen evaluation source and checkpoint, without collecting activation extrema or changing calibration.
+
+[[scripts/analysis/inspect_vit_hidden_bounds.py#main]] uses the same spiking attention and GELU configuration as the selected experiment. Two synthetic clean inputs and one input with Gaussian timing noise must produce identical module bounds. The CSV records exact endpoints; these are not measured dataset activation ranges. Source, evaluator, and checkpoint identity checks prevent inspecting a different implementation by accident. Both residual additions are checked against their input bounds in every layer.
+
+## Calibrated ViT Noise Comparison
+
+A separate experiment repeats the existing timing noise and deadline margin sweeps with frozen layer-wise calibration at threshold 40; previous uncalibrated results remain unchanged.
+
+[[scripts/experiments/run_calibrated_noise_vit.py#execute]] uses [[scripts/analysis/evaluate_calibrated_vit.py#main]] to consume the same seed-0 training 5k artifact in both collection passes without reshuffling. Observed minimum and maximum values receive an additional 5% of interval width on each calibrated side. All 48 configured sites are required; validation 5k never selects ranges. The 65-condition union reuses only the dense reference and keeps three seeds per stochastic condition. This is a controlled comparison at threshold 40, not a repeated threshold selection.
+
+Source, checkpoint, training artifact, GELU implementation, floor, wrapper, and frozen table identities are checked before reuse. A complete clean evaluation precedes the stochastic sweep; clean accuracy at or below 1% stops execution for inspection. Partial outputs show all completed replicas but compute confidence intervals only for complete three-seed cells. GPU capacity waits never terminate the campaign merely because a device is occupied. GPU devices 4–7 and persistent runtime storage remain mandatory.
+
 ## Symbolic Operation-Count Check
 
 The paper’s spike-operation and energy formulas have a dedicated symbolic regression checker independent of model execution.
@@ -339,6 +388,36 @@ The paper’s spike-operation and energy formulas have a dedicated symbolic regr
 [[scripts/verification/verify_sop.py#main]] recomputes atomic operators, module costs, full ViT formulas, and published rounded values. It encodes fixed-scalar multiplication as free weight calibration through [[scripts/verification/verify_sop.py#free_scale]] instead of counting raw Python calls.
 
 This verifies internal arithmetic consistency under the stated cost model. It does not validate the physical energy constant, system boundary, routing, memory, static power, or circuit feasibility.
+
+## Manuscript Terminology and Notation Check
+
+The manuscript workflow uses a machine-readable pattern lexicon to prevent unreviewed labels and mathematical notation from entering publication-facing artifacts.
+
+`scripts/verification/terminology_lexicon.json` records each concept, its explanation, matching expressions, handling status, affected surface, optional preferred form, and the source supporting the decision. [[scripts/verification/check_terminology.py#main]] consumes this lexicon but does not replace the manuscript as the authority.
+
+The approved notation for the lower bound potential is $V_{\mathrm{lb}}$; publication text must not use the italic form.
+
+The approved primitive definitions use an adjustable weight in $\psi_{\mathrm{NE}}$ and let $\psi_{\mathrm{Int}}$ integrate its supplied current waveform directly, without repeating that weight outside the integral.
+
+The GELU approximation coefficient is locally defined as $c=0.044715$ in the composition table; the longer subscripted form is not used.
+
+The standalone composed tanh operator remains internal implementation support and is omitted from the manuscript composition table. The lowercase $\tanh$ denotes only the mathematical function in the activation mapping.
+
+The checker can inspect files, directories, standard input, or only added lines in a unified diff. Matches marked `review`, `internal-only`, or `forbid` stop publication-facing changes. Heuristic candidate expressions are advisory unless strict candidate handling is requested.
+
+The preflight is required even if automatic skill selection does not occur. It runs on proposed content before mutation and on the exact current task added lines afterward; exit codes 1 and 2 block downstream generation and completion reporting.
+
+The automated pass provides locations and explanations; it cannot determine whether a previously unseen phrase or symbol is semantically justified. Every candidate requires comparison with the manuscript and blocks progress until it is rewritten with an established form or explicitly approved.
+
+## Conference Manuscript Layout
+
+Conference-specific manuscript material is isolated by venue and year so archived submissions and new templates can coexist without ambiguous relative paths.
+
+The withdrawn NeurIPS snapshot, review notes, bibliography, and publication figures live under `paper/neurips_2026/`. The official ICLR 2027 LaTeX template and its original ZIP live under `paper/iclr_2027/`. The complete `paper/` tree remains intentionally untracked.
+
+The ICLR entry point `paper/iclr_2027/iclr2027_conference.tex` retains the preamble, submission metadata, abstract, bibliography, and ordered inputs. Introduction, Related Work, Preliminaries, Methodology, and Appendix content live in matching `iclr2027_conference_<section>.tex` files, each declaring the entry point as its TeX root.
+
+Experiment scripts that publish figures or rebuild the archived NeurIPS manuscript target its venue-specific directory. ICLR manuscript work uses the ICLR directory without overwriting the archived source.
 
 ## Verification Boundaries
 

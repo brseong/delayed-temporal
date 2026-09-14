@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Independent re-derivation and cross-check of the SOP / energy numbers in
-tex/neurips_2026.tex (Appendix "Detailed Derivation of SOP ...").
+paper/neurips_2026/neurips_2026.tex (Appendix "Detailed Derivation of SOP ...").
 
 Why this exists
 ---------------
@@ -28,7 +28,7 @@ Atomic operator costs (Table tab:sop_efficiency / primitive decompositions):
     f_Div = 2*phi_NL + psi_ED          -> (2, 1)
 
 Each layer below is recomputed independently and compared against the value
-literally written in tex/neurips_2026.tex (paper_* dicts, annotated with the
+literally written in paper/neurips_2026/neurips_2026.tex (paper_* dicts, annotated with the
 source line). Run:  python scripts/verification/verify_sop.py
 Exit code is non-zero if any check fails.
 """
@@ -64,11 +64,10 @@ def total(pair):
 
 
 # Composite operators rebuilt from the atoms above.
-# tanh(x) = 2 * f_Div(1, 1 + f_Exp(2x)) - 1 ; the *2 and (2S-1) affine are free.
-TANH = add(EXP, DIV)
-# GELU(tanh form): x^2=f_Mul, x^3=f_Mul, gate*x=f_Mul (3 dynamic muls) + tanh.
-# Constant scalings 0.044715, sqrt(2/pi), 0.5 are free_scale (omitted).
-GELU = add(MUL, MUL, MUL, TANH)
+# GELU(tanh form): the affine tanh map and following half scaling cancel, leaving
+# x^2=f_Mul, x^3=f_Mul, gate*x=f_Mul (3 dynamic muls) + exp + division.
+# Constant scalings 0.044715, sqrt(2/pi), and 2 are free_scale (omitted).
+GELU = add(MUL, MUL, MUL, EXP, DIV)
 # Swish(x,beta) = f_Mul(x, f_Div(1, 1+f_Exp(beta x))) ; beta is a constant scale.
 SWISH = add(EXP, DIV, MUL)
 # SwiGLU(u,v) = f_Mul(v, Swish(u,beta)).

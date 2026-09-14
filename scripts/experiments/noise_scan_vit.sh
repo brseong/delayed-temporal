@@ -42,7 +42,7 @@ manifest_path="$scan_logdir/expected_runs.tsv"
 raw_csv_path="$scan_logdir/raw_runs.csv"
 summary_csv_path="$scan_logdir/summary.csv"
 figure_prefix="${SCAN_FIGURE_PREFIX:-$repo_root/artifacts/figures/noise_robustness_vit_base_${scan_protocol}_${precision}_v2}"
-paper_figure="$repo_root/paper/figures/noise-robustness-vit-base.pdf"
+paper_figure="$repo_root/paper/neurips_2026/figures/noise-robustness-vit-base.pdf"
 mkdir -p "$scan_logdir"
 
 # The quick protocol resolves both transition curves on the fixed 5,000-image

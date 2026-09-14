@@ -339,6 +339,11 @@ def verify_gpu_selection() -> None:
 
 def main() -> None:
     # @lat: [[lat.md/evaluation#ViT-B/16 Global Theta Selection]]
+    summarizer_script = (
+        _ROOT / "scripts" / "analysis" / "summarize_theta_selection.py"
+    ).read_text(encoding="utf-8")
+    assert "Max pre-clamp rail-saturation rate" in summarizer_script
+    assert "rail excursion" not in summarizer_script
     verify_selection_rule()
     verify_confirmation_rule()
     verify_log_parser()
