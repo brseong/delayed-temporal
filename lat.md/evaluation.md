@@ -381,6 +381,44 @@ A separate experiment repeats the existing timing noise and deadline margin swee
 
 Source, checkpoint, training artifact, GELU implementation, floor, wrapper, and frozen table identities are checked before reuse. A complete clean evaluation precedes the stochastic sweep; clean accuracy at or below 1% stops execution for inspection. Partial outputs show all completed replicas but compute confidence intervals only for complete three-seed cells. GPU capacity waits never terminate the campaign merely because a device is occupied. GPU devices 4–7 and persistent runtime storage remain mandatory.
 
+## Calibrated Three Sweep Campaign
+
+The current ViT-B/16 campaign selects a threshold using training 5k and compares nine validation points on each of the threshold, timing noise, and deadline margin axes with output bounds policy 3.
+
+[[scripts/experiments/calibrated_three_sweeps.py#make_tasks]] fixes nine thresholds from 10 to 160 at equal logarithmic intervals. Each threshold receives a new 48-site calibration table from the seed-0 training 5k artifact: observed minimum and maximum, 5% additional interval width, and two collection passes. The same training 5k determines the smallest candidate within 25 correct predictions of the best candidate. Validation 5k is never used for calibration or selection.
+
+[[scripts/experiments/calibrated_three_sweeps.py#select_theta]] refuses selection at the smallest candidate or a gain greater than five correct predictions between the two largest candidates. [[scripts/experiments/calibrated_three_sweeps.py#confirm_selection]] requires exact training correct count and prediction digest on the opposite execution environment, plus validation accuracy within 25 correct predictions of the best immediate neighbor. Passing evidence is `confirmed` on 5k, not approved on 50k.
+
+The experiment uses the augreg2 ViT-B/16 checkpoint, float64, batch size 32, time constant 1, all three spiking LayerNorm stages, attention and MLP, the current GELU construction, and no mismatch or weight noise. Tracking and TensorBoard are disabled. The basic workload is 71 evaluations and nine calibration collections; four short environment comparisons are separate. [[scripts/verification/verify_calibrated_three_sweep_contract.py#main]] verifies the counts, exact grids, table identity, replay, boundary selection, and old metadata rejection.
+
+## Calibrated Three Sweep Scheduling
+
+One local controller owns all assignments, waits for complete seeds in order, and moves only work that has not been submitted between the local and cluster workers.
+
+[[scripts/experiments/run_calibrated_three_sweeps.py#Controller]] freezes the source commit, evaluator and runtime hashes, checkpoint, datasets, and per-threshold calibration hashes. Immutable task and phase manifests accompany a resumable assignment record. Only completed results whose raw logs and identities validate can be reused. Partial logs are preserved; a repeatedly failing task requires inspection instead of being classified as scientific accuracy collapse.
+
+Theta collection is followed by matched clean and seed-0 noisy short evaluations on both environments. Training and validation evaluate all nine candidates, then the selected training condition is replayed on the opposite environment. The two noise sweeps share one condition and therefore require 17 evaluations per seed. All seed 0 conditions complete before seed 1; all seed 1 conditions complete before seed 2. Normal completion advances automatically. Missing results prevent advancing.
+
+After seed 0, execution stops for a range decision if all nine timing noise points are within one percentage point of clean accuracy, or all are at most one percent accurate. Individual low or nonmonotonic results are retained. [[scripts/verification/verify_calibrated_three_sweep_runner.py#main]] tests seed completion, resource limits, duplicate prevention, resume behavior, and the range decision. The old threshold-40 campaign was stopped under the user's 2026-09-14 instruction; its complete and partial outputs remain separate.
+
+## Calibrated Three Sweep Distribution
+
+Local GPU devices 4–7 and the UBAI RTX A6000 partitions share the workload under separate execution rules, with all cluster temporary storage on verified disk rather than memory filesystems.
+
+The initial assignment is six theta candidates on UBAI and three locally, and eleven noise conditions on UBAI and six locally per seed. Each task uses one GPU and four CPU cores. UBAI jobs request 64 GiB, with up to eight campaign jobs; account limits remain ten running jobs, twenty submitted jobs, and twelve GPUs. Local device admission checks compute PIDs even when those PIDs are outside the controller's container. No DataParallel is used.
+
+[[scripts/experiments/ubai/prepare_calibrated_three_sweeps_ubai.py#prepare]] creates a separate deployment using the portable Python 3.12.13 environment and Ubuntu 24.04 image. Heavy checksum and environment verification runs in a Slurm preparation job. Read-only mounts preserve identical source, dataset and checkpoint paths. Every compute task rechecks preparation and source identity. The imported Transformers source subtree and SpikingJelly package subtree have separate content hashes because editable packages are not contained in the main source commit or environment archive.
+
+[[scripts/experiments/ubai/prepare_calibrated_three_sweeps_ubai.py#admit_runtime]] admits environment extraction and scratch space under a filesystem-checked `/enroot` path and rejects tmpfs/ramfs. It reserves concurrent disk usage, binds container temporary paths to this disk, and cleans only the exact owned runtime directory after child exit. Leftovers require terminal Slurm evidence; no age-only cleanup is allowed. [[scripts/verification/verify_calibrated_three_sweep_ubai.py#UBAISafetyTests]] covers allocation, paths, capacity reservation, checksum rejection, and termination cleanup.
+
+## Calibrated Three Sweep Reporting
+
+Live figures show completed evaluations only; immutable seed snapshots distinguish provisional one- and two-seed results from final three-seed Student-t confidence intervals.
+
+[[scripts/analysis/summarize_calibrated_three_sweeps.py#summarize]] regenerates replica, cell and site CSVs plus progress and source evidence from verified raw logs. Training selection results have a separate CSV from validation plots. Accuracy has three panels: logarithmic threshold and timing noise axes, and a linear deadline margin/noise standard deviation ratio axis. Deadline-miss and pre-clamp rail-saturation rates use a separate figure with true zeros retained.
+
+One seed is a single observation; two seeds give a provisional mean without a 95% interval. Three seeds give the mean and 95% Student-t interval with two degrees of freedom. Physical rates always pool raw numerators and denominators. The shared timing noise and margin condition is evaluated once per seed but appears in both corresponding panels. [[scripts/verification/verify_calibrated_three_sweep_summary.py#main]] checks incomplete evidence, duplicate seeds, pooled rates, confidence intervals and immutable snapshots. Results remain under the campaign artifact tag and are not automatically promoted to the paper.
+
 ## Symbolic Operation-Count Check
 
 The paper’s spike-operation and energy formulas have a dedicated symbolic regression checker independent of model execution.

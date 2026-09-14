@@ -458,3 +458,18 @@ theta=40과 양의 하한 $10^{-5}$에서 float32/float64 모두 상한의 log �
 - [x] ViT/GPT-2의 version 3 표 저장·복원과 적용, version 2 표의 validation/inference 적용 거부를 확인했다. 변경된 규칙과 검증을 [[calibration#Layer-wise Calibration#Frozen Execution#LayerNorm Positive Input Range]]에 연결했다.
 
 전체 모델의 정확도 변화는 이 검사로 주장하지 않는다. 이후 새 구현으로 평가할 때에만 별도 calibration 수집과 결과 경로를 사용한다.
+
+## Calibrated Three Sweep Execution
+
+2026-09-14 승인된 최신 bound 실험은 theta 선택과 두 noise 축을 각각 9점으로 평가하고 seed 전체 완료 순서로 중간 결과를 남긴다.
+
+- [x] 이전 threshold-40 실행기와 해당 evaluator만 중단했다. 완료·부분 로그는 삭제하거나 새 결과와 합치지 않았다.
+- [x] LayerNorm 상한 변경을 `c9f4e40`으로 별도 커밋하고 UBAI의 clean checkout에 동기화했다.
+- [x] [[evaluation#Calibrated Three Sweep Campaign]]에 71회 평가, 9회 calibration, training 선택과 validation 분리 및 경계 중단 규칙을 정의했다.
+- [x] [[evaluation#Calibrated Three Sweep Scheduling]]의 seed 0 전체 → seed 1 전체 → seed 2 전체 순서와 완료 결과 재사용을 구현했다.
+- [ ] 최종 실행 소스를 별도 커밋하고 양쪽 clean checkout을 같은 commit으로 고정한다.
+- [ ] CPU 검증과 Slurm 자산 검증 후 양쪽의 짧은 clean/noisy prediction 일치를 확인한다.
+- [ ] 9개 theta의 training/validation 및 반대 환경 replay를 검증해 선택을 확정한다. 범위 부족·불안정이면 noise 시작 전에 보고한다.
+- [ ] 17조건씩 세 seed를 진행하고 첫째·둘째 중간 그림과 최종 그림을 보존한다. seed 0 범위 중단 규칙을 적용한다.
+
+로컬은 GPU 4–7만, UBAI는 gpu4/gpu5만 사용하며 RAM 디스크에는 환경을 풀지 않는다. 50k와 추가 축은 진행하지 않는다. 기존 시간 추정은 약 38 GPU-hours이며 구현·검증·대기 시간을 포함하지 않는다.

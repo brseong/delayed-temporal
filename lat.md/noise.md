@@ -247,6 +247,16 @@ When adjacent results have the same classification, the next proposed scale move
 
 조건 전환 시 점유 검사에 걸리면 해당 장치에서 대기 후 재검사하며 전체 실험을 실패 처리하지 않는다. 검증은 연속 조건 실행과 일시적인 사용률 상승 후 재개, 완료 결과 재사용을 포함한다.
 
+## Calibrated Threshold and Noise Sweeps
+
+The current campaign repeats threshold selection with calibration and output bounds policy 3 before evaluating separate timing noise and deadline margin sweeps; previous threshold-40 results remain historical evidence.
+
+The approved tag is `vit_base_calibrated_theta_rt_ratio_float64_bounds3_v1`. [[evaluation#Calibrated Three Sweep Campaign]] defines training-only selection and opposite-environment replay. The exact threshold values are $10\,2^{i/2}$ for integer indices 0 through 8; timing noise values are $10^{-5}10^{i/8}$ over the same indices. These are not rounded before execution.
+
+For the confirmed threshold, the absolute timing standard deviation is $\sigma_t=2\theta r_t$ and deadline margin is the requested ratio multiplied by $\sigma_t$. The timing noise sweep fixes ratio 4. The ratio sweep fixes $r_t=10^{-5}$ and uses 0, 1, 2, 2.5, 3, 3.5, 4, 5, and 6. Deadline margin is distinct from the additional 5% calibration interval width. Bounds stay frozen during each evaluation.
+
+[[evaluation#Calibrated Three Sweep Scheduling]] enforces 17 distinct conditions for each of seeds 0, 1, and 2 and reports twice before the final aggregate. [[evaluation#Calibrated Three Sweep Reporting]] keeps temporary estimates separate from final confidence intervals. No static mismatch, weight noise, 50k evaluation, automatic range extension, or automatic manuscript promotion is part of this campaign.
+
 ## Gaussian Noise Statistics
 
 Maintained experiments expose event delivery and readout saturation counters for each site so robustness results can be related to delivery and readout effects in the simulator.
