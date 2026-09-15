@@ -365,6 +365,7 @@ def _validate_architecture(args: argparse.Namespace) -> None:
         args.phase in ("hardware-smoke", "hardware-eval")
         and args.pooling_domain == "ttfs"
         and not args.condition_worker
+        and args.pwm_backend == "hagen-hardware"
         and args.deadline_margin_json is None
     ):
         raise ValueError("TTFS hardware evaluation requires --deadline-margin-json")

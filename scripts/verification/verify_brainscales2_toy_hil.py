@@ -145,6 +145,8 @@ def verify_physical_pooling_with_torch_readout() -> None:
         temporal_pool_estimator="analytic-corrected-max",
     )
     _validate_architecture(args)
+    args.deadline_margin_json = None
+    _validate_architecture(args)
     prepared = _prepare_hidden_activation(
         args,
         None,
