@@ -1398,6 +1398,8 @@ def verify_metrics_and_artifact_schema() -> None:
     labels = torch.tensor([0, 1])
     rows = summarize_toy_evaluations(labels, logits[0], logits[0], [evaluation], bootstrap_iterations=10)
     assert rows[-1]["accuracy"] == 1.0
+    assert rows[-1]["logit_mean_accuracy"] == 1.0
+    assert rows[-1]["logit_mean_gain"] == 0.0
     with TemporaryDirectory() as directory:
         output = Path(directory)
         write_toy_artifacts(
@@ -1431,6 +1433,8 @@ def verify_metrics_and_artifact_schema() -> None:
         assert "nonmiss_activation_mae_uint5" in hardware_row
         assert "oracle_miss_repair_accuracy" in hardware_row
         assert "torch_readout_accuracy" in hardware_row
+        assert "logit_mean_accuracy" in hardware_row
+        assert "logit_mean_nll" in hardware_row
         with (output / "activation_error_by_code.csv").open(
             newline="", encoding="utf-8"
         ) as handle:

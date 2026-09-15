@@ -272,6 +272,11 @@ def summarize_toy_evaluations(
             evaluation.torch_oracle_miss_repair_logits.argmax(dim=-1)
             == repeated_labels
         )
+        logit_mean = evaluation.logits.to(torch.float64).mean(dim=0)
+        logit_mean_accuracy = _accuracy(logit_mean, labels)
+        oracle_logit_mean = evaluation.oracle_miss_repair_logits.to(
+            torch.float64
+        ).mean(dim=0)
         result = evaluation.pool_result
         activation_metrics, _ = _activation_analysis(evaluation)
         sample_all_miss = result.all_miss.any(dim=-1)
@@ -314,6 +319,15 @@ def summarize_toy_evaluations(
                 "trials": evaluation.logits.shape[0],
                 "accuracy": float(correct.float().mean()),
                 "nll": _nll(evaluation.logits, repeated_labels),
+                "logit_mean_accuracy": logit_mean_accuracy,
+                "logit_mean_nll": _nll(logit_mean, labels),
+                "logit_mean_gain": (
+                    logit_mean_accuracy - float(correct.float().mean())
+                ),
+                "oracle_logit_mean_accuracy": _accuracy(
+                    oracle_logit_mean, labels
+                ),
+                "oracle_logit_mean_nll": _nll(oracle_logit_mean, labels),
                 "oracle_miss_repair_accuracy": float(oracle_correct.float().mean()),
                 "oracle_miss_repair_nll": _nll(
                     evaluation.oracle_miss_repair_logits, repeated_labels

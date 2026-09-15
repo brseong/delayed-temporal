@@ -304,6 +304,8 @@ The empirical corrected maximum groups UInt5 codes that share the same quantized
 
 All four estimators consume the same raw-event tensor, retain all-miss-to-zero semantics, and run through the same frozen readout. Replay results remain rough model-selection evidence; hardware acceptance requires an independent calibration acquisition and evaluation events.
 
+The artifact fields `logit_mean_accuracy` and `logit_mean_nll` report results after averaging logits across repeated physical trials. This secondary control does not replace the primary accuracy averaged over individual trial predictions when evaluating neuron pooling.
+
 ### Deadline margin selection
 
 Margin calibration must exclude code zero and choose the smallest hardware-grid deadline extension whose hierarchical-bootstrap miss upper bound passes in every placement.
