@@ -13,7 +13,7 @@ from utils.transforms.calibration import (
     CalibrationRuntimeState,
     apply_calibrated_activation,
     calibration_table_to_dict,
-    get_layer_calibration,
+    get_runtime_layer_calibration,
     observe_calibration_activation,
 )
 from utils.transforms.types import Potential, PotentialBounds
@@ -234,6 +234,8 @@ def _calibration_site_keys(
         keys = tuple(
             (layer.module_name, layer.tensor_name) for layer in state.table.layers
         )
+        for module_name, tensor_name in keys:
+            get_runtime_layer_calibration(state, module_name, tensor_name)
         if set(state.clipping_counts) != set(keys):
             raise ValueError(
                 "calibration runtime clipping sites do not match its frozen table"
@@ -318,7 +320,7 @@ def bind_model_calibration(
             if text_policy and str(dtype).removeprefix("torch.") != metadata.dtype:
                 raise ValueError(f"{name}: execution dtype differs from calibration")
             if isinstance(state, CalibrationRuntimeState):
-                layer = get_layer_calibration(state.table, module_name, tensor_name)
+                layer = get_runtime_layer_calibration(state, module_name, tensor_name)
                 validate_symmetric_encoder_bounds(
                     PotentialBounds(layer.bounds.min, layer.bounds.max),
                     dtype, name=name, positive_floor=floor,
@@ -566,7 +568,7 @@ def calibrated_potential(
     # Frozen phases ignore collection rails entirely. The persisted record supplies
     # both the clamp endpoints and the immutable Potential metadata returned downstream.
     if isinstance(state, CalibrationRuntimeState):
-        layer = get_layer_calibration(state.table, module_name, tensor_name)
+        layer = get_runtime_layer_calibration(state, module_name, tensor_name)
         bounds = PotentialBounds(layer.bounds.min, layer.bounds.max)
         if collection_execution_bounds is not None and (
             float(bounds.min) < execution_lower

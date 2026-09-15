@@ -29,6 +29,7 @@ from utils.transformers.models.spiking_ops import SpikingLayerNorm
 from utils.transformers.integrations.spiking_sdpa_attention import (
     attention_score_representability_bounds,
 )
+from utils.transformers.tokenizer_identity import tokenizer_backend_sha256
 
 
 def gpt2_calibration_specs(
@@ -297,7 +298,7 @@ def build_gpt2_calibration_metadata(
         ).encode()).hexdigest()
     backend = getattr(tokenizer, "backend_tokenizer", None)
     if backend is not None and hasattr(backend, "to_str"):
-        preprocessing_fields["backend_sha256"] = hashlib.sha256(backend.to_str().encode()).hexdigest()
+        preprocessing_fields["backend_sha256"] = tokenizer_backend_sha256(backend)
     try:
         preprocessing = json.dumps(
             preprocessing_fields,

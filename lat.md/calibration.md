@@ -186,6 +186,14 @@ Both deterministic and Gaussian [[utils/transformers/models/spiking_ops.py#Spiki
 
 The selected potential ranges, variance calculation from clipped magnitudes, checkpoint epsilon, positive log floor, learned affine scaling and output bounds are unchanged. [[scripts/verification/verify_layernorm_shared_deadline.py#verify_rounding_directions]] checks opposite directions of endpoint rounding at internal upper endpoints 40.007 and 40.172. Further checks cover eight ablations, clean and Gaussian execution, sampling domains, invalid interval rejection before random draws, and strict primitive deadline validation.
 
+### Runtime Record Lookup
+
+Frozen execution reuses records validated during setup. It must not reconstruct every layer and histogram when one activation site requests its selected range.
+
+Runtime creation validates the complete immutable table and builds an immutable index by module and tensor name. Binding and forward calls use that index while preserving checks on each activation and all clipping counters. Replacing the table, bypassing validated runtime construction, or requesting an unknown site is rejected. The public table lookup retains full validation for setup callers.
+
+This optimization changes neither stored ranges nor operator arithmetic, calibration metadata or serialization. Verification compares exact values, domains and counts and checks that repeated execution does not trigger complete table reconstruction. Existing fixed experiment sources and logs remain unchanged.
+
 ### BERT Fixed Range Flow
 
 BERT freezes its three embedding-table ranges, propagates the normalized `Potential` through the encoder and first-token pooler, and derives GELU or ReLU output ranges from fixed affine endpoints.

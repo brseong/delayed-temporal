@@ -46,6 +46,10 @@ Collection uses one seeded training subset in two deterministic passes. Evaluati
 
 BERT/RoBERTa print flushed cumulative correct/total and accuracy after each evaluation batch, followed by a prediction digest. GPT-2 prints flushed batch mean loss and its exponent, preserving the existing metric rather than relabeling it as token weighted corpus perplexity. `--no-tensorboard` suppresses TensorBoard files. W&B can remain disabled without suppressing local metrics. Calibration also prints pass and sample progress immediately.
 
+[[utils/transformers/tokenizer_identity.py#tokenizer_backend_sha256]] hashes the tokenizer structure without its mutable padding and truncation state for each request. Those request settings, maximum length, sides and special token identifiers remain explicit metadata and must still match. Vocabulary, model, normalizer and other structural changes remain part of the hash. [[scripts/verification/verify_text_tokenizer_identity.py#verify_request_state_independence]] checks cached and newly encoded input paths against the same identity, while altered preprocessing settings or tokenization structure are rejected.
+
+The first 256-example GPT-2 comparison at source `014f428` stopped before SNN inference because the old backend hash depended on whether dataset tokenization used its cache. Its partial logs are preserved separately. The corrected implementation requires fresh collection and does not rewrite or relabel that failed attempt. [[calibration#Layer-wise Calibration#Frozen Execution#Runtime Record Lookup]] also removes repeated complete table validation from frozen activation execution without changing numerical results.
+
 ## Validation Scope
 
 Tests must establish executed site coverage, selected range consumption and strict persistence before reporting calibrated accuracy. Passing small checks does not establish full dataset performance or update the manuscript.

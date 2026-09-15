@@ -33,6 +33,7 @@ def source_hashes(family: str) -> dict[str, str]:
         Path(__file__), ROOT / "scripts/evaluation" / f"error_analysis_{family}.py",
         ROOT / "scripts/evaluation/text_calibration_runtime.py",
         ROOT / "utils/transformers/calibration.py",
+        ROOT / "utils/transformers/tokenizer_identity.py",
         ROOT / "utils/transformers/models/text_calibration.py",
         ROOT / "utils/transformers/models/spiking_ops.py",
         ROOT / "utils/transformers/optional_tensorboard.py",

@@ -28,6 +28,7 @@ from utils.transformers.calibration import (
 from utils.transformers.integrations.spiking_sdpa_attention import (
     attention_score_representability_bounds,
 )
+from utils.transformers.tokenizer_identity import tokenizer_backend_sha256
 
 
 def calibrate_text_potential(module: nn.Module, tensor_name: str, value: Potential) -> Potential:
@@ -169,9 +170,7 @@ def build_text_calibration_metadata(
             vocab, sort_keys=True, separators=(",", ":"), allow_nan=False,
         ).encode()).hexdigest()
     backend = tokenizer_get("backend_tokenizer", None)
-    backend_sha256 = None
-    if backend is not None and hasattr(backend, "to_str"):
-        backend_sha256 = hashlib.sha256(backend.to_str().encode()).hexdigest()
+    backend_sha256 = tokenizer_backend_sha256(backend)
     preprocessing = dict(
         tokenizer_class=type(tokenizer).__name__,
         tokenizer_name_or_path=tokenizer_identifier or str(tokenizer_get("name_or_path", "")),
