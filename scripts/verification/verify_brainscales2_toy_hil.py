@@ -26,6 +26,7 @@ from scripts.evaluation.brainscales2_toy_hil import (
     _deadline_margin_context,
     _evaluate_readout_ablations,
     _load_deadline_margin_payload,
+    _prepare_hidden_activation,
     _run_hagen_first,
     _load_isolated_condition,
     _run_hagen_output,
@@ -33,6 +34,7 @@ from scripts.evaluation.brainscales2_toy_hil import (
     _run_temporal_pool,
     _run_worker_command_with_retries,
     _timing_calibration_sha256,
+    _validate_architecture,
 )
 from utils.hardware.brainscales2.config import BrainScaleS2PoolConfig
 from utils.hardware.brainscales2.hagen import HagenConfig, HagenPWMBackend, HagenResult
@@ -114,6 +116,60 @@ def verify_frozen_integer_conversion() -> None:
     restored_forward = restored.forward(calibration_x[:8])
     torch.testing.assert_close(forward.hidden_uint5, restored_forward.hidden_uint5)
     torch.testing.assert_close(forward.logits_int8, restored_forward.logits_int8)
+
+
+def verify_physical_pooling_with_torch_readout() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Physical pooling with torch readout]]
+    _, converted, calibration_x = _converted_fixture()
+    args = SimpleNamespace(
+        pool_sample_chunk_size=1,
+        pool_replica_sample_budget=1,
+        pool_calibration_trial_chunk_size=1,
+        hagen_row_chunk_size=1,
+        condition_worker_max_attempts=1,
+        condition_worker_retry_backoff_s=0.0,
+        condition_worker_idle_timeout_s=1.0,
+        margin_calibration_samples=1,
+        margin_calibration_trials=1,
+        phase="hardware-eval",
+        pooling_domain="ttfs",
+        condition_worker=False,
+        condition_deadline_margin_s=0.0,
+        deadline_margin_json=Path("deadline_margin.json"),
+        architecture="yy-30",
+        task="yinyang",
+        pool_mapping="dedicated",
+        pwm_backend="torch",
+        pool_backend="hardware",
+        placements=["local-pool", "cross-quadrant"],
+        temporal_pool_estimator="analytic-corrected-max",
+    )
+    _validate_architecture(args)
+    prepared = _prepare_hidden_activation(
+        args,
+        None,
+        converted,
+        calibration_x[:8],
+        avg=1,
+    )
+    expected = converted.hidden_from_input(calibration_x[:8])[2]
+    torch.testing.assert_close(prepared.value, expected)
+    assert prepared.metadata["backend"] == "torch"
+    assert prepared.metadata["avg"] == 1
+    try:
+        _prepare_hidden_activation(args, None, converted, calibration_x[:8], avg=2)
+    except ValueError as error:
+        assert "avg=1" in str(error)
+    else:
+        raise AssertionError("torch hidden preparation accepted avg greater than one")
+
+    args.pwm_backend = "hagen-mock"
+    try:
+        _validate_architecture(args)
+    except ValueError as error:
+        assert "pwm-backend" in str(error)
+    else:
+        raise AssertionError("physical pooling accepted a mock Hagen backend")
 
 
 def verify_grouped_placement() -> None:
@@ -1581,6 +1637,7 @@ def verify_python311_and_notebook_contract() -> None:
 def main() -> None:
     verify_deterministic_yin_yang_splits()
     verify_frozen_integer_conversion()
+    verify_physical_pooling_with_torch_readout()
     verify_grouped_placement()
     verify_grouped_broadcast_fan_in()
     verify_mock_and_all_miss_policy()

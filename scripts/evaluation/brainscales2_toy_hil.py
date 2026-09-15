@@ -379,9 +379,11 @@ def _validate_architecture(args: argparse.Namespace) -> None:
     if args.pooling_domain == "potential" and args.pwm_backend == "torch":
         raise ValueError("potential-domain pooling requires a Hagen PWM backend")
     if args.phase.startswith("hardware") or args.phase == "calibrate-margin":
-        if args.pwm_backend != "hagen-hardware" or args.pool_backend != "hardware":
+        if args.pool_backend != "hardware":
+            raise ValueError("physical pooling phases require --pool-backend hardware")
+        if args.pwm_backend not in ("torch", "hagen-hardware"):
             raise ValueError(
-                "hardware phases require --pwm-backend hagen-hardware and --pool-backend hardware"
+                "physical pooling phases accept only --pwm-backend torch or hagen-hardware"
             )
 
 
@@ -843,6 +845,37 @@ def _run_hagen_first(
         }
     )
     return HagenResult(combined, metadata)
+
+
+def _prepare_hidden_activation(
+    args: argparse.Namespace,
+    hagen: HagenPWMBackend | None,
+    converted: ConvertedToyModel,
+    input_value: torch.Tensor,
+    *,
+    avg: int,
+) -> HagenResult:
+    """Prepare the frozen hidden code for a physical pooling condition."""
+    if hagen is None:
+        if avg != 1:
+            raise ValueError("torch hidden preparation supports only avg=1")
+        hidden = converted.hidden_from_input(input_value)[2].detach().cpu().to(torch.int32)
+        return HagenResult(
+            hidden,
+            {
+                "backend": "torch",
+                "avg": 1,
+                "input_shape": list(input_value.shape),
+                "output_shape": list(hidden.shape),
+            },
+        )
+    return _run_hagen_first(
+        args,
+        hagen,
+        converted,
+        converted.encode_input(input_value),
+        avg=avg,
+    )
 
 
 def _evaluate_readout_ablations(
@@ -1843,14 +1876,11 @@ def prepare_first_hidden_phase(args: argparse.Namespace) -> None:
     model = _load_float_checkpoint(args)
     converted = _load_or_convert(args, model, dataset.calibration_x)
     hagen = _hagen_backend(args)
-    if hagen is None:
-        raise ValueError("physical first-hidden preparation requires a Hagen backend")
-    input_uint5 = converted.encode_input(test_x)
-    first = _run_hagen_first(
+    first = _prepare_hidden_activation(
         args,
         hagen,
         converted,
-        input_uint5,
+        test_x,
         avg=args.condition_hagen_avg,
     )
     payload = {
@@ -2143,14 +2173,11 @@ def margin_calibration_phase(args: argparse.Namespace) -> None:
     trials = min(args.margin_calibration_trials, 2) if args.quick else args.margin_calibration_trials
     calibration_x = dataset.calibration_x[:samples]
     hagen = _hagen_backend(args)
-    if hagen is None:
-        raise ValueError("calibrate-margin requires a physical Hagen backend")
-    input_uint5 = converted.encode_input(calibration_x)
-    first = _run_hagen_first(
+    first = _prepare_hidden_activation(
         args,
         hagen,
         converted,
-        input_uint5,
+        calibration_x,
         avg=1,
     )
     hidden_uint5 = first.value.detach().cpu().to(torch.int32)

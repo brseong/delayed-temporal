@@ -114,6 +114,8 @@ Every condition retains the actual Hagen UInt5 tensor presented to the LIF stage
 
 Two paired causal controls operate on the same pooled hidden tensor. The miss-repair oracle replaces only all-miss positions with the ideal converted hidden code before the selected readout, while the readout ablation sends the unmodified pooled tensor through the deterministic integer PyTorch second layer. A torch-readout oracle is also retained so miss repair can be compared without analog readout noise.
 
+Hardware phases also permit `pwm-backend=torch` with `pool-backend=hardware` for the physical pooling control. It sends the deterministic converted hidden code through the physical LIF pool and frozen torch readout, while the manifest keeps this result separate from execution with two Hagen affine layers. Potential-domain pooling still requires Hagen.
+
 ### Network pool placement
 
 Dedicated mapping preserves persistent physical identity, while time-multiplexed mapping deliberately reuses a small pool and is reported as a different hardware method.
@@ -221,6 +223,10 @@ Tests cover zero and maximum weights, source isolation, quiet activity, missing 
 ### Host-mediated implicit ReLU boundary
 
 The default hidden boundary must lower raw PWM values through the declared $V_{lb}=0$ Potential range without calling `ConvertingReLU`, retain UInt5 upper saturation, and label the result as host-mediated rather than continuous on-chip activation.
+
+### Physical pooling with torch readout
+
+Physical pooling may use deterministic converted hidden codes and the frozen torch readout, but it must reject mock Hagen execution and Hagen potential averaging in this control.
 
 ### Hagen shift probe consolidation
 
