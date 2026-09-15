@@ -32,6 +32,12 @@ UBAI에는 NAS가 직접 공유된다고 가정하지 않는다. 기존 환경�
 
 두 환경은 동일한 ViT-B 입력과 calibration으로 correct count 및 prediction digest가 일치해야 한다. 대기 중인 UBAI 작업을 로컬로 옮길 때에는 소유자와 작업 이름을 확인하고 취소와 종료 확인을 마친 뒤 배정을 바꾼다. 실행 중인 작업을 중복 제출하지 않는다.
 
+### Temporary Additional GPUs
+
+이번 비교 실험에서는 사용자 승인으로 GPU 1–3을 일시적으로 추가 허용한다. 기본 GPU 4–7 규칙과 기존 experiment.json은 바꾸지 않으며, GPU 0은 제외한다. 추가 GPU는 승인된 batch size의 미시작 ANN 평가에만 사용한다.
+
+추가 실행은 같은 source commit, evaluator, 데이터와 task 정의를 사용한다. 이미 완료했거나 실행 중인 평가를 중복 제출하지 않는다. 해당 모델의 calibration이 종료에 가까워지면 추가 평가만 중단하고 기존 pipeline에 양보한다. 원래 진행 중인 calibration과 SNN은 중단하거나 표본을 나누지 않는다. 따라서 추가 GPU를 허용해도 전체 종료 시간을 결정하는 ViT-L calibration과 SNN의 시간은 크게 줄지 않을 수 있다.
+
 ## Results
 
 원시 로그와 manifest가 근거이며, 완료된 ANN/SNN 한 쌍마다 중간 표를 갱신한다.
