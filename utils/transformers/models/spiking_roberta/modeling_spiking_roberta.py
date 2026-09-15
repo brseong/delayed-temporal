@@ -45,6 +45,8 @@ from .configuration_roberta import RobertaConfig
 
 from utils.transforms.functions import clamp_gelu_output, gelu_approximation, tanh
 from utils.transforms.types import Potential, PotentialBounds
+from utils.transformers.models.text_calibration import calibrate_text_potential
+from utils.transformers.calibration import calibration_uses_explicit_bounds
 from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear, _apply_norm
 
@@ -65,6 +67,8 @@ class RobertaEmbeddings(nn.Module):
         if _use_spiking_ln:
             _sln_kwargs = dict(
                 theta=_theta, tau_s=_tau_s,
+                eps=config.layer_norm_eps,
+                clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
                 use_spiking_log=getattr(config, "spiking_ln_log", True),
                 use_spiking_expdiff=getattr(config, "spiking_ln_expdiff", True),
@@ -394,7 +398,15 @@ class RobertaSelfAttention(nn.Module):
         pot_k = self.key(pot)
         pot_v = self.value(pot)
         pot_q = self.query(pot)
-        
+        explicit_bounds = (
+            self.config._attn_implementation == "spiking_sdpa"
+            and calibration_uses_explicit_bounds(self)
+        )
+        if explicit_bounds:
+            pot_q = calibrate_text_potential(self, "query", pot_q)
+            pot_k = calibrate_text_potential(self, "key", pot_k)
+            pot_v = calibrate_text_potential(self, "value", pot_v)
+
         key_layer = pot_k.value.view(*new_shape).transpose(1, 2)
         value_layer = pot_v.value.view(*new_shape).transpose(1, 2)
         query_layer = pot_q.value.view(*new_shape).transpose(1, 2)
@@ -414,7 +426,15 @@ class RobertaSelfAttention(nn.Module):
             attention_kwargs["theta"] = theta
             attention_kwargs["tau"] = getattr(self.config, "tau_s", 1.0)
             attention_kwargs["source_length_max"] = source_length_max
-            context_domain = attention_output_bounds(theta, source_length_max)
+            if explicit_bounds:
+                attention_kwargs.update(
+                    query_bounds=pot_q.domain,
+                    key_bounds=pot_k.domain,
+                    value_bounds=pot_v.domain,
+                )
+                context_domain = pot_v.domain
+            else:
+                context_domain = attention_output_bounds(theta, source_length_max)
 
         # Eager training dropout scales surviving normalized weights by 1/(1-p).
         # Include zero plus both scaled value endpoints without reading its mask.
@@ -469,6 +489,8 @@ class RobertaSelfOutput(nn.Module):
         if _use_spiking_ln:
             _sln_kwargs = dict(
                 theta=_theta, tau_s=_tau_s,
+                eps=config.layer_norm_eps,
+                clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
                 use_spiking_log=getattr(config, "spiking_ln_log", True),
                 use_spiking_expdiff=getattr(config, "spiking_ln_expdiff", True),
@@ -512,7 +534,8 @@ class RobertaSelfOutput(nn.Module):
             pot_dense.domain.min + pot_skip.domain.min,
             pot_dense.domain.max + pot_skip.domain.max,
         )
-        return _apply_norm(self.LayerNorm, Potential(val, domain))
+        residual = calibrate_text_potential(self, "residual", Potential(val, domain))
+        return _apply_norm(self.LayerNorm, residual)
 
 
 class RobertaAttention(nn.Module):
@@ -530,6 +553,7 @@ class RobertaAttention(nn.Module):
 class RobertaIntermediate(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.tau_s = getattr(config, "tau_s", 1.0)
         self.use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
         self.dense = SpikingLinear(
             config.hidden_size,
@@ -564,7 +588,8 @@ class RobertaIntermediate(nn.Module):
         if self.use_spiking_mlp:
             pot_z = self.dense(pot)
             if isinstance(self.intermediate_act_fn, GELUActivation):
-                return Potential(*gelu_approximation(*pot_z))
+                pot_z = calibrate_text_potential(self, "activation_input", pot_z)
+                return Potential(*gelu_approximation(*pot_z, theta=self.dense.theta, tau_s=self.tau_s))
             if isinstance(self.intermediate_act_fn, nn.ReLU):
                 return Potential(
                     pot_z.value.relu(),
@@ -616,6 +641,8 @@ class RobertaOutput(nn.Module):
         if _use_spiking_ln:
             _sln_kwargs = dict(
                 theta=_theta, tau_s=_tau_s,
+                eps=config.layer_norm_eps,
+                clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
                 use_spiking_log=getattr(config, "spiking_ln_log", True),
                 use_spiking_expdiff=getattr(config, "spiking_ln_expdiff", True),
@@ -658,7 +685,8 @@ class RobertaOutput(nn.Module):
             pot_dense.domain.min + pot_skip.domain.min,
             pot_dense.domain.max + pot_skip.domain.max,
         )
-        return _apply_norm(self.LayerNorm, Potential(val, domain))
+        residual = calibrate_text_potential(self, "residual", Potential(val, domain))
+        return _apply_norm(self.LayerNorm, residual)
 
 
 class RobertaLayer(GradientCheckpointingLayer):
@@ -772,7 +800,7 @@ class RobertaPooler(nn.Module):
                     name="roberta_pooler_input",
                 )
             pot_in = Potential(first_token_tensor, first_token_domain)
-            pot_dense = self.dense(pot_in)
+            pot_dense = calibrate_text_potential(self, "activation_input", self.dense(pot_in))
             pooled_output, _ = tanh(pot_dense.value, pot_dense.domain, tau_s=self.tau_s, theta=self.dense.theta)
             return pooled_output
 
@@ -859,6 +887,7 @@ class RobertaModel(RobertaPreTrainedModel):
                 extended_attention_mask = attention_mask[:, None, None, :]
             else:
                 extended_attention_mask = attention_mask
+            extended_attention_mask = extended_attention_mask.to(dtype=embedding_output.value.dtype)
             extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(embedding_output.value.dtype).min
         else:
             extended_attention_mask = None
@@ -881,6 +910,7 @@ class RobertaLMHead(nn.Module):
 
     def __init__(self, config):
         super().__init__()
+        self.tau_s = getattr(config, "tau_s", 1.0)
         self.use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
         self.dense = SpikingLinear(
             config.hidden_size,
@@ -894,6 +924,8 @@ class RobertaLMHead(nn.Module):
         if _use_spiking_ln:
             _sln_kwargs = dict(
                 theta=_theta, tau_s=_tau_s,
+                eps=config.layer_norm_eps,
+                clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
                 use_spiking_log=getattr(config, "spiking_ln_log", True),
                 use_spiking_expdiff=getattr(config, "spiking_ln_expdiff", True),
@@ -940,7 +972,8 @@ class RobertaLMHead(nn.Module):
         # Dense and spiking GELU use the same fixed output range.
         if self.use_spiking_mlp:
             pot_z = self.dense(pot)
-            pot_act = Potential(*gelu_approximation(*pot_z))
+            pot_z = calibrate_text_potential(self, "activation_input", pot_z)
+            pot_act = Potential(*gelu_approximation(*pot_z, theta=self.dense.theta, tau_s=self.tau_s))
         else:
             x = nn.functional.linear(
                 pot.value,
@@ -1122,7 +1155,7 @@ class RobertaClassificationHead(nn.Module):
         # Tanh maps the frozen affine endpoints monotonically; the spiking Tanh owns
         # the same public structural output range through its composed operator.
         if self.use_spiking_mlp:
-            pot_z = self.dense(pot_in)
+            pot_z = calibrate_text_potential(self, "activation_input", self.dense(pot_in))
             pot_tanh = Potential(
                 *tanh(
                     pot_z.value,

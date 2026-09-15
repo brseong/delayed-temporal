@@ -1696,13 +1696,9 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
     assert args.calibration_bins == 16
     assert args.theta == 2000.0
     assert args.attention_theta == 100.0
-    _expect_raises(
-        ValueError,
-        lambda: validate_gpt2_calibration_arguments(
-            replace(args, dtype="float64")
-        ),
-        "require dtype=float32",
-    )
+    assert validate_gpt2_calibration_arguments(
+        replace(args, dtype="float64")
+    ) is CalibrationMode.COLLECT
     _expect_raises(
         ValueError,
         lambda: validate_gpt2_calibration_arguments(
@@ -1767,8 +1763,8 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
     assert dict(metadata.model_options)["attention_theta"] == 2.0
     _verify_gelu_metadata_identity(metadata)
 
-    # The local threshold affects only attention's score/value code window. Affine
-    # projections retain the global rail, and score calibration uses the local cap.
+    # Selected attention score bounds retain the numerical limit without an
+    # additional threshold cap. The affine operators retain their own threshold.
     config._attn_implementation = "spiking_sdpa"
     torch.manual_seed(2119)
     spiking_model = GPT2Model(config).eval()
@@ -1789,6 +1785,7 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
         1.0,
         8,
         attention.c_attn.weight.dtype,
+        cap_by_theta=False,
     )
     assert score_spec.fixed_min == expected_score_bounds.min
     assert score_spec.fixed_max == expected_score_bounds.max
@@ -1831,7 +1828,7 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
         device=torch.device("cpu"),
         expected_samples=4,
     )
-    assert len(table.layers) == 2
+    assert len(table.layers) == 3
     assert all(layer.num_values > 0 for layer in table.layers)
     assert not model_calibration_is_bound(model)
     assert not model_calibration_is_bound(model.h[0])
@@ -1891,8 +1888,8 @@ def verify_gpt2_fixed_range_flow() -> None:
             second = mlp(Potential(second_value, input_domain))
             assert first.domain == second.domain
 
-    # Architecture discovery leaves the parameter-derived model entry analytic and
-    # declares only the two recursively widening residual sites per block.
+    # Architecture discovery keeps the model entry analytic and selects both
+    # residuals plus the first MLP affine output even with a dense activation.
     torch.manual_seed(2110)
     model = GPT2Model(make_config(use_spiking_mlp=True)).eval()
     specs = gpt2_calibration_specs(
@@ -1904,6 +1901,7 @@ def verify_gpt2_fixed_range_flow() -> None:
     assert tuple((spec.module_name, spec.tensor_name) for spec in specs) == (
         ("h.0", "attention_residual"),
         ("h.0", "output"),
+        ("h.0.mlp", "activation_input"),
     )
     metadata = replace(
         _make_metadata(),
@@ -1911,12 +1909,12 @@ def verify_gpt2_fixed_range_flow() -> None:
         model_id="tiny-gpt2",
         max_sequence_length=4,
         input_shape=(4,),
-        model_options=(("use_spiking_mlp", True),),
+        model_options=(("text_calibration_policy_version", 1), ("use_spiking_mlp", True)),
     )
     collector = create_calibration_collector(metadata, specs, bin_count=16)
     input_ids = torch.tensor([[1, 2, 3, 4], [4, 3, 2, 1]])
     attention_mask = torch.ones_like(input_ids)
-    assert bind_model_calibration(model, collector) == 1
+    assert bind_model_calibration(model, collector) == 2
     first_pass = model(
         input_ids=input_ids,
         attention_mask=attention_mask,
@@ -1930,9 +1928,9 @@ def verify_gpt2_fixed_range_flow() -> None:
     )
     assert torch.equal(first_pass.last_hidden_state, second_pass.last_hidden_state)
     table = finalize_calibration_collection(collector)
-    assert clear_model_calibration(model, expected_state=collector) == 1
+    assert clear_model_calibration(model, expected_state=collector) == 2
 
-    # Frozen validation binds exactly the same block module. Every residual site is
+    # Frozen validation binds the same block and MLP modules. Every selected site is
     # exercised without updating its persisted range, and reports a positive element
     # denominator even when this in-population replay has no excursions.
     runtime = create_calibration_runtime(
@@ -1940,7 +1938,7 @@ def verify_gpt2_fixed_range_flow() -> None:
         table,
         expected_metadata=metadata,
     )
-    assert bind_model_calibration(model, runtime) == 1
+    assert bind_model_calibration(model, runtime) == 2
     frozen = model(
         input_ids=input_ids,
         attention_mask=attention_mask,
@@ -1953,9 +1951,10 @@ def verify_gpt2_fixed_range_flow() -> None:
     } == {
         ("h.0", "attention_residual"),
         ("h.0", "output"),
+        ("h.0.mlp", "activation_input"),
     }
     assert all(item.num_values > 0 for item in report)
-    assert clear_model_calibration(model, expected_state=runtime) == 1
+    assert clear_model_calibration(model, expected_state=runtime) == 2
 
 
 # @lat: [[calibration#Layer-wise Calibration#Frozen Execution#ViT Residual Range Reset]]

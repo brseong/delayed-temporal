@@ -22,6 +22,8 @@ from utils.transforms.types import Potential, PotentialBounds
 _CALIBRATION_STATE_ATTRIBUTE = "_delayed_temporal_calibration_state"
 _CALIBRATION_NAME_ATTRIBUTE = "_delayed_temporal_calibration_module_name"
 VIT_CALIBRATION_POLICY_VERSION = 2
+TEXT_CALIBRATION_POLICY_VERSION = 1
+TEXT_CALIBRATION_FAMILIES = frozenset({"bert", "roberta", "gpt2"})
 
 
 def _vit_calibration_policy_enabled(
@@ -47,6 +49,50 @@ def vit_calibration_uses_explicit_bounds(module: nn.Module) -> bool:
     return _vit_calibration_policy_enabled(
         module.__dict__[_CALIBRATION_STATE_ATTRIBUTE]
     )
+
+
+def _explicit_calibration_policy_enabled(
+    state: CalibrationCollectorState | CalibrationRuntimeState,
+) -> bool:
+    """Recognize versioned range transfer without relabeling text models as ViT."""
+    metadata = state.metadata if isinstance(state, CalibrationCollectorState) else state.table.metadata
+    options = dict(metadata.model_options)
+    if "vit_calibration_policy_version" in options:
+        if "text_calibration_policy_version" in options:
+            raise ValueError("calibration cannot combine ViT and text policy versions")
+        return _vit_calibration_policy_enabled(state)
+    if "text_calibration_policy_version" not in options:
+        return False
+    version = options["text_calibration_policy_version"]
+    if type(version) is not int or version != TEXT_CALIBRATION_POLICY_VERSION:
+        raise ValueError("unsupported text_calibration_policy_version")
+    if metadata.model_family not in TEXT_CALIBRATION_FAMILIES:
+        raise ValueError("text_calibration_policy_version requires BERT, RoBERTa or GPT-2")
+    return True
+
+
+def calibration_uses_explicit_bounds(module: nn.Module) -> bool:
+    """Return whether this module owns versioned input-range calibration."""
+    if not model_calibration_is_bound(module):
+        return False
+    return _explicit_calibration_policy_enabled(
+        module.__dict__[_CALIBRATION_STATE_ATTRIBUTE]
+    )
+
+
+def _calibration_execution_dtype(module: nn.Module, tensor_name: str) -> torch.dtype:
+    """Resolve the real projection dtype for separate or fused Q/K/V weights."""
+    if tensor_name in {"query", "key", "value"}:
+        projection = getattr(module, tensor_name, None)
+        if projection is None:
+            projection = getattr(module, "c_attn", None)
+        if projection is None or not isinstance(getattr(projection, "weight", None), Tensor):
+            raise ValueError(f"{tensor_name}: calibrated projection has no weight dtype")
+        return projection.weight.dtype
+    parameter = next(module.parameters(), None)
+    if parameter is None:
+        raise ValueError(f"{tensor_name}: calibrated module has no execution dtype")
+    return parameter.dtype
 
 
 def validate_symmetric_encoder_bounds(
@@ -249,12 +295,13 @@ def bind_model_calibration(
 
     # Validate the new physical input ranges before publishing any bindings. Legacy
     # tables keep their former behavior; their evaluator metadata gate still rejects
-    # reuse for a new ViT run.
-    if _vit_calibration_policy_enabled(state):
+    # reuse for a new versioned run.
+    if _explicit_calibration_policy_enabled(state):
         metadata = state.metadata if isinstance(state, CalibrationCollectorState) else state.table.metadata
         options = dict(metadata.model_options)
+        text_policy = metadata.model_family in TEXT_CALIBRATION_FAMILIES
         for module_name, tensor_name in site_keys:
-            if tensor_name not in {"query", "key", "value", "centered_input"}:
+            if not text_policy and tensor_name not in {"query", "key", "value", "centered_input"}:
                 continue
             module = modules_by_name[module_name]
             name = f"{module_name}.{tensor_name}"
@@ -267,9 +314,9 @@ def bind_model_calibration(
                     or floor != metadata.clip_margin
                 ):
                     raise ValueError(f"{name}: LayerNorm epsilon or positive floor differs from calibration")
-                dtype = module.weight.dtype
-            else:
-                dtype = getattr(module, tensor_name).weight.dtype
+            dtype = _calibration_execution_dtype(module, tensor_name)
+            if text_policy and str(dtype).removeprefix("torch.") != metadata.dtype:
+                raise ValueError(f"{name}: execution dtype differs from calibration")
             if isinstance(state, CalibrationRuntimeState):
                 layer = get_layer_calibration(state.table, module_name, tensor_name)
                 validate_symmetric_encoder_bounds(

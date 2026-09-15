@@ -1,6 +1,8 @@
 """GPT-2-specific declarations for layer-wise fixed-range calibration."""
 
 import json
+import time
+import hashlib
 from typing import Any
 
 import torch
@@ -19,9 +21,11 @@ from utils.transforms.calibration import (
 from utils.transforms.functions import GELU_OUTPUT_MIN, OUTPUT_BOUNDS_VERSION
 from utils.transforms.noise import get_gaussian_time_noise
 from utils.transformers.calibration import (
+    TEXT_CALIBRATION_POLICY_VERSION,
     bind_model_calibration,
     clear_model_calibration,
 )
+from utils.transformers.models.spiking_ops import SpikingLayerNorm
 from utils.transformers.integrations.spiking_sdpa_attention import (
     attention_score_representability_bounds,
 )
@@ -34,13 +38,11 @@ def gpt2_calibration_specs(
     upper_quantile: float,
     margin_fraction: float,
 ) -> tuple[LayerCalibrationSpec, ...]:
-    """Declare GPT-2 residual and optional spiking-attention calibration sites.
+    """Declare every GPT-2 activation requiring a selected fixed range.
 
-    Every block contributes its recursively widening self-attention and MLP residual
-    outputs. A spiking attention module additionally freezes its raw softmin score
-    rail below the representability ceiling derived from model capacity, temporal
-    scale, and the query/key/value projection dtype. The embedding sum keeps its
-    parameter-derived analytic interval and therefore declares no site.
+    Residuals, MLP inputs, query/key/value projections, attention scores and active
+    LayerNorm inputs are discovered from actual modules. Embeddings and bounded
+    activation outputs retain their analytically derived intervals.
 
     Args:
         model: Unwrapped GPT-2 model or task wrapper.
@@ -49,8 +51,7 @@ def gpt2_calibration_specs(
         margin_fraction: Per-side expansion after symmetric quantile selection.
 
     Returns:
-        Two specifications per block and one score specification per spiking
-        attention layer.
+        Specifications for exactly the sites executed by the configured modules.
 
     Raises:
         TypeError: If ``model`` is not an unwrapped PyTorch module.
@@ -63,6 +64,7 @@ def gpt2_calibration_specs(
     from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import (
         GPT2Attention,
         GPT2Block,
+        GPT2MLP,
         GPT2Model,
         resolve_gpt2_attention_theta,
     )
@@ -83,6 +85,9 @@ def gpt2_calibration_specs(
     )
     if len(model_names) != 1:
         raise ValueError("model must contain exactly one GPT2Model module")
+    if any(getattr(module.config, "add_cross_attention", False)
+           for module in model.modules() if isinstance(module, GPT2Model)):
+        raise ValueError("GPT-2 calibration does not support cross-attention")
     block_names = tuple(
         sorted(
             name
@@ -110,9 +115,25 @@ def gpt2_calibration_specs(
                 )
             )
 
-    # Only the spiking backend consumes calibrated softmin score rails. The eager
-    # architecture therefore preserves the artifact schema used before score-range
-    # calibration was introduced.
+    for module_name, module in sorted(model.named_modules()):
+        if isinstance(module, GPT2MLP):
+            tensor_name = "activation_input"
+        elif isinstance(module, SpikingLayerNorm) and any((
+            module.use_spiking_mul, module.use_spiking_log, module.use_spiking_expdiff,
+        )):
+            tensor_name = "centered_input"
+        else:
+            continue
+        specs.append(LayerCalibrationSpec(
+            module_name=module_name,
+            tensor_name=tensor_name,
+            range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
+            lower_quantile=lower_quantile,
+            upper_quantile=upper_quantile,
+            margin_fraction=margin_fraction,
+        ))
+
+    # Dense attention has no bounded temporal Q/K/V or score encoder.
     attention_modules = tuple(
         sorted(
             (name, module)
@@ -122,6 +143,15 @@ def gpt2_calibration_specs(
         )
     )
     for module_name, module in attention_modules:
+        for tensor_name in ("query", "key", "value"):
+            specs.append(LayerCalibrationSpec(
+                module_name=module_name,
+                tensor_name=tensor_name,
+                range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
+                lower_quantile=lower_quantile,
+                upper_quantile=upper_quantile,
+                margin_fraction=margin_fraction,
+            ))
         # GPT-2 cache growth is bounded by the configured position capacity, not the
         # current token batch. The combined Q/K/V projection weight supplies the
         # execution dtype that determines the exponential representability floor.
@@ -130,6 +160,7 @@ def gpt2_calibration_specs(
             float(getattr(module.config, "tau_s", 1.0)),
             int(module.config.max_position_embeddings),
             module.c_attn.weight.dtype,
+            cap_by_theta=False,
         )
         specs.append(
             LayerCalibrationSpec(
@@ -146,6 +177,14 @@ def gpt2_calibration_specs(
     return tuple(specs)
 
 
+def _gpt2_config_sha256(config: Any) -> str:
+    """Hash numerical configuration without checkpoint location or dtype aliases."""
+    config_dict = config.to_dict()
+    for name in ("_name_or_path", "_commit_hash", "transformers_version", "torch_dtype", "dtype"):
+        config_dict.pop(name, None)
+    return hashlib.sha256(json.dumps(config_dict, sort_keys=True, default=str).encode()).hexdigest()
+
+
 def build_gpt2_calibration_metadata(
     *,
     model_id: str,
@@ -158,6 +197,8 @@ def build_gpt2_calibration_metadata(
     config: Any,
     max_length: int,
     attention_implementation: str,
+    dtype: str = "float32",
+    checkpoint_sha256: str = "",
 ) -> CalibrationMetadata:
     """Build the complete reusable identity of one GPT-2 calibration artifact.
 
@@ -195,6 +236,7 @@ def build_gpt2_calibration_metadata(
         "calibration_split": calibration_split,
         "calibration_dataset_fingerprint": calibration_dataset_fingerprint,
         "attention_implementation": attention_implementation,
+        "dtype": dtype,
     }
     for name, value in text_values.items():
         if not isinstance(value, str):
@@ -214,6 +256,10 @@ def build_gpt2_calibration_metadata(
         raise ValueError("calibration_seed must be non-negative")
     if max_length <= 0:
         raise ValueError("max_length must be positive")
+    if dtype not in ("float32", "float64"):
+        raise ValueError("dtype must be float32 or float64")
+    if not isinstance(checkpoint_sha256, str):
+        raise TypeError("checkpoint_sha256 must be a string")
 
     # The artifact is valid only up to the same padded request length. Refuse a
     # tokenizer length beyond the learned position table instead of persisting an
@@ -245,6 +291,13 @@ def build_gpt2_calibration_metadata(
         "subset_samples": calibration_samples,
         "subset_fingerprint": calibration_dataset_fingerprint,
     }
+    if hasattr(tokenizer, "get_vocab"):
+        preprocessing_fields["vocab_sha256"] = hashlib.sha256(json.dumps(
+            tokenizer.get_vocab(), sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode()).hexdigest()
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is not None and hasattr(backend, "to_str"):
+        preprocessing_fields["backend_sha256"] = hashlib.sha256(backend.to_str().encode()).hexdigest()
     try:
         preprocessing = json.dumps(
             preprocessing_fields,
@@ -266,10 +319,13 @@ def build_gpt2_calibration_metadata(
     # Persist all configured paths that alter residual distributions. Training-only
     # dropout probabilities are included because model.eval() makes their effective
     # behavior zero, while recording them still rejects a different checkpoint config.
+    config_sha256 = _gpt2_config_sha256(config)
     model_options = tuple(
         sorted(
             (
                 ("activation_function", str(getattr(config, "activation_function", ""))),
+                ("checkpoint_sha256", checkpoint_sha256),
+                ("config_sha256", config_sha256),
                 (
                     "attention_theta",
                     resolve_gpt2_attention_theta(config),
@@ -277,6 +333,9 @@ def build_gpt2_calibration_metadata(
                 ("attention_implementation", attention_implementation),
                 ("gelu_output_min", GELU_OUTPUT_MIN),
                 ("output_bounds_version", OUTPUT_BOUNDS_VERSION),
+                ("text_calibration_policy_version", TEXT_CALIBRATION_POLICY_VERSION),
+                ("layer_norm_eps", float(config.layer_norm_epsilon)),
+                ("layer_norm_clip_margin", float(getattr(config, "clip_margin", 1.0e-5))),
                 ("attn_pdrop", float(getattr(config, "attn_pdrop", 0.0))),
                 ("embd_pdrop", float(getattr(config, "embd_pdrop", 0.0))),
                 ("resid_pdrop", float(getattr(config, "resid_pdrop", 0.0))),
@@ -289,9 +348,7 @@ def build_gpt2_calibration_metadata(
         )
     )
 
-    # GPT-2 evaluator execution is float32 today. The common metadata schema still
-    # has a tau_m slot, so it stores the same value as tau_s rather than a second
-    # attention scale.
+    # The metadata records the evaluator dtype and the single configured time scale.
     theta = float(getattr(config, "theta"))
     tau_s = float(getattr(config, "tau_s"))
     return CalibrationMetadata(
@@ -300,7 +357,7 @@ def build_gpt2_calibration_metadata(
         dataset_id=dataset_id,
         dataset_split=calibration_split,
         preprocessing=preprocessing,
-        dtype="float32",
+        dtype=dtype,
         theta=theta,
         tau_s=tau_s,
         tau_m=tau_s,
@@ -366,14 +423,52 @@ def collect_gpt2_calibration_table(
         raise ValueError("calibration dataset length does not match expected_samples")
     if get_gaussian_time_noise().enabled:
         raise RuntimeError("calibration collection requires Gaussian timing noise off")
+    from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import GPT2Model
+
+    model_configs = [module.config for module in model.modules() if isinstance(module, GPT2Model)]
+    if len(model_configs) != 1:
+        raise ValueError("calibration requires exactly one GPT2Model")
+    config = model_configs[0]
+    metadata = collector.metadata
+    options = dict(metadata.model_options)
+    if metadata.model_family != "gpt2":
+        raise ValueError("calibration model family differs from the model")
+    actual_dtype = next(model.parameters()).dtype
+    if actual_dtype not in (torch.float32, torch.float64) or metadata.dtype != str(actual_dtype).removeprefix("torch."):
+        raise ValueError("calibration dtype differs from the model")
+    version = options.get("text_calibration_policy_version")
+    if type(version) is not int or version != TEXT_CALIBRATION_POLICY_VERSION:
+        raise ValueError("calibration requires the current text calibration policy")
+    if (
+        metadata.theta != float(config.theta)
+        or metadata.tau_s != float(config.tau_s)
+        or metadata.tau_m != float(config.tau_s)
+        or metadata.clip_margin != float(getattr(config, "clip_margin", 1.0e-5))
+        or options.get("config_sha256") != _gpt2_config_sha256(config)
+        or options.get("output_bounds_version") != OUTPUT_BOUNDS_VERSION
+        or options.get("attention_implementation") != config._attn_implementation
+    ):
+        raise ValueError("calibration metadata differs from the model configuration")
+    if not collector.site_specs:
+        raise ValueError("calibration sites must not be empty")
+    first_spec = next(iter(collector.site_specs.values()))
+    expected_specs = gpt2_calibration_specs(
+        model, lower_quantile=first_spec.lower_quantile,
+        upper_quantile=first_spec.upper_quantile, margin_fraction=first_spec.margin_fraction,
+    )
+    if dict(collector.site_specs) != {(spec.module_name, spec.tensor_name): spec for spec in expected_specs}:
+        raise ValueError("calibration sites differ from the active model")
 
     # Keep one binding across both passes. The first pass discovers only extrema;
     # histogram bin edges are fixed before replaying the identical selected texts.
     bind_model_calibration(model, collector)
     try:
         pass_counts: list[int] = []
+        pass_digests: list[str] = []
+        collection_started = time.monotonic()
         for pass_index in range(2):
             observed_samples = 0
+            digest = hashlib.sha256()
 
             # Token identities remain integer-valued and are never cast to the model
             # floating dtype. Disabling cache avoids retaining generation state across
@@ -398,12 +493,29 @@ def collect_gpt2_calibration_table(
                         raise RuntimeError(
                             "calibration input_ids and attention_mask must share [batch, sequence] shape"
                         )
+                    if input_ids.shape[1] != metadata.max_sequence_length:
+                        raise ValueError("calibration token length differs from metadata")
                     observed_samples += int(input_ids.shape[0])
+                    for name, value in (("input_ids", input_ids), ("attention_mask", attention_mask)):
+                        digest.update(name.encode())
+                        digest.update(str((tuple(value.shape), str(value.dtype))).encode())
+                        digest.update(value.detach().cpu().contiguous().numpy().tobytes())
                     model(
                         input_ids=input_ids.to(device=device),
                         attention_mask=attention_mask.to(device=device),
                         use_cache=False,
                     )
+                    completed = pass_index * expected_samples + observed_samples
+                    elapsed = time.monotonic() - collection_started
+                    print(json.dumps({
+                        "event": "calibration_progress", "pass": pass_index + 1,
+                        "passes": 2, "observed_samples": observed_samples,
+                        "expected_samples": expected_samples,
+                        "elapsed_seconds": round(elapsed, 3),
+                        "estimated_remaining_seconds": round(
+                            elapsed * (2 * expected_samples - completed) / completed, 3,
+                        ),
+                    }, sort_keys=True, allow_nan=False), flush=True)
 
             # Exact counts catch custom collation or dataset behavior that drops or
             # duplicates examples despite a nominally correct dataset length.
@@ -412,12 +524,15 @@ def collect_gpt2_calibration_table(
                     "calibration pass sample count does not match expected_samples"
                 )
             pass_counts.append(observed_samples)
+            pass_digests.append(digest.hexdigest())
             if pass_index == 0:
                 start_histogram_calibration_pass(collector)
 
         # Preserve the replay invariant explicitly before immutable finalization.
         if pass_counts[0] != pass_counts[1]:
             raise ValueError("calibration passes consumed different populations")
+        if pass_digests[0] != pass_digests[1]:
+            raise ValueError("calibration token order or preprocessing changed between passes")
         return finalize_calibration_collection(collector)
     finally:
         clear_model_calibration(model, expected_state=collector)

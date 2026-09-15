@@ -16,7 +16,7 @@ from utils.transforms.types import Potential, PotentialBounds, SpikeSample, Time
 from utils.transformers.calibration import (
     calibrated_potential,
     validate_symmetric_encoder_bounds,
-    vit_calibration_uses_explicit_bounds,
+    calibration_uses_explicit_bounds,
 )
 
 
@@ -260,14 +260,14 @@ class SpikingLayerNorm(nn.Module):
     ) -> tuple[torch.Tensor, PotentialBounds, PotentialBounds]:
         """Resolve one fixed bound for magnitude, variance, and log encoding.
 
-        Only an explicitly bound ViT calibration policy changes the legacy theta
+        Only an explicitly bound input-range calibration policy changes the legacy theta
         interval. Collection uses the incoming interval width as a conservative
         bound for the centered input, without measuring the current batch. Frozen
         execution uses the persisted centered-input record. Learned affine scaling
         and final output bounds remain independent of this internal interval.
         """
         radius = float(self.theta)
-        if vit_calibration_uses_explicit_bounds(self):
+        if calibration_uses_explicit_bounds(self):
             name = (
                 f"{self.__dict__['_delayed_temporal_calibration_module_name']}"
                 ".centered_input"

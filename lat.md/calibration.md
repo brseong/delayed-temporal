@@ -192,21 +192,27 @@ BERT freezes its three embedding-table ranges, propagates the normalized `Potent
 
 The public embedding call still returns a tensor by default. The internal model requests `Potential`; custom embedding tensors must fit the frozen word-table range, while an explicit `Potential` may declare a separately established fixed range.
 
+Versioned BERT calibration now also selects Q/K/V, attention scores, residual sums before normalization, composed GELU inputs, centered LayerNorm inputs and the pooler Tanh input. [[text-calibration#Text Model Calibration#Encoder Coverage]] defines the complete coverage of active modules and checkpoint epsilon contract.
+
 ### RoBERTa Fixed Range Flow
 
 RoBERTa freezes embedding and affine parameter ranges, propagates `Potential` across every operator-backed adapter, and preserves the public Hugging Face model-output types.
 
 Dense ablations keep functional PyTorch values but reuse frozen affine intervals. Local language-model and sequence-classification wrappers request the final encoder `Potential` privately so their spiking heads never reconstruct a range from a tensor.
 
+Versioned RoBERTa calibration follows [[text-calibration#Text Model Calibration#Encoder Coverage]], including the executed classification or masked language head. It collects each selected tensor before clipping and passes selected attention and LayerNorm ranges to the actual encoders.
+
 ### GPT-2 Fixed Range Flow
 
-GPT-2 freezes token and position table ranges, derives the embedding sum and MLP activation ranges analytically, and exposes two signed-symmetric residual calibration sites per pre-norm block.
+GPT-2 freezes embedding ranges and derives activation output ranges analytically. Text policy 1 additionally selects Q/K/V, attention scores, two residuals, first MLP affine outputs and active LayerNorm centered inputs, including final normalization.
 
 Unbound execution retains exact interval sums. Collection uses those sums as safety rails, while frozen execution resets attention and MLP residual streams to persisted ranges so depth cannot recursively widen them.
 
+[[text-calibration#Text Model Calibration#GPT-2 Coverage]] documents selected range consumption, caching and the 109 sites in a fully spiking configuration with twelve blocks. Legacy tables selecting only residuals do not satisfy the new evaluator metadata contract.
+
 ### GPT-2 Evaluator Artifact Lifecycle
 
-The GPT-2 evaluator collects or consumes immutable per-block residual ranges without using evaluation texts to select those ranges. The model entry remains on its parameter-derived analytic interval.
+The GPT-2 evaluator collects or consumes immutable ranges under text policy 1 without using evaluation texts to select them. The model entry remains on its analytic interval, and both float32 and float64 are supported.
 
 Collection removes empty WikiText rows, selects a fixed prefix of a seeded training-split permutation, tokenizes to one padded maximum length, and replays the same sequential loader for min-max and histogram passes with cache, loss, timing noise, and `DataParallel` disabled.
 
@@ -228,7 +234,7 @@ The permanent runtime check covers shared linear, convolution, GPT-2 Conv1D, Lay
 
 ### Attention Score Range Calibration
 
-When layer-wise calibration is enabled, each supported ViT/GPT-2 attention layer selects one symmetric score range from noise-free scores before clamping, subject to an analytic ceiling that prevents exponential underflow.
+Supported ViT, BERT, RoBERTa and GPT-2 attention layers select symmetric score ranges from clean scores before clamping. A numerical ceiling prevents exponential underflow.
 
 For layer $\ell$, let $q_\ell=\max(|\min s_\ell|,|\max s_\ell|)$ over the clean calibration population. Because the configured per-side margin $m$ is a fraction of the full symmetric width $2q_\ell$, calibration selects $c_{\ell,\mathrm{cal}}=q_\ell+2mq_\ell=(1+2m)q_\ell$. With dtype minimum normal $f_{\min}$, temporal scale $\tau$, source capacity $S_{\max}$, and log safety margin $\eta$, the representable radius is
 
@@ -236,7 +242,7 @@ $$
 c_{\mathrm{repr}}=\frac{\tau}{2}\left(-\log f_{\min}-\log S_{\max}-\eta\right).
 $$
 
-For legacy callers the frozen layer radius is $c_\ell=\min(c_{\ell,\mathrm{cal}},c_{\mathrm{repr}},\theta)$. ViT policy 2 omits the final theta limit, while retaining the statistical and numerical limits. Collection observes raw scores but executes softmin on the representable interval; validation and inference clamp directly to $[-c_\ell,c_\ell]$ and count strict excursions without updating it.
+For legacy callers the frozen layer radius is $c_\ell=\min(c_{\ell,\mathrm{cal}},c_{\mathrm{repr}},\theta)$. ViT policy 2 and text policy 1 omit the final theta limit, while retaining the statistical and numerical limits. Collection observes raw scores but executes softmin on the representable interval; validation and inference clamp directly to $[-c_\ell,c_\ell]$ and count strict excursions without updating it.
 
 Masked positions are overwritten with $+c_\ell$ after score clamping in the negated-score convention. The artifact persists endpoint-selection parameters, margin, symmetric analytic ceiling, dtype, model-wide `tau_s`, and $S_{\max}$; attention uses $\tau=\tau_s$, and the common metadata schema mirrors that value in its `tau_m` slot. A precision, scale, or capacity change invalidates reuse.
 

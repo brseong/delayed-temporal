@@ -50,6 +50,8 @@ from utils.transformers.calibration import (
     calibrated_potential,
     model_calibration_is_bound,
 )
+from utils.transformers.models.text_calibration import calibrate_text_potential
+from utils.transformers.calibration import calibration_uses_explicit_bounds
 from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear, _apply_norm
 
@@ -71,6 +73,8 @@ class BertEmbeddings(nn.Module):
         if _use_spiking_ln:
             _sln_kwargs = dict(
                 theta=_theta, tau_s=_tau_s,
+                eps=config.layer_norm_eps,
+                clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
                 use_spiking_log=getattr(config, "spiking_ln_log", True),
                 use_spiking_expdiff=getattr(config, "spiking_ln_expdiff", True),
@@ -376,6 +380,15 @@ class BertSelfAttention(nn.Module):
         pot_k = self.key(pot)
         pot_v = self.value(pot)
         pot_q = self.query(pot)
+        explicit_bounds = (
+            self.config._attn_implementation == "spiking_sdpa"
+            and calibration_uses_explicit_bounds(self)
+        )
+        if explicit_bounds:
+            pot_q = calibrate_text_potential(self, "query", pot_q)
+            pot_k = calibrate_text_potential(self, "key", pot_k)
+            pot_v = calibrate_text_potential(self, "value", pot_v)
+
         key_layer = pot_k.value.view(*new_shape).transpose(1, 2)
         value_layer = pot_v.value.view(*new_shape).transpose(1, 2)
         query_layer = pot_q.value.view(*new_shape).transpose(1, 2)
@@ -396,7 +409,15 @@ class BertSelfAttention(nn.Module):
             kwargs["theta"] = theta
             kwargs["tau"] = getattr(self.config, "tau_s", 1.0)
             kwargs["source_length_max"] = source_length_max
-            context_domain = attention_output_bounds(theta, source_length_max)
+            if explicit_bounds:
+                kwargs.update(
+                    query_bounds=pot_q.domain,
+                    key_bounds=pot_k.domain,
+                    value_bounds=pot_v.domain,
+                )
+                context_domain = pot_v.domain
+            else:
+                context_domain = attention_output_bounds(theta, source_length_max)
 
         # Eager training dropout scales surviving normalized weights by 1/(1-p).
         # Include zero plus both scaled value endpoints without observing its mask.
@@ -440,6 +461,8 @@ class BertSelfOutput(nn.Module):
         if _use_spiking_ln:
             _sln_kwargs = dict(
                 theta=_theta, tau_s=_tau_s,
+                eps=config.layer_norm_eps,
+                clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
                 use_spiking_log=getattr(config, "spiking_ln_log", True),
                 use_spiking_expdiff=getattr(config, "spiking_ln_expdiff", True),
@@ -457,7 +480,8 @@ class BertSelfOutput(nn.Module):
             pot_dense.domain.min + pot_skip.domain.min,
             pot_dense.domain.max + pot_skip.domain.max,
         )
-        return _apply_norm(self.LayerNorm, Potential(val, domain))
+        residual = calibrate_text_potential(self, "residual", Potential(val, domain))
+        return _apply_norm(self.LayerNorm, residual)
 
 
 class BertAttention(nn.Module):
@@ -477,6 +501,7 @@ class BertIntermediate(nn.Module):
         super().__init__()
         self.dense = SpikingLinear(config.hidden_size, config.intermediate_size, theta=getattr(config, "theta", 400.0))
         self._use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
+        self.tau_s = getattr(config, "tau_s", 1.0)
         if isinstance(config.hidden_act, str):
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
         else:
@@ -505,7 +530,8 @@ class BertIntermediate(nn.Module):
         # The composed GELU already applies the shared fixed output range.
         if self._use_spiking_mlp:
             if isinstance(self.intermediate_act_fn, GELUActivation):
-                return Potential(*gelu_approximation(*pot_z))
+                pot_z = calibrate_text_potential(self, "activation_input", pot_z)
+                return Potential(*gelu_approximation(*pot_z, theta=self.dense.theta, tau_s=self.tau_s))
             if isinstance(self.intermediate_act_fn, nn.ReLU):
                 # ReLU is monotone and clips negative inputs to the fixed zero rail.
                 return Potential(
@@ -545,6 +571,8 @@ class BertOutput(nn.Module):
         if _use_spiking_ln:
             _sln_kwargs = dict(
                 theta=_theta, tau_s=_tau_s,
+                eps=config.layer_norm_eps,
+                clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
                 use_spiking_log=getattr(config, "spiking_ln_log", True),
                 use_spiking_expdiff=getattr(config, "spiking_ln_expdiff", True),
@@ -562,7 +590,8 @@ class BertOutput(nn.Module):
             pot_dense.domain.min + pot_skip.domain.min,
             pot_dense.domain.max + pot_skip.domain.max,
         )
-        return _apply_norm(self.LayerNorm, Potential(val, domain))
+        residual = calibrate_text_potential(self, "residual", Potential(val, domain))
+        return _apply_norm(self.LayerNorm, residual)
 
 
 class BertLayer(GradientCheckpointingLayer):
@@ -705,7 +734,7 @@ class BertPooler(nn.Module):
                 first_token_tensor,
                 first_token_domain,
             )
-            pot_dense = self.dense(first_token_potential)
+            pot_dense = calibrate_text_potential(self, "activation_input", self.dense(first_token_potential))
             pooled_output, _ = tanh(pot_dense.value, pot_dense.domain, tau_s=self.tau_s, theta=self.dense.theta)
             return pooled_output
 
@@ -773,6 +802,7 @@ class BertModel(BertPreTrainedModel):
                 extended_attention_mask = attention_mask[:, None, None, :]
             else:
                 extended_attention_mask = attention_mask
+            extended_attention_mask = extended_attention_mask.to(dtype=embedding_output.value.dtype)
             extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(embedding_output.value.dtype).min
         else:
             extended_attention_mask = None
