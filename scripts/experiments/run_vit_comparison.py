@@ -25,7 +25,7 @@ from scripts.experiments.vit_comparison import (
     DEFAULT_ROOT, MODEL_KEYS, PYTHON, SOURCE, TAG, check_source, evaluator_command,
     make_task, model_by_key, parsed_result, read_json, require_gpu, safe_output,
     sha256_file, task_sha256, validate_experiment, validate_result, validate_table,
-    validate_task, write_immutable_json,
+    validate_task, write_immutable_json, require_current_experiment,
 )
 from scripts.experiments.run_calibrated_three_sweeps import atomic_json, gpu_activity, gpu_available
 from scripts.experiments.ubai.run_calibrated_three_sweep_pair import worker_environment
@@ -51,6 +51,28 @@ def event(root: Path, name: str, **fields: Any) -> None:
     print(line, flush=True)
 
 
+def discover_calibration_sites(config_fields: dict) -> list[dict]:
+    """Record actual module identities without allocating checkpoint weights."""
+    import torch
+    from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
+    from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTForImageClassification
+    from utils.transformers.models.spiking_vit.calibration import vit_calibration_specs
+    config = ViTConfig(**config_fields)
+    config.theta, config.tau_s, config.clip_margin = 40.0, 1.0, 1e-5
+    config._attn_implementation = "eager"
+    config.use_spiking_layernorm = config.use_spiking_mlp = True
+    config.spiking_ln_mul = config.spiking_ln_log = config.spiking_ln_expdiff = True
+    config.spiking_mlp_exact_gelu = False
+    with torch.device("meta"):
+        model = ViTForImageClassification(config).double().eval()
+    config._attn_implementation = "spiking_sdpa"
+    return [{"module_name": spec.module_name, "tensor_name": spec.tensor_name,
+             "range_policy": spec.range_policy.value, "fixed_min": spec.fixed_min,
+             "fixed_max": spec.fixed_max}
+            for spec in vit_calibration_specs(model, lower_quantile=0.0,
+                                             upper_quantile=1.0, margin_fraction=0.05)]
+
+
 def initialize(root: Path, source: Path, assets_manifest: Path) -> dict:
     from scripts.experiments.ubai.prepare_calibrated_three_sweeps_ubai import artifact_records, package_source_identity
     if socket.gethostname() != "baekryun-cuda129" or root.name != TAG:
@@ -58,12 +80,14 @@ def initialize(root: Path, source: Path, assets_manifest: Path) -> dict:
     if (root / "experiment.json").exists():
         experiment = read_json(root / "experiment.json")
         validate_experiment(experiment)
+        require_current_experiment(experiment)
         check_source(experiment)
         return experiment
     assets = read_json(assets_manifest)
     experiment = {"tag": TAG, "source_root": str(source.resolve()), "python_bin": PYTHON,
                   "source_commit": subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip(),
                   "theta": 40.0, "precision": "float64", "output_bounds_version": 3,
+                  "vit_calibration_policy_version": 2,
                   "tau_s": 1.0, "tracking": "disabled", "local_gpu_ids": [4, 5, 6, 7],
                   "evaluation_count": 8, "calibration_count": 4,
                   "models": assets["models"], "assets_manifest_sha256": sha256_file(assets_manifest),
@@ -76,6 +100,7 @@ def initialize(root: Path, source: Path, assets_manifest: Path) -> dict:
         experiment[prefix + "_path"] = relative
         experiment[prefix + "_sha256"] = sha256_file(source / relative)
     for row in experiment["models"]:
+        row["calibration_sites"] = discover_calibration_sites(row["checkpoint_config"])
         row["preprocessing_sha256"] = sha256_file(Path(row["checkpoint_path"]) / "preprocessor_config.json")
         for field in ("checkpoint", "dataset", "calibration_dataset"):
             path = row[field + "_path"]
@@ -130,6 +155,7 @@ def completed(root: Path, experiment: dict, task: dict) -> dict | None:
 
 
 def run_task(root: Path, experiment: dict, task: dict, host_label: str) -> dict:
+    require_current_experiment(experiment)
     validate_task(task, experiment)
     task_path = root / "tasks" / (task["run_id"] + ".json")
     write_immutable_json(task_path, task)
@@ -140,6 +166,8 @@ def run_task(root: Path, experiment: dict, task: dict, host_label: str) -> dict:
         result = completed(root, experiment, task)
         if result is not None:
             return result
+        if host_label == "local" and os.environ.get("CUDA_VISIBLE_DEVICES") not in {"4", "5", "6", "7"}:
+            raise ValueError("Local comparison requires exactly one physical GPU from 4 through 7")
         check_source(experiment)
         model = model_by_key(experiment, task["model_key"])
         check_assets(experiment, model, host_label)
@@ -297,6 +325,7 @@ def environment_replay(root: Path, experiment: dict, host_label: str) -> None:
 def worker(root: Path, mode: str, key: str, host_label: str) -> None:
     experiment = read_json(root / "experiment.json")
     validate_experiment(experiment)
+    require_current_experiment(experiment)
     if platform.python_version() != "3.12.13":
         raise ValueError("The evaluator requires Python3.12.13")
     if package_versions() != experiment["package_versions"]:
@@ -339,9 +368,34 @@ def summarize(root: Path, experiment: dict, *, require_complete: bool = False) -
     return build_outputs(experiment, results, root / "outputs", require_complete=require_complete)
 
 
+def prepare_execution(root: Path, experiment: dict) -> dict:
+    """Save validated next commands without launching a full model evaluation."""
+    validate_experiment(experiment)
+    require_current_experiment(experiment)
+    check_source(experiment)
+    prepared = []
+    for key in MODEL_KEYS:
+        selected_path = root / "admissions" / (key + ".json")
+        selected = admission(root, experiment, key, "local") if selected_path.exists() else None
+        command = [experiment["python_bin"], str(Path(experiment["source_root"]) / SCRIPT),
+                   "pipeline", "--root", str(root.resolve()), "--model", key, "--host-label", "local"]
+        prepared.append({"model_key": key, "batch_size": selected["batch_size"] if selected else None,
+                         "admission_verified": selected is not None,
+                         "requires_full_calibration": True, "command": command,
+                         "commands_by_gpu": {str(gpu): ["env", f"CUDA_VISIBLE_DEVICES={gpu}", *command]
+                                             for gpu in (4, 5, 6, 7)}})
+    value = {"experiment_sha256": task_sha256(experiment), "source_commit": experiment["source_commit"],
+             "vit_calibration_policy_version": 2, "allowed_gpu_ids": [4, 5, 6, 7],
+             "launch_performed": False, "models": prepared}
+    destination = root / "prepared" / (task_sha256(value) + ".json")
+    write_immutable_json(destination, value)
+    event(root, "execution_prepared", manifest=str(destination), launch_performed=False)
+    return value
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("initialize", "admit", "pipeline", "environment", "summarize", "run"))
+    parser.add_argument("mode", choices=("initialize", "admit", "prepare", "pipeline", "environment", "summarize", "run"))
     parser.add_argument("--root", type=Path, default=Path(DEFAULT_ROOT))
     parser.add_argument("--source", type=Path, default=Path(SOURCE))
     parser.add_argument("--assets-manifest", type=Path,
@@ -352,9 +406,12 @@ def main() -> None:
     args = parser.parse_args()
     if args.mode == "initialize":
         initialize(args.root, args.source, args.assets_manifest)
+    elif args.mode == "prepare":
+        prepare_execution(args.root, read_json(args.root / "experiment.json"))
     elif args.mode == "summarize":
         summarize(args.root, read_json(args.root / "experiment.json"), require_complete=args.require_complete)
     elif args.mode == "run":
+        require_current_experiment(read_json(args.root / "experiment.json"))
         from scripts.experiments.vit_comparison_controller import run
         run(args.root)
     else:

@@ -59,6 +59,9 @@ def validate_results(experiment: dict, runs: list[dict]) -> tuple[list[dict], di
     checks are additional safeguards, not a replacement for parsing raw logs.
     """
     models = experiment.get("models")
+    version = experiment.get("vit_calibration_policy_version", 1)
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError("Unknown ViT calibration policy")
     if not isinstance(models, list) or len(models) != 4:
         raise ValueError("The comparison requires exactly four model records")
     by_model = {model["model_key"]: model for model in models}
@@ -98,6 +101,8 @@ def validate_results(experiment: dict, runs: list[dict]) -> tuple[list[dict], di
             raise ValueError("Duplicate model condition")
         model = by_model[model_key]
         _require_identity(row, experiment, ("source_commit",))
+        if version == 2:
+            _require_identity(row, experiment, ("vit_calibration_policy_version",))
         _require_identity(row, model, ("checkpoint_sha256",))
         if row.get("precision") != "float64" or row.get("theta") != 40:
             raise ValueError("Unexpected numerical evaluation condition")
@@ -118,7 +123,12 @@ def validate_results(experiment: dict, runs: list[dict]) -> tuple[list[dict], di
             _require_identity(row, experiment, ("calibration_evaluator_sha256",))
             sites = row.get("sites")
             site_count = len(sites) if isinstance(sites, (dict, list)) else sites
-            expected_sites = 4 * int(model["checkpoint_config"]["num_hidden_layers"])
+            if experiment.get("vit_calibration_policy_version") == 2:
+                from scripts.experiments.vit_comparison import calibration_site_records
+                expected_sites = len(calibration_site_records(experiment, model))
+                _require_identity(row, experiment, ("vit_calibration_policy_version",))
+            else:
+                expected_sites = 4 * int(model["checkpoint_config"]["num_hidden_layers"])
             if site_count != expected_sites:
                 raise ValueError("Calibration site count disagrees with checkpoint depth")
             if row.get("samples", row.get("total")) != 5000:

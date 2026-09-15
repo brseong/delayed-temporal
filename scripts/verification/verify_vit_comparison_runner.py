@@ -30,6 +30,22 @@ def put_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, sort_keys=True, allow_nan=False))
 
 
+def topology_fixture(depth: int, *, version: int = 2) -> list[dict]:
+    suffixes = [("", "attention_residual"), ("", "output"),
+                (".attention.attention", "attention_score"), (".intermediate", "activation_input")]
+    if version == 2:
+        suffixes += [(".attention.attention", name) for name in ("query", "key", "value")]
+        suffixes += [("." + name, "centered_input") for name in ("layernorm_before", "layernorm_after")]
+    names = [(f"vit.encoder.layer.{index}{suffix}", name) for index in range(depth) for suffix, name in suffixes]
+    if version == 2:
+        names.append(("vit.layernorm", "centered_input"))
+    ceiling = 0.5 * (-math.log(sys.float_info.min) - math.log(197) - 2.0) if version == 2 else 40.0
+    return [{"module_name": module, "tensor_name": name,
+             "range_policy": "signed_symmetric_ceiling" if name == "attention_score" else "signed_symmetric",
+             "fixed_min": -ceiling if name == "attention_score" else None,
+             "fixed_max": ceiling if name == "attention_score" else None} for module, name in names]
+
+
 def experiment_fixture(root: Path) -> dict:
     models = []
     for index, key in enumerate(contract.MODEL_KEYS):
@@ -47,7 +63,9 @@ def experiment_fixture(root: Path) -> dict:
                 "num_attention_heads": 16 if large else 12 if index == 2 else 6,
                 "intermediate_size": 4096 if large else 3072 if index == 2 else 1536,
                 "image_size": 224, "patch_size": 16, "num_channels": 3,
+                "layer_norm_eps": 1e-12,
             },
+            "calibration_sites": topology_fixture(24 if large else 12),
             "calibration_dataset_path": str(root / "assets" / ("cifar_train" if cifar else "imagenet_train")),
             "calibration_dataset_fingerprint": "training-data",
             "calibration_dataset_sha256": "5" * 64,
@@ -58,6 +76,7 @@ def experiment_fixture(root: Path) -> dict:
         })
     experiment = {
         "tag": contract.TAG, "theta": 40.0, "precision": "float64", "output_bounds_version": 3,
+        "vit_calibration_policy_version": 2,
         "tau_s": 1.0, "tracking": "disabled", "local_gpu_ids": [4, 5, 6, 7],
         "evaluation_count": 8, "calibration_count": 4, "models": models,
         "source_commit": "a" * 40, "source_root": str(root / "source"),
@@ -94,17 +113,16 @@ def table_fixture(experiment: dict, task: dict) -> dict:
         "spiking_ln_mul": True, "spiking_ln_log": True, "spiking_ln_expdiff": True,
         "use_spiking_layernorm": True, "use_spiking_mlp": True, "spiking_mlp_exact_gelu": False,
     }
+    version = contract.calibration_policy_version(experiment)
+    if version == 2:
+        options.update(vit_calibration_policy_version=2, layer_norm_eps=1e-12,
+                       layer_norm_clip_margin=1e-5)
     layers = []
-    for index in range(row["checkpoint_config"]["num_hidden_layers"]):
-        for suffix, name in (("", "attention_residual"), ("", "output"),
-                             (".attention.attention", "attention_score"), (".intermediate", "activation_input")):
-            attention = name == "attention_score"
-            layers.append({
-                "module_name": f"vit.encoder.layer.{index}{suffix}", "tensor_name": name,
+    for spec in topology_fixture(row["checkpoint_config"]["num_hidden_layers"], version=version):
+        layers.append({
+                **spec,
                 "bounds": {"min": -1.0, "max": 1.0}, "observed_min": -0.9, "observed_max": 0.9,
                 "num_values": 100, "lower_quantile": 0.0, "upper_quantile": 1.0, "margin_fraction": 0.05,
-                "fixed_min": -40.0 if attention else None, "fixed_max": 40.0 if attention else None,
-                "range_policy": "signed_symmetric_ceiling" if attention else "signed_symmetric",
                 "histogram": {"bounds": {"min": -0.9, "max": 0.9}, "num_values": 100,
                               "underflows": 0, "overflows": 0, "bin_counts": [100] + [0] * 2047},
             })
@@ -176,7 +194,7 @@ def completed_fixture(root: Path, experiment: dict, task: dict) -> dict:
         "elapsed_seconds": 1.0, "log_sha256": contract.sha256_file(log), "calibration_sha256": table_hash,
     }
     if collect:
-        result["sites"] = 4 * contract.model_by_key(experiment, task["model_key"])["checkpoint_config"]["num_hidden_layers"]
+        result["sites"] = len(contract.calibration_site_records(experiment, contract.model_by_key(experiment, task["model_key"])))
         result["samples"] = result["total"] = task["calibration_samples"]
     else:
         result.update(contract.parsed_result(task, root))
@@ -437,9 +455,67 @@ def verify_source_and_gpu(root: Path) -> None:
             reject(lambda: contract.require_gpu(experiment, "local"))
 
 
+def verify_policy2_and_preparation(root: Path) -> None:
+    """Keep archived results readable while preparation never launches inference."""
+    experiment = experiment_fixture(root)
+    contract.validate_experiment(experiment)
+    for model in experiment["models"]:
+        expected = 217 if model["model_key"].endswith("large") else 109
+        assert len(contract.calibration_site_records(experiment, model)) == expected
+        broken = copy.deepcopy(experiment)
+        contract.model_by_key(broken, model["model_key"])["calibration_sites"].pop()
+        reject(lambda: contract.validate_experiment(broken))
+    for value in (None, 1, 3, True):
+        reject(lambda value=value: contract.validate_experiment({**experiment, "vit_calibration_policy_version": value}))
+    legacy = copy.deepcopy(experiment)
+    legacy["tag"] = contract.LEGACY_TAG
+    del legacy["vit_calibration_policy_version"]
+    for model in legacy["models"]:
+        model.pop("calibration_sites")
+    contract.validate_experiment(legacy)
+    reject(lambda: contract.require_current_experiment(legacy))
+    old_task = contract.make_task(legacy, "imagenet_vit_small", "smoke_collect", 32)
+    path = root / old_task["calibration_file"]
+    put_json(path, table_fixture(legacy, old_task))
+    contract.validate_table(path, old_task, legacy)
+    reject(lambda: contract.validate_table(path, contract.make_task(experiment, "imagenet_vit_small", "smoke_collect", 32), experiment))
+    new_task = contract.make_task(experiment, "imagenet_vit_small", "smoke_collect", 32)
+    table = table_fixture(experiment, new_task)
+    for key, value in (("vit_calibration_policy_version", 1), ("layer_norm_eps", 1e-5),
+                       ("layer_norm_clip_margin", 1e-6)):
+        changed = copy.deepcopy(table)
+        changed["metadata"]["model_options"] = sorted({**dict(changed["metadata"]["model_options"]), key: value}.items())
+        put_json(path, changed)
+        reject(lambda: contract.validate_table(path, new_task, experiment))
+    with patch.object(runner, "check_source"), patch.object(runner, "event"), \
+            patch.object(runner, "run_task") as execute, patch.object(runner, "admission") as admit:
+        value = runner.prepare_execution(root, experiment)
+        execute.assert_not_called()
+        admit.assert_not_called()
+        assert value["launch_performed"] is False and len(value["models"]) == 4
+        for row in value["models"]:
+            assert set(row["commands_by_gpu"]) == {"4", "5", "6", "7"}
+            for gpu, command in row["commands_by_gpu"].items():
+                assert command == ["env", "CUDA_VISIBLE_DEVICES=" + gpu, *row["command"]]
+        assert all(row["batch_size"] is None and row["requires_full_calibration"] for row in value["models"])
+        assert len(list((root / "prepared").glob("*.json"))) == 1
+        assert runner.prepare_execution(root, experiment) == value
+    with patch.object(runner, "admission", return_value={"batch_size": 32}), \
+            patch.object(runner, "pipeline") as launch, patch.object(runner, "check_source"), \
+            patch.object(runner, "require_gpu"), patch.object(runner, "gpu_activity", return_value={4: {}}), \
+            patch.object(runner, "gpu_available", return_value=True), \
+            patch.object(runner, "package_versions", return_value=experiment["package_versions"]), \
+            patch.object(runner.platform, "python_version", return_value="3.12.13"), \
+            patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "4"}):
+        put_json(root / "experiment.json", experiment)
+        runner.worker(root, "admit", "imagenet_vit_small", "local")
+        launch.assert_not_called()
+
+
 def main() -> None:
     checks = (verify_contract, verify_commands, verify_tables, verify_completed_logs,
-              verify_admission, verify_source_and_gpu, verify_pipeline_outputs, verify_worker_integration)
+              verify_admission, verify_source_and_gpu, verify_pipeline_outputs, verify_worker_integration,
+              verify_policy2_and_preparation)
     failures = []
     with tempfile.TemporaryDirectory(prefix="vit-comparison-runner-tests-") as temporary:
         for check in checks:

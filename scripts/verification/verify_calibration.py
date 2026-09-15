@@ -1058,6 +1058,7 @@ def verify_deterministic_training_subset() -> None:
         image_size=4,
         num_channels=3,
         hidden_act="gelu",
+        layer_norm_eps=1.0e-12,
         theta=4.0,
         tau_s=1.0,
         tau_m=1.0,
@@ -1084,6 +1085,22 @@ def verify_deterministic_training_subset() -> None:
     assert metadata.input_shape == (3, 4, 4)
     assert first._fingerprint in metadata.preprocessing
     _verify_gelu_metadata_identity(metadata)
+    assert dict(metadata.model_options)["layer_norm_eps"] == config.layer_norm_eps
+    validate_calibration_metadata(metadata, metadata)
+    without_epsilon = tuple(
+        option for option in metadata.model_options if option[0] != "layer_norm_eps"
+    )
+    for options in (
+        without_epsilon,
+        tuple(sorted((*without_epsilon, ("layer_norm_eps", 1.0e-5)))),
+    ):
+        _expect_raises(
+            ValueError,
+            lambda options=options: validate_calibration_metadata(
+                replace(metadata, model_options=options), metadata
+            ),
+            "model_options",
+        )
 
     class CalibrationDataset(Dataset):
         """Return deterministic preprocessed tensors to the two-pass driver."""

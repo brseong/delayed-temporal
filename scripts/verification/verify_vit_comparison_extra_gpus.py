@@ -149,6 +149,10 @@ class ExtraGpuTests(unittest.TestCase):
 
     def test_exact_temporary_scope(self) -> None:
         experiment = copy.deepcopy(self.experiment)
+        experiment["tag"] = extra.TAG
+        experiment.pop("vit_calibration_policy_version")
+        for model in experiment["models"]:
+            model.pop("calibration_sites", None)
         experiment.update(source_commit=extra.SOURCE_COMMIT, source_root=str(extra.SOURCE))
         path = self.root / "experiment.json"
         put_json(path, experiment)

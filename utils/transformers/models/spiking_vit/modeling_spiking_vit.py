@@ -49,6 +49,8 @@ from utils.transforms.types import Potential, PotentialBounds
 from utils.transformers.calibration import (
     calibrated_potential,
     model_calibration_is_bound,
+    validate_symmetric_encoder_bounds,
+    vit_calibration_uses_explicit_bounds,
 )
 from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import SpikingConv2d, SpikingLayerNorm, SpikingLinear, _apply_norm
@@ -287,10 +289,10 @@ class ViTSelfAttention(nn.Module):
 
         Dense eager attention remains a convex combination of the projected value
         vectors and therefore retains their incoming domain. The spiking backend
-        instead uses one immutable value-integration rail derived from ``theta`` and
-        the configured patch capacity. Passing the same configuration values to the
-        backend and the memoized range helper keeps its physical clamp and returned
-        ``Potential`` metadata identical without inspecting the current tensor.
+        instead uses the selected value interval for its output clamp. Explicit
+        calibration preserves each projection's fixed interval through dispatch;
+        callers without it retain the global threshold interval. Neither path
+        derives execution bounds from the current tensor.
 
         Args:
             pot: Hidden-state tensor paired with its declared potential bounds.
@@ -309,6 +311,32 @@ class ViTSelfAttention(nn.Module):
         pot_v: Potential = self.value(pot)
         pot_q: Potential = self.query(pot)
 
+        explicit_bounds = (
+            self.config._attn_implementation == "spiking_sdpa"
+            and vit_calibration_uses_explicit_bounds(self)
+        )
+        if explicit_bounds:
+            calibrated_projections: list[Potential] = []
+            for tensor_name, projected in (("query", pot_q), ("key", pot_k), ("value", pot_v)):
+                # Collection uses only the projection's declared analytic interval,
+                # never extrema from the current activation. Frozen execution
+                # instead attaches and enforces this site's persisted interval.
+                radius = max(
+                    abs(float(projected.domain.min)), abs(float(projected.domain.max)),
+                )
+                collection_bounds = PotentialBounds(-radius, radius)
+                selected = calibrated_potential(
+                    self,
+                    tensor_name,
+                    projected.value,
+                    collection_bounds=collection_bounds,
+                )
+                validate_symmetric_encoder_bounds(
+                    selected.domain, selected.value.dtype, name=tensor_name,
+                )
+                calibrated_projections.append(selected)
+            pot_q, pot_k, pot_v = calibrated_projections
+
         key_layer   = pot_k.value.view(*new_shape).transpose(1, 2)
         value_layer = pot_v.value.view(*new_shape).transpose(1, 2)
         query_layer = pot_q.value.view(*new_shape).transpose(1, 2)
@@ -318,7 +346,7 @@ class ViTSelfAttention(nn.Module):
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
         # Eager attention is a normalized convex combination, so it retains the
-        # projected-value domain unless the spiking backend selects its wider rail.
+        # projected-value domain unless the spiking backend selects its fixed interval.
         kwargs = {}
         context_domain = pot_v.domain
         if self.config._attn_implementation == "spiking_sdpa":
@@ -349,7 +377,15 @@ class ViTSelfAttention(nn.Module):
                 + 1
             )
             kwargs["source_length_max"] = source_length_max
-            context_domain = attention_output_bounds(theta, source_length_max)
+            if explicit_bounds:
+                kwargs.update(
+                    query_bounds=pot_q.domain,
+                    key_bounds=pot_k.domain,
+                    value_bounds=pot_v.domain,
+                )
+                context_domain = pot_v.domain
+            else:
+                context_domain = attention_output_bounds(theta, source_length_max)
 
         # Dense attention dropout independently removes normalized weights and
         # scales survivors. During training its weighted sum includes zero and both
@@ -537,7 +573,8 @@ class ViTLayer(GradientCheckpointingLayer):
         _use_spiking_ln = getattr(config, "use_spiking_layernorm", True)
         if _use_spiking_ln:
             _sln_kwargs = dict(
-                theta=_theta, tau_s=_tau_s,
+                theta=_theta, tau_s=_tau_s, eps=config.layer_norm_eps,
+                clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
                 use_spiking_log=getattr(config, "spiking_ln_log", True),
                 use_spiking_expdiff=getattr(config, "spiking_ln_expdiff", True),
@@ -699,6 +736,8 @@ class ViTModel(ViTPreTrainedModel):
         if getattr(config, "use_spiking_layernorm", True):
             self.layernorm = SpikingLayerNorm(
                 config.hidden_size,
+                eps=config.layer_norm_eps,
+                clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 theta=getattr(config, "theta", 10.0),
                 tau_s=getattr(config, "tau_s", 1.0),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),

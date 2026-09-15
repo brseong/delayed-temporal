@@ -7,11 +7,17 @@ import torch
 from torch import nn
 
 from utils.transforms import neg_identity_transform
+from utils.transforms.calibration import CalibrationCollectorState
 from utils.transforms.functions import multiplication_operator, division_function
 from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_noise
 from utils.transforms.potential_to_spike import neg_log_transform
 from utils.transforms.spike_to_potential import exponential_difference_operator
 from utils.transforms.types import Potential, PotentialBounds, SpikeSample, TimeBounds
+from utils.transformers.calibration import (
+    calibrated_potential,
+    validate_symmetric_encoder_bounds,
+    vit_calibration_uses_explicit_bounds,
+)
 
 
 class SpikingLayerNorm(nn.Module):
@@ -247,6 +253,62 @@ class SpikingLayerNorm(nn.Module):
         )
         return frozen_bounds
 
+    def _centered_input_domains(
+        self,
+        pot: Potential,
+        centered: torch.Tensor,
+    ) -> tuple[torch.Tensor, PotentialBounds, PotentialBounds]:
+        """Resolve one fixed bound for magnitude, variance, and log encoding.
+
+        Only an explicitly bound ViT calibration policy changes the legacy theta
+        interval. Collection uses the incoming interval width as a conservative
+        bound for the centered input, without measuring the current batch. Frozen
+        execution uses the persisted centered-input record. Learned affine scaling
+        and final output bounds remain independent of this internal interval.
+        """
+        radius = float(self.theta)
+        if vit_calibration_uses_explicit_bounds(self):
+            name = (
+                f"{self.__dict__['_delayed_temporal_calibration_module_name']}"
+                ".centered_input"
+            )
+            # Both x and its mean lie in the incoming interval. Their difference
+            # therefore lies within plus/minus its width in either collection pass.
+            collection_bounds = None
+            state = self.__dict__["_delayed_temporal_calibration_state"]
+            if isinstance(state, CalibrationCollectorState):
+                width = float(pot.domain.max) - float(pot.domain.min)
+                if not math.isfinite(width) or width <= self.clip_margin:
+                    raise ValueError(
+                        f"{name}: incoming interval width must be finite and "
+                        "exceed the positive floor"
+                    )
+                collection_bounds = validate_symmetric_encoder_bounds(
+                    PotentialBounds(-width, width),
+                    centered.dtype,
+                    name=name,
+                    positive_floor=self.clip_margin,
+                )
+            selected = calibrated_potential(
+                self,
+                "centered_input",
+                centered,
+                collection_bounds=collection_bounds,
+            )
+            bounds = validate_symmetric_encoder_bounds(
+                selected.domain,
+                centered.dtype,
+                name=name,
+                positive_floor=self.clip_margin,
+            )
+            centered = selected.value
+            radius = float(bounds.max)
+        return (
+            centered,
+            PotentialBounds(0.0, radius),
+            PotentialBounds(self.clip_margin, radius),
+        )
+
     def _gaussian_forward(self, pot: Potential) -> Potential:
         """Evaluate LayerNorm with event-aware timing and fixed output bounds.
 
@@ -310,14 +372,13 @@ class SpikingLayerNorm(nn.Module):
         # rails. Only the later logarithmic carrier copies receive the strictly
         # positive encoder floor; inactive rails remain zero in the variance.
         x_err = x - x.mean(dim=-1, keepdim=True)
-        magnitude_domain = PotentialBounds(0.0, theta)
+        x_err, magnitude_domain, domain_err = self._centered_input_domains(pot, x_err)
         x_err_pos_magnitude = magnitude_domain.clamp(
             x_err.clamp_min(0.0), name="x_err_pos_magnitude"
         )
         x_err_neg_magnitude = magnitude_domain.clamp(
             (-x_err).clamp_min(0.0), name="x_err_neg_magnitude"
         )
-        domain_err = PotentialBounds(clip_margin, theta)
         x_err_pos = domain_err.clamp(
             x_err_pos_magnitude, name="x_err_pos_log_carrier"
         )
@@ -335,14 +396,14 @@ class SpikingLayerNorm(nn.Module):
                 magnitude_domain,
                 x_err_pos_magnitude,
                 magnitude_domain,
-                theta,
+                magnitude_domain.max,
             )
             M_neg, _ = multiplication_operator(
                 x_err_neg_magnitude,
                 magnitude_domain,
                 x_err_neg_magnitude,
                 magnitude_domain,
-                theta,
+                magnitude_domain.max,
             )
             var_x = (M_pos + M_neg).mean(dim=-1, keepdim=True)
         else:
@@ -598,23 +659,14 @@ class SpikingLayerNorm(nn.Module):
 
         x_err = x - x.mean(dim=-1, keepdim=True)
         
-        # Debug: check if x_err exceeds theta
-        # max_val = x_err.abs().max().item()
-        # if max_val > theta:
-        #     print(f"[DEBUG] x_err max {max_val:.2f} exceeds theta {theta}")
-            
         # The clip margin sets only the positive logarithmic input floor; magnitudes
-        # retain zero and theta. Epsilon is added separately to the feature variance.
-        magnitude_domain = PotentialBounds(0.0, theta)
+        # retain zero and the selected maximum. Epsilon remains a variance stabilizer.
+        x_err, magnitude_domain, domain_err = self._centered_input_domains(pot, x_err)
         x_err_pos_magnitude = magnitude_domain.clamp(
             x_err.clamp_min(0.0), name="x_err_pos_magnitude"
         )
         x_err_neg_magnitude = magnitude_domain.clamp(
             (-x_err).clamp_min(0.0), name="x_err_neg_magnitude"
-        )
-        domain_err: PotentialBounds = PotentialBounds(
-            clip_margin,
-            theta,
         )
         x_err_pos = domain_err.clamp(
             x_err_pos_magnitude, name="x_err_pos_log_carrier"
@@ -631,14 +683,14 @@ class SpikingLayerNorm(nn.Module):
                 magnitude_domain,
                 x_err_pos_magnitude,
                 magnitude_domain,
-                theta,
+                magnitude_domain.max,
             )
             M_neg, _ = multiplication_operator(
                 x_err_neg_magnitude,
                 magnitude_domain,
                 x_err_neg_magnitude,
                 magnitude_domain,
-                theta,
+                magnitude_domain.max,
             )
             var_x = (M_pos + M_neg).mean(dim=-1, keepdim=True)
         else:
