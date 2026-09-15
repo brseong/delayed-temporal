@@ -298,7 +298,9 @@ Temporal pooling separates drop-aware activation mean, raw maximum, finite-$M$ d
 
 `mean` maps every missed replica to UInt5 zero before averaging. `raw-max` maps TTFS earliest-event selection to activation maximum, so its pooled miss probability decreases while its order-statistic bias remains.
 
-`analytic-corrected-max` estimates the delivered residual scale and codewise deadline tail only from calibration events, then adds the finite-$M$ conditional earliest-time offset. `empirical-corrected-max` monotonically inverts the codewise calibration response without labels.
+`analytic-corrected-max` estimates the delivered residual scale and codewise deadline tail only from calibration events, then adds the finite-$M$ conditional earliest-time offset. `empirical-corrected-max` inverts the codewise calibration response without labels.
+
+The empirical corrected maximum groups UInt5 codes that share the same quantized input time. It selects the nearest measured response group, then resolves physically indistinguishable codes with the unlabeled calibration activation prior. The activation prior is recorded in the timing calibration and its checksum invalidates stale worker artifacts.
 
 All four estimators consume the same raw-event tensor, retain all-miss-to-zero semantics, and run through the same frozen readout. Replay results remain rough model-selection evidence; hardware acceptance requires an independent calibration acquisition and evaluation events.
 

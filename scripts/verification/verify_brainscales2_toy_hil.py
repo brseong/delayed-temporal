@@ -70,6 +70,7 @@ from utils.hardware.brainscales2.toy_pooling import (
     TimingCalibrationObservation,
     ToyPoolConfig,
     ToyPoolResult,
+    calibration_activation_code_prior,
     calibrate_timing,
     concatenate_timing_calibration_observations,
     concatenate_toy_pool_results,
@@ -383,6 +384,45 @@ def verify_mean_and_corrected_max_estimators() -> None:
             spiking,
         )
         assert int(result.decoded_uint5[0, 0, 0]) == 10
+
+    code_index = torch.arange(32)
+    quantized_codes = torch.round(
+        (
+            spiking.input_late_s
+            - code_index.to(torch.float64) / 31.0 * width
+        )
+        / spiking.dt_s
+    ) * spiking.dt_s
+    prior_hidden = torch.tensor(
+        [[1, 2], [1, 2], [2, 1], [1, 2]],
+        dtype=torch.int32,
+    )
+    activation_prior = calibration_activation_code_prior(prior_hidden)
+    collision_calibration = TimingCalibration(
+        response_delay_s=0.0,
+        neuron_offset_s=torch.zeros((2, 1), dtype=torch.float64),
+        calibration_trials=4,
+        nominal_code_time_s=quantized_codes,
+        raw_max_expected_time_s=quantized_codes,
+        analytic_max_correction_s=torch.zeros(32, dtype=torch.float64),
+        activation_code_prior=activation_prior,
+    )
+    collision_time = quantized_codes[1]
+    collision = decode_pool_observations(
+        torch.full((1, 1, 2, 1), collision_time, dtype=torch.float64),
+        torch.full((1, 2), collision_time, dtype=torch.float64),
+        collision_calibration,
+        resolve_grouped_physical_coordinates(2, 1, "local-pool", "dedicated"),
+        ToyPoolConfig(
+            pool_size=1,
+            logical_neurons=2,
+            inference_trials=1,
+            calibration_trials=4,
+            estimator="empirical-corrected-max",
+        ),
+        spiking,
+    )
+    assert collision.decoded_uint5.tolist() == [[[1, 2]]]
 
 
 def verify_chunked_pool_aggregation() -> None:
@@ -1206,6 +1246,13 @@ def verify_deadline_margin_provenance_and_timing_hash() -> None:
         analytic_max_correction_s=torch.ones(32, dtype=torch.float64),
     )
     assert _timing_calibration_sha256(calibration) != _timing_calibration_sha256(changed)
+    prior_changed = replace(
+        calibration,
+        activation_code_prior=torch.ones((32, 2), dtype=torch.float64) / 32.0,
+    )
+    assert _timing_calibration_sha256(calibration) != _timing_calibration_sha256(
+        prior_changed
+    )
 
     with TemporaryDirectory() as directory:
         root = Path(directory)

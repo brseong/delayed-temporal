@@ -66,6 +66,7 @@ from utils.hardware.brainscales2.toy_pooling import (
     TimingCalibrationObservation,
     ToyPoolConfig,
     ToyPoolResult,
+    calibration_activation_code_prior,
     calibrate_timing,
     concatenate_timing_calibration_observations,
     concatenate_toy_pool_results,
@@ -677,6 +678,7 @@ def _run_temporal_pool(
     hidden_uint5: torch.Tensor,
     pool_config: ToyPoolConfig,
     spiking_config: BrainScaleS2PoolConfig,
+    activation_code_prior: torch.Tensor | None = None,
 ) -> Any:
     requested_chunk_size = args.pool_sample_chunk_size
     effective_chunk_size = requested_chunk_size
@@ -705,6 +707,7 @@ def _run_temporal_pool(
                 pool_config,
                 spiking_config,
                 effective_chunk_size,
+                activation_code_prior=activation_code_prior,
             )
         )
 
@@ -713,7 +716,17 @@ def _run_temporal_pool(
         or hidden_uint5.shape[0] <= effective_chunk_size
     ):
         return with_chunk_metadata(
-            temporal_backend.run_uint5(hidden_uint5, pool_config, spiking_config)
+            temporal_backend.run_uint5(
+                hidden_uint5,
+                pool_config,
+                spiking_config,
+                **(
+                    {"activation_code_prior": activation_code_prior}
+                    if args.pool_backend == "hardware"
+                    and activation_code_prior is not None
+                    else {}
+                ),
+            )
         )
     results = []
     for start in range(0, hidden_uint5.shape[0], effective_chunk_size):
@@ -728,6 +741,12 @@ def _run_temporal_pool(
                 hidden_uint5[start:stop],
                 pool_config,
                 spiking_config,
+                **(
+                    {"activation_code_prior": activation_code_prior}
+                    if args.pool_backend == "hardware"
+                    and activation_code_prior is not None
+                    else {}
+                ),
             )
         )
     return with_chunk_metadata(concatenate_toy_pool_results(results))
@@ -963,6 +982,9 @@ def evaluation_phase(args: argparse.Namespace) -> None:
     runtime: dict[str, Any] = {"dataset_load_s": perf_counter() - dataset_started}
     model = _load_float_checkpoint(args)
     converted = _load_or_convert(args, model, dataset.calibration_x)
+    activation_code_prior = calibration_activation_code_prior(
+        converted.hidden_from_input(dataset.calibration_x)[2]
+    )
     with torch.no_grad():
         float_logits = model(test_x).detach().cpu()
     ideal = converted.forward(test_x)
@@ -1044,6 +1066,7 @@ def evaluation_phase(args: argparse.Namespace) -> None:
                 first_hidden,
                 pool_config,
                 spiking_config,
+                activation_code_prior,
             )
             (
                 logits,
@@ -1427,6 +1450,10 @@ def _timing_calibration_sha256(calibration: TimingCalibration) -> str:
         ("nominal_code_time_s", calibration.nominal_code_time_s),
         ("raw_max_expected_time_s", calibration.raw_max_expected_time_s),
         ("analytic_max_correction_s", calibration.analytic_max_correction_s),
+        (
+            "activation_code_prior",
+            getattr(calibration, "activation_code_prior", None),
+        ),
     ):
         digest.update(name.encode("ascii"))
         if value is None:
@@ -1585,6 +1612,7 @@ def _run_shared_timing_calibration(
     pool_config: ToyPoolConfig,
     spiking_config: BrainScaleS2PoolConfig,
     *,
+    activation_code_prior: torch.Tensor | None = None,
     launcher: Callable[
         [argparse.Namespace, Path, ToyPoolConfig, BrainScaleS2PoolConfig],
         TimingCalibrationObservation,
@@ -1608,6 +1636,11 @@ def _run_shared_timing_calibration(
         "spiking_config": spiking_config.to_manifest_dict(),
         "requested_trial_chunk_size": args.pool_calibration_trial_chunk_size,
         "effective_trial_chunk_size": effective_chunk_size,
+        "activation_code_prior_sha256": (
+            None
+            if activation_code_prior is None
+            else _tensor_sha256(activation_code_prior)
+        ),
     })
     if manifest_path.is_file() and timing_path.is_file():
         try:
@@ -1651,6 +1684,7 @@ def _run_shared_timing_calibration(
     calibration = calibrate_timing(
         joined.first_spike_s,
         joined.nominal_input_s,
+        activation_code_prior,
     )
     temporary_path = timing_path.with_suffix(timing_path.suffix + ".tmp")
     torch.save(calibration, temporary_path)
@@ -1685,6 +1719,7 @@ def _run_isolated_pool_chunks(
     spiking_config: BrainScaleS2PoolConfig,
     effective_chunk_size: int,
     *,
+    activation_code_prior: torch.Tensor | None = None,
     launcher: Callable[
         [
             argparse.Namespace,
@@ -1710,6 +1745,7 @@ def _run_isolated_pool_chunks(
         args,
         pool_config,
         spiking_config,
+        activation_code_prior=activation_code_prior,
         launcher=calibration_launcher,
     )
     chunk_root = args.output_dir / "pool_chunks"

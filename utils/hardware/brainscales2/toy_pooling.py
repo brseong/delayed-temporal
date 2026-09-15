@@ -88,6 +88,7 @@ class TimingCalibration:
     nominal_code_time_s: torch.Tensor | None = None
     raw_max_expected_time_s: torch.Tensor | None = None
     analytic_max_correction_s: torch.Tensor | None = None
+    activation_code_prior: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -468,12 +469,28 @@ def _finite_m_deadline_correction(
 def calibrate_timing(
     first_spike_s: torch.Tensor,
     nominal_input_s: torch.Tensor,
+    activation_code_prior: torch.Tensor | None = None,
 ) -> TimingCalibration:
     """Estimate mean, raw-max, and max-bias calibration without labels."""
     if first_spike_s.ndim != 4:
         raise ValueError("calibration spikes must have shape [trial, code, logical, replica]")
     if nominal_input_s.ndim != 1 or nominal_input_s.numel() != first_spike_s.shape[1]:
         raise ValueError("calibration code times do not match spike observations")
+    if activation_code_prior is not None:
+        expected_shape = (first_spike_s.shape[1], first_spike_s.shape[2])
+        if activation_code_prior.shape != expected_shape:
+            raise ValueError(
+                "activation code prior must have shape [code, logical]"
+            )
+        if (
+            not torch.isfinite(activation_code_prior).all()
+            or (activation_code_prior < 0).any()
+        ):
+            raise ValueError("activation code prior must be finite and non-negative")
+        normalization = activation_code_prior.sum(dim=0, keepdim=True)
+        if (normalization <= 0).any():
+            raise ValueError("every logical activation prior must have positive mass")
+        activation_code_prior = activation_code_prior / normalization
     residual = first_spike_s - nominal_input_s.reshape(1, -1, 1, 1)
     response_delay = float(_nanmean(residual, dim=(0, 1, 2, 3)))
     offsets = _nanmean(residual - response_delay, dim=(0, 1))
@@ -496,7 +513,30 @@ def calibrate_timing(
         analytic_max_correction_s=_finite_m_deadline_correction(
             corrected, nominal_input_s
         ),
+        activation_code_prior=(
+            None
+            if activation_code_prior is None
+            else activation_code_prior.detach().clone().to(torch.float64)
+        ),
     )
+
+
+def calibration_activation_code_prior(
+    hidden_uint5: torch.Tensor,
+    *,
+    code_count: int = 32,
+) -> torch.Tensor:
+    """Estimate per-logical UInt5 frequencies from unlabeled calibration inputs."""
+    if hidden_uint5.ndim != 2 or hidden_uint5.shape[0] == 0:
+        raise ValueError("calibration hidden codes must have shape [sample, logical]")
+    codes = hidden_uint5.to(torch.int64)
+    if (codes < 0).any() or (codes >= code_count).any():
+        raise ValueError("calibration hidden code lies outside the declared code range")
+    counts = torch.stack(
+        [(codes == code).sum(dim=0) for code in range(code_count)],
+        dim=0,
+    ).to(torch.float64)
+    return counts / counts.sum(dim=0, keepdim=True)
 
 
 def _nominal_uint5_times(
@@ -532,6 +572,39 @@ def _empirical_max_inverse(
         calibration.raw_max_expected_time_s, spiking_config
     )
     target = _decode_time_uint5(calibration.nominal_code_time_s, spiking_config)
+    activation_prior = getattr(calibration, "activation_code_prior", None)
+    if activation_prior is not None:
+        if expected.ndim != 1:
+            raise RuntimeError("collision-aware empirical correction requires a global curve")
+        if activation_prior.shape != (target.numel(), raw_activation.shape[-1]):
+            raise RuntimeError("activation prior does not match code and logical dimensions")
+        _, collision_group = torch.unique(
+            calibration.nominal_code_time_s,
+            sorted=True,
+            return_inverse=True,
+        )
+        group_count = int(collision_group.max()) + 1
+        if group_count < target.numel():
+            group_expected: list[torch.Tensor] = []
+            group_code: list[torch.Tensor] = []
+            code_index = torch.arange(target.numel(), device=target.device)
+            for group in range(group_count):
+                members = collision_group == group
+                group_expected.append(_nanmean(expected[members], dim=0))
+                member_codes = code_index[members]
+                member_prior = activation_prior[members]
+                group_code.append(member_codes[member_prior.argmax(dim=0)])
+            expected_by_group = torch.stack(group_expected)
+            selected_group = (
+                raw_activation.unsqueeze(-1) - expected_by_group
+            ).abs().argmin(dim=-1)
+            code_by_group = torch.stack(group_code)
+            corrected = torch.empty_like(raw_activation)
+            for logical in range(raw_activation.shape[-1]):
+                corrected[..., logical] = code_by_group[
+                    selected_group[..., logical], logical
+                ]
+            return corrected.clamp(0.0, 31.0)
     valid = torch.isfinite(expected) & torch.isfinite(target)
     expected = expected[valid]
     target = target[valid]
@@ -1064,6 +1137,7 @@ class GroupedHardwarePoolBackend:
         spiking_config: BrainScaleS2PoolConfig,
         *,
         timing_calibration: TimingCalibration | None = None,
+        activation_code_prior: torch.Tensor | None = None,
     ) -> ToyPoolResult:
         """Run inference alone, optionally reusing a shared timing calibration."""
         if hidden_uint5.ndim != 2 or hidden_uint5.shape[1] != config.logical_neurons:
@@ -1072,7 +1146,9 @@ class GroupedHardwarePoolBackend:
         if timing_calibration is None:
             observation = self.observe_timing_calibration(config, spiking_config)
             timing_calibration = calibrate_timing(
-                observation.first_spike_s, observation.nominal_input_s
+                observation.first_spike_s,
+                observation.nominal_input_s,
+                activation_code_prior,
             )
             calibration_strategy = "inline-separate"
             calibration_metadata = observation.metadata
