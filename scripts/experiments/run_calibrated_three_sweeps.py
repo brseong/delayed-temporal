@@ -28,6 +28,10 @@ from scripts.experiments.calibrated_three_sweeps import (
 
 LOCAL_GPUS = (4, 5, 6, 7)
 GPU_ADMISSION_POLICY = {'max_memory_used_mib': 1024.0, 'max_utilization_gpu_percent': 5.0}
+UBAI_RESOURCE_POLICY = {'max_gpus': 12, 'max_running_jobs': 10, 'max_submitted_jobs': 20,
+                        'experiments_per_paired_job': 2}
+PAIR_FILES = ('scripts/experiments/ubai/run_calibrated_three_sweep_pair.py',
+              'scripts/experiments/ubai/calibrated_three_sweep_pair.sbatch')
 ASSETS = Path('/data/delayed-temporal/artifacts/assets/theta-selection-v1')
 REMOTE_BASE = '/home1/sizz1997/myubai'
 MAIN_TASKS = 80
@@ -204,7 +208,9 @@ def controller_identity(experiment: dict[str, Any]) -> dict[str, Any]:
     return {'source_commit': head, 'source_root': str(REPO),
             'controller_sha256': sha256_file(Path(__file__)),
             'evaluator_source_commit': experiment['source_commit'],
-            'gpu_admission_policy': GPU_ADMISSION_POLICY}
+            'gpu_admission_policy': GPU_ADMISSION_POLICY,
+            'ubai_resource_policy': UBAI_RESOURCE_POLICY,
+            'pair_runtime_sha256': {relative: sha256_file(REPO / relative) for relative in PAIR_FILES}}
 
 
 def default_host(task: dict, ordinal: int) -> str:
@@ -224,12 +230,27 @@ def parse_queue(text: str) -> list[dict]:
     return rows
 
 
-def quota_available(queue: list[dict], campaign_prefix: str) -> int:
+def quota_available(queue: list[dict], campaign_prefix: str, gpus_per_job: int = 1) -> int:
+    if gpus_per_job not in (1, 2):
+        raise ValueError('A Slurm job must reserve one or two GPUs')
     own = [row for row in queue if row['name'].startswith(campaign_prefix)]
-    running = [row for row in queue if row['state'] not in {'PENDING', 'CONFIGURING'}]
     # Reserve for submitted jobs as well, so queued work cannot exceed account limits later.
-    return max(0, min(8 - len(own), 20 - len(queue), 10 - len(queue),
-                      12 - sum(row['gpus'] for row in queue), 10 - len(running)))
+    return max(0, min((12 - sum(row['gpus'] for row in own)) // gpus_per_job,
+                      20 - len(queue), 10 - len(queue),
+                      (12 - sum(row['gpus'] for row in queue)) // gpus_per_job))
+
+
+def pair_tasks_compatible(tasks: list[dict]) -> bool:
+    if len(tasks) != 2 or len({task['run_id'] for task in tasks}) != 2:
+        return False
+    phases = {'collect': 'calibration', 'smoke_clean': 'smoke', 'smoke_noise': 'smoke',
+              'theta_train': 'theta', 'theta_validation': 'theta', 'dense': 'theta',
+              'theta_replay': 'replay', 'noise': 'noise'}
+    if any(task.get('host_label') not in (None, 'ubai') or task['kind'] not in phases for task in tasks):
+        return False
+    if len({phases[task['kind']] for task in tasks}) != 1:
+        return False
+    return tasks[0]['kind'] != 'noise' or tasks[0]['seed'] == tasks[1]['seed']
 
 
 def seed_range_reason(results: list[dict], clean_accuracy: float) -> str | None:
@@ -277,10 +298,12 @@ class Controller:
         self.children: dict[str, subprocess.Popen] = {}
         self.gpu_locks: dict[str, Any] = {}
         self.prep_verified = False
+        self.pair_controller_verified = False
         self.root.joinpath('worker_logs').mkdir(parents=True, exist_ok=True)
         identity = controller_identity(self.experiment)
         write_immutable_json(self.root / 'controllers' / (identity['source_commit'] + '.json'), identity)
         self.state['controller_identity'] = identity
+        self.remote_controller = f"{REMOTE_BASE}/delayed-temporal-controllers/{identity['source_commit']}"
         self.event('controller_started', **identity)
 
     def save(self) -> None:
@@ -414,7 +437,8 @@ class Controller:
         if task['calibration_file'] and task['kind'] != 'collect':
             files.append(task['calibration_file'])
         self.transfer(files, pull=False)
-        row.update(status='submitting', host='ubai', attempt=row['attempt'] + 1)
+        row.update(status='submitting', host='ubai', attempt=row['attempt'] + 1, slurm_name=name)
+        row.pop('pair_id', None)
         self.save()
         exports = 'ALL,EXPERIMENT_SOURCE=' + self.remote_source + ',EXPERIMENT_DEPLOYMENT=' + self.remote_root + '/ubai/deployment.json,TASK_ID=' + task['run_id']
         response = self.remote(['sbatch', '--parsable', '--job-name=' + name, '--export=' + exports,
@@ -427,6 +451,88 @@ class Controller:
         row.update(status='running', job_id=job_id, started_at=time.time())
         self.save()
         self.event('task_started', run_id=task['run_id'], host='ubai', job_id=job_id, attempt=row['attempt'])
+
+    def start_remote_pair(self, tasks: list[dict], queue: list[dict]) -> None:
+        if not pair_tasks_compatible(tasks):
+            raise ValueError('Paired experiments must be distinct and belong to the same stage')
+        if any(self.state['tasks'][task['run_id']]['status'] != 'pending'
+               or self.state['tasks'][task['run_id']].get('fixed_host') == 'local' for task in tasks):
+            raise ValueError('Only pending cluster experiments can be paired')
+        if quota_available(queue, self.prefix, 2) < 1:
+            raise ValueError('The paired job exceeds the available Slurm allocation')
+        identity = self.state['controller_identity']
+        if not self.pair_controller_verified:
+            head = self.remote(['git', '-C', self.remote_controller, 'rev-parse', 'HEAD']).strip()
+            if head != identity['source_commit']:
+                raise NeedsAttention('The remote paired controller checkout is not synchronized')
+            self.pair_controller_verified = True
+        entries = [{'run_id': task['run_id'],
+                    'task_sha256': sha256_file(self.root / 'tasks' / (task['run_id'] + '.json'))}
+                   for task in tasks]
+        attempts = [self.state['tasks'][task['run_id']]['attempt'] + 1 for task in tasks]
+        pair_id = 'pair-' + task_sha256({'tasks': entries, 'attempts': attempts,
+                                       'controller_commit': identity['source_commit']})[:24]
+        pair = {'format_version': 1, 'pair_id': pair_id,
+                'experiment_sha256': sha256_file(self.root / 'experiment.json'),
+                'deployment_sha256': sha256_file(self.root / 'ubai/deployment.json'),
+                'source_commit': self.experiment['source_commit'],
+                'controller_commit': identity['source_commit'],
+                'controller_sha256': identity['pair_runtime_sha256'], 'tasks': entries}
+        write_immutable_json(self.root / 'pairs' / (pair_id + '.json'), pair)
+        files = ['experiment.json', 'pairs/' + pair_id + '.json']
+        for task in tasks:
+            files.append('tasks/' + task['run_id'] + '.json')
+            if task['calibration_file'] and task['kind'] != 'collect':
+                files.append(task['calibration_file'])
+        self.transfer(list(dict.fromkeys(files)), pull=False)
+        name = self.prefix + pair_id
+        if any(row['name'] == name for row in queue):
+            raise NeedsAttention('A pending pair already has a Slurm submission')
+        for task, attempt in zip(tasks, attempts):
+            self.state['tasks'][task['run_id']].update(
+                status='submitting', host='ubai', attempt=attempt, pair_id=pair_id, slurm_name=name)
+        self.save()
+        exports = ','.join(('ALL', 'EXPERIMENT_SOURCE=' + self.remote_source,
+                            'EXPERIMENT_DEPLOYMENT=' + self.remote_root + '/ubai/deployment.json',
+                            'CONTROLLER_SOURCE=' + self.remote_controller,
+                            'CONTROLLER_COMMIT=' + identity['source_commit'],
+                            'PAIR_MANIFEST=' + self.remote_root + '/pairs/' + pair_id + '.json'))
+        response = self.remote(['sbatch', '--parsable', '--job-name=' + name, '--export=' + exports,
+                                '--output=' + self.remote_root + '/slurm/%x-%j.out',
+                                '--error=' + self.remote_root + '/slurm/%x-%j.err',
+                                self.remote_controller + '/' + PAIR_FILES[1]])
+        job_id = response.strip().split(';')[0]
+        if not job_id.isdecimal():
+            raise NeedsAttention('Unexpected paired Slurm submission response')
+        for task in tasks:
+            row = self.state['tasks'][task['run_id']]
+            row.update(status='running', job_id=job_id, started_at=time.time())
+        self.save()
+        self.event('paired_job_started', pair_id=pair_id, job_id=job_id,
+                   run_ids=[task['run_id'] for task in tasks], gpus=2)
+
+    def schedule_remote(self, tasks: list[dict], queue: list[dict]) -> list[dict]:
+        pending = [task for task in tasks if self.state['tasks'][task['run_id']]['status'] == 'pending'
+                   and self.state['tasks'][task['run_id']].get('fixed_host') != 'local']
+        submitted = []
+        while pending and quota_available(queue, self.prefix):
+            first = pending[0]
+            peers = sorted(pending[1:], key=lambda task: task['kind'] != first['kind'])
+            peer = next((task for task in peers if pair_tasks_compatible([first, task])), None)
+            if peer is not None and quota_available(queue, self.prefix, 2):
+                batch = [first, peer]
+                self.start_remote_pair(batch, queue)
+            else:
+                batch = [first]
+                self.start_remote(first, queue)
+            row = self.state['tasks'][first['run_id']]
+            if not any(item['job_id'] == row['job_id'] for item in queue):
+                queue.append({'job_id': row['job_id'], 'name': row.get('slurm_name', self.prefix + first['run_id']),
+                              'state': 'PENDING', 'gpus': len(batch)})
+            for task in batch:
+                pending.remove(task)
+            submitted.extend(batch)
+        return submitted
 
     def finished_local(self, task: dict, row: dict) -> bool:
         process = self.children.get(task['run_id'])
@@ -458,7 +564,7 @@ class Controller:
                 return None
             if row['status'] == 'submitting':
                 # Do not resubmit an ambiguous launch automatically.
-                existing = [q for q in queue if q['name'] == self.prefix + task['run_id']]
+                existing = [q for q in queue if q['name'] == row.get('slurm_name', self.prefix + task['run_id'])]
                 if len(existing) != 1:
                     raise NeedsAttention('Ambiguous Slurm submission requires accounting inspection')
                 row.update(status='running', job_id=existing[0]['job_id'])
@@ -517,7 +623,7 @@ class Controller:
             elif row.get('host') == 'ubai' and row.get('job_id'):
                 try:
                     current = parse_queue(self.remote(['squeue', '-h', '-r', '-j', row['job_id'], '-o', '%i|%T|%j|%b']))
-                    if any(q['name'] == self.prefix + run_id for q in current):
+                    if any(q['name'] == row.get('slurm_name', self.prefix + run_id) for q in current):
                         self.remote(['scancel', row['job_id']])
                 except (subprocess.SubprocessError, OSError) as exc:
                     self.event('stop_requires_retry', run_id=run_id, reason=str(exc))
@@ -569,6 +675,7 @@ class Controller:
             pending = [task for task in tasks if self.state['tasks'][task['run_id']]['status'] == 'pending']
             # Start each host's planned share first; only unsubmitted tasks can move.
             for allow_move in (False, True):
+                remote_pending = []
                 for task in list(pending):
                     row = self.state['tasks'][task['run_id']]
                     preferred = row['preferred_host']
@@ -587,15 +694,17 @@ class Controller:
                         if self.start_local(task, gpu):
                             pending.remove(task)
                     elif host == 'ubai' and remote_slots and queue is not None:
-                        try:
-                            self.start_remote(task, queue)
-                        except (subprocess.SubprocessError, OSError) as exc:
-                            self.state['remote_wait_reason'] = str(exc)
-                            # Submitting state is deliberately not returned to pending.
-                            remote_slots = 0
-                            continue
-                        remote_slots -= 1
-                        pending.remove(task)
+                        remote_pending.append(task)
+                if remote_pending and queue is not None:
+                    try:
+                        self.schedule_remote(remote_pending, queue)
+                        remote_slots = quota_available(queue, self.prefix)
+                    except (subprocess.SubprocessError, OSError) as exc:
+                        self.state['remote_wait_reason'] = str(exc)
+                        # Submitting state is deliberately not returned to pending.
+                        remote_slots = 0
+                    pending = [task for task in pending
+                               if self.state['tasks'][task['run_id']]['status'] == 'pending']
             self.state.update(phase_completed=len(done), phase_total=len(tasks))
             self.save()
             if len(done) < len(tasks):

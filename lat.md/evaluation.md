@@ -405,7 +405,7 @@ After seed 0, execution stops for a range decision if all nine timing noise poin
 
 Local GPU devices 4–7 and the UBAI RTX A6000 partitions share the workload under separate execution rules, with all cluster temporary storage on verified disk rather than memory filesystems.
 
-The initial assignment is six theta candidates on UBAI and three locally, and eleven noise conditions on UBAI and six locally per seed. Each task uses one GPU and four CPU cores. UBAI jobs request 64 GiB, with up to eight campaign jobs; account limits remain ten running jobs, twenty submitted jobs, and twelve GPUs. No DataParallel is used.
+The initial assignment is six theta candidates on UBAI and three locally, and eleven noise conditions on UBAI and six locally per seed. Each experiment uses one GPU and four CPU cores. Following the user's allocation change, new UBAI jobs pair two experiments and request two GPUs, eight CPU cores and 128 GiB. Account limits remain ten running jobs, twenty submitted jobs and twelve GPUs. Existing jobs and odd remaining conditions retain one GPU and 64 GiB. No DataParallel is used.
 
 Local admission retains the user's existing limit: total device memory at most 1 GiB and GPU utilization at most 5%, including both endpoints. A foreign compute PID alone does not block a device. [[scripts/experiments/run_calibrated_three_sweeps.py#gpu_available]] is used both when finding available devices and immediately before launch under the device lock. The controller records actual memory, utilization and PIDs; its own assignments and locks still allow only one campaign worker per GPU. Missing telemetry prevents new local launches without stopping cluster tasks.
 
@@ -414,6 +414,18 @@ A controller-only correction may use a separately committed clean checkout while
 [[scripts/experiments/ubai/prepare_calibrated_three_sweeps_ubai.py#prepare]] creates a separate deployment using the portable Python 3.12.13 environment and Ubuntu 24.04 image. Heavy checksum and environment verification runs in a Slurm preparation job. Read-only mounts preserve identical source, dataset and checkpoint paths. Every compute task rechecks preparation and source identity. The imported Transformers source subtree and SpikingJelly package subtree have separate content hashes because editable packages are not contained in the main source commit or environment archive.
 
 [[scripts/experiments/ubai/prepare_calibrated_three_sweeps_ubai.py#admit_runtime]] admits environment extraction and scratch space under a filesystem-checked `/enroot` path and rejects tmpfs/ramfs. It reserves concurrent disk usage, binds container temporary paths to this disk, and cleans only the exact owned runtime directory after child exit. Leftovers require terminal Slurm evidence; no age-only cleanup is allowed. [[scripts/verification/verify_calibrated_three_sweep_ubai.py#UBAISafetyTests]] covers allocation, paths, capacity reservation, checksum rejection, and termination cleanup.
+
+## Calibrated Three Sweep Paired Jobs
+
+Two independent experiments share a Slurm job and an extracted environment, while separate GPU devices, process state and result files preserve the existing evaluation contract.
+
+[[scripts/experiments/run_calibrated_three_sweeps.py#quota_available]] counts jobs and allocated GPU devices separately and reserves capacity for pending jobs too. Six paired jobs can run twelve experiments concurrently; twenty submitted jobs do not grant forty concurrent GPU devices. Other account jobs reduce the available capacity. Local devices 4–7 remain a separate pool.
+
+[[scripts/experiments/run_calibrated_three_sweeps.py#Controller#start_remote_pair]] groups only unsubmitted conditions in the current stage. A pair cannot cross seed stages, change a fixed execution environment, or repeat an existing assignment. An odd remaining condition may use an individual job. The immutable pair manifest records raw file hashes for experiment, deployment and task files, plus the controller commit and runtime file hashes. These raw hashes are distinct from the canonical JSON hashes in the assignment record. Evaluation source and task definitions remain frozen separately.
+
+[[scripts/experiments/ubai/run_calibrated_three_sweep_pair.py#run_workers]] gives each evaluator exactly one distinct allocated GPU device and four separate CPU cores. [[scripts/experiments/ubai/run_calibrated_three_sweep_pair.py#admit_pair_runtime]] extracts the environment once on verified disk and reserves an additional scratch allowance for the second evaluator. Separate writable scratch directories prevent cache collisions. Cleanup waits for both child processes; no temporary environment is extracted onto a RAM disk.
+
+One failed condition does not cancel its peer. After Slurm confirms termination, each result is validated independently and only missing conditions are retried. Existing individual jobs remain unchanged during controller replacement. [[scripts/verification/verify_calibrated_three_sweep_pair.py#PairTests]] verifies paired runtime identity, distinct device and CPU assignments, disk reservation and cleanup, and failure isolation. The scheduling verification also covers resource limits, shared job recovery and reuse of complete results.
 
 ## Calibrated Three Sweep Reporting
 

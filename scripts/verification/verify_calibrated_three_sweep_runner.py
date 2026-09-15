@@ -16,7 +16,8 @@ sys.path.insert(0, str(ROOT))
 from scripts.experiments.calibrated_three_sweeps import make_task, make_tasks, task_sha256
 from scripts.experiments.run_calibrated_three_sweeps import (
     Controller, LOCAL_GPUS, NeedsAttention, assert_seed_barrier, controller_identity, default_host,
-    gpu_available, parse_gpu_activity, parse_gpu_occupancy, parse_queue, quota_available, seed_range_reason,
+    gpu_available, pair_tasks_compatible, parse_gpu_activity, parse_gpu_occupancy,
+    parse_queue, quota_available, seed_range_reason,
 )
 from scripts.verification.verify_calibrated_three_sweep_contract import experiment_fixture, result_fixture
 
@@ -71,21 +72,56 @@ def verify_occupancy_and_quota(experiment: dict) -> None:
             must_reject(lambda gpu=gpu: dummy.start_local(noise_tasks(experiment)[0], gpu))
     queue = parse_queue("1|RUNNING|foreign|gpu:rtxa6000:2\n2|PENDING|c3-test-one|gpu:1\n3|RUNNING|cpu|N/A")
     assert [row["gpus"] for row in queue] == [2, 1, 0]
-    assert quota_available([], "c3-test-") == 8
+    assert quota_available([], "c3-test-") == 10
     rows = lambda count, state="RUNNING", own=False, gpus=1: [
         {"job_id": str(i), "state": state, "name": ("c3-test-" if own else "other-") + str(i), "gpus": gpus}
         for i in range(count)]
-    assert quota_available(rows(8, own=True), "c3-test-") == 0
+    assert quota_available(rows(8, own=True), "c3-test-") == 2
     assert quota_available(rows(10), "c3-test-") == 0
     assert quota_available(rows(20, state="PENDING", gpus=0), "c3-test-") == 0
     assert quota_available(rows(3, gpus=4), "c3-test-") == 0
     assert quota_available(rows(2, gpus=4), "c3-test-") == 4
     for queue in (rows(2), rows(4, state="PENDING"), rows(5, own=True), rows(9, gpus=0)):
         capacity = quota_available(queue, "c3-test-")
-        assert 0 <= capacity <= 8
+        assert 0 <= capacity <= 10
         assert len(queue) + capacity <= 20
         assert sum(row["state"] not in {"PENDING", "CONFIGURING"} for row in queue) + capacity <= 10
         assert sum(row["gpus"] for row in queue) + capacity <= 12
+
+
+def verify_paired_quota_and_compatibility(experiment: dict) -> None:
+    assert quota_available([], "c3-test-", gpus_per_job=2) == 6
+    rows = lambda count, gpus=1: [
+        {"job_id": str(i), "state": "RUNNING", "name": f"c3-test-{i}", "gpus": gpus}
+        for i in range(count)]
+    assert quota_available(rows(8), "c3-test-", gpus_per_job=2) == 2
+    assert quota_available(rows(6, 2), "c3-test-", gpus_per_job=2) == 0
+    assert quota_available(rows(10), "c3-test-", gpus_per_job=2) == 0
+    assert quota_available(rows(4, 2), "c3-test-", gpus_per_job=2) == 2
+    for queue in (rows(4, 2), rows(8), rows(5), rows(3, 3)):
+        for gpus in (1, 2):
+            jobs = quota_available(queue, "c3-test-", gpus_per_job=gpus)
+            assert len(queue) + jobs <= 10
+            assert sum(row["gpus"] for row in queue) + jobs * gpus <= 12
+    for invalid in (0, -1, 3):
+        must_reject(lambda invalid=invalid: quota_available([], "c3-test-", gpus_per_job=invalid))
+    tasks = noise_tasks(experiment)
+    assert pair_tasks_compatible(tasks[:2])
+    assert not pair_tasks_compatible(tasks[:1])
+    assert not pair_tasks_compatible(tasks[:3])
+    assert not pair_tasks_compatible([tasks[0], tasks[0]])
+    assert not pair_tasks_compatible([tasks[0], noise_tasks(experiment, 1)[1]])
+    theta_train = make_task(experiment, "theta_train", theta_index=0, calibration_sha256="2" * 64)
+    theta_validation = make_task(experiment, "theta_validation", theta_index=0, calibration_sha256="2" * 64)
+    assert pair_tasks_compatible([theta_train, theta_validation])
+    assert pair_tasks_compatible([theta_validation, make_task(experiment, "dense")])
+    assert not pair_tasks_compatible([tasks[0], theta_train])
+    assert not pair_tasks_compatible([make_task(experiment, "collect", theta_index=0), theta_train])
+    smoke_clean = make_tasks(experiment, "smoke_clean", host_label="ubai", calibration_sha256="2" * 64)[0]
+    smoke_noise = make_tasks(experiment, "smoke_noise", host_label="ubai", calibration_sha256="2" * 64)[0]
+    assert pair_tasks_compatible([smoke_clean, smoke_noise])
+    local_smoke = make_tasks(experiment, "smoke_clean", host_label="local", calibration_sha256="2" * 64)[0]
+    assert not pair_tasks_compatible([local_smoke, smoke_noise])
 
 
 def activity_fixture(memory: float = 262, utilization: float = 0) -> dict:
@@ -193,6 +229,7 @@ class FakeController(Controller):
         self.max_attempts = 3
         self.outputs = {}
         self.starts = []
+        self.pair_starts = []
         self.events = []
         self.transfers = []
         self.failures = {}
@@ -206,7 +243,7 @@ class FakeController(Controller):
         if arguments[0] == "squeue":
             return self.queue_text
         if arguments[0] == "sacct":
-            return "COMPLETED|\n"
+            return getattr(self, "accounting_state", "COMPLETED") + "|\n"
         raise AssertionError(f"Unexpected remote action: {arguments}")
 
     def transfer(self, files, *, pull: bool) -> None:
@@ -242,6 +279,16 @@ class FakeController(Controller):
 
     def start_remote(self, task: dict, queue: list[dict]) -> None:
         self.launch(task, "ubai")
+        self.state["tasks"][task["run_id"]]["slurm_name"] = self.prefix + task["run_id"]
+
+    def start_remote_pair(self, tasks: list[dict], queue: list[dict]) -> None:
+        assert pair_tasks_compatible(tasks)
+        self.pair_starts.append(tuple(task["run_id"] for task in tasks))
+        shared_job_id = str(1000 + len(self.pair_starts))
+        shared_name = self.prefix + f"pair-{len(self.pair_starts)}"
+        for task in tasks:
+            self.launch(task, "ubai")
+            self.state["tasks"][task["run_id"]].update(job_id=shared_job_id, slurm_name=shared_name)
 
 
 def verify_resume_retries_and_reassignment(experiment: dict, root: Path) -> None:
@@ -272,7 +319,7 @@ def verify_resume_retries_and_reassignment(experiment: dict, root: Path) -> None
         must_reject(lambda: exhausted.run_tasks("failed-phase", tasks[:1]))
         assert len(exhausted.starts) == 3
         remote_full = FakeController(root / "remote-full", experiment)
-        remote_full.queue_text = "\n".join(f"{i}|PENDING|c3-test-reserved-{i}|gpu:1" for i in range(8))
+        remote_full.queue_text = "\n".join(f"{i}|PENDING|c3-test-reserved-{i}|gpu:1" for i in range(10))
         # Ordinal zero is local, ordinal one is UBAI; completed zero leaves only the latter.
         remote_full.outputs[tasks[0]["run_id"]] = result_fixture(experiment, tasks[0])
         remote_full.run_tasks("move-local", tasks[:2])
@@ -297,6 +344,86 @@ def verify_owned_worker_reservation(experiment: dict, root: Path) -> None:
     with patch("scripts.experiments.run_calibrated_three_sweeps.gpu_activity", return_value=activity_fixture()), patch("time.sleep"):
         controller.run_tasks("reserved-device", tasks[:1], force_hosts={tasks[0]["run_id"]: "local"})
     assert controller.starts == [(tasks[0]["run_id"], "local", 5)]
+
+
+def verify_pair_schedule_and_retry(experiment: dict, root: Path) -> None:
+    tasks = noise_tasks(experiment)
+    controller = FakeController(root / "pair-schedule", experiment)
+    for ordinal, task in enumerate(tasks):
+        controller.prepare_task(task, ordinal, "ubai")
+    queue = []
+    submitted = controller.schedule_remote(tasks, queue)
+    assert len(submitted) == len(controller.starts) == 12
+    assert len(controller.pair_starts) == len(queue) == 6
+    assert sum(job["gpus"] for job in queue) == 12
+    assert len({task["run_id"] for task in submitted}) == 12
+    odd = FakeController(root / "pair-odd", experiment)
+    for ordinal, task in enumerate(tasks[:3]):
+        odd.prepare_task(task, ordinal, "ubai")
+    odd_queue = []
+    assert len(odd.schedule_remote(tasks[:3], odd_queue)) == 3
+    assert len(odd.pair_starts) == 1 and sorted(row["gpus"] for row in odd_queue) == [1, 2]
+    filtered = FakeController(root / "pair-pending-only", experiment)
+    for ordinal, task in enumerate(tasks[:4]):
+        filtered.prepare_task(task, ordinal, "local" if ordinal == 0 else "ubai")
+    filtered.state["tasks"][tasks[1]["run_id"]]["status"] = "running"
+    filtered.state["tasks"][tasks[2]["run_id"]]["status"] = "complete"
+    assert filtered.schedule_remote(tasks[:4], []) == tasks[3:4]
+    retry = FakeController(root / "pair-peer-retry", experiment)
+    retry.failures[tasks[1]["run_id"]] = 1
+    retry.accounting_state = "FAILED"
+    with patch("scripts.experiments.run_calibrated_three_sweeps.gpu_activity", return_value=activity_fixture()), patch("time.sleep"):
+        result = retry.run_tasks("pair-retry", tasks[:2], force_hosts={task["run_id"]: "ubai" for task in tasks[:2]})
+        starts = list(retry.starts)
+        assert len(result) == 2 and len(retry.pair_starts) == 1
+        assert Counter(row[0] for row in retry.starts) == {tasks[0]["run_id"]: 1, tasks[1]["run_id"]: 2}
+        retry.run_tasks("pair-retry", tasks[:2])
+        assert retry.starts == starts
+
+
+def verify_pair_submission_and_recovery(experiment: dict, root: Path) -> None:
+    tasks = noise_tasks(experiment)[:2]
+    controller = FakeController(root / "pair-submission", experiment)
+    for ordinal, task in enumerate(tasks):
+        controller.prepare_task(task, ordinal, "ubai")
+    with patch.object(controller, "remote", side_effect=AssertionError("No invalid pair may be submitted")):
+        must_reject(lambda: Controller.start_remote_pair(controller, tasks[:1], []))
+        must_reject(lambda: Controller.start_remote_pair(controller, [tasks[0], tasks[0]], []))
+        must_reject(lambda: Controller.start_remote_pair(controller, [tasks[0], noise_tasks(experiment, 1)[1]], []))
+        for status in ("complete", "running", "submitting"):
+            controller.state["tasks"][tasks[0]["run_id"]]["status"] = status
+            must_reject(lambda: Controller.start_remote_pair(controller, tasks, []))
+        controller.state["tasks"][tasks[0]["run_id"]]["status"] = "pending"
+        controller.state["tasks"][tasks[0]["run_id"]]["fixed_host"] = "local"
+        must_reject(lambda: Controller.start_remote_pair(controller, tasks, []))
+        controller.state["tasks"][tasks[0]["run_id"]]["fixed_host"] = "ubai"
+    controller.pair_controller_verified = True
+    controller.remote_controller = "/fixture/paired-controller"
+    controller.remote_source = "/fixture/frozen-evaluator"
+    controller.remote_root = "/fixture/results"
+    controller.state["controller_identity"] = {"source_commit": "b" * 40, "pair_runtime_sha256": {"pair.py": "e" * 64}}
+    (controller.root / "experiment.json").write_text(json.dumps(experiment))
+    (controller.root / "ubai").mkdir()
+    (controller.root / "ubai/deployment.json").write_text("{}")
+    with patch.object(controller, "remote", return_value="7654\n") as remote:
+        Controller.start_remote_pair(controller, tasks, [])
+        assert remote.call_count == 1 and remote.call_args.args[0][0] == "sbatch"
+    rows = [controller.state["tasks"][task["run_id"]] for task in tasks]
+    assert {row["job_id"] for row in rows} == {"7654"}
+    assert len({row["slurm_name"] for row in rows}) == 1
+    assert len(list(controller.root.glob("pairs/*.json"))) == 1
+    queue = [{"job_id": "7654", "state": "RUNNING", "name": rows[0]["slurm_name"], "gpus": 2}]
+    # Resume after sbatch succeeded but before recording its response for both peers.
+    for row in rows:
+        row["status"] = "submitting"
+        row.pop("job_id")
+    with patch.object(controller, "remote", side_effect=AssertionError("Recovery must reuse the existing job")):
+        for task in tasks:
+            assert controller.poll_task(task, queue) is None
+            assert controller.state["tasks"][task["run_id"]]["job_id"] == "7654"
+    assert all(row["status"] == "running" for row in rows)
+    rows[0]["status"] = "submitting"
+    must_reject(lambda: controller.poll_task(tasks[0], queue + [{**queue[0], "job_id": "7655"}]))
 
 
 def verify_locked_launch_recheck(experiment: dict, root: Path) -> None:
@@ -397,6 +524,7 @@ def main() -> None:
     experiment = experiment_fixture()
     verify_default_distribution_and_order(experiment)
     verify_occupancy_and_quota(experiment)
+    verify_paired_quota_and_compatibility(experiment)
     verify_activity_admission()
     verify_separate_controller_identity(experiment)
     verify_range_checks(experiment)
@@ -405,9 +533,11 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="verify-three-sweep-runner-", dir=runtime) as temporary:
         verify_resume_retries_and_reassignment(experiment, Path(temporary))
         verify_owned_worker_reservation(experiment, Path(temporary))
+        verify_pair_schedule_and_retry(experiment, Path(temporary))
+        verify_pair_submission_and_recovery(experiment, Path(temporary))
         verify_locked_launch_recheck(experiment, Path(temporary))
         verify_campaign_seed_order(experiment, Path(temporary))
-    print("Calibrated three-sweep scheduling checks passed (9 groups).")
+    print("Calibrated three-sweep scheduling checks passed (12 groups).")
 
 
 if __name__ == "__main__":
