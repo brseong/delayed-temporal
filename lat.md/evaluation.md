@@ -64,6 +64,16 @@ The text-model runners accept `--cache-dir` so a documented local dataset cache 
 
 Each spiking runner prints per-site Gaussian rates and logs them under `Gaussian/<site>/...` in W&B. Gaussian counters are process-wide mutable state and are reset whenever a new seeded replica is configured.
 
+### ViT Accuracy Progress
+
+ViT evaluations flush cumulative accuracy to the ordinary log after every evaluated batch, independently of W&B and TensorBoard. Intermediate records never replace the final exact counts and prediction digest.
+
+[[scripts/evaluation/error_analysis_vit.py#log_evaluation_progress]] writes one `Evaluation progress` JSON record per batch with the experiment name, backend, completed and total batches, correct count, evaluated and expected samples, accuracy, elapsed time and estimated remaining seconds. The expected sample count respects `max_eval_batches` and an uneven last batch. Each record remains `partial`, including the last batch, until the existing final result and provenance checks succeed. Missing or interrupted final results remain incomplete.
+
+Redirected evaluation logs disable the terminal progress bar so records occupy complete lines; each accuracy record is flushed immediately. Logging does not change predictions, dataset order, calibration or the final accuracy calculation. Dedicated throughput benchmarks omit this extra output inside their measured interval. Calibration collection retains its separate progress report for the two collection passes and does not report task accuracy.
+
+[[scripts/verification/verify_vit_evaluation_progress.py#verify_cumulative_accuracy_and_flush]] checks cumulative counts, uneven batches, immediate flushing and invalid input rejection. Other checks cover integration without tracking services, bounded evaluation length, benchmark exclusion and the final parser rejecting logs containing only progress records.
+
 ## Fixed-Domain ViT-S Real-Data Audit
 
 The fixed-domain audit measures one cached pretrained ViT-S checkpoint on the same 5,000-image ImageNet-1k validation subset and separates analytic rails, residual calibration, and Gaussian event effects.

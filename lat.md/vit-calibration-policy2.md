@@ -60,3 +60,11 @@ LayerNorm 공통 시간창 수정을 적용하고 CPU 회귀 검증으로 확인
 공통 시간창 수정을 포함한 별도 clean checkout에서 training seed-0 5k를 두 번 수집하고, 같은 checkpoint와 순서의 test 10k를 ANN/SNN으로 평가한다. theta 40, float64, 정책 2의 109개 site, 출력 bound 정책 3, 기존 5% 여유를 유지한다. 새 source의 짧은 검사로 batch size를 먼저 확인하며 이전 짧은 calibration은 재사용하지 않는다.
 
 기존 v2의 source와 실패 로그는 보존하고 `artifacts/logs/conversion_comparison/cifar10-shared-deadline-20260915/` 아래 별도 manifest에 새 source를 고정한다. 실행은 유휴 GPU 4–7 중 한 장, GPU별 잠금, W&B와 TensorBoard 비활성화를 유지한다. 임시 경로는 `/data`의 실제 디스크에 두고 로그·calibration·결과와 분리한다. 전체 결과가 완성되기 전 부분 정확도를 성능 복원 결과로 보고하지 않는다.
+
+새 source `1be495d`의 CIFAR-10 짧은 검사는 batch 32, training 64장 두 번 수집, test 64/64 정답으로 통과했다. 17:08 UTC부터 training 5k의 본 calibration을 수집 중이며, 이어 ANN/SNN test 10k를 순서대로 평가한다. 이 실행 시점에는 전체 정확도 결과가 없으므로 성능 복원을 확정하지 않는다.
+
+## CIFAR-10 Accuracy Logging Restart
+
+사용자 요청으로 진행 중인 CIFAR calibration을 중단하고, batch별 정확도 로그를 포함한 새 source에서 다시 시작한다. 기존 완료 검사와 중단 로그는 별도 경로에 보존하며 새 결과와 합치지 않는다.
+
+일반 평가에는 [[evaluation#Evaluation and Verification#Diagnostics and Instrumentation#ViT Accuracy Progress]]를 적용한다. 새 실행은 `artifacts/logs/conversion_comparison/cifar10-progress-20260915/` 아래 같은 v2 태그를 사용한다. 기존 source와 checkpoint, 데이터의 차이를 manifest로 구분하고, training 5k 수집과 ANN/SNN test 10k를 새로 수행한다. GPU 4–7 제한, GPU별 잠금, W&B·TensorBoard 비활성화와 실제 디스크의 임시 경로를 유지한다.
