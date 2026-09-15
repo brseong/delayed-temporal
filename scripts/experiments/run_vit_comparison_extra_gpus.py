@@ -246,7 +246,8 @@ def execute(root: Path, gpu: int, model: str, temporary_local_gpus: bool) -> dic
                      "gpu_probe": probe, "temporary_local_gpus": True, "started_at": time.time()}
             grant_id = uuid.uuid4().hex
             runner.write_immutable_json(control / "grants" / (grant_id + ".json"), grant)
-            runner.event(root, "temporary_gpu_started", grant_id=grant_id, **grant)
+            runner.event(root, "temporary_gpu_started", grant_id=grant_id, gpu=gpu,
+                         run_id=task["run_id"], authorization=grant)
             stop_event, reason = threading.Event(), []
             def interrupted(signum, _frame):
                 raise InterruptedError(f"Temporary evaluation interrupted: {signum}")

@@ -1,9 +1,10 @@
 """CPU checks for the current comparison's temporary additional GPU execution."""
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
 import copy
 import fcntl
+import io
 import json
 import os
 from pathlib import Path
@@ -314,6 +315,72 @@ class ExtraGpuTests(unittest.TestCase):
                 patch.object(extra, "require_window", side_effect=AssertionError("Unexpected window")), \
                 patch.object(extra.os, "kill", side_effect=AssertionError("Unexpected signal")):
             self.assertEqual(extra.execute(self.root, 1, self.key, True)["status"], "deferred")
+
+    def full_execute(self, interrupted: bool) -> dict:
+        disk = ROOT / "artifacts" / "runtime"
+        handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+        with tempfile.TemporaryDirectory(prefix="comparison-extra-execute-test-", dir=disk) as runtime:
+            self.experiment["runtime_root"] = runtime
+            self.admission_evidence()
+            put_json(self.root / "assignments.json", {"local": {}})
+            progress = {"remaining_batches": 100, "main_pid": 123456789, "main_start_ticks": 987}
+            called = []
+            def evaluate(root, experiment, task, host):
+                called.append(task["run_id"])
+                self.assertEqual(host, "local")
+                self.assertEqual(task["kind"], "dense")
+                self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "1")
+                self.assertEqual(os.environ["OMP_NUM_THREADS"], "4")
+                self.assertEqual(os.environ["WANDB_MODE"], "disabled")
+                self.assertTrue(Path(os.environ["TMPDIR"]).is_relative_to(Path(runtime)))
+                if interrupted:
+                    handler = signal.getsignal(signal.SIGTERM)
+                    handler(signal.SIGTERM, None)
+                    self.fail("The installed interruption handler did not interrupt")
+                return completed_fixture(root, experiment, task)
+            with patch.object(extra, "validate_scope", return_value=self.experiment), \
+                    patch.object(extra, "load_frozen_runner", return_value=runner), \
+                    patch.object(extra, "GPU_LOCK_ROOT", self.root / "gpu-locks"), \
+                    patch.object(extra, "TAG", Path(runtime).name), \
+                    patch.object(extra, "require_window", return_value=progress), \
+                    patch.object(extra, "gpu_probe", return_value={"count": 1, "model": "NVIDIA RTX A6000"}), \
+                    patch.object(extra, "process_identity", return_value={"start_ticks": 456}), \
+                    patch.object(extra.os, "sched_getaffinity", return_value=set(range(32))), \
+                    patch.object(extra.os, "sched_setaffinity") as affinity, \
+                    patch.object(extra.os, "kill", side_effect=AssertionError("Unexpected actual signal")), \
+                    patch.object(extra.subprocess, "check_output", return_value="ext2/ext3\n"), \
+                    patch.object(runner, "run_task", side_effect=evaluate), \
+                    patch.dict(os.environ), redirect_stdout(io.StringIO()):
+                result = extra.execute(self.root, 1, self.key, True)
+            affinity.assert_called_once_with(0, {16, 17, 18, 19})
+            self.assertEqual(called, [self.key + "_dense"])
+        for sig, handler in handlers.items():
+            self.assertIs(signal.getsignal(sig), handler)
+        events = [json.loads(line) for line in (self.root / "events.jsonl").read_text().splitlines()]
+        self.assertEqual([row["event"] for row in events], ["temporary_gpu_started", "temporary_gpu_finished"])
+        authorization = events[0]["authorization"]
+        self.assertEqual(authorization["root"], str(self.root))
+        self.assertEqual(authorization["gpu"], 1)
+        self.assertTrue(authorization["temporary_local_gpus"])
+        self.assertEqual(events[0]["grant_id"], events[1]["grant_id"])
+        records = list((self.root / "temporary_local_gpus" / "end").glob("*.json"))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(json.loads(records[0].read_text())["status"], result["status"])
+        with extra.lock(self.root / "gpu-locks" / "gpu-1.lock"):
+            pass
+        with extra.lock(self.root / "temporary_local_gpus" / (self.key + ".lock")):
+            pass
+        return result
+
+    def test_execute_complete_logs_real_events_and_restores_handlers(self) -> None:
+        self.assertEqual(self.full_execute(False)["status"], "complete")
+        self.assertTrue((self.root / "results" / (self.key + "_dense.json")).exists())
+
+    def test_execute_interrupted_logs_real_events_and_defers_safely(self) -> None:
+        result = self.full_execute(True)
+        self.assertEqual(result["status"], "deferred")
+        self.assertIn("interrupted", result["reason"])
+        self.assertFalse((self.root / "results" / (self.key + "_dense.json")).exists())
 
 
 if __name__ == "__main__":
