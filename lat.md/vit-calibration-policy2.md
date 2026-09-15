@@ -29,3 +29,20 @@ W&B·TensorBoard·잡음은 끄고 임시 파일은 `/data/delayed-temporal/arti
 [[scripts/experiments/run_vit_comparison.py#prepare_execution]]은 각 모델의 검증된 batch size 또는 아직 미확인인 상태와 전체 수집이 필요한 후속 명령을 내용 hash별 JSON으로 보존한다. 준비 파일은 실행 승인이 아니며 실행 시 source·데이터·checkpoint·calibration identity와 GPU 점유를 다시 확인한다.
 
 [[scripts/verification/verify_vit_comparison_runner.py#verify_policy2_and_preparation]]은 109/217개 site, 구버전 읽기와 새 실행 차단, eps·하한 불일치 거부 및 준비 과정에서 evaluator를 호출하지 않는 것을 확인한다. Attention·LayerNorm·calibration·Gaussian 및 기존 비교 실행기 검증과 용어 검사, `lat check`를 함께 실행한다.
+
+## Short Check Results
+
+커밋 `dee5e1b`의 고정 checkout에서 네 모델의 짧은 검사를 실시했다. 세 모델은 batch 32로 통과했고 ViT-B는 calibration 수집 오류로 중단되어 전체 실행 준비 완료로 표시하지 않는다.
+
+| 모델 | 두 번 수집 | 별도 평가 두 batch | 상태 |
+|---|---|---|---|
+| CIFAR-10 ViT-S | 64장, 109곳 | 64/64 | 통과 |
+| ImageNet ViT-S | 64장, 109곳 | 52/64 | 통과 |
+| ImageNet ViT-B | 중단 | 미실행 | 시간창 경계 오류 |
+| ImageNet ViT-L | 64장, 217곳 | 56/64 | 통과 |
+
+위 correct count는 메모리·실행 검사용이며 논문 정확도가 아니다. 짧은 calibration은 본 평가에 재사용하지 않는다. 유휴 GPU 4와 5만 사용했고 종료 후 모두 해제했다. 임시 경로는 `/data`의 ext4이며 `/tmp`를 사용하지 않았다. 실패 로그와 임시 경로는 보존했다.
+
+ViT-B는 `observation_deadline must not precede either event-domain maximum`으로 실패했다. CPU에서 내부 상한 40.007, 하한 1e-5를 사용하면 두 log 시간창의 끝값이 15.20197990377345와 15.201979903773452로 달라져 같은 예외가 재현된다. 차이는 1 ULP이다. 실제 실패 모델의 해당 상한 값은 로그에 없으므로 이 최소 재현의 값과 같다고 단정하지 않는다. 일반 primitive의 경계 검사를 완화하거나 batch를 줄여 우회하지 않았다.
+
+후속 필수 조치는 [[todo#TODO#ViT Calibration Policy 2 Shared Deadline]]이다. 기존 LayerNorm hook의 전역 theta 비교 경고는 선택된 내부 범위의 clipping count가 아니므로, 실제 calibration의 site별 원시 count와 구분한다.

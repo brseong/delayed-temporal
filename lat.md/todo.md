@@ -473,3 +473,11 @@ theta=40과 양의 하한 $10^{-5}$에서 float32/float64 모두 상한의 log �
 - [ ] 17조건씩 세 seed를 진행하고 첫째·둘째 중간 그림과 최종 그림을 보존한다. seed 0 범위 중단 규칙을 적용한다.
 
 로컬은 GPU 4–7만, UBAI는 gpu4/gpu5만 사용하며 RAM 디스크에는 환경을 풀지 않는다. 50k와 추가 축은 진행하지 않는다. 기존 시간 추정은 약 38 GPU-hours이며 구현·검증·대기 시간을 포함하지 않는다.
+
+## ViT Calibration Policy 2 Shared Deadline
+
+ViT-B의 짧은 calibration 수집에서 발견한 log 시간창 끝값 불일치를 해결해야 새 비교 실행을 승인할 수 있다. 같은 오류를 작은 batch로 우회하거나 기존 calibration을 재사용하지 않는다.
+
+- LayerNorm의 세 log 인코딩에 동일하게 계산한 공통 시간창을 sampling 전에 적용한다. 이후 event의 domain만 바꾸는 처리는 하지 않는다.
+- 일반 primitive의 deadline 검사는 유지한다. 상한 40.007과 반대 방향 반올림 사례, 8개 ablation, noise-off·Gaussian 표준편차 0·seeded 경로의 회귀 검증을 추가한다.
+- 경고는 전역 theta 초과와 선택된 범위의 실제 clipping을 구분한다. 수정은 새 source와 별도 실패 기록을 유지한 재검사로 검증한다.

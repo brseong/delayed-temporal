@@ -321,7 +321,7 @@ class ExtraGpuTests(unittest.TestCase):
             self.assertEqual(extra.execute(self.root, 1, self.key, True)["status"], "deferred")
 
     def full_execute(self, interrupted: bool) -> dict:
-        disk = ROOT / "artifacts" / "runtime"
+        disk = Path("/data/delayed-temporal/artifacts/runtime")
         handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
         with tempfile.TemporaryDirectory(prefix="comparison-extra-execute-test-", dir=disk) as runtime:
             self.experiment["runtime_root"] = runtime

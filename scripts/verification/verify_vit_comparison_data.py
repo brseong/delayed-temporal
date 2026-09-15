@@ -117,7 +117,8 @@ def verify_dynamic_sites() -> None:
         # Discovery follows the installed evaluator attention backend, not a flag.
         config._attn_implementation = "spiking_sdpa"
         specs = vit_calibration_specs(model, lower_quantile=0.0, upper_quantile=1.0, margin_fraction=0.05)
-        assert len(specs) == 4 * depth, (depth, len(specs))
+        assert len(specs) == 9 * depth + 1, (depth, len(specs))
+        assert len({(spec.module_name, spec.tensor_name) for spec in specs}) == len(specs)
 
 
 def verify_model_record() -> None:

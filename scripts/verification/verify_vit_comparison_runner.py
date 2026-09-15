@@ -502,6 +502,7 @@ def verify_policy2_and_preparation(root: Path) -> None:
         assert runner.prepare_execution(root, experiment) == value
     with patch.object(runner, "admission", return_value={"batch_size": 32}), \
             patch.object(runner, "pipeline") as launch, patch.object(runner, "check_source"), \
+            patch.object(runner.fcntl, "flock"), \
             patch.object(runner, "require_gpu"), patch.object(runner, "gpu_activity", return_value={4: {}}), \
             patch.object(runner, "gpu_available", return_value=True), \
             patch.object(runner, "package_versions", return_value=experiment["package_versions"]), \
