@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 CALIBRATION_SAMPLES = 5000
 CALIBRATION_SEED = 0
+DATASET_IMAGE_KEYS = {"imagenet-1k": "image", "cifar10": "img"}
 
 
 def sha256_file(path: Path) -> str:
@@ -43,28 +44,50 @@ def validate_source(source: Path, expected_commit: str) -> None:
 
 def local_training_accessors(
     dataset: Any, *, expected_fingerprint: str,
+    dataset_id: str = "imagenet-1k", sample_count: int = CALIBRATION_SAMPLES,
 ) -> tuple[Callable[..., Any], Callable[..., Any]]:
     """Return the already selected training population without another shuffle."""
-    if len(dataset) != CALIBRATION_SAMPLES:
-        raise ValueError("calibration artifact must contain exactly 5000 samples")
+    if dataset_id not in DATASET_IMAGE_KEYS:
+        raise ValueError("unsupported local calibration dataset")
+    if len(dataset) != sample_count:
+        raise ValueError("calibration artifact sample count mismatch")
     if not expected_fingerprint or dataset._fingerprint != expected_fingerprint:
         raise ValueError("calibration dataset fingerprint mismatch")
+    expected_dataset_id = dataset_id
+    expected_sample_count = sample_count
 
     def load_training(dataset_id: str, *, split: str, **_: Any) -> Any:
-        if dataset_id != "imagenet-1k" or split != "train":
-            raise ValueError("local calibration loader accepts only ImageNet training data")
+        if dataset_id != expected_dataset_id or split != "train":
+            raise ValueError("local calibration loader requires the declared training dataset")
         return dataset
 
     def select_training(loaded: Any, *, sample_count: int, seed: int) -> Any:
         if loaded is not dataset:
             raise ValueError("calibration subset must come from the verified local artifact")
-        if sample_count != CALIBRATION_SAMPLES or seed != CALIBRATION_SEED:
-            raise ValueError("local calibration requires exactly 5000 samples and seed 0")
+        if sample_count != expected_sample_count or seed != CALIBRATION_SEED:
+            raise ValueError("local calibration sample count or seed mismatch")
         if loaded._fingerprint != expected_fingerprint:
             raise ValueError("calibration dataset fingerprint changed")
         return loaded
 
     return load_training, select_training
+
+
+def calibration_dataset_view(
+    dataset: Any, *, dataset_id: str, expected_fingerprint: str, smoke_samples: int = 0,
+) -> Any:
+    """Verify the complete artifact before taking an explicitly requested smoke prefix."""
+    if dataset_id not in DATASET_IMAGE_KEYS:
+        raise ValueError("unsupported local calibration dataset")
+    if isinstance(smoke_samples, bool) or not isinstance(smoke_samples, int):
+        raise TypeError("calibration smoke samples must be an integer")
+    if not 0 <= smoke_samples < CALIBRATION_SAMPLES:
+        raise ValueError("calibration smoke samples must be zero or between 1 and 4999")
+    if len(dataset) != CALIBRATION_SAMPLES or dataset._fingerprint != expected_fingerprint:
+        raise ValueError("calibration requires the verified complete training 5000 artifact")
+    if not {DATASET_IMAGE_KEYS[dataset_id], "label"}.issubset(dataset.column_names):
+        raise ValueError("calibration artifact has incorrect image or label columns")
+    return dataset.select(range(smoke_samples)) if smoke_samples else dataset
 
 
 def bind_metadata_identity(metadata: Any, identity: dict[str, Any]) -> Any:
@@ -108,15 +131,23 @@ def progress_collector(original: Callable[..., Any]) -> Callable[..., Any]:
     return collect
 
 
-def validate_arguments(args: Any, implementation: str, magnitude_floor: float) -> None:
-    if args.model_backend != "spiking" or args.dataset_id != "imagenet-1k":
-        raise ValueError("calibrated evaluation requires spiking ImageNet ViT")
+def validate_arguments(
+    args: Any, implementation: str, magnitude_floor: float, *, smoke_samples: int = 0,
+) -> None:
+    if args.model_backend != "spiking" or args.dataset_id not in DATASET_IMAGE_KEYS:
+        raise ValueError("calibrated evaluation requires supported spiking ViT data")
     if args.calibration_mode not in {"collect", "validate", "inference"}:
         raise ValueError("calibration mode must be collect, validate, or inference")
     if not args.calibration_path:
         raise ValueError("calibration path is required")
-    if args.calibration_samples != CALIBRATION_SAMPLES or args.calibration_seed != CALIBRATION_SEED:
-        raise ValueError("calibration requires exactly 5000 samples and seed 0")
+    if isinstance(smoke_samples, bool) or not isinstance(smoke_samples, int):
+        raise TypeError("calibration smoke samples must be an integer")
+    if not 0 <= smoke_samples < CALIBRATION_SAMPLES:
+        raise ValueError("calibration smoke samples must be zero or between 1 and 4999")
+    if args.calibration_samples != (smoke_samples or CALIBRATION_SAMPLES) or args.calibration_seed != CALIBRATION_SEED:
+        raise ValueError("calibration sample count or seed does not match the explicit mode")
+    if smoke_samples and args.calibration_mode != "collect" and args.max_eval_batches <= 0:
+        raise ValueError("smoke calibration must not be used for an unlimited evaluation")
     if implementation != "phi_nl_psi_ed" or magnitude_floor != 1e-5:
         raise ValueError("calibration requires the fixed GELU cubic implementation and floor")
     if not Path(args.model_id).is_dir():
@@ -133,6 +164,10 @@ def main() -> None:
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--calibration-dataset-path", type=Path, required=True)
     parser.add_argument("--calibration-dataset-fingerprint", required=True)
+    parser.add_argument(
+        "--calibration-smoke-samples", type=int, default=0,
+        help="Explicitly use a prefix for memory checks; its table is invalid for final runs.",
+    )
     own, remaining = parser.parse_known_args()
     identity_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     identity_parser.add_argument("--source-commit", required=True)
@@ -159,16 +194,20 @@ def main() -> None:
     originals: dict[str, Any] = {}
     try:
         vit_args, implementation, floor = gelu.parse_arguments()
-        validate_arguments(vit_args, implementation, floor)
+        validate_arguments(vit_args, implementation, floor, smoke_samples=own.calibration_smoke_samples)
         if artifact_identity(Path(vit_args.model_id))["aggregate_sha256"] != vit_args.checkpoint_sha256:
             raise ValueError("checkpoint contents do not match the expected SHA-256")
         dataset = load_from_disk(str(own.calibration_dataset_path.resolve()))
         if not isinstance(dataset, Dataset):
             raise TypeError("calibration artifact must be one saved training Dataset")
-        if not {"image", "label"}.issubset(dataset.column_names):
-            raise ValueError("calibration artifact requires image and label columns")
+        dataset = calibration_dataset_view(
+            dataset, dataset_id=vit_args.dataset_id,
+            expected_fingerprint=own.calibration_dataset_fingerprint,
+            smoke_samples=own.calibration_smoke_samples,
+        )
         load_training, select_training = local_training_accessors(
-            dataset, expected_fingerprint=own.calibration_dataset_fingerprint,
+            dataset, expected_fingerprint=dataset._fingerprint,
+            dataset_id=vit_args.dataset_id, sample_count=vit_args.calibration_samples,
         )
         original_metadata = evaluator.build_vit_calibration_metadata
         bound_identity = {
@@ -177,7 +216,13 @@ def main() -> None:
             "gelu_cubic_implementation": implementation,
             "gelu_cubic_floor": floor,
             "gelu_evaluator_sha256": sha256_file(Path(gelu.__file__)),
-            "calibration_dataset_fingerprint": own.calibration_dataset_fingerprint,
+            "vit_evaluator_sha256": sha256_file(Path(evaluator.__file__)),
+            "calibration_wrapper_sha256": sha256_file(Path(__file__)),
+            "calibration_dataset_fingerprint": dataset._fingerprint,
+            "calibration_source_fingerprint": own.calibration_dataset_fingerprint,
+            "calibration_dataset_id": vit_args.dataset_id,
+            "calibration_image_key": DATASET_IMAGE_KEYS[vit_args.dataset_id],
+            "calibration_purpose": "smoke" if own.calibration_smoke_samples else "final",
         }
 
         def build_metadata(**kwargs: Any) -> Any:
@@ -206,6 +251,10 @@ def main() -> None:
             "path": str(own.calibration_dataset_path.resolve()),
             "fingerprint": dataset._fingerprint,
             "samples": len(dataset), "seed": CALIBRATION_SEED,
+            "source_fingerprint": own.calibration_dataset_fingerprint,
+            "dataset_id": vit_args.dataset_id, "split": "train",
+            "image_key": DATASET_IMAGE_KEYS[vit_args.dataset_id],
+            "purpose": "smoke" if own.calibration_smoke_samples else "final",
         }, sort_keys=True), flush=True)
         gelu.main()
         final_table_hash = sha256_file(table_path)

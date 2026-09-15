@@ -529,6 +529,12 @@ def validate_vit_runtime_arguments(args: Arguments) -> None:
             )
 
 
+def require_finite_logits(logits: torch.Tensor) -> None:
+    """Reject invalid numeric output before it can become a finite accuracy."""
+    if not bool(torch.isfinite(logits).all()):
+        raise ValueError("Evaluation logits contain NaN or infinite values")
+
+
 def load_evaluation_dataset(
     args: Arguments,
     *,
@@ -1232,6 +1238,7 @@ def evaluate_vit_model(args: Arguments) -> None:
             transform_types.set_current_module_name(None)
 
         # Logits에서 가장 높은 확률을 가진 클래스 인덱스 추출
+        require_finite_logits(outputs.logits)
         predictions = torch.argmax(outputs.logits, dim=-1)
         measured_batch = (
             not benchmark_enabled

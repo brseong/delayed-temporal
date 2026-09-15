@@ -21,6 +21,7 @@ from scripts.evaluation.error_analysis_vit import (
 )
 from utils.transformers.models.spiking_vit import modeling_spiking_vit
 from utils.transforms.functions import (
+    _constant_synaptic_scale,
     _tanh_sigmoid_gate,
     clamp_gelu_output,
     multiplication_operator,
@@ -195,13 +196,11 @@ def gelu_with_phi_nl_psi_ed_cube(
         magnitude_floor=magnitude_floor,
     )
 
-    coefficient = 0.044715
-    scaled_cube, scaled_cube_domain = multiplication_operator(
+    scaled_cube, scaled_cube_domain = _constant_synaptic_scale(
         cube,
         cube_domain,
-        input_value.new_tensor(coefficient).expand_as(input_value),
-        PotentialBounds(coefficient, coefficient),
-        theta,
+        0.044715,
+        name="gelu_phi_nl_cubic_coefficient",
     )
     inner_domain = PotentialBounds(
         domain.min + scaled_cube_domain.min,
@@ -212,13 +211,11 @@ def gelu_with_phi_nl_psi_ed_cube(
         name="gelu_phi_nl_inner",
     )
 
-    tanh_scale = 0.7978845608028654
-    tanh_input, tanh_input_domain = multiplication_operator(
+    tanh_input, tanh_input_domain = _constant_synaptic_scale(
         inner,
         inner_domain,
-        input_value.new_tensor(tanh_scale).expand_as(input_value),
-        PotentialBounds(tanh_scale, tanh_scale),
-        theta,
+        0.7978845608028654,
+        name="gelu_phi_nl_tanh_scale",
     )
     gate, gate_domain = _tanh_sigmoid_gate(
         tanh_input,

@@ -818,6 +818,26 @@ def clamp_sigmoid_exponential_input(
     return value.clamp(-cap, cap), PotentialBounds(lower, upper)
 
 
+def _constant_synaptic_scale(
+    input_value: Float[torch.Tensor, "*batch dims"],
+    domain: PotentialBounds,
+    scale: float,
+    *,
+    name: str,
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Apply a fixed synaptic scale without encoding another temporal operand."""
+    scale_value = float(scale)
+    if not isfinite(scale_value):
+        raise ValueError("constant synaptic scale must be finite")
+    endpoint_products = (
+        scale_value * float(domain.min),
+        scale_value * float(domain.max),
+    )
+    scaled_domain = PotentialBounds(min(endpoint_products), max(endpoint_products))
+    scaled_value = input_value * input_value.new_tensor(scale_value)
+    return scaled_domain.clamp(scaled_value, name=name), scaled_domain
+
+
 def _tanh_sigmoid_gate(
     input_value: Float[torch.Tensor, "*batch dims"],
     domain: PotentialBounds,
@@ -825,22 +845,19 @@ def _tanh_sigmoid_gate(
     tau_s: float,
     theta: float,
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Return ``1 / (1 + exp(-2v))`` from the shared tanh primitives."""
+    """Return ``1 / (1 + exp(-2v))`` with fixed synaptic input scaling.
+
+    ``theta`` remains a compatibility argument; no multiplication operand is
+    encoded for the fixed gain, even when ``2 * tau_s`` exceeds ``theta``.
+    """
     tau_value = float(tau_s)
     if not isfinite(tau_value) or tau_value <= 0.0:
         raise ValueError("tau_s must be finite and positive")
-    scale_const = 2.0 * tau_value
-    scale_bound = PotentialBounds(scale_const, scale_const)
-    scaled_input, _ = multiplication_operator(
+    scaled_input, scaled_domain = _constant_synaptic_scale(
         input_value,
         domain,
-        input_value.new_tensor(scale_const).expand_as(input_value),
-        scale_bound,
-        theta,
-    )
-    scaled_domain = PotentialBounds(
-        scale_const * domain.min,
-        scale_const * domain.max,
+        2.0 * tau_value,
+        name="tanh_exponential_input",
     )
 
     scaled_input_clamped, scaled_domain_clamped = clamp_sigmoid_exponential_input(
@@ -978,11 +995,10 @@ def gelu_approximation(
     x2, domain_x2 = clamp_gelu_square_output(x2, domain, theta=theta)
     x3, domain_x3 = multiplication_operator(x2, domain_x2, input_clamped, domain, theta)
 
-    # 0.044715 * x^3
-    coeff = 0.044715
-    coeff_tensor = input_value.new_tensor(coeff).expand_as(input_value)
-    coeff_domain = PotentialBounds(coeff, coeff)
-    x3_scaled, domain_x3_scaled = multiplication_operator(x3, domain_x3, coeff_tensor, coeff_domain, theta)
+    # Fixed coefficients use synaptic scaling without another encoded operand.
+    x3_scaled, domain_x3_scaled = _constant_synaptic_scale(
+        x3, domain_x3, 0.044715, name="gelu_cubic_coefficient",
+    )
 
     # x + 0.044715 * x^3. Floating-point addition can round a mathematical
     # endpoint a few ulps beyond the interval obtained from real arithmetic.
@@ -993,10 +1009,9 @@ def gelu_approximation(
     )
 
     # sqrt(2/pi) * inner
-    scale_const = 0.7978845608028654
-    scale_tensor = input_value.new_tensor(scale_const).expand_as(input_value)
-    scale_domain = PotentialBounds(scale_const, scale_const)
-    tanh_in, tanh_in_domain = multiplication_operator(inner, inner_domain, scale_tensor, scale_domain, theta)
+    tanh_in, tanh_in_domain = _constant_synaptic_scale(
+        inner, inner_domain, 0.7978845608028654, name="gelu_tanh_scale",
+    )
 
     # The tanh affine output and the following half scaling cancel exactly. Reuse
     # the normalized ratio as the [0, 1] GELU gate and avoid an extra encoded event.
@@ -1043,18 +1058,11 @@ def gelu_approximation_sigmoid(
     tau_value = float(tau_s)
     if not isfinite(tau_value) or tau_value <= 0.0:
         raise ValueError("tau_s must be finite and positive")
-    scale_const = 1.702 * tau_value
-    scale_bound = PotentialBounds(scale_const, scale_const)
-    scaled_input, _ = multiplication_operator(
+    scaled_input, scaled_domain = _constant_synaptic_scale(
         input_value,
         domain,
-        input_value.new_tensor(scale_const).expand_as(input_value),
-        scale_bound,
-        theta,
-    )
-    scaled_domain = PotentialBounds(
-        scale_const * domain.min,
-        scale_const * domain.max,
+        1.702 * tau_value,
+        name="gelu_sigmoid_exponential_input",
     )
 
     # Step 2: apply the fixed cap without creating an invalid encoding interval.

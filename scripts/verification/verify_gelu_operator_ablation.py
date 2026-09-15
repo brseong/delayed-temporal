@@ -166,13 +166,13 @@ def verify_gelu_operator_event_selection() -> None:
             )
             stats = get_gaussian_noise_stats()
 
-            # GELU contains six multiplication calls. Each call samples one event
+            # GELU contains three dynamic multiplication calls. Each samples one event
             # per tensor element plus one scalar reference shared by the call.
             expected_multiplication_events = (
-                0 if "multiplication" in selected else 6 * element_count
+                0 if "multiplication" in selected else 3 * element_count
             )
             expected_multiplication_references = (
-                0 if "multiplication" in selected else 6
+                0 if "multiplication" in selected else 3
             )
             assert stats.get("multiplication.data", {}).get("events", 0) == (
                 expected_multiplication_events

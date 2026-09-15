@@ -1,0 +1,460 @@
+"""Verify comparison assignments, result evidence and memory admission without GPUs."""
+from __future__ import annotations
+
+import copy
+import json
+import math
+import os
+from pathlib import Path
+import sys
+import tempfile
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from scripts.experiments import run_vit_comparison as runner
+from scripts.experiments import vit_comparison as contract
+
+
+def reject(action, errors=(ValueError, KeyError, FileNotFoundError, RuntimeError)) -> None:
+    try:
+        action()
+    except errors:
+        return
+    raise AssertionError("Invalid comparison evidence was accepted")
+
+
+def put_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, sort_keys=True, allow_nan=False))
+
+
+def experiment_fixture(root: Path) -> dict:
+    models = []
+    for index, key in enumerate(contract.MODEL_KEYS):
+        cifar, large = index == 0, index == 3
+        models.append({
+            "model_key": key, "task": "cifar10" if cifar else "imagenet-1k",
+            "architecture": "ViT-L/16" if large else "ViT-B/16" if index == 2 else "ViT-S/16",
+            "checkpoint_id": key, "checkpoint_path": str(root / "assets" / key),
+            "checkpoint_sha256": str(index + 1) * 64,
+            "preprocessing_sha256": "a" * 64,
+            "checkpoint_config": {
+                "id2label": {str(i): str(i) for i in range(10 if cifar else 1000)},
+                "num_hidden_layers": 24 if large else 12,
+                "hidden_size": 1024 if large else 768 if index == 2 else 384,
+                "num_attention_heads": 16 if large else 12 if index == 2 else 6,
+                "intermediate_size": 4096 if large else 3072 if index == 2 else 1536,
+                "image_size": 224, "patch_size": 16, "num_channels": 3,
+            },
+            "calibration_dataset_path": str(root / "assets" / ("cifar_train" if cifar else "imagenet_train")),
+            "calibration_dataset_fingerprint": "training-data",
+            "calibration_dataset_sha256": "5" * 64,
+            "dataset_path": str(root / "assets" / ("cifar_test" if cifar else "imagenet_validation")),
+            "dataset_fingerprint": "evaluation-data", "dataset_sha256": "6" * 64,
+            "expected_samples": 10000 if cifar else 5000,
+            "evaluation_split": "test" if cifar else "validation", "evaluation_quick_test": not cifar,
+        })
+    experiment = {
+        "tag": contract.TAG, "theta": 40.0, "precision": "float64", "output_bounds_version": 3,
+        "tau_s": 1.0, "tracking": "disabled", "local_gpu_ids": [4, 5, 6, 7],
+        "evaluation_count": 8, "calibration_count": 4, "models": models,
+        "source_commit": "a" * 40, "source_root": str(root / "source"),
+        "python_bin": sys.executable, "runtime_root": str(root / "runtime"),
+        "evaluator_path": "scripts/evaluation/error_analysis_vit.py", "evaluator_sha256": "7" * 64,
+        "calibration_evaluator_path": "scripts/analysis/evaluate_calibrated_vit.py", "calibration_evaluator_sha256": "8" * 64,
+        "gelu_evaluator_path": "scripts/analysis/gelu_cubic_phi_nl_vit.py", "gelu_evaluator_sha256": "9" * 64,
+        "dependency_sha256": {"transformers": "b" * 64, "spikingjelly": "c" * 64},
+        "runtime_sha256": {runner.SCRIPT: "d" * 64, "scripts/experiments/vit_comparison.py": "e" * 64},
+        "package_versions": {name: "1.0" for name in (
+            "torch", "torchvision", "transformers", "spikingjelly", "numpy", "datasets",
+            "safetensors", "timm", "tokenizers", "scipy")},
+        "assets_manifest_sha256": "f" * 64, "asset_checks": {},
+    }
+    return experiment
+
+
+def table_fixture(experiment: dict, task: dict) -> dict:
+    row = contract.model_by_key(experiment, task["model_key"])
+    smoke = task["calibration_samples"] != 5000
+    fingerprint = "smoke-prefix-data" if smoke else row["calibration_dataset_fingerprint"]
+    options = {
+        "source_commit": experiment["source_commit"], "output_bounds_version": 3,
+        "checkpoint_sha256": row["checkpoint_sha256"],
+        "gelu_evaluator_sha256": experiment["gelu_evaluator_sha256"],
+        "vit_evaluator_sha256": experiment["evaluator_sha256"],
+        "calibration_wrapper_sha256": experiment["calibration_evaluator_sha256"],
+        "gelu_cubic_implementation": "phi_nl_psi_ed", "gelu_cubic_floor": 1e-5,
+        "calibration_dataset_fingerprint": fingerprint,
+        "calibration_source_fingerprint": row["calibration_dataset_fingerprint"],
+        "calibration_dataset_id": row["task"], "calibration_image_key": "img" if row["task"] == "cifar10" else "image",
+        "calibration_purpose": "smoke" if smoke else "final",
+        "attention_implementation": "spiking_sdpa", "hidden_act": "gelu", "gelu_output_min": -0.170041,
+        "spiking_ln_mul": True, "spiking_ln_log": True, "spiking_ln_expdiff": True,
+        "use_spiking_layernorm": True, "use_spiking_mlp": True, "spiking_mlp_exact_gelu": False,
+    }
+    layers = []
+    for index in range(row["checkpoint_config"]["num_hidden_layers"]):
+        for suffix, name in (("", "attention_residual"), ("", "output"),
+                             (".attention.attention", "attention_score"), (".intermediate", "activation_input")):
+            attention = name == "attention_score"
+            layers.append({
+                "module_name": f"vit.encoder.layer.{index}{suffix}", "tensor_name": name,
+                "bounds": {"min": -1.0, "max": 1.0}, "observed_min": -0.9, "observed_max": 0.9,
+                "num_values": 100, "lower_quantile": 0.0, "upper_quantile": 1.0, "margin_fraction": 0.05,
+                "fixed_min": -40.0 if attention else None, "fixed_max": 40.0 if attention else None,
+                "range_policy": "signed_symmetric_ceiling" if attention else "signed_symmetric",
+                "histogram": {"bounds": {"min": -0.9, "max": 0.9}, "num_values": 100,
+                              "underflows": 0, "overflows": 0, "bin_counts": [100] + [0] * 2047},
+            })
+    return {"format_version": 1, "layers": layers, "metadata": {
+        "theta": 40.0, "dtype": "float64", "dataset_split": "train", "dataset_id": row["task"],
+        "model_id": row["checkpoint_path"], "model_family": "vit", "input_shape": [3, 224, 224],
+        "tau_s": 1.0, "tau_m": 1.0, "clip_margin": 1e-5, "max_sequence_length": None,
+        "model_options": sorted(options.items()),
+        "preprocessing": json.dumps({"subset_samples": task["calibration_samples"], "subset_seed": 0,
+                                     "subset_fingerprint": fingerprint, "subset_selection": "seeded_training_permutation_prefix"}),
+    }}
+
+
+def log_fixture(experiment: dict, task: dict) -> str:
+    row = contract.model_by_key(experiment, task["model_key"])
+    samples, correct = task["expected_samples"], task["expected_samples"] * 4 // 5
+    text = (
+        "Slurm identity — job: fixture, gpu_family: rtxa6000\n"
+        "Comparison task — " + json.dumps({"task_sha256": contract.task_sha256(task), "batch_size": task["batch_size"]}) + "\n"
+        "GPU model: NVIDIA RTX A6000\n"
+        f"Model backend: {task['backend']}\n"
+        f"Artifact identity — source_commit: {task['source_commit']}, checkpoint_sha256: {task['checkpoint_sha256']}\n"
+        "Gaussian time noise — enabled: False, std_frac: 0.0, identity_window: 80.0, "
+        "std_abs: 0.0, mean_abs: 0.0, seed: 0, identity_deadline_ulp: 1e-12, "
+        "std_to_identity_ulp: 0.0, deadline_margin_std: 0.0, deadline_margin_abs: 0.0\n"
+        "Static threshold mismatch — enabled: False, theta_std: 0.0, seed: 0\n"
+        f"Evaluation metadata — model: {row['checkpoint_path']}, dataset: {row['task']}, split: {task['split']}, "
+        f"samples: {row['expected_samples']}, theta: 40.0, precision: float64, source: disk:{row['dataset_path']}, "
+        f"fingerprint: {task['dataset_fingerprint']}\n"
+        f"Correct: {correct}\nEvaluated samples: {samples}\nPrediction SHA256: {'f' * 64}\nAccuracy: {correct / samples}\n"
+    )
+    if task["backend"] == "spiking":
+        text += (
+            "GELU cubic implementation: phi_nl_psi_ed\nGELU cubic magnitude floor: 1e-05\n"
+            f"Calibration identity — mode: validate, sha256: {task['calibration_sha256']}\n"
+            "Spiking LayerNorm: True, Spiking Attention: True\n"
+            "  LN stages — mul: True, log: True, expdiff: True\nSpiking MLP: True\n"
+            "Clamp[layernorm/test] values=100, underflows=1 (rate=0.01), overflows=2 (rate=0.02)\n"
+        )
+    return text
+
+
+def completed_fixture(root: Path, experiment: dict, task: dict) -> dict:
+    collect = task["kind"] in {"collect", "smoke_collect"}
+    if task["calibration_file"]:
+        table_path = root / task["calibration_file"]
+        put_json(table_path, table_fixture(experiment, task))
+        table_hash = contract.sha256_file(table_path)
+    else:
+        table_hash = ""
+    if not collect and task["kind"] != "dense":
+        task = contract.make_task(experiment, task["model_key"], task["kind"], task["batch_size"],
+                                  calibration_sha256=table_hash, host_label=task.get("host_label"))
+    put_json(root / "tasks" / (task["run_id"] + ".json"), task)
+    log = root / task["log_file"]
+    log.parent.mkdir(parents=True, exist_ok=True)
+    if collect:
+        log.write_text(
+            "Comparison task — " + json.dumps({"task_sha256": contract.task_sha256(task), "batch_size": task["batch_size"]}) + "\n"
+            "Calibration progress — " + json.dumps({"completed_batches": 2 * math.ceil(task["calibration_samples"] / task["batch_size"]),
+                "total_batches": 2 * math.ceil(task["calibration_samples"] / task["batch_size"]),
+                "completed_samples": 2 * task["calibration_samples"], "pass": 2, "elapsed_seconds": 1.0}) + "\n"
+            f"Calibration identity — mode: collect, sha256: {table_hash}\n")
+    else:
+        log.write_text(log_fixture(experiment, task))
+    result = {
+        **task, "success": True, "task_sha256": contract.task_sha256(task),
+        "experiment_sha256": contract.task_sha256(experiment), "host_label": task.get("host_label", "local"),
+        "elapsed_seconds": 1.0, "log_sha256": contract.sha256_file(log), "calibration_sha256": table_hash,
+    }
+    if collect:
+        result["sites"] = 4 * contract.model_by_key(experiment, task["model_key"])["checkpoint_config"]["num_hidden_layers"]
+        result["samples"] = result["total"] = task["calibration_samples"]
+    else:
+        result.update(contract.parsed_result(task, root))
+    put_json(root / task["result_file"], result)
+    return json.loads(json.dumps(result))
+
+
+def verify_pipeline_outputs(root: Path) -> None:
+    experiment = experiment_fixture(root)
+    put_json(root / "experiment.json", experiment)
+    invoked = []
+    def execute(output, exp, task, host):
+        invoked.append((task["model_key"], task["kind"]))
+        return completed_fixture(output, exp, task)
+    with patch.object(runner, "admission", return_value={"batch_size": 32}), \
+            patch.object(runner, "run_task", side_effect=execute), patch.object(runner, "event"):
+        for key in contract.MODEL_KEYS:
+            runner.pipeline(root, experiment, key, "local")
+    assert invoked == [(key, kind) for key in contract.MODEL_KEYS for kind in ("collect", "dense", "spiking")]
+    # Constructed results intentionally use the worker's exact schema. A reducer
+    # requiring fields which the worker does not emit must fail this integration.
+    value = runner.summarize(root, experiment, require_complete=True)
+    assert value["complete"] and value["calibrations_complete"] == 4 and value["evaluations_complete"] == 8
+    from scripts.analysis.summarize_vit_comparison import verify_publication_bundle
+    verify_publication_bundle(root / "outputs")
+
+
+def verify_worker_integration(root: Path) -> None:
+    """Exercise the real worker's persisted schema with a simulated evaluator child."""
+    experiment = experiment_fixture(root)
+    source = Path(experiment["source_root"])
+    source.mkdir()
+    # The worker must reject /tmp even in tests, so only its scoped scratch path
+    # uses the maintained disk-backed runtime tree.
+    disk_root = ROOT / "artifacts/runtime"
+    disk_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="comparison-worker-test-", dir=disk_root) as runtime:
+        experiment["runtime_root"] = runtime
+        for kind in ("collect", "dense", "spiking", "smoke_collect", "smoke_spiking"):
+            table_name = "smoke/cifar10_vit_small/bs32/calibration.json" if kind.startswith("smoke") else "calibration/cifar10_vit_small.json"
+            digest = contract.sha256_file(root / table_name) if kind in {"spiking", "smoke_spiking"} else ""
+            task = contract.make_task(experiment, "cifar10_vit_small", kind, 32, calibration_sha256=digest)
+            class Child:
+                def __init__(self, command, *, stdout, **kwargs):
+                    assert command == contract.evaluator_command(experiment, task, root)
+                    assert kwargs["start_new_session"] is True
+                    assert kwargs["env"]["CUDA_VISIBLE_DEVICES"] == "4"
+                    if kind in {"collect", "smoke_collect"}:
+                        path = root / task["calibration_file"]
+                        put_json(path, table_fixture(experiment, task))
+                        total_batches = 2 * math.ceil(task["calibration_samples"] / task["batch_size"])
+                        stdout.write("Calibration progress — " + json.dumps({
+                            "completed_batches": total_batches, "total_batches": total_batches,
+                            "completed_samples": 2 * task["calibration_samples"], "pass": 2,
+                            "elapsed_seconds": 0.01}) + "\n")
+                        stdout.write(f"Calibration identity — mode: collect, sha256: {contract.sha256_file(path)}\n")
+                    else:
+                        text = "\n".join(line for line in log_fixture(experiment, task).splitlines()
+                                         if not line.startswith(("Slurm identity — ", "Comparison task — ")))
+                        stdout.write(text + "\n")
+                    stdout.flush()
+                def wait(self, **_):
+                    return 0
+                def poll(self):
+                    return 0
+            with patch.object(runner, "check_source"), patch.object(runner, "check_assets"), \
+                    patch.object(runner, "event"), patch.object(runner.subprocess, "Popen", Child), \
+                    patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "4"}):
+                result = runner.run_task(root, experiment, task, "local")
+                reloaded = runner.completed(root, experiment, task)
+                assert reloaded == result
+                assert runner.run_task(root, experiment, task, "local") == result
+        value = runner.summarize(root, experiment)
+        assert value["calibrations_complete"] == 1 and value["evaluations_complete"] == 2
+
+
+def verify_contract(root: Path) -> None:
+    experiment = experiment_fixture(root)
+    contract.validate_experiment(experiment)
+    tasks = [contract.make_task(experiment, key, kind, 32, calibration_sha256="b" * 64 if kind == "spiking" else "")
+             for key in contract.MODEL_KEYS for kind in ("collect", "dense", "spiking")]
+    assert len({task["run_id"] for task in tasks}) == 12
+    assert sum(task["kind"] == "collect" for task in tasks) == 4
+    assert sum(task["kind"] in {"dense", "spiking"} for task in tasks) == 8
+    for task in tasks:
+        contract.validate_task(task, experiment)
+        for field, value in (("source_commit", "b" * 40), ("checkpoint_sha256", "a" * 64),
+                             ("dataset_fingerprint", "other"), ("time_noise_std_frac", 1e-5),
+                             ("deadline_margin_std", 4.0), ("gelu_evaluator_sha256", "0" * 64)):
+            reject(lambda: contract.validate_task({**task, field: value}, experiment))
+        reject(lambda: contract.validate_task({**task, "preprocessing_sha256": "0" * 64}, experiment))
+    for batch in (0, 1, 4, 64, 128):
+        reject(lambda: contract.make_task(experiment, contract.MODEL_KEYS[0], "collect", batch))
+    for field, value in (("local_gpu_ids", list(range(8))), ("theta", 2000), ("evaluation_count", 4)):
+        reject(lambda: contract.validate_experiment({**experiment, field: value}))
+    for field in ("dependency_sha256", "runtime_sha256", "package_versions"):
+        reject(lambda: contract.validate_experiment({**experiment, field: {}}))
+    for field, value in (("dataset_fingerprint", ""), ("calibration_dataset_fingerprint", ""),
+                         ("evaluation_quick_test", True)):
+        changed = copy.deepcopy(experiment)
+        changed["models"][0][field] = value
+        reject(lambda: contract.validate_experiment(changed))
+
+
+def verify_commands(root: Path) -> None:
+    experiment = experiment_fixture(root)
+    for key in contract.MODEL_KEYS:
+        for kind in ("collect", "dense", "spiking", "smoke_collect", "smoke_spiking"):
+            task = contract.make_task(experiment, key, kind, 16, calibration_sha256="b" * 64)
+            args = contract.evaluator_command(experiment, task, root)
+            at = lambda name: args[args.index(name) + 1]
+            assert at("--batch_size") == "16" and at("--theta") == "40" and at("--precision") == "float64"
+            assert "--no-tensorboard" in args and "--no-gaussian-time-noise" in args and "--no-mismatch-enabled" in args
+            for flag in ("--time-noise-std-frac", "--time-noise-mean", "--time-noise-deadline-margin-std", "--mismatch-theta-std", "--weight-noise-std", "--bias-noise-std"):
+                assert float(at(flag)) == 0
+            assert ("--quick-test" in args) == (key != "cifar10_vit_small")
+            if kind.startswith("smoke"):
+                assert at("--calibration-smoke-samples") == at("--calibration-samples") == "32"
+                assert "smoke/" in at("--calibration-path")
+                if kind == "smoke_spiking":
+                    assert at("--max_eval_batches") == "2"
+            else:
+                assert "--max_eval_batches" not in args and "--calibration-smoke-samples" not in args
+
+
+def verify_tables(root: Path) -> None:
+    experiment = experiment_fixture(root)
+    for key in contract.MODEL_KEYS:
+        for kind in ("collect", "smoke_collect"):
+            task = contract.make_task(experiment, key, kind, 32)
+            table = table_fixture(experiment, task)
+            path = root / task["calibration_file"]
+            put_json(path, table)
+            contract.validate_table(path, task, experiment)
+            for field, value in (("source_commit", "z" * 40), ("gelu_evaluator_sha256", "0" * 64),
+                                 ("vit_evaluator_sha256", "0" * 64), ("calibration_wrapper_sha256", "0" * 64),
+                                 ("calibration_source_fingerprint", "other"), ("calibration_purpose", "wrong"),
+                                 ("attention_implementation", "eager"), ("output_bounds_version", 2)):
+                changed = copy.deepcopy(table)
+                options = dict(changed["metadata"]["model_options"])
+                options[field] = value
+                changed["metadata"]["model_options"] = sorted(options.items())
+                put_json(path, changed)
+                reject(lambda: contract.validate_table(path, task, experiment))
+            for mutation in (lambda t: t["layers"].pop(), lambda t: t["layers"].__setitem__(0, t["layers"][1]),
+                             lambda t: t["layers"][0].__setitem__("module_name", "another.module"),
+                             lambda t: t["layers"][0]["histogram"].__setitem__("bin_counts", [100, 0]),
+                             lambda t: t["metadata"].__setitem__("dataset_id", "another-dataset")):
+                changed = copy.deepcopy(table)
+                mutation(changed)
+                put_json(path, changed)
+                reject(lambda: contract.validate_table(path, task, experiment))
+            put_json(path, table)
+
+
+def verify_completed_logs(root: Path) -> None:
+    experiment = experiment_fixture(root)
+    for key in contract.MODEL_KEYS:
+        for kind in ("collect", "dense", "spiking", "smoke_collect", "smoke_spiking"):
+            result = completed_fixture(root, experiment, contract.make_task(experiment, key, kind, 32))
+            task = runner.read_json(root / "tasks" / (result["run_id"] + ".json"))
+            contract.validate_result(task, result, experiment, root)
+            assert runner.completed(root, experiment, task) == result
+            for field, value in (("success", False), ("source_commit", "b" * 40), ("task_sha256", "f" * 64),
+                                 ("experiment_sha256", "f" * 64), ("log_sha256", "f" * 64)):
+                reject(lambda: contract.validate_result(task, {**result, field: value}, experiment, root))
+            if kind not in {"collect", "smoke_collect"}:
+                log = root / task["log_file"]
+                original = log.read_text()
+                for changed in (original.replace("Prediction SHA256:", "Partial prediction:"), original + "Correct: 0\n",
+                                original.replace("Comparison task — ", "Wrong task — "), original + "Traceback (most recent call last)\n"):
+                    log.write_text(changed)
+                    reject(lambda: contract.parsed_result(task, root))
+                log.write_text(original)
+
+
+def verify_admission(root: Path) -> None:
+    experiment, key = experiment_fixture(root), "imagenet_vit_base"
+    calls = []
+    def execute(output, exp, task, host):
+        calls.append((task["kind"], task["batch_size"]))
+        if task["batch_size"] == 32:
+            path = output / task["log_file"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("torch.OutOfMemoryError: CUDA out of memory\n")
+            raise RuntimeError("evaluator exited")
+        return completed_fixture(output, exp, task)
+    with patch.object(runner, "run_task", side_effect=execute), patch.object(runner, "event"):
+        selected = runner.admission(root, experiment, key, "local")
+        assert selected["batch_size"] == 16
+        assert calls == [("smoke_collect", 32), ("smoke_collect", 16), ("smoke_spiking", 16)]
+        assert runner.admission(root, experiment, key, "local") == selected
+        admission_path = root / "admissions" / (key + ".json")
+        for field, value in (("result_sha256", {}), ("batch_size", 8), ("model_key", "imagenet_vit_small"),
+                             ("calibration_sha256", "0" * 64), ("prediction_sha256", "0" * 64)):
+            put_json(admission_path, {**selected, field: value})
+            reject(lambda: runner.admission(root, experiment, key, "local"))
+        put_json(admission_path, selected)
+    bad_root = root / "technical_failure"
+    bad_root.mkdir()
+    with patch.object(runner, "run_task", side_effect=RuntimeError("bad input")) as call:
+        reject(lambda: runner.admission(bad_root, experiment, key, "local"))
+        assert call.call_count == 1
+    oom_root = root / "all_oom"
+    oom_root.mkdir()
+    def oom(output, exp, task, host):
+        path = output / task["log_file"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("CUDA out of memory\n")
+        raise RuntimeError("evaluator exited")
+    with patch.object(runner, "run_task", side_effect=oom) as call, patch.object(runner, "event"):
+        reject(lambda: runner.admission(oom_root, experiment, key, "local"))
+        assert [item.args[2]["batch_size"] for item in call.call_args_list] == [32, 16, 8]
+
+
+def verify_source_and_gpu(root: Path) -> None:
+    experiment = experiment_fixture(root)
+    with patch("subprocess.check_output", side_effect=["b" * 40 + "\n", ""]):
+        reject(lambda: contract.check_source(experiment))
+    with patch("subprocess.check_output", side_effect=[experiment["source_commit"] + "\n", " M changed.py\n"]):
+        reject(lambda: contract.check_source(experiment))
+    for prefix in ("evaluator", "calibration_evaluator", "gelu_evaluator"):
+        path = Path(experiment["source_root"]) / experiment[prefix + "_path"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture " + prefix)
+        experiment[prefix + "_sha256"] = contract.sha256_file(path)
+    for name in experiment["runtime_sha256"]:
+        path = Path(experiment["source_root"]) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture runtime " + name)
+        experiment["runtime_sha256"][name] = contract.sha256_file(path)
+    def dependency_identity(path):
+        return experiment["dependency_sha256"]["transformers" if path.name == "src" else "spikingjelly"], []
+    with patch("subprocess.check_output", side_effect=lambda args, **kwargs: experiment["source_commit"] + "\n" if args[-1] == "HEAD" else ""), \
+            patch("scripts.experiments.ubai.prepare_calibrated_three_sweeps_ubai.package_source_identity", side_effect=dependency_identity):
+        contract.check_source(experiment)
+        for prefix in ("evaluator", "calibration_evaluator", "gelu_evaluator"):
+            reject(lambda: contract.check_source({**experiment, prefix + "_sha256": "0" * 64}))
+        changed = copy.deepcopy(experiment)
+        changed["runtime_sha256"][runner.SCRIPT] = "0" * 64
+        reject(lambda: contract.check_source(changed))
+        changed = copy.deepcopy(experiment)
+        changed["dependency_sha256"]["transformers"] = "0" * 64
+        reject(lambda: contract.check_source(changed))
+    good = json.dumps({"count": 1, "model": "NVIDIA RTX A6000"})
+    for gpu in (4, 5, 6, 7):
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": str(gpu)}), patch("subprocess.check_output", return_value=good):
+            assert contract.require_gpu(experiment, "local") == "NVIDIA RTX A6000"
+    for gpu in ("0", "1", "2", "3", "", "4,5", "8", "-1"):
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": gpu}), patch("subprocess.check_output") as query:
+            reject(lambda: contract.require_gpu(experiment, "local"))
+            query.assert_not_called()
+    assert not runner.gpu_available({"memory_used_mib": 20000, "utilization_gpu_percent": 0, "pids": []})
+    assert not runner.gpu_available({"memory_used_mib": 0, "utilization_gpu_percent": 100, "pids": []})
+    assert runner.gpu_available({"memory_used_mib": 0, "utilization_gpu_percent": 0, "pids": [12345]})
+    for changed in ({"count": 2, "model": "NVIDIA RTX A6000"}, {"count": 1, "model": "NVIDIA RTX 3090"}):
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "4"}), patch("subprocess.check_output", return_value=json.dumps(changed)):
+            reject(lambda: contract.require_gpu(experiment, "local"))
+
+
+def main() -> None:
+    checks = (verify_contract, verify_commands, verify_tables, verify_completed_logs,
+              verify_admission, verify_source_and_gpu, verify_pipeline_outputs, verify_worker_integration)
+    failures = []
+    with tempfile.TemporaryDirectory(prefix="vit-comparison-runner-tests-") as temporary:
+        for check in checks:
+            root = Path(temporary) / check.__name__
+            root.mkdir()
+            try:
+                check(root)
+                print(f"PASS {check.__name__}")
+            except Exception as error:
+                failures.append((check.__name__, repr(error)))
+                print(f"FAIL {check.__name__}: {error!r}")
+    if failures:
+        raise AssertionError(failures)
+    print(f"Comparison runner verification passed ({len(checks)} groups).")
+
+
+if __name__ == "__main__":
+    main()

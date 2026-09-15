@@ -19,6 +19,7 @@ from scripts.evaluation.error_analysis_vit import (
 )
 from utils.transformers.models.spiking_vit import modeling_spiking_vit
 from utils.transforms.functions import (
+    _constant_synaptic_scale,
     clamp_gelu_output,
     clamp_gelu_square_output,
     clamp_sigmoid_exponential_input,
@@ -354,14 +355,12 @@ def gelu_operator_ablation(
     x2, domain_x2 = clamp_gelu_square_output(x2, domain, theta=theta)
     x3, domain_x3 = multiply(x2, domain_x2, input_clamped, domain)
 
-    # Apply both fixed polynomial coefficients through the selected multiplication
-    # path so the multiplication ablation covers constant as well as data factors.
-    cubic_coefficient = input_value.new_tensor(0.044715).expand_as(input_value)
-    x3_scaled, domain_x3_scaled = multiply(
+    # Fixed coefficients do not add encoded operands or shadow Gaussian draws.
+    x3_scaled, domain_x3_scaled = _constant_synaptic_scale(
         x3,
         domain_x3,
-        cubic_coefficient,
-        PotentialBounds(0.044715, 0.044715),
+        0.044715,
+        name="gelu_ablation_cubic_coefficient",
     )
     inner_domain = PotentialBounds(
         domain.min + domain_x3_scaled.min,
@@ -371,23 +370,23 @@ def gelu_operator_ablation(
         input_clamped + x3_scaled,
         name="gelu_ablation_inner",
     )
-    tanh_scale = input_value.new_tensor(0.7978845608028654).expand_as(input_value)
-    tanh_input, tanh_input_domain = multiply(
+    tanh_input, tanh_input_domain = _constant_synaptic_scale(
         inner,
         inner_domain,
-        tanh_scale,
-        PotentialBounds(0.7978845608028654, 0.7978845608028654),
+        0.7978845608028654,
+        name="gelu_ablation_tanh_scale",
     )
 
     # Construct the direct gate 1/(1+exp(-2z)) locally so exponential and division
     # can be ablated independently while matching the production composition.
-    exponent_scale = 2.0 * float(tau_s)
-    exponent_scale_tensor = input_value.new_tensor(exponent_scale).expand_as(input_value)
-    scaled_tanh_input, scaled_tanh_domain = multiply(
+    tau_value = float(tau_s)
+    if not isfinite(tau_value) or tau_value <= 0.0:
+        raise ValueError("tau_s must be finite and positive")
+    scaled_tanh_input, scaled_tanh_domain = _constant_synaptic_scale(
         tanh_input,
         tanh_input_domain,
-        exponent_scale_tensor,
-        PotentialBounds(exponent_scale, exponent_scale),
+        2.0 * tau_value,
+        name="gelu_ablation_exponential_input",
     )
     scaled_tanh_input, scaled_tanh_domain = clamp_sigmoid_exponential_input(
         scaled_tanh_input, scaled_tanh_domain, tau_s=tau_s, limit=80.0,

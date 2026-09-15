@@ -1955,7 +1955,7 @@ def verify_gaussian_tanh_function() -> None:
         )
         assert deterministic_domain == expected_domain
 
-        # Zero standard deviation traverses multiplication, exponential, division,
+        # Zero standard deviation traverses fixed scaling, exponential, division,
         # and the public tanh clamp without perturbing any carrier. It must preserve
         # both values and rails while counting every final activation exactly once.
         set_gaussian_time_noise(enabled=True, time_std=0.0, seed=851)
@@ -1973,8 +1973,8 @@ def verify_gaussian_tanh_function() -> None:
         )
         assert zero_noise_domain == expected_domain
         zero_stats = get_gaussian_noise_stats()
-        assert zero_stats["multiplication.data"]["events"] == value.numel()
-        assert zero_stats["multiplication.reference"]["events"] == 1
+        assert zero_stats.get("multiplication.data", {}).get("events", 0) == 0
+        assert zero_stats.get("multiplication.reference", {}).get("events", 0) == 0
         assert zero_stats["exponential.input"]["events"] == value.numel()
         assert zero_stats["division.numerator"]["events"] == value.numel()
         assert zero_stats["division.denominator"]["events"] == value.numel()
@@ -2072,7 +2072,7 @@ def verify_gaussian_sigmoid_gelu_function() -> None:
         assert deterministic_domain == expected_domain
 
         # Zero-noise event-aware execution must preserve the complete composition.
-        # Two multiplication calls scale and gate the input; one gate output counter
+        # Fixed scaling adds no event; one multiplication gates the input. One counter
         # is recorded per activation without underflow or overflow.
         set_gaussian_time_noise(enabled=True, time_std=0.0, seed=861)
         zero_noise, zero_noise_domain = gelu_approximation_sigmoid(
@@ -2089,8 +2089,8 @@ def verify_gaussian_sigmoid_gelu_function() -> None:
         )
         assert zero_noise_domain == expected_domain
         zero_stats = get_gaussian_noise_stats()
-        assert zero_stats["multiplication.data"]["events"] == 2 * value.numel()
-        assert zero_stats["multiplication.reference"]["events"] == 2
+        assert zero_stats["multiplication.data"]["events"] == value.numel()
+        assert zero_stats["multiplication.reference"]["events"] == 1
         assert zero_stats["exponential.input"]["events"] == value.numel()
         assert zero_stats["division.numerator"]["events"] == value.numel()
         assert zero_stats["division.denominator"]["events"] == value.numel()
