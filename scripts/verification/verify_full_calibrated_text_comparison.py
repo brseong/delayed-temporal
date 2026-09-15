@@ -68,6 +68,7 @@ def verify_gpt2_parser() -> None:
             "valid_token_count": 10 * batch, "token_weighted_loss": 3.0,
             "token_weighted_perplexity": 20.085536923187668,
         }, sort_keys=True))
+    rows[1] = " 50%|progress| " + rows[1]
     text = "Evaluation dataset fingerprint: xyz\n" + "\n".join(rows)
     text += "\nCalibration[layer/site] values=100, underflows=0 (rate=0), overflows=0 (rate=0)\n"
     result = runner.parse_gpt2(text, 10, {"layer/site"})

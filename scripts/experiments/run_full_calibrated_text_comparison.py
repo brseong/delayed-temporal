@@ -182,12 +182,26 @@ def parse_classification(log: str, expected_samples: int, sites: set[str] | None
     return result
 
 
-def parse_gpt2(log: str, expected_samples: int, sites: set[str] | None) -> dict[str, Any]:
-    fingerprints = re.findall(r"^Evaluation dataset fingerprint: (\S+)\s*$", log, re.MULTILINE)
+def json_event_rows(log: str, event: str) -> list[dict[str, Any]]:
+    """Parse flushed JSON even when a progress bar prefix shares the output line."""
     rows = []
     for line in log.splitlines():
-        if line.startswith("{") and '"event": "evaluation_progress"' in line:
-            rows.append(json.loads(line))
+        start = line.find("{")
+        if start < 0 or f'"event": "{event}"' not in line[start:]:
+            continue
+        try:
+            value = json.loads(line[start:])
+        except json.JSONDecodeError as error:
+            raise ValueError(f"malformed {event} record") from error
+        if value.get("event") != event:
+            raise ValueError(f"mismatched {event} record")
+        rows.append(value)
+    return rows
+
+
+def parse_gpt2(log: str, expected_samples: int, sites: set[str] | None) -> dict[str, Any]:
+    fingerprints = re.findall(r"^Evaluation dataset fingerprint: (\S+)\s*$", log, re.MULTILINE)
+    rows = json_event_rows(log, "evaluation_progress")
     expected_batches = math.ceil(expected_samples / BATCH_SIZE)
     if len(fingerprints) != 1 or len(rows) != expected_batches:
         raise ValueError("GPT-2 result is missing or incomplete")
@@ -228,8 +242,7 @@ def update_progress(output: Path, family: str, phase: str, log_path: Path) -> No
         return
     text = log_path.read_text(errors="replace")
     if phase == "collect" and family == "gpt2":
-        rows = [json.loads(line) for line in text.splitlines()
-                if line.startswith("{") and '"event": "calibration_progress"' in line]
+        rows = json_event_rows(text, "calibration_progress")
         progress = rows[-1] if rows else None
     elif phase == "collect":
         matches = re.findall(
@@ -248,8 +261,7 @@ def update_progress(output: Path, family: str, phase: str, log_path: Path) -> No
                         "estimated_remaining_seconds": float(elapsed) *
                         (total_batches - completed) / completed}
     elif family == "gpt2":
-        rows = [json.loads(line) for line in text.splitlines()
-                if line.startswith("{") and '"event": "evaluation_progress"' in line]
+        rows = json_event_rows(text, "evaluation_progress")
         progress = rows[-1] if rows else None
     else:
         matches = re.findall(
