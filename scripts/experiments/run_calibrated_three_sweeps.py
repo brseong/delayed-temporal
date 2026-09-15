@@ -27,6 +27,11 @@ from scripts.experiments.calibrated_three_sweeps import (
 )
 
 LOCAL_GPUS = (4, 5, 6, 7)
+SUPPORTED_LOCAL_GPUS = tuple(range(8))
+CPU_GPU_ORDER = (4, 5, 6, 7, 0, 1, 2, 3)
+LOCAL_WORKER = 'scripts/experiments/run_calibrated_three_sweep_local_task.py'
+REBALANCE_MIN_WAIT_SECONDS = 60
+TEMPORARY_GPU_SOURCE = '36615ab4390f9817e3af0e4c4a6f840fc6bd57ee'
 GPU_ADMISSION_POLICY = {'max_memory_used_mib': 1024.0, 'max_utilization_gpu_percent': 5.0}
 UBAI_RESOURCE_POLICY = {'max_gpus': 12, 'max_running_jobs': 10, 'max_submitted_jobs': 20,
                         'experiments_per_paired_job': 2}
@@ -130,14 +135,14 @@ def initialize(root: Path, source: Path, python_bin: str) -> dict:
     return experiment
 
 
-def parse_gpu_occupancy(devices: str, applications: str) -> dict[int, set[int]]:
+def parse_gpu_occupancy(devices: str, applications: str, gpu_ids: tuple[int, ...] = LOCAL_GPUS) -> dict[int, set[int]]:
     uuids = {}
     for line in devices.strip().splitlines():
         index, uuid = [part.strip() for part in line.split(',')]
         uuids[uuid] = int(index)
-    if not set(LOCAL_GPUS).issubset(uuids.values()):
+    if not set(gpu_ids).issubset(uuids.values()):
         raise ValueError('Required local GPU indices are missing')
-    occupied = {index: set() for index in LOCAL_GPUS}
+    occupied = {index: set() for index in gpu_ids}
     for line in applications.strip().splitlines():
         if not line.strip():
             continue
@@ -157,7 +162,7 @@ def gpu_occupancy() -> dict[int, set[int]]:
     return parse_gpu_occupancy(query('index,uuid', 'gpu'), query('gpu_uuid,pid', 'compute-apps'))
 
 
-def parse_gpu_activity(devices: str, applications: str) -> dict[int, dict[str, Any]]:
+def parse_gpu_activity(devices: str, applications: str, gpu_ids: tuple[int, ...] = LOCAL_GPUS) -> dict[int, dict[str, Any]]:
     identities, activity = [], {}
     seen_uuids = set()
     for line in devices.strip().splitlines():
@@ -171,16 +176,16 @@ def parse_gpu_activity(devices: str, applications: str) -> dict[int, dict[str, A
                            'utilization_gpu_percent': utilization}
         identities.append(f'{index},{uuid}')
         seen_uuids.add(uuid)
-    pids = parse_gpu_occupancy('\n'.join(identities), applications)
-    return {index: {**activity[index], 'pids': sorted(pids[index])} for index in LOCAL_GPUS}
+    pids = parse_gpu_occupancy('\n'.join(identities), applications, gpu_ids)
+    return {index: {**activity[index], 'pids': sorted(pids[index])} for index in gpu_ids}
 
 
-def gpu_activity() -> dict[int, dict[str, Any]]:
+def gpu_activity(*, gpu_ids: tuple[int, ...] = LOCAL_GPUS) -> dict[int, dict[str, Any]]:
     def query(fields: str, kind: str) -> str:
         return subprocess.check_output(['nvidia-smi', f'--query-{kind}={fields}',
                                         '--format=csv,noheader,nounits'], text=True, timeout=15)
     return parse_gpu_activity(query('index,uuid,memory.used,utilization.gpu', 'gpu'),
-                              query('gpu_uuid,pid', 'compute-apps'))
+                              query('gpu_uuid,pid', 'compute-apps'), gpu_ids)
 
 
 def gpu_available(sample: dict[str, Any]) -> bool:
@@ -209,6 +214,12 @@ def controller_identity(experiment: dict[str, Any]) -> dict[str, Any]:
             'controller_sha256': sha256_file(Path(__file__)),
             'evaluator_source_commit': experiment['source_commit'],
             'gpu_admission_policy': GPU_ADMISSION_POLICY,
+            'local_gpu_ids': list(LOCAL_GPUS),
+            'supported_local_gpu_ids': list(SUPPORTED_LOCAL_GPUS),
+            'local_worker_sha256': sha256_file(REPO / LOCAL_WORKER),
+            'rebalance_min_wait_seconds': REBALANCE_MIN_WAIT_SECONDS,
+            'rebalance_account': 'uos',
+            'rebalance_sha256': sha256_file(REPO / 'scripts/experiments/calibrated_three_sweep_rebalance.py'),
             'ubai_resource_policy': UBAI_RESOURCE_POLICY,
             'pair_runtime_sha256': {relative: sha256_file(REPO / relative) for relative in PAIR_FILES}}
 
@@ -276,10 +287,14 @@ def assert_seed_barrier(seed: int, results: list[dict], experiment: dict, theta:
 
 
 class Controller:
-    def __init__(self, root: Path, *, poll_seconds: float = 30, max_attempts: int = 3):
+    def __init__(self, root: Path, *, poll_seconds: float = 30, max_attempts: int = 3,
+                 temporary_local_gpus: bool = False):
         self.root = root.resolve()
         self.experiment = read_json(root / 'experiment.json')
         validate_experiment(self.experiment)
+        if temporary_local_gpus and (self.experiment['source_commit'] != TEMPORARY_GPU_SOURCE
+                                     or self.root.name != TAG):
+            raise ValueError('Temporary GPU permission is restricted to the current frozen campaign')
         from scripts.experiments.run_calibrated_three_sweep_task import check_source
         check_source(self.experiment)
         if socket.gethostname() != 'baekryun-cuda129':
@@ -290,6 +305,8 @@ class Controller:
         self.prefix = 'c3-' + self.experiment['source_commit'][:7] + '-'
         self.poll_seconds = max(2, poll_seconds)
         self.max_attempts = max_attempts
+        self.local_gpus = SUPPORTED_LOCAL_GPUS if temporary_local_gpus else LOCAL_GPUS
+        self.rebalance_account = 'uos'
         self.state_path = root / 'assignments.json'
         self.state = read_json(self.state_path) if self.state_path.exists() else {
             'experiment_sha256': task_sha256(self.experiment), 'tasks': {}, 'phase': 'prepared'}
@@ -303,8 +320,11 @@ class Controller:
         identity = controller_identity(self.experiment)
         write_immutable_json(self.root / 'controllers' / (identity['source_commit'] + '.json'), identity)
         self.state['controller_identity'] = identity
+        self.state['active_local_gpu_ids'] = list(self.local_gpus)
+        self.state['temporary_local_gpus'] = temporary_local_gpus
         self.remote_controller = f"{REMOTE_BASE}/delayed-temporal-controllers/{identity['source_commit']}"
-        self.event('controller_started', **identity)
+        self.event('controller_started', **identity, active_local_gpu_ids=list(self.local_gpus),
+                   temporary_local_gpus=temporary_local_gpus)
 
     def save(self) -> None:
         self.state['updated_at_utc'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
@@ -374,7 +394,7 @@ class Controller:
             raise ValueError('Task assignment identity changed')
 
     def start_local(self, task: dict, gpu: int) -> bool:
-        if gpu not in LOCAL_GPUS:
+        if gpu not in self.local_gpus:
             raise ValueError('Local GPU is not allowed')
         if any(row.get('host') == 'local' and row.get('gpu') == gpu
                and row['status'] in {'starting', 'running'} for row in self.state['tasks'].values()):
@@ -388,7 +408,7 @@ class Controller:
             lock.close()
             return False
         try:
-            admission = gpu_activity()[gpu]
+            admission = gpu_activity(gpu_ids=self.local_gpus)[gpu]
         except (subprocess.SubprocessError, OSError, ValueError) as exc:
             self.state['local_wait_reason'] = str(exc)
             lock.close()
@@ -396,6 +416,13 @@ class Controller:
         if not gpu_available(admission):
             lock.close()
             return False
+        available_cpus = sorted(os.sched_getaffinity(0))
+        offset = CPU_GPU_ORDER.index(gpu) * 4
+        if offset + 4 > len(available_cpus):
+            self.state['local_wait_reason'] = 'Insufficient separate CPU cores for the local GPU slot'
+            lock.close()
+            return False
+        assigned_cpus = available_cpus[offset:offset + 4]
         row = self.state['tasks'][task['run_id']]
         row.update(status='starting', host='local', gpu=gpu, attempt=row['attempt'] + 1,
                    gpu_admission=admission)
@@ -404,19 +431,19 @@ class Controller:
                            MKL_NUM_THREADS='4', OPENBLAS_NUM_THREADS='4', WANDB_MODE='disabled',
                            WANDB_DISABLED='true', PYTHONDONTWRITEBYTECODE='1')
         environment.pop('WANDB_API_KEY', None)
-        command = [self.experiment['python_bin'], '-u', str(self.source / 'scripts/experiments/run_calibrated_three_sweep_task.py'),
+        command = [self.experiment['python_bin'], '-u', str(REPO / LOCAL_WORKER),
                    '--experiment', str(self.root / 'experiment.json'), '--task', str(self.root / 'tasks' / (task['run_id'] + '.json')),
                    '--output-root', str(self.root), '--host-label', 'local']
+        if self.local_gpus != LOCAL_GPUS:
+            command.append('--temporary-local-gpus')
         with (self.root / 'worker_logs' / f"{task['run_id']}.attempt-{row['attempt']}.log").open('a') as output:
             process = subprocess.Popen(command, cwd=self.source, env=environment, stdout=output,
                                        stderr=subprocess.STDOUT, start_new_session=True, pass_fds=(lock.fileno(),))
-        available_cpus = sorted(os.sched_getaffinity(0))
-        offset = LOCAL_GPUS.index(gpu) * 4
-        assigned_cpus = [available_cpus[(offset + n) % len(available_cpus)] for n in range(4)]
         os.sched_setaffinity(process.pid, assigned_cpus)
         self.children[task['run_id']] = process
         self.gpu_locks[task['run_id']] = lock
-        row.update(status='running', pid=process.pid, started_at=time.time(), cpu_ids=assigned_cpus)
+        row.update(status='running', pid=process.pid, started_at=time.time(), cpu_ids=assigned_cpus,
+                   local_worker_path=str(REPO / LOCAL_WORKER))
         self.save()
         self.event('task_started', run_id=task['run_id'], host='local', gpu=gpu,
                    attempt=row['attempt'], gpu_admission=admission)
@@ -424,6 +451,8 @@ class Controller:
 
     def start_remote(self, task: dict, queue: list[dict]) -> None:
         row = self.state['tasks'][task['run_id']]
+        if row.get('rebalance_target') == 'local':
+            raise ValueError('A condition returned to local execution cannot be resubmitted remotely')
         name = self.prefix + task['run_id']
         # Recover submission if SSH disconnected after sbatch accepted it.
         existing = [q for q in queue if q['name'] == name]
@@ -456,7 +485,8 @@ class Controller:
         if not pair_tasks_compatible(tasks):
             raise ValueError('Paired experiments must be distinct and belong to the same stage')
         if any(self.state['tasks'][task['run_id']]['status'] != 'pending'
-               or self.state['tasks'][task['run_id']].get('fixed_host') == 'local' for task in tasks):
+               or self.state['tasks'][task['run_id']].get('fixed_host') == 'local'
+               or self.state['tasks'][task['run_id']].get('rebalance_target') == 'local' for task in tasks):
             raise ValueError('Only pending cluster experiments can be paired')
         if quota_available(queue, self.prefix, 2) < 1:
             raise ValueError('The paired job exceeds the available Slurm allocation')
@@ -513,7 +543,8 @@ class Controller:
 
     def schedule_remote(self, tasks: list[dict], queue: list[dict]) -> list[dict]:
         pending = [task for task in tasks if self.state['tasks'][task['run_id']]['status'] == 'pending'
-                   and self.state['tasks'][task['run_id']].get('fixed_host') != 'local']
+                   and self.state['tasks'][task['run_id']].get('fixed_host') != 'local'
+                   and self.state['tasks'][task['run_id']].get('rebalance_target') != 'local']
         submitted = []
         while pending and quota_available(queue, self.prefix):
             first = pending[0]
@@ -545,13 +576,49 @@ class Controller:
         path = Path(f'/proc/{pid}/cmdline')
         if not path.exists():
             return True
-        command = path.read_bytes().replace(b'\0', b' ').decode(errors='replace')
-        if 'run_calibrated_three_sweep_task.py' not in command or task['run_id'] not in command:
+        if not path.read_bytes():
+            # An adopted child may briefly be a zombie before its new parent reaps it.
+            try:
+                status = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0]
+            except FileNotFoundError:
+                return True
+            if status == 'Z':
+                return True
+        if not self.local_process_matches(task['run_id'], row):
             raise NeedsAttention('Stored local PID no longer matches the assigned task')
         return False
 
+    def local_process_matches(self, run_id: str, row: dict) -> bool:
+        try:
+            arguments = Path(f"/proc/{row['pid']}/cmdline").read_bytes().decode().split('\0')
+        except (FileNotFoundError, ProcessLookupError, UnicodeDecodeError):
+            return False
+        workers = {str(self.source / 'scripts/experiments/run_calibrated_three_sweep_task.py'),
+                   row.get('local_worker_path', str(REPO / LOCAL_WORKER))}
+        if not workers.intersection(arguments):
+            return False
+        for flag, value in (('--experiment', str(self.root / 'experiment.json')),
+                            ('--task', str(self.root / 'tasks' / (run_id + '.json'))),
+                            ('--output-root', str(self.root)), ('--host-label', 'local')):
+            if arguments.count(flag) != 1:
+                return False
+            index = arguments.index(flag)
+            if index + 1 >= len(arguments) or arguments[index + 1] != value:
+                return False
+        return True
+
+    def rebalance_pending(self, tasks: list[dict], queue: list[dict], local_slots: int) -> int:
+        from scripts.experiments.calibrated_three_sweep_rebalance import rebalance_pending
+        return rebalance_pending(self, tasks, queue, local_slots)
+
+    def poll_rebalance(self, task: dict, queue: list[dict] | None) -> dict | None:
+        from scripts.experiments.calibrated_three_sweep_rebalance import poll_rebalance
+        return poll_rebalance(self, task, queue)
+
     def poll_task(self, task: dict, queue: list[dict] | None) -> dict | None:
         row = self.state['tasks'][task['run_id']]
+        if row['status'] == 'cancelling_for_local':
+            return self.poll_rebalance(task, queue)
         if row['status'] in {'pending', 'complete'}:
             result = self.completed(task)
             if row['status'] == 'complete' and result is None:
@@ -612,14 +679,11 @@ class Controller:
 
     def stop_owned(self) -> None:
         for run_id, row in self.state['tasks'].items():
-            if row['status'] not in {'starting', 'running', 'submitting'}:
+            if row['status'] not in {'starting', 'running', 'submitting', 'cancelling_for_local'}:
                 continue
             if row.get('host') == 'local' and row.get('pid'):
-                command_path = Path(f"/proc/{row['pid']}/cmdline")
-                if command_path.exists():
-                    command = command_path.read_bytes().replace(b'\0', b' ').decode(errors='replace')
-                    if 'run_calibrated_three_sweep_task.py' in command and run_id in command:
-                        os.kill(row['pid'], signal.SIGTERM)
+                if self.local_process_matches(run_id, row):
+                    os.kill(row['pid'], signal.SIGTERM)
             elif row.get('host') == 'ubai' and row.get('job_id'):
                 try:
                     current = parse_queue(self.remote(['squeue', '-h', '-r', '-j', row['job_id'], '-o', '%i|%T|%j|%b']))
@@ -662,7 +726,7 @@ class Controller:
                 self.report()
                 last_summary_count = len(done)
             try:
-                activity = gpu_activity()
+                activity = gpu_activity(gpu_ids=self.local_gpus)
                 self.state['local_gpu_activity'] = activity
                 self.state.pop('local_wait_reason', None)
             except (subprocess.SubprocessError, OSError, ValueError) as exc:
@@ -671,7 +735,18 @@ class Controller:
                 self.state['local_wait_reason'] = str(exc)
             reserved = {r['gpu'] for r in self.state['tasks'].values()
                         if r['status'] in {'starting', 'running'} and r.get('host') == 'local'}
-            local_free = [g for g in LOCAL_GPUS if g in activity and gpu_available(activity[g]) and g not in reserved]
+            local_free = [g for g in self.local_gpus if g in activity and gpu_available(activity[g]) and g not in reserved]
+            if queue is not None and local_free:
+                try:
+                    returned = sum(self.state['tasks'][task['run_id']]['status'] == 'pending'
+                                   and self.state['tasks'][task['run_id']].get('rebalance_target') == 'local'
+                                   for task in tasks)
+                    self.rebalance_pending(tasks, queue, max(0, len(local_free) - returned))
+                except (subprocess.SubprocessError, OSError) as exc:
+                    self.state['remote_wait_reason'] = str(exc)
+            moving = sum(self.state['tasks'][task['run_id']]['status'] == 'cancelling_for_local' for task in tasks)
+            # Reserve newly free local slots until guarded cancellation is confirmed.
+            local_free = local_free[min(moving, len(local_free)):]
             pending = [task for task in tasks if self.state['tasks'][task['run_id']]['status'] == 'pending']
             # Start each host's planned share first; only unsubmitted tasks can move.
             for allow_move in (False, True):
@@ -679,16 +754,15 @@ class Controller:
                 for task in list(pending):
                     row = self.state['tasks'][task['run_id']]
                     preferred = row['preferred_host']
-                    host = preferred
-                    if allow_move and not row.get('fixed_host'):
+                    fixed = row.get('fixed_host') or row.get('rebalance_target')
+                    host = fixed or preferred
+                    if allow_move and not fixed:
                         if host == 'local' and not local_free and remote_slots:
                             host = 'ubai'
                         elif host == 'ubai' and not remote_slots and local_free:
                             host = 'local'
-                    if local_free and remote_slots and not row.get('fixed_host'):
-                        other = 'ubai' if host == 'local' else 'local'
-                        if self.estimate_seconds(task, other) < .95 * self.estimate_seconds(task, host):
-                            host = other
+                    if local_free and not fixed and queue is not None and any(q['state'] == 'PENDING' for q in queue):
+                        host = 'local'
                     if host == 'local' and local_free:
                         gpu = local_free.pop(0)
                         if self.start_local(task, gpu):
@@ -757,6 +831,10 @@ class Controller:
                 if reason:
                     raise NeedsAttention(reason + '; request a new range before seed one')
         self.state['phase'] = 'complete'
+        if self.state.get('temporary_local_gpus'):
+            self.local_gpus = LOCAL_GPUS
+            self.state.update(active_local_gpu_ids=list(LOCAL_GPUS), temporary_local_gpus=False)
+            self.event('temporary_local_gpu_permission_ended', local_gpu_ids=list(LOCAL_GPUS))
         self.save()
         self.event('campaign_completed', evaluations=71, calibration_collections=9)
 
@@ -771,7 +849,11 @@ def main() -> None:
     mode.add_argument('--run', action='store_true')
     mode.add_argument('--status', action='store_true')
     parser.add_argument('--poll-seconds', type=float, default=30)
+    parser.add_argument('--temporary-local-gpus', action='store_true',
+                        help='Temporarily permit local devices 0–3 for this frozen campaign only')
     args = parser.parse_args()
+    if args.temporary_local_gpus and not args.run:
+        parser.error('--temporary-local-gpus is only valid with --run')
     root = args.experiment_root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     if args.initialize:
@@ -783,7 +865,8 @@ def main() -> None:
         return
     with (root / 'controller.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        controller = Controller(root, poll_seconds=args.poll_seconds)
+        controller = Controller(root, poll_seconds=args.poll_seconds,
+                                temporary_local_gpus=args.temporary_local_gpus)
         def interrupted(signum: int, _frame: Any) -> None:
             raise NeedsAttention(f'Controller interrupted by signal {signum}; partial outputs preserved')
         signal.signal(signal.SIGTERM, interrupted)

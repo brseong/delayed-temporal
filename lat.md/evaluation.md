@@ -393,7 +393,7 @@ The experiment uses the augreg2 ViT-B/16 checkpoint, float64, batch size 32, tim
 
 ## Calibrated Three Sweep Scheduling
 
-One local controller owns all assignments, waits for complete seeds in order, and moves only work that has not been submitted between the local and cluster workers.
+One local controller owns all assignments and waits for complete seeds in order. Unstarted cluster work can move to local workers only after guarded cancellation and terminal confirmation.
 
 [[scripts/experiments/run_calibrated_three_sweeps.py#Controller]] freezes the source commit, evaluator and runtime hashes, checkpoint, datasets, and per-threshold calibration hashes. Immutable task and phase manifests accompany a resumable assignment record. Only completed results whose raw logs and identities validate can be reused. Partial logs are preserved; a repeatedly failing task requires inspection instead of being classified as scientific accuracy collapse.
 
@@ -403,11 +403,13 @@ After seed 0, execution stops for a range decision if all nine timing noise poin
 
 ## Calibrated Three Sweep Distribution
 
-Local GPU devices 4–7 and the UBAI RTX A6000 partitions share the workload under separate execution rules, with all cluster temporary storage on verified disk rather than memory filesystems.
+Local GPU devices 4–7 remain the default and share work with the UBAI RTX A6000 partitions. Temporary permission for devices 0–3 applies only to the remaining work of the current campaign; cluster temporary storage stays on verified disk.
 
 The initial assignment is six theta candidates on UBAI and three locally, and eleven noise conditions on UBAI and six locally per seed. Each experiment uses one GPU and four CPU cores. Following the user's allocation change, new UBAI jobs pair two experiments and request two GPUs, eight CPU cores and 128 GiB. Account limits remain ten running jobs, twenty submitted jobs and twelve GPUs. Existing jobs and odd remaining conditions retain one GPU and 64 GiB. No DataParallel is used.
 
 Local admission retains the user's existing limit: total device memory at most 1 GiB and GPU utilization at most 5%, including both endpoints. A foreign compute PID alone does not block a device. [[scripts/experiments/run_calibrated_three_sweeps.py#gpu_available]] is used both when finding available devices and immediately before launch under the device lock. The controller records actual memory, utilization and PIDs; its own assignments and locks still allow only one campaign worker per GPU. Missing telemetry prevents new local launches without stopping cluster tasks.
+
+The user's 2026-09-15 permission requires the explicit `--temporary-local-gpus` option for this campaign and its existing frozen source. It does not change the default device list or other experiment runners. The controller records the active device list separately from the immutable experiment and clears temporary permission when the campaign completes. Without the option, a new controller uses devices 4–7. CPU slots retain the order 4, 5, 6, 7, 0, 1, 2, 3 so existing workers keep their original four cores while additional workers use separate cores.
 
 A controller-only correction may use a separately committed clean checkout while evaluation, calibration, task manifests and active cluster jobs retain their original frozen source. [[scripts/experiments/run_calibrated_three_sweeps.py#controller_identity]] records the controller commit, content hash and admission policy separately and rejects changes to imported experiment or reporting helpers. This avoids restarting scientifically unchanged work merely to correct task allocation.
 
@@ -426,6 +428,22 @@ Two independent experiments share a Slurm job and an extracted environment, whil
 [[scripts/experiments/ubai/run_calibrated_three_sweep_pair.py#run_workers]] gives each evaluator exactly one distinct allocated GPU device and four separate CPU cores. [[scripts/experiments/ubai/run_calibrated_three_sweep_pair.py#admit_pair_runtime]] extracts the environment once on verified disk and reserves an additional scratch allowance for the second evaluator. Separate writable scratch directories prevent cache collisions. Cleanup waits for both child processes; no temporary environment is extracted onto a RAM disk.
 
 One failed condition does not cancel its peer. After Slurm confirms termination, each result is validated independently and only missing conditions are retried. Existing individual jobs remain unchanged during controller replacement. [[scripts/verification/verify_calibrated_three_sweep_pair.py#PairTests]] verifies paired runtime identity, distinct device and CPU assignments, disk reservation and cleanup, and failure isolation. The scheduling verification also covers resource limits, shared job recovery and reuse of complete results.
+
+## Calibrated Three Sweep Local Worker
+
+A separately verified local wrapper changes only device admission and delegates evaluation to the existing frozen worker, preserving the source, conditions, completed results and reporting contract.
+
+[[scripts/experiments/run_calibrated_three_sweep_local_task.py#main]] checks the clean controller commit and content hashes before loading the original worker from the frozen source. It replaces only the worker's device-admission function, strips the wrapper-specific temporary option, and delegates the original task arguments. The evaluator, task and experiment files are not rewritten. Default admission remains devices 4–7; devices 0–3 additionally require the current campaign tag, frozen source and explicit temporary option.
+
+[[scripts/verification/verify_calibrated_three_sweep_local_task.py#main]] verifies default and temporary permission, single-device validation, wrong-campaign rejection, source and controller integrity, and unchanged evaluator delegation. The scheduling tests retain both legacy and new worker identification through exact experiment and task paths, along with separate CPU assignments for eight workers.
+
+## Calibrated Three Sweep Queue Reassignment
+
+When cluster allocation is delayed, available local devices can take over pending conditions without interrupting running cluster evaluations or executing one condition twice.
+
+[[scripts/experiments/calibrated_three_sweep_rebalance.py#rebalance_pending]] considers current-stage jobs pending for at least 60 seconds, within available local capacity. It checks the exact job identifier, name, user and account, and keeps both members of a pair together. A persisted intent precedes placing a user hold. The controller then verifies that the job is still pending with zero priority and its user hold before cancellation. If it started in the meantime, the controller retains remote execution and releases only its own hold; outside holds are preserved.
+
+[[scripts/experiments/calibrated_three_sweep_rebalance.py#poll_rebalance]] waits for terminal Slurm accounting and validates any available results before releasing either assignment. A cancelled job with an explicitly absent start time and zero elapsed time returns to local scheduling without consuming an evaluation retry. Completed results are reused independently. Missing accounting or transport failures leave assignments reserved. Returned conditions cannot be resubmitted remotely, and seed completion order is unchanged. The verification covers paired identity, cancellation races, restart, external holds, partial results and duplicate prevention.
 
 ## Calibrated Three Sweep Reporting
 
