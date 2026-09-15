@@ -113,7 +113,7 @@ def main() -> None:
     if not (1 <= args.batch_size <= 8 and 2 <= args.max_length <= 128):
         raise ValueError("this diagnostic requires batch size at most 8 and sequence length at most 128")
     output = args.output_dir.resolve()
-    artifact_root = (ROOT / "artifacts").resolve()
+    artifact_root = Path("/data/delayed-temporal/artifacts").resolve()
     if output == artifact_root or not output.is_relative_to(artifact_root) or output.exists():
         raise ValueError("output-dir must be a new dedicated path below artifacts")
     runtime_id = hashlib.sha256(str(output).encode()).hexdigest()[:16]

@@ -638,6 +638,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         dataset = dataset.filter(
             lambda example: len(example[text_column].strip()) > 0
         )
+        print(f"Evaluation dataset fingerprint: {dataset._fingerprint}", flush=True)
     elif calibration_dataset is not None:
         text_column = infer_text_column(
             calibration_dataset.column_names,
