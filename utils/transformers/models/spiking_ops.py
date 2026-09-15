@@ -416,7 +416,8 @@ class SpikingLayerNorm(nn.Module):
         var_x = var_x + eps
         domain_var = PotentialBounds(domain_err.min ** 2, domain_err.max ** 2)
         var_x = domain_var.clamp(var_x, name="var_x")
-        T0 = tau_s * math.log(domain_err.max / domain_err.min)
+        T0 = tau_s * (math.log(domain_err.max) - math.log(domain_err.min))
+        shared_time_bounds = TimeBounds(0.0, T0)
 
         if self.use_spiking_log:
             # The variance code uses tau_s/2 so decoding produces its square root.
@@ -426,6 +427,7 @@ class SpikingLayerNorm(nn.Module):
                 var_x,
                 domain_var,
                 tau_s=tau_s / 2.0,
+                shared_time_bounds=shared_time_bounds,
                 return_spike_sample=True,
                 noise_site="layernorm.log_sigma",
             )
@@ -433,6 +435,7 @@ class SpikingLayerNorm(nn.Module):
                 x_err_pos,
                 domain_err,
                 tau_s=tau_s,
+                shared_time_bounds=shared_time_bounds,
                 return_spike_sample=True,
                 noise_site="layernorm.log_positive",
             )
@@ -440,6 +443,7 @@ class SpikingLayerNorm(nn.Module):
                 x_err_neg,
                 domain_err,
                 tau_s=tau_s,
+                shared_time_bounds=shared_time_bounds,
                 return_spike_sample=True,
                 noise_site="layernorm.log_negative",
             )
@@ -460,8 +464,7 @@ class SpikingLayerNorm(nn.Module):
             t_sigma = (tau_s / 2.0) * torch.log(hi2_t / var_x)
             t_err_pos = tau_s * torch.log(hi_t / x_err_pos)
             t_err_neg = tau_s * torch.log(hi_t / x_err_neg)
-            tb_sigma = TimeBounds(0.0, T0)
-            tb_err = TimeBounds(0.0, T0)
+            tb_sigma = tb_err = shared_time_bounds
             # Floating-point logarithms can round just beyond the fixed time window.
             # Clamp numerical timestamps without extending the observation deadline.
             t_sigma = t_sigma.clamp(0.0, T0)
@@ -516,20 +519,7 @@ class SpikingLayerNorm(nn.Module):
             if isinstance(t_sigma, SpikeSample):
                 # All three log encoders describe two differential readouts and must
                 # use the same observation deadline before their rail masks combine.
-                if not (
-                    math.isclose(
-                        float(t_sigma.domain.max),
-                        float(t_err_pos.domain.max),
-                        rel_tol=1.0e-9,
-                        abs_tol=1.0e-12,
-                    )
-                    and math.isclose(
-                        float(t_sigma.domain.max),
-                        float(t_err_neg.domain.max),
-                        rel_tol=1.0e-9,
-                        abs_tol=1.0e-12,
-                    )
-                ):
+                if not (t_sigma.domain == t_err_pos.domain == t_err_neg.domain):
                     raise ValueError(
                         "LayerNorm log events require a shared observation deadline"
                     )
@@ -702,22 +692,31 @@ class SpikingLayerNorm(nn.Module):
         domain_var: PotentialBounds = PotentialBounds(domain_err.min ** 2, domain_err.max ** 2)
         var_x = domain_var.clamp(var_x, name="var_x")
 
-        T0 = tau_s * math.log(domain_err.max / domain_err.min)
+        T0 = tau_s * (math.log(domain_err.max) - math.log(domain_err.min))
+        shared_time_bounds = TimeBounds(0.0, T0)
         if self.use_spiking_log:
             # Only variance encoding uses tau_s/2 to obtain its square root.
             # Magnitudes use tau_s, giving the same reference and time window:
             # (tau_s/2) * log(hi^2) = tau_s * log(hi).
-            t_sigma, tb_sigma = neg_log_transform(var_x, domain_var, tau_s=tau_s/2)
-            t_err_pos, tb_err = neg_log_transform(x_err_pos, domain_err, tau_s=tau_s)
-            t_err_neg, _ = neg_log_transform(x_err_neg, domain_err, tau_s=tau_s)
+            t_sigma, tb_sigma = neg_log_transform(
+                var_x, domain_var, tau_s=tau_s / 2,
+                shared_time_bounds=shared_time_bounds,
+            )
+            t_err_pos, tb_err = neg_log_transform(
+                x_err_pos, domain_err, tau_s=tau_s,
+                shared_time_bounds=shared_time_bounds,
+            )
+            t_err_neg, _ = neg_log_transform(
+                x_err_neg, domain_err, tau_s=tau_s,
+                shared_time_bounds=shared_time_bounds,
+            )
         else:
             _hi_t = x.new_tensor(domain_err.max)
             _hi2_t = x.new_tensor(domain_err.max ** 2)
             t_sigma = (tau_s / 2.0) * torch.log(_hi2_t / var_x)
             t_err_pos = tau_s * torch.log(_hi_t / x_err_pos)
             t_err_neg = tau_s * torch.log(_hi_t / x_err_neg)
-            tb_sigma = TimeBounds(0.0, T0)
-            tb_err = TimeBounds(0.0, T0)
+            tb_sigma = tb_err = shared_time_bounds
             # Match the Gaussian direct-log ablation's numerical time-window guard.
             # The analytic deadline and logarithmic reference remain unchanged.
             t_sigma = t_sigma.clamp(0.0, T0)

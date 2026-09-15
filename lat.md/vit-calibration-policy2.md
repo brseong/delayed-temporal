@@ -46,3 +46,17 @@ W&B·TensorBoard·잡음은 끄고 임시 파일은 `/data/delayed-temporal/arti
 ViT-B는 `observation_deadline must not precede either event-domain maximum`으로 실패했다. CPU에서 내부 상한 40.007, 하한 1e-5를 사용하면 두 log 시간창의 끝값이 15.20197990377345와 15.201979903773452로 달라져 같은 예외가 재현된다. 차이는 1 ULP이다. 실제 실패 모델의 해당 상한 값은 로그에 없으므로 이 최소 재현의 값과 같다고 단정하지 않는다. 일반 primitive의 경계 검사를 완화하거나 batch를 줄여 우회하지 않았다.
 
 후속 필수 조치는 [[todo#TODO#ViT Calibration Policy 2 Shared Deadline]]이다. 기존 LayerNorm hook의 전역 theta 비교 경고는 선택된 내부 범위의 clipping count가 아니므로, 실제 calibration의 site별 원시 count와 구분한다.
+
+## Shared Deadline Fix
+
+LayerNorm 공통 시간창 수정을 적용하고 CPU 회귀 검증으로 확인했다. 앞선 ViT-B의 실패 로그와 고정 checkout은 보존하며, 이 수정 뒤의 실제 모델 재검사는 아직 수행하지 않았다.
+
+세 log 인코딩과 직접 log 계산 경로가 같은 시간창 객체를 사용한다. Gaussian의 샘플링과 도착 판정 이전에 적용하며, 일반 primitive의 경계 검사는 유지한다. 상세 계약과 검증은 [[calibration#Layer-wise Calibration#Frozen Execution#LayerNorm Shared Log Deadline]]에 기록했다. 기존 짧은 검사 결과는 수정 전 source의 결과이며 새 source 검증으로 바꾸어 표시하지 않는다.
+
+## CIFAR-10 Full Check
+
+2026-09-15 사용자 요청으로 CIFAR-10 한 모델의 전체 정확도 비교만 재실행한다. 다른 ImageNet 모델, noise sweep, UBAI 제출 및 논문 표 변경은 시작하지 않는다.
+
+공통 시간창 수정을 포함한 별도 clean checkout에서 training seed-0 5k를 두 번 수집하고, 같은 checkpoint와 순서의 test 10k를 ANN/SNN으로 평가한다. theta 40, float64, 정책 2의 109개 site, 출력 bound 정책 3, 기존 5% 여유를 유지한다. 새 source의 짧은 검사로 batch size를 먼저 확인하며 이전 짧은 calibration은 재사용하지 않는다.
+
+기존 v2의 source와 실패 로그는 보존하고 `artifacts/logs/conversion_comparison/cifar10-shared-deadline-20260915/` 아래 별도 manifest에 새 source를 고정한다. 실행은 유휴 GPU 4–7 중 한 장, GPU별 잠금, W&B와 TensorBoard 비활성화를 유지한다. 임시 경로는 `/data`의 실제 디스크에 두고 로그·calibration·결과와 분리한다. 전체 결과가 완성되기 전 부분 정확도를 성능 복원 결과로 보고하지 않는다.

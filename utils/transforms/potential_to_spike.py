@@ -1,6 +1,6 @@
 import torch
 from jaxtyping import Float, Int
-from math import log, exp, isfinite
+from math import log, exp, isfinite, ulp
 from numbers import Real
 from .types import ClosedBounds, PotentialBounds, SpikeSample, TimeBounds, check_domain
 from .noise import inject_spike_time_noise
@@ -134,6 +134,7 @@ def neg_log_transform(
     domain: PotentialBounds,
     *,
     tau_s: float = 1.0,
+    shared_time_bounds: TimeBounds | None = None,
     **_
     ) -> tuple[Float[torch.Tensor, "*batch dims"], TimeBounds]:
     """Encode a strictly positive potential as negative-log spike latency.
@@ -147,15 +148,20 @@ def neg_log_transform(
         input_value: Strictly positive potential tensor contained in ``domain``.
         domain: Positive potential rails defining the logarithmic code window.
         tau_s: Positive finite temporal scale applied to all logarithmic latencies.
+        shared_time_bounds: Optional common interval for equivalent logarithmic
+            encodings. Its endpoint may differ from the derived deadline only by
+            floating-point roundoff; it is fixed before Gaussian sampling.
 
     Returns:
         Encoded spike times and their fixed interval from zero to
         ``tau_s*log(domain.max/domain.min)``.
 
     Raises:
-        TypeError: If ``tau_s`` is not a real scalar.
+        TypeError: If ``tau_s`` is not a real scalar or the shared interval is not
+            a ``TimeBounds`` object.
         ValueError: If ``tau_s`` is non-finite or non-positive, or if the declared
-            logarithmic domain does not have a strictly positive lower endpoint.
+            logarithmic domain does not have a strictly positive lower endpoint,
+            or if the shared interval changes the logarithmic code window.
     """
     # Reject booleans and invalid physical scales explicitly; unlike ``assert``, this
     # contract remains active under optimized Python execution.
@@ -176,11 +182,29 @@ def neg_log_transform(
     # Take logarithms independently so a wide but valid positive domain does not
     # overflow while forming either payload or endpoint ratios. Larger potentials
     # map to earlier events, while the endpoint logs fix the shared deadline.
+    log_max, log_min = log(float(domain.max)), log(float(domain.min))
+    deadline = tau_value * (log_max - log_min)
+    time_bounds = TimeBounds(0.0, deadline)
+    if shared_time_bounds is not None:
+        if not isinstance(shared_time_bounds, TimeBounds):
+            raise TypeError("shared_time_bounds must be TimeBounds")
+        # Equivalent square/variance encodings can round their scalar logarithms
+        # differently. Limit this reconciliation to arithmetic roundoff, including
+        # cancellation between endpoint logs; this is not a deadline margin.
+        tolerance = 4.0 * max(
+            ulp(deadline), tau_value * ulp(log_max), tau_value * ulp(log_min),
+        )
+        if (
+            shared_time_bounds.min != 0.0
+            or shared_time_bounds.max <= 0.0
+            or not isfinite(tolerance)
+            or abs(float(shared_time_bounds.max) - deadline) > tolerance
+        ):
+            raise ValueError("shared_time_bounds must match the logarithmic code window")
+        time_bounds = shared_time_bounds
+
     domain_max = input_value.new_tensor(float(domain.max))
     spike_time = tau_value * (
         torch.log(domain_max) - torch.log(input_value)
     )
-    deadline = tau_value * (
-        log(float(domain.max)) - log(float(domain.min))
-    )
-    return spike_time, TimeBounds(0.0, deadline)
+    return spike_time, time_bounds

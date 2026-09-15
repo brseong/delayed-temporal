@@ -176,6 +176,16 @@ The selected radius never overwrites `self.theta`, so a narrow internal interval
 
 [[scripts/verification/verify_layernorm_calibrated_bounds.py#verify_selected_ranges_and_ablations]] checks broad and narrow selected bounds, all eight ablations and a scale larger than the internal radius. Additional cases cover raw collection, partitioning, old behavior, epsilon/floor separation, invalid intervals, noisy replay and unchanged final output bounds.
 
+### LayerNorm Shared Log Deadline
+
+LayerNorm computes one immutable time interval from the positive input range and shares it across the variance and both signed log encoders. Equivalent endpoint calculations must not produce different observation deadlines.
+
+[[utils/transforms/potential_to_spike.py#neg_log_transform]] accepts an optional `shared_time_bounds` value. It requires a zero start, positive end and agreement with the derived logarithmic interval within floating-point roundoff of the endpoint logs and temporal scaling. This cannot introduce an arbitrary deadline margin. Calls without the argument retain their existing interval calculation.
+
+Both deterministic and Gaussian [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm]] paths compute the interval once and pass that same object to all three log encoders. Direct logarithm ablations also use the shared interval. The Gaussian decorator receives it before sampling and delivery classification; no sampled event domain or delivery mask is rewritten afterward. The general exponential-difference and integration boundary checks remain unchanged.
+
+The selected potential ranges, variance calculation from clipped magnitudes, checkpoint epsilon, positive log floor, learned affine scaling and output bounds are unchanged. [[scripts/verification/verify_layernorm_shared_deadline.py#verify_rounding_directions]] checks opposite directions of endpoint rounding at internal upper endpoints 40.007 and 40.172. Further checks cover eight ablations, clean and Gaussian execution, sampling domains, invalid interval rejection before random draws, and strict primitive deadline validation.
+
 ### BERT Fixed Range Flow
 
 BERT freezes its three embedding-table ranges, propagates the normalized `Potential` through the encoder and first-token pooler, and derives GELU or ReLU output ranges from fixed affine endpoints.
