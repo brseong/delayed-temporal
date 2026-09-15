@@ -118,17 +118,18 @@ def verify_dataset_inputs(root):
     assert restored["sentence"] == dataset["sentence"]
     reject(lambda: load_text_dataset_artifact(str(artifact), "wrong", role="evaluation"))
     loader = make_text_dataloader(
-        dataset, TinyTokenizer(), text_column="sentence", max_length=8,
+        restored, TinyTokenizer(), text_column="sentence", max_length=8,
         batch_size=2, include_labels=True,
     )
     batches = list(loader)
     assert batches[0]["labels"].tolist() == [0, 1]
     assert "token_type_ids" in batches[0]
     collection = make_text_dataloader(
-        dataset.remove_columns("label"), TinyTokenizer(), text_column="sentence",
+        restored.remove_columns("label"), TinyTokenizer(), text_column="sentence",
         max_length=8, batch_size=2, include_labels=False,
     )
     assert all("labels" not in batch for batch in collection)
+    assert not list(artifact.glob("cache-*.arrow"))
     reject(lambda: make_text_dataloader(
         dataset.remove_columns("label"), TinyTokenizer(), text_column="sentence",
         max_length=8, batch_size=2, include_labels=True,

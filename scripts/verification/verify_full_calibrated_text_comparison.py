@@ -35,6 +35,10 @@ def verify_dataset_identity(root: Path) -> None:
     stored_fingerprint = str(load_from_disk(path)._fingerprint)
     identity = runner.dataset_identity(path, stored_fingerprint, 10)
     assert identity["samples"] == 10 and identity["files_sha256"]
+    runner.verify_dataset_snapshot(identity)
+    (path / "unexpected-cache.arrow").write_bytes(b"cache")
+    reject(lambda: runner.verify_dataset_snapshot(identity), ValueError)
+    (path / "unexpected-cache.arrow").unlink()
     reject(lambda: runner.dataset_identity(path, "wrong", 10), ValueError)
     reject(lambda: runner.dataset_identity(path, stored_fingerprint, 9), ValueError)
 
@@ -86,6 +90,19 @@ def verify_commands(root: Path) -> None:
     assert commands["collect"].count("--calibration-mode") == 1
     assert commands["ann"][-2:] == ["--calibration-mode", "none"]
     assert commands["snn"][-2:] == ["--calibration-mode", "validate"]
+
+
+def verify_collection_progress(root: Path) -> None:
+    log = root / "bert-collect.log"
+    log.write_text(
+        "Calibration progress: pass=1/2 batch=5/625 samples=40/5000 elapsed_seconds=10.0\n"
+    )
+    output = root / "bert-progress"
+    runner.update_progress(output, "bert", "collect", log)
+    value = json.loads((output / "status.json").read_text())
+    assert value["progress"]["batch"] == 5
+    assert value["progress"]["total_batches"] == 1250
+    assert (output / "progress" / "collect-batch-0005.json").is_file()
 
 
 def evaluation_log(family: str, *, with_sites: bool) -> str:
@@ -167,6 +184,7 @@ def main() -> None:
         verify_classification_parser()
         verify_gpt2_parser()
         verify_commands(root)
+        verify_collection_progress(root)
         verify_summarizer(root)
     print("Full calibrated text comparison checks passed")
 

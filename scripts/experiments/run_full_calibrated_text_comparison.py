@@ -101,6 +101,18 @@ def dataset_identity(path: Path, expected_fingerprint: str, expected_samples: in
             "samples": expected_samples, "files_sha256": files}
 
 
+def verify_dataset_snapshot(identity: dict[str, Any]) -> None:
+    """Reject tokenization or another phase that mutates the saved Dataset tree."""
+    path = Path(identity["path"])
+    files = {
+        str(item.relative_to(path)): sha256_file(item)
+        for item in sorted(path.rglob("*"))
+        if item.is_file()
+    }
+    if files != identity["files_sha256"]:
+        raise ValueError("self-contained text dataset files changed during evaluation")
+
+
 def build_commands(args: argparse.Namespace, output: Path) -> dict[str, list[str]]:
     family = FAMILY_CONFIG[args.family]
     evaluator = args.source_root / "scripts/evaluation" / f"error_analysis_{args.family}.py"
@@ -215,7 +227,27 @@ def update_progress(output: Path, family: str, phase: str, log_path: Path) -> No
     if not log_path.exists():
         return
     text = log_path.read_text(errors="replace")
-    if family == "gpt2":
+    if phase == "collect" and family == "gpt2":
+        rows = [json.loads(line) for line in text.splitlines()
+                if line.startswith("{") and '"event": "calibration_progress"' in line]
+        progress = rows[-1] if rows else None
+    elif phase == "collect":
+        matches = re.findall(
+            r"Calibration progress: pass=(\d+)/(\d+) batch=(\d+)/(\d+) "
+            r"samples=(\d+)/(\d+) elapsed_seconds=([0-9.]+)", text,
+        )
+        progress = None
+        if matches:
+            current_pass, passes, batch, batches, samples, expected, elapsed = matches[-1]
+            completed = (int(current_pass) - 1) * int(batches) + int(batch)
+            total_batches = int(passes) * int(batches)
+            progress = {"pass": int(current_pass), "passes": int(passes),
+                        "batch": completed, "total_batches": total_batches,
+                        "observed_samples": int(samples), "expected_samples": int(expected),
+                        "elapsed_seconds": float(elapsed),
+                        "estimated_remaining_seconds": float(elapsed) *
+                        (total_batches - completed) / completed}
+    elif family == "gpt2":
         rows = [json.loads(line) for line in text.splitlines()
                 if line.startswith("{") and '"event": "evaluation_progress"' in line]
         progress = rows[-1] if rows else None
@@ -386,6 +418,8 @@ def main() -> None:
         try:
             sites: set[str] | None = None
             for phase in ("collect", "ann", "snn"):
+                verify_dataset_snapshot(manifest["calibration_dataset"])
+                verify_dataset_snapshot(manifest["evaluation_dataset"])
                 phase_path = output / "phases" / f"{phase}.json"
                 if phase_path.exists():
                     phase_result = json.loads(phase_path.read_text())
@@ -427,6 +461,8 @@ def main() -> None:
                 write_new_json(phase_path, phase_result)
                 state["phases"][phase] = phase_result
                 atomic_json(output / "result.json", state)
+                verify_dataset_snapshot(manifest["calibration_dataset"])
+                verify_dataset_snapshot(manifest["evaluation_dataset"])
             ann = state["phases"]["ann"]["metrics"]
             snn = state["phases"]["snn"]["metrics"]
             if ann["evaluation_dataset_fingerprint"] != snn["evaluation_dataset_fingerprint"]:
@@ -434,6 +470,8 @@ def main() -> None:
             state["state"] = "complete"
             state["calibration_sha256"] = state["phases"]["collect"]["calibration_sha256"]
             source_identity(args.source_root, args.expected_commit, args.family)
+            verify_dataset_snapshot(manifest["calibration_dataset"])
+            verify_dataset_snapshot(manifest["evaluation_dataset"])
             atomic_json(output / "result.json", state)
             atomic_json(output / "status.json", {"state": "complete", "family": args.family,
                                                    "updated_at": time.time()})

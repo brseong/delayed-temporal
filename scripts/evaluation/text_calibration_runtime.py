@@ -180,6 +180,7 @@ def make_text_dataloader(
 
     processed = dataset.map(
         tokenize_batch, batched=True, remove_columns=dataset.column_names,
+        load_from_cache_file=False, keep_in_memory=True,
     )
     columns = [name for name in ("input_ids", "attention_mask", "token_type_ids") if name in processed.column_names]
     if "input_ids" not in columns or "attention_mask" not in columns:

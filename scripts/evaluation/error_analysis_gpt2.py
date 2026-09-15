@@ -749,6 +749,8 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             tokenize_batch,
             batched=True,
             remove_columns=dataset.column_names,
+            load_from_cache_file=False,
+            keep_in_memory=True,
         )
         processed_dataset.set_format(
             type="torch",
@@ -766,6 +768,8 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             tokenize_batch,
             batched=True,
             remove_columns=calibration_dataset.column_names,
+            load_from_cache_file=False,
+            keep_in_memory=True,
         )
         processed_calibration_dataset.set_format(
             type="torch",

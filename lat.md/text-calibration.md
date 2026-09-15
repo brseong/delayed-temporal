@@ -56,6 +56,8 @@ The complete comparison collects fresh ranges from 5,000 training examples and e
 
 [[scripts/evaluation/text_calibration_runtime.py#load_text_dataset_artifact]] loads a single saved Dataset only when its stored fingerprint and exact sample count match the immutable model manifest. It does not replace the requested artifact with a network download or another cache entry.
 
+Tokenization disables on-disk `Dataset.map` cache creation and keeps transformed batches in memory. The runner compares the complete saved Dataset file set and hashes before and after every phase, so a newly created cache file invalidates the run instead of silently changing its data artifact.
+
 [[scripts/experiments/run_full_calibrated_text_comparison.py#main]] runs collection, ANN evaluation and SNN evaluation sequentially on one GPU while allowing different models to run in parallel. It preserves each attempt log, reuses only hash-validated completed phases, and writes flushed progress records throughout evaluation.
 
 [[scripts/analysis/summarize_full_calibrated_text_comparison.py#build]] authenticates every phase log and calibration table again before producing raw, summary, calibration-site and provenance artifacts. Partial model results may be inspected but cannot satisfy the complete campaign gate.
