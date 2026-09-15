@@ -33,6 +33,7 @@ from scripts.evaluation.text_calibration_runtime import (
     add_text_calibration_arguments,
     finish_text_calibration,
     load_text_calibration_subset,
+    load_text_dataset_artifact,
     make_text_dataloader,
     model_state_sha256,
     run_text_calibration,
@@ -122,6 +123,10 @@ class Arguments:
     calibration_lower_quantile: float = 0.0
     calibration_upper_quantile: float = 1.0
     calibration_margin_fraction: float = 0.05
+    calibration_dataset_path: str = ""
+    calibration_dataset_fingerprint: str = ""
+    evaluation_dataset_path: str = ""
+    evaluation_dataset_fingerprint: str = ""
 
 def parse_arguments() -> Arguments:
     """Parse RoBERTa evaluation and direct Gaussian timing options.
@@ -183,7 +188,7 @@ def parse_arguments() -> Arguments:
         "--gaussian-time-noise",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Apply direct Gaussian error to every event-aware spike time.",
+        help="Apply direct Gaussian error to each supported spike time.",
     )
     parser.add_argument(
         "--time-noise-std-frac",
@@ -356,6 +361,12 @@ def evaluate_roberta_model(args: Arguments) -> None:
     preferred_text_column = DATASET_PRESETS.get(args.task, {}).get("text_column")
 
     def load_requested_split(split: str) -> Any:
+        if split == dataset_split and args.evaluation_dataset_path:
+            return load_text_dataset_artifact(
+                args.evaluation_dataset_path,
+                args.evaluation_dataset_fingerprint,
+                role="evaluation",
+            )
         print(f"Loading dataset: {dataset_name}/{dataset_config_name} ({split})...", flush=True)
         if dataset_config_name is None:
             return load_dataset(dataset_name, split=split, cache_dir=args.cache_dir)

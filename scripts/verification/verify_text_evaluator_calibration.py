@@ -17,11 +17,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import torch
-from datasets import Dataset
+from datasets import Dataset, load_from_disk
 
 from scripts.evaluation import text_calibration_runtime
 from scripts.evaluation.text_calibration_runtime import (
     ClassificationProgress,
+    load_text_dataset_artifact,
     make_text_dataloader,
     model_state_sha256,
     validate_text_calibration_arguments,
@@ -106,8 +107,16 @@ def verify_arguments_and_progress(root):
     print("PASS arguments and immediate local progress")
 
 
-def verify_dataset_inputs():
+def verify_dataset_inputs(root):
     dataset = Dataset.from_dict({"sentence": ["one", "two", "three"], "label": [0, 1, 0]})
+    artifact = root / "dataset"
+    dataset.save_to_disk(artifact)
+    stored_fingerprint = str(load_from_disk(artifact)._fingerprint)
+    restored = load_text_dataset_artifact(
+        str(artifact), stored_fingerprint, role="evaluation",
+    )
+    assert restored["sentence"] == dataset["sentence"]
+    reject(lambda: load_text_dataset_artifact(str(artifact), "wrong", role="evaluation"))
     loader = make_text_dataloader(
         dataset, TinyTokenizer(), text_column="sentence", max_length=8,
         batch_size=2, include_labels=True,
@@ -242,7 +251,7 @@ def main():
     with tempfile.TemporaryDirectory(dir=runtime, prefix="unit-") as directory:
         root = Path(directory)
         verify_arguments_and_progress(root)
-        verify_dataset_inputs()
+        verify_dataset_inputs(root)
         verify_family_lifecycle(root, "bert")
         verify_family_lifecycle(root, "roberta")
     print("All text evaluator calibration checks passed")

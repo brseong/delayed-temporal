@@ -88,7 +88,8 @@ def initialize(root: Path, source: Path, assets_manifest: Path) -> dict:
                   "source_commit": subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip(),
                   "theta": 40.0, "precision": "float64", "output_bounds_version": 3,
                   "vit_calibration_policy_version": 2,
-                  "tau_s": 1.0, "tracking": "disabled", "local_gpu_ids": [4, 5, 6, 7],
+                  "tau_s": 1.0, "tracking": "disabled", "local_gpu_ids": list(range(8)),
+                  "campaign_extra_local_gpus": [0, 1, 2, 3],
                   "evaluation_count": 8, "calibration_count": 4,
                   "models": assets["models"], "assets_manifest_sha256": sha256_file(assets_manifest),
                   "runtime_root": f"/data/delayed-temporal/artifacts/runtime/{TAG}",
@@ -154,6 +155,30 @@ def completed(root: Path, experiment: dict, task: dict) -> dict | None:
     return result
 
 
+def update_task_progress(root: Path, task: dict, log_path: Path) -> None:
+    """Expose the latest flushed evaluator count without treating it as completion."""
+    if not log_path.exists():
+        return
+    prefix = "Calibration progress — " if task["kind"] in {"collect", "smoke_collect"} else "Evaluation progress — "
+    rows = []
+    for line in log_path.read_text(errors="replace").splitlines():
+        if line.startswith(prefix):
+            try:
+                rows.append(json.loads(line[len(prefix):]))
+            except json.JSONDecodeError:
+                continue
+    progress = rows[-1] if rows else None
+    value = {"state": "running", "model_key": task["model_key"], "run_id": task["run_id"],
+             "phase": task["kind"], "progress": progress, "updated_at": time.time()}
+    atomic_json(root / "status" / f'{task["model_key"]}.json', value)
+    if progress is not None:
+        batch = progress.get("completed_batches")
+        if type(batch) is int and batch > 0:
+            snapshot = root / "progress" / task["run_id"] / f"batch-{batch:04d}.json"
+            if not snapshot.exists():
+                write_immutable_json(snapshot, value)
+
+
 def run_task(root: Path, experiment: dict, task: dict, host_label: str) -> dict:
     require_current_experiment(experiment)
     validate_task(task, experiment)
@@ -166,8 +191,12 @@ def run_task(root: Path, experiment: dict, task: dict, host_label: str) -> dict:
         result = completed(root, experiment, task)
         if result is not None:
             return result
-        if host_label == "local" and os.environ.get("CUDA_VISIBLE_DEVICES") not in {"4", "5", "6", "7"}:
-            raise ValueError("Local comparison requires exactly one physical GPU from 4 through 7")
+        if host_label == "local":
+            visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+            if not visible.isdecimal() or int(visible) not in experiment["local_gpu_ids"]:
+                raise ValueError("Local comparison requires one campaign-approved physical GPU")
+            if int(visible) < 4 and experiment.get("campaign_extra_local_gpus") != [0, 1, 2, 3]:
+                raise ValueError("GPU 0 through 3 require the campaign-specific manifest override")
         check_source(experiment)
         model = model_by_key(experiment, task["model_key"])
         check_assets(experiment, model, host_label)
@@ -213,7 +242,11 @@ def run_task(root: Path, experiment: dict, task: dict, host_label: str) -> dict:
                 child = subprocess.Popen(evaluator_command(experiment, task, root), cwd=source,
                                          env=environment, stdout=log, stderr=subprocess.STDOUT,
                                          start_new_session=True)
+                while child.poll() is None:
+                    update_task_progress(root, task, log_path)
+                    time.sleep(5)
                 code = child.wait()
+            update_task_progress(root, task, log_path)
             if code != 0:
                 raise RuntimeError(f"Evaluator exit {code}; preserved {log_path}")
         finally:
@@ -247,6 +280,10 @@ def run_task(root: Path, experiment: dict, task: dict, host_label: str) -> dict:
             shutil.rmtree(scratch)
         event(root, "task_completed", run_id=task["run_id"], model_key=task["model_key"],
               host_label=host_label, elapsed_seconds=result["elapsed_seconds"], correct=result.get("correct"))
+        atomic_json(root / "status" / f'{task["model_key"]}.json', {
+            "state": "phase_complete", "model_key": task["model_key"], "run_id": task["run_id"],
+            "phase": task["kind"], "updated_at": time.time(),
+        })
         return result
 
 
@@ -334,14 +371,19 @@ def worker(root: Path, mode: str, key: str, host_label: str) -> None:
     gpu_lock = None
     if host_label == "local":
         visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-        if visible not in {"4", "5", "6", "7"}:
-            raise ValueError("Local execution is restricted to GPU4 through7")
+        if not visible.isdecimal() or int(visible) not in experiment["local_gpu_ids"]:
+            raise ValueError("Local execution requires one campaign-approved physical GPU")
+        if int(visible) < 4 and experiment.get("campaign_extra_local_gpus") != [0, 1, 2, 3]:
+            raise ValueError("GPU 0 through 3 require the campaign-specific manifest override")
         lock_dir = Path("/data/delayed-temporal/artifacts/runtime/gpu-locks")
         lock_dir.mkdir(parents=True, exist_ok=True)
         gpu_lock = (lock_dir / f"gpu-{visible}.lock").open("a")
         fcntl.flock(gpu_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if not gpu_available(gpu_activity()[int(visible)]):
-            raise RuntimeError("Assigned local GPU is occupied")
+        for check in range(2):
+            if not gpu_available(gpu_activity(gpu_ids=(int(visible),))[int(visible)]):
+                raise RuntimeError("Assigned local GPU is occupied")
+            if check == 0:
+                time.sleep(10)
     require_gpu(experiment, host_label)
     try:
         if mode == "admit":
@@ -383,9 +425,9 @@ def prepare_execution(root: Path, experiment: dict) -> dict:
                          "admission_verified": selected is not None,
                          "requires_full_calibration": True, "command": command,
                          "commands_by_gpu": {str(gpu): ["env", f"CUDA_VISIBLE_DEVICES={gpu}", *command]
-                                             for gpu in (4, 5, 6, 7)}})
+                                             for gpu in range(8)}})
     value = {"experiment_sha256": task_sha256(experiment), "source_commit": experiment["source_commit"],
-             "vit_calibration_policy_version": 2, "allowed_gpu_ids": [4, 5, 6, 7],
+             "vit_calibration_policy_version": 2, "allowed_gpu_ids": list(range(8)),
              "launch_performed": False, "models": prepared}
     destination = root / "prepared" / (task_sha256(value) + ".json")
     write_immutable_json(destination, value)

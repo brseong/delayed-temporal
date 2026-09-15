@@ -77,7 +77,8 @@ def experiment_fixture(root: Path) -> dict:
     experiment = {
         "tag": contract.TAG, "theta": 40.0, "precision": "float64", "output_bounds_version": 3,
         "vit_calibration_policy_version": 2,
-        "tau_s": 1.0, "tracking": "disabled", "local_gpu_ids": [4, 5, 6, 7],
+        "tau_s": 1.0, "tracking": "disabled", "local_gpu_ids": list(range(8)),
+        "campaign_extra_local_gpus": [0, 1, 2, 3],
         "evaluation_count": 8, "calibration_count": 4, "models": models,
         "source_commit": "a" * 40, "source_root": str(root / "source"),
         "python_bin": sys.executable, "runtime_root": str(root / "runtime"),
@@ -288,7 +289,7 @@ def verify_contract(root: Path) -> None:
         reject(lambda: contract.validate_task({**task, "preprocessing_sha256": "0" * 64}, experiment))
     for batch in (0, 1, 4, 64, 128):
         reject(lambda: contract.make_task(experiment, contract.MODEL_KEYS[0], "collect", batch))
-    for field, value in (("local_gpu_ids", list(range(8))), ("theta", 2000), ("evaluation_count", 4)):
+    for field, value in (("local_gpu_ids", [4, 5, 6, 7]), ("theta", 2000), ("evaluation_count", 4)):
         reject(lambda: contract.validate_experiment({**experiment, field: value}))
     for field in ("dependency_sha256", "runtime_sha256", "package_versions"):
         reject(lambda: contract.validate_experiment({**experiment, field: {}}))
@@ -440,13 +441,17 @@ def verify_source_and_gpu(root: Path) -> None:
         changed["dependency_sha256"]["transformers"] = "0" * 64
         reject(lambda: contract.check_source(changed))
     good = json.dumps({"count": 1, "model": "NVIDIA RTX A6000"})
-    for gpu in (4, 5, 6, 7):
+    for gpu in range(8):
         with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": str(gpu)}), patch("subprocess.check_output", return_value=good):
             assert contract.require_gpu(experiment, "local") == "NVIDIA RTX A6000"
-    for gpu in ("0", "1", "2", "3", "", "4,5", "8", "-1"):
+    for gpu in ("", "4,5", "8", "-1"):
         with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": gpu}), patch("subprocess.check_output") as query:
             reject(lambda: contract.require_gpu(experiment, "local"))
             query.assert_not_called()
+    without_override = {**experiment, "campaign_extra_local_gpus": []}
+    with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "1"}), patch("subprocess.check_output") as query:
+        reject(lambda: contract.require_gpu(without_override, "local"))
+        query.assert_not_called()
     assert not runner.gpu_available({"memory_used_mib": 20000, "utilization_gpu_percent": 0, "pids": []})
     assert not runner.gpu_available({"memory_used_mib": 0, "utilization_gpu_percent": 100, "pids": []})
     assert runner.gpu_available({"memory_used_mib": 0, "utilization_gpu_percent": 0, "pids": [12345]})
@@ -494,7 +499,7 @@ def verify_policy2_and_preparation(root: Path) -> None:
         admit.assert_not_called()
         assert value["launch_performed"] is False and len(value["models"]) == 4
         for row in value["models"]:
-            assert set(row["commands_by_gpu"]) == {"4", "5", "6", "7"}
+            assert set(row["commands_by_gpu"]) == {str(gpu) for gpu in range(8)}
             for gpu, command in row["commands_by_gpu"].items():
                 assert command == ["env", "CUDA_VISIBLE_DEVICES=" + gpu, *row["command"]]
         assert all(row["batch_size"] is None and row["requires_full_calibration"] for row in value["models"])

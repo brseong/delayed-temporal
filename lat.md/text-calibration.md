@@ -50,6 +50,24 @@ BERT/RoBERTa print flushed cumulative correct/total and accuracy after each eval
 
 The first 256-example GPT-2 comparison at source `014f428` stopped before SNN inference because the old backend hash depended on whether dataset tokenization used its cache. Its partial logs are preserved separately. The corrected implementation requires fresh collection and does not rewrite or relabel that failed attempt. [[calibration#Layer-wise Calibration#Frozen Execution#Runtime Record Lookup]] also removes repeated complete table validation from frozen activation execution without changing numerical results.
 
+## Complete Comparison Execution
+
+The complete comparison collects fresh ranges from 5,000 training examples and evaluates the complete evaluation population selected by the campaign.
+
+[[scripts/evaluation/text_calibration_runtime.py#load_text_dataset_artifact]] loads a single saved Dataset only when its stored fingerprint and exact sample count match the immutable model manifest. It does not replace the requested artifact with a network download or another cache entry.
+
+[[scripts/experiments/run_full_calibrated_text_comparison.py#main]] runs collection, ANN evaluation and SNN evaluation sequentially on one GPU while allowing different models to run in parallel. It preserves each attempt log, reuses only hash-validated completed phases, and writes flushed progress records throughout evaluation.
+
+[[scripts/analysis/summarize_full_calibrated_text_comparison.py#build]] authenticates every phase log and calibration table again before producing raw, summary, calibration-site and provenance artifacts. Partial model results may be inspected but cannot satisfy the complete campaign gate.
+
+GPT-2 records token-weighted corpus perplexity as the primary complete-run metric and retains the historical mean of batch losses as a compatibility metric. Both values come from the same model forwards; padding positions are excluded from the token count.
+
+The pinned WikiText-2 raw test revision contains 4,358 rows and 2,891 rows after excluding empty text. The complete campaign evaluates those 2,891 rows rather than padding the dataset to an assumed count.
+
+The comparison manifest may admit local GPUs 0 through 3 without changing the repository-wide default GPU set. This permission is confined to the versioned campaign and each evaluator retains one visible RTX A6000.
+
+`scripts/experiments/ubai/full_calibrated_text_pair.sbatch` gives BERT and RoBERTa one GPU and four CPU cores each inside one two-GPU Slurm allocation. The portable environment and task scratch are expanded only below the node-local `/enroot` disk, and the exact job-owned directory is removed after both children terminate.
+
 ## Validation Scope
 
 Tests must establish executed site coverage, selected range consumption and strict persistence before reporting calibrated accuracy. Passing small checks does not establish full dataset performance or update the manuscript.

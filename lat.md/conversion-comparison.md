@@ -55,3 +55,13 @@ raw_runs.csv, summary.csv, sop_breakdown.csv, provenance 및 생성한 LaTeX 행
 평가에서는 [[scripts/evaluation/error_analysis_vit.py#require_finite_logits]]가 NaN 또는 무한대인 logit을 정확도 계산 전에 거부한다. 전처리 설정 파일의 SHA-256과 주요 의존성의 버전도 별도로 고정하며, 두 실행 환경의 버전이 다르면 평가를 시작하지 않는다.
 
 새 검증은 GELU 고정 계수의 부호와 경계, 일반 곱셈 유지, CIFAR image/label 순서, 모델별 calibration site 수, frozen table, source 혼합 거부, 메모리 검사 재개, 로그 완전성, SOP 부분합과 에너지 단위 및 CSV와 LaTeX 일치를 포함한다. 기존 NeurIPS SOP 검증기는 변경하지 않는다. 실행 전 관련 검증과 용어 검사 및 lat check를 통과하고, 최종 논문 반영 후 ICLR 원고를 빌드한다.
+
+## Complete Seven-Model Campaign
+
+최신 비교 실행은 네 ViT와 BERT, RoBERTa, GPT-2를 하나의 source identity 아래에서 다시 평가하고, ICLR에는 검증된 ViT 네 행만 반영한다.
+
+태그 `conversion_comparison_theta40_calibrated_float64_bounds3_v3`은 ViT policy 2와 text policy 1을 구별해 기록한다. CIFAR-10 test 10k, ImageNet fixed validation 5k, SST-2 validation 872개, 고정 dataset revision의 비어 있지 않은 WikiText-2 test 2,891개 전부를 사용하며 모델별 training seed-0 5k calibration을 새로 수집한다.
+
+이번 태그에 한해 로컬 GPU 0--3도 명시적으로 허용하지만 전역 GPU 기본값은 바꾸지 않는다. 로컬과 UBAI 작업은 같은 최종 commit, checkpoint, dataset, preprocessing과 calibration identity를 검사하고, `/tmp`가 아닌 실제 디스크에 runtime을 둔다.
+
+각 ViT evaluator의 flush된 calibration 또는 평가 batch record는 모델별 `status` 파일과 덮어쓰지 않는 progress snapshot으로 복제된다. 부분 record는 진행 확인용이며 완료 결과나 표 생성의 근거로 승인되지 않는다.

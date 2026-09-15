@@ -3,22 +3,43 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 import re
+import subprocess
 from typing import Any
 
 from scripts.experiments.calibrated_three_sweeps import (
     parse_result_log, safe_output, sha256_file, task_sha256, write_immutable_json,
 )
-from scripts.experiments.run_calibrated_three_sweep_task import check_source, require_gpu
+from scripts.experiments.run_calibrated_three_sweep_task import check_source, require_gpu as require_default_gpu
 
 LEGACY_TAG = "vit_conversion_comparison_theta40_calibrated_float64_bounds3_v1"
-TAG = "vit_conversion_comparison_theta40_calibrated_float64_bounds3_v2"
+PREVIOUS_TAG = "vit_conversion_comparison_theta40_calibrated_float64_bounds3_v2"
+TAG = "conversion_comparison_theta40_calibrated_float64_bounds3_v3"
 MODEL_KEYS = ("cifar10_vit_small", "imagenet_vit_small", "imagenet_vit_base", "imagenet_vit_large")
 KINDS = {"collect", "dense", "spiking", "smoke_collect", "smoke_spiking", "environment_spiking"}
 PYTHON = "/opt/conda/envs/dt/bin/python"
-SOURCE = "/data/delayed-temporal-worktrees/vit-conversion-comparison-v2"
+SOURCE = "/data/delayed-temporal-worktrees/full-calibrated-comparison"
 DEFAULT_ROOT = "/data/delayed-temporal/artifacts/logs/conversion_comparison/" + TAG
+
+
+def require_gpu(experiment: dict[str, Any], host_label: str) -> str:
+    """Allow every local A6000 only for the explicitly versioned comparison campaign."""
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if host_label != "local":
+        return require_default_gpu(experiment, host_label)
+    if not visible.isdecimal() or int(visible) not in experiment.get("local_gpu_ids", []):
+        raise ValueError("Exactly one campaign-approved local GPU must be visible")
+    if int(visible) < 4 and experiment.get("campaign_extra_local_gpus") != [0, 1, 2, 3]:
+        raise ValueError("GPU 0 through 3 require the campaign-specific manifest override")
+    probe = subprocess.check_output([
+        experiment["python_bin"], "-c", "import json,torch; print(json.dumps({'count':torch.cuda.device_count(),"
+        "'model':torch.cuda.get_device_name(0) if torch.cuda.device_count() else ''}))"], text=True)
+    data = json.loads(probe)
+    if data["count"] != 1 or "RTX A6000" not in data["model"]:
+        raise ValueError("Exactly one RTX A6000 GPU is required")
+    return data["model"]
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -37,7 +58,7 @@ def calibration_policy_version(experiment: dict) -> int:
     version = experiment.get("vit_calibration_policy_version")
     if experiment.get("tag") == LEGACY_TAG and version is None:
         return 1
-    if experiment.get("tag") == TAG and type(version) is int and version == 2:
+    if experiment.get("tag") in {PREVIOUS_TAG, TAG} and type(version) is int and version == 2:
         return 2
     raise ValueError("Comparison tag and calibration policy differ")
 
@@ -83,7 +104,8 @@ def validate_experiment(experiment: dict) -> None:
     version = calibration_policy_version(experiment)
     for key, value in {"theta": 40.0, "precision": "float64",
                        "output_bounds_version": 3, "tau_s": 1.0,
-                       "local_gpu_ids": [4, 5, 6, 7], "evaluation_count": 8,
+                       "local_gpu_ids": list(range(8)), "evaluation_count": 8,
+                       "campaign_extra_local_gpus": [0, 1, 2, 3],
                        "calibration_count": 4, "tracking": "disabled"}.items():
         if experiment.get(key) != value:
             raise ValueError(f"Experiment contract mismatch: {key}")

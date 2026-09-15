@@ -14,6 +14,7 @@ from typing import Any, Callable
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+from datasets import load_from_disk
 
 from utils.transforms.calibration import (
     CalibrationMode,
@@ -42,6 +43,10 @@ CALIBRATION_ARGUMENT_DEFAULTS = {
     "calibration_lower_quantile": 0.0,
     "calibration_upper_quantile": 1.0,
     "calibration_margin_fraction": 0.05,
+    "calibration_dataset_path": "",
+    "calibration_dataset_fingerprint": "",
+    "evaluation_dataset_path": "",
+    "evaluation_dataset_fingerprint": "",
 }
 
 
@@ -57,6 +62,10 @@ def add_text_calibration_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--calibration-lower-quantile", type=float, default=0.0)
     parser.add_argument("--calibration-upper-quantile", type=float, default=1.0)
     parser.add_argument("--calibration-margin-fraction", type=float, default=0.05)
+    parser.add_argument("--calibration-dataset-path", default="")
+    parser.add_argument("--calibration-dataset-fingerprint", default="")
+    parser.add_argument("--evaluation-dataset-path", default="")
+    parser.add_argument("--evaluation-dataset-fingerprint", default="")
 
 
 def text_calibration_argument_values(args: argparse.Namespace) -> dict[str, Any]:
@@ -74,6 +83,13 @@ def validate_text_calibration_arguments(args: Any) -> CalibrationMode | None:
             raise ValueError(f"{name} must be a positive integer")
     if type(args.max_eval_batches) is not int or args.max_eval_batches < 0:
         raise ValueError("max_eval_batches must be a non-negative integer")
+    for role in ("calibration", "evaluation"):
+        path = getattr(args, f"{role}_dataset_path")
+        fingerprint = getattr(args, f"{role}_dataset_fingerprint")
+        if bool(path) != bool(fingerprint):
+            raise ValueError(f"{role} dataset path and fingerprint must be supplied together")
+        if path and not Path(path).is_dir():
+            raise FileNotFoundError(path)
     if args.calibration_mode == "none":
         return None
     mode = CalibrationMode(args.calibration_mode)
@@ -105,10 +121,37 @@ def validate_text_calibration_arguments(args: Any) -> CalibrationMode | None:
 
 def load_text_calibration_subset(args: Any, load_split: Callable[[str], Any]) -> Any:
     """Select exactly the requested training texts selected using the seed, never validation or test texts."""
+    if args.calibration_dataset_path:
+        selected = load_text_dataset_artifact(
+            args.calibration_dataset_path,
+            args.calibration_dataset_fingerprint,
+            role="calibration",
+        )
+        if len(selected) != args.calibration_samples:
+            raise ValueError("self-contained calibration dataset has the wrong sample count")
+        return selected
     training = load_split("train")
     return select_calibration_subset(
         training, sample_count=args.calibration_samples, seed=args.calibration_seed,
     )
+
+
+def load_text_dataset_artifact(path: str, expected_fingerprint: str, *, role: str) -> Any:
+    """Load one immutable Dataset artifact and verify its stored row identity."""
+    dataset = load_from_disk(path)
+    if not hasattr(dataset, "column_names") or not hasattr(dataset, "_fingerprint"):
+        raise TypeError(f"{role} dataset artifact must contain one Dataset")
+    actual = str(dataset._fingerprint)
+    if actual != expected_fingerprint:
+        raise ValueError(
+            f"{role} dataset fingerprint differs: expected {expected_fingerprint}, got {actual}"
+        )
+    print(
+        f"Loaded self-contained {role} dataset: {path} "
+        f"(samples={len(dataset)}, fingerprint={actual})",
+        flush=True,
+    )
+    return dataset
 
 
 def make_text_dataloader(

@@ -16,7 +16,10 @@ import wandb
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from utils.transformers.optional_tensorboard import create_summary_writer
-from scripts.evaluation.text_calibration_runtime import model_state_sha256
+from scripts.evaluation.text_calibration_runtime import (
+    load_text_dataset_artifact,
+    model_state_sha256,
+)
 from datasets import load_dataset
 from transformers import AttentionInterface, AutoModelForCausalLM, AutoTokenizer
 from utils.transforms.calibration import (
@@ -121,6 +124,10 @@ class Arguments:
     calibration_lower_quantile: float
     calibration_upper_quantile: float
     calibration_margin_fraction: float
+    calibration_dataset_path: str
+    calibration_dataset_fingerprint: str
+    evaluation_dataset_path: str
+    evaluation_dataset_fingerprint: str
 
     # These four fields match ViT, BERT, and RoBERTa exactly; distribution choice
     # and a separate evaluation-mode switch are intentionally absent.
@@ -252,6 +259,10 @@ def parse_arguments() -> Arguments:
         default=0.05,
         help="Per-side range expansion after endpoint selection.",
     )
+    parser.add_argument("--calibration-dataset-path", default="")
+    parser.add_argument("--calibration-dataset-fingerprint", default="")
+    parser.add_argument("--evaluation-dataset-path", default="")
+    parser.add_argument("--evaluation-dataset-fingerprint", default="")
 
     # These options match the other model evaluators so one experiment convention
     # can configure every supported architecture.
@@ -259,7 +270,7 @@ def parse_arguments() -> Arguments:
         "--gaussian-time-noise",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Apply direct Gaussian error to every event-aware spike time.",
+        help="Apply direct Gaussian error to each supported spike time.",
     )
     parser.add_argument(
         "--time-noise-std-frac",
@@ -330,6 +341,10 @@ def parse_arguments() -> Arguments:
         calibration_lower_quantile=args.calibration_lower_quantile,
         calibration_upper_quantile=args.calibration_upper_quantile,
         calibration_margin_fraction=args.calibration_margin_fraction,
+        calibration_dataset_path=args.calibration_dataset_path,
+        calibration_dataset_fingerprint=args.calibration_dataset_fingerprint,
+        evaluation_dataset_path=args.evaluation_dataset_path,
+        evaluation_dataset_fingerprint=args.evaluation_dataset_fingerprint,
         gaussian_time_noise=args.gaussian_time_noise,
         time_noise_std_frac=args.time_noise_std_frac,
         time_noise_mean=args.time_noise_mean,
@@ -367,11 +382,21 @@ def validate_gpt2_calibration_arguments(
     if args.dtype not in ("float32", "float64"):
         raise ValueError("dtype must be float32 or float64")
     if args.calibration_mode == "none":
+        mode = None
+    else:
+        try:
+            mode = CalibrationMode(args.calibration_mode)
+        except ValueError as error:
+            raise ValueError("unsupported calibration_mode") from error
+    for role in ("calibration", "evaluation"):
+        path = getattr(args, f"{role}_dataset_path")
+        fingerprint = getattr(args, f"{role}_dataset_fingerprint")
+        if bool(path) != bool(fingerprint):
+            raise ValueError(f"{role} dataset path and fingerprint must be supplied together")
+        if path and not Path(path).is_dir():
+            raise FileNotFoundError(path)
+    if mode is None:
         return None
-    try:
-        mode = CalibrationMode(args.calibration_mode)
-    except ValueError as error:
-        raise ValueError("unsupported calibration_mode") from error
     if args.model_backend != "spiking":
         raise ValueError("layer-wise calibration requires model_backend=spiking")
     if not isinstance(args.calibration_path, str):
@@ -451,19 +476,41 @@ def gpt2_loss_metrics(
     return avg_loss, perplexity
 
 
+def gpt2_token_metrics(*, token_nll_sum: float, valid_token_count: int) -> tuple[float, float]:
+    """Compute corpus loss and perplexity from all valid next-token targets."""
+    if valid_token_count <= 0 or not math.isfinite(token_nll_sum):
+        raise FloatingPointError("GPT-2 token-weighted metric is incomplete or nonfinite")
+    loss = token_nll_sum / valid_token_count
+    if not math.isfinite(loss) or loss > math.log(sys.float_info.max):
+        raise FloatingPointError("GPT-2 token-weighted loss is nonfinite or not representable")
+    return loss, math.exp(loss)
+
+
 def print_gpt2_progress(
     *, batch_index: int, total_batches: int, total_examples: int,
     total_loss: float, valid_batches: int, elapsed_seconds: float,
+    token_nll_sum: float = 0.0, valid_token_count: int = 0,
 ) -> None:
-    """Flush local progress while preserving the existing mean of batch losses."""
+    """Flush both corpus-token and legacy batch-mean language-model metrics."""
     average_loss = total_loss / valid_batches if valid_batches else None
     finite_loss = average_loss if average_loss is not None and math.isfinite(average_loss) else None
     perplexity = math.exp(finite_loss) if finite_loss is not None and finite_loss < 709.0 else None
+    token_weighted_loss, token_weighted_perplexity = (None, None)
+    if valid_token_count:
+        try:
+            token_weighted_loss, token_weighted_perplexity = gpt2_token_metrics(
+                token_nll_sum=token_nll_sum, valid_token_count=valid_token_count,
+            )
+        except FloatingPointError:
+            pass
     print(json.dumps({
         "event": "evaluation_progress", "batch": batch_index,
         "total_batches": total_batches, "evaluated_samples": total_examples,
         "valid_loss_batches": valid_batches, "average_loss": finite_loss,
         "perplexity": perplexity, "loss_aggregation": "mean_of_batch_losses",
+        "token_nll_sum": token_nll_sum, "valid_token_count": valid_token_count,
+        "token_weighted_loss": token_weighted_loss,
+        "token_weighted_perplexity": token_weighted_perplexity,
         "elapsed_seconds": round(elapsed_seconds, 3),
         "estimated_remaining_seconds": round(
             elapsed_seconds * max(0, total_batches - batch_index) / batch_index, 3,
@@ -577,6 +624,12 @@ def evaluate_gpt2_model(args: Arguments) -> None:
 
     def load_requested_split(split: str) -> Any:
         """Load one evaluator split under the resolved dataset configuration."""
+        if split == dataset_split and args.evaluation_dataset_path:
+            return load_text_dataset_artifact(
+                args.evaluation_dataset_path,
+                args.evaluation_dataset_fingerprint,
+                role="evaluation",
+            )
         # A missing dataset configuration is a supported Hugging Face dataset form;
         # avoid passing an explicit None as a positional builder configuration.
         if dataset_config_name is None:
@@ -609,7 +662,15 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             f"Loading calibration dataset: {dataset_name}/{dataset_config_name} "
             f"({calibration_split})..."
         )
-        training_dataset = load_requested_split(calibration_split)
+        training_dataset = (
+            load_text_dataset_artifact(
+                args.calibration_dataset_path,
+                args.calibration_dataset_fingerprint,
+                role="calibration",
+            )
+            if args.calibration_dataset_path
+            else load_requested_split(calibration_split)
+        )
 
         # Empty WikiText rows carry no language-model tokens beyond padding and would
         # make subset identity depend on non-examples. Filter before permutation so
@@ -618,14 +679,21 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             training_dataset.column_names,
             preferred=preferred_text_column,
         )
-        training_dataset = training_dataset.filter(
-            lambda example: len(example[calibration_text_column].strip()) > 0
-        )
-        calibration_dataset = select_calibration_subset(
-            training_dataset,
-            sample_count=args.calibration_samples,
-            seed=args.calibration_seed,
-        )
+        if args.calibration_dataset_path:
+            if len(training_dataset) != args.calibration_samples:
+                raise ValueError("self-contained calibration dataset has the wrong sample count")
+            if any(len(text.strip()) == 0 for text in training_dataset[calibration_text_column]):
+                raise ValueError("self-contained GPT-2 calibration dataset contains empty text")
+            calibration_dataset = training_dataset
+        else:
+            training_dataset = training_dataset.filter(
+                lambda example: len(example[calibration_text_column].strip()) > 0
+            )
+            calibration_dataset = select_calibration_subset(
+                training_dataset,
+                sample_count=args.calibration_samples,
+                seed=args.calibration_seed,
+            )
 
     # Evaluation preserves its existing empty-line removal independently. Frozen
     # setup does not select or mutate validation examples to match calibration.
@@ -635,9 +703,13 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             dataset.column_names,
             preferred=preferred_text_column,
         )
-        dataset = dataset.filter(
-            lambda example: len(example[text_column].strip()) > 0
-        )
+        if args.evaluation_dataset_path:
+            if any(len(text.strip()) == 0 for text in dataset[text_column]):
+                raise ValueError("self-contained GPT-2 evaluation dataset contains empty text")
+        else:
+            dataset = dataset.filter(
+                lambda example: len(example[text_column].strip()) > 0
+            )
         print(f"Evaluation dataset fingerprint: {dataset._fingerprint}", flush=True)
     elif calibration_dataset is not None:
         text_column = infer_text_column(
@@ -898,6 +970,8 @@ def evaluate_gpt2_model(args: Arguments) -> None:
     total_loss = 0.0
     total_steps = 0
     total_examples = 0
+    token_nll_sum = 0.0
+    valid_token_count = 0
     evaluation_started = time.monotonic()
     expected_batches = min(len(dataloader), max_eval_batches) if max_eval_batches > 0 else len(dataloader)
 
@@ -938,7 +1012,13 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         loss = outputs.loss
 
         if not torch.isnan(loss):
-            total_loss += loss.item()
+            batch_loss = loss.item()
+            batch_valid_tokens = int((labels[..., 1:] != -100).sum().item())
+            if batch_valid_tokens <= 0:
+                raise ValueError("GPT-2 batch has no valid next-token targets")
+            total_loss += batch_loss
+            token_nll_sum += batch_loss * batch_valid_tokens
+            valid_token_count += batch_valid_tokens
             total_steps += 1
             wandb.log({"Batch Loss": loss.item(), "Batch Perplexity": math.exp(min(loss.item(), 20.0))})
 
@@ -947,6 +1027,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         print_gpt2_progress(
             batch_index=log_step[0], total_batches=expected_batches,
             total_examples=total_examples, total_loss=total_loss, valid_batches=total_steps,
+            token_nll_sum=token_nll_sum, valid_token_count=valid_token_count,
             elapsed_seconds=time.monotonic() - evaluation_started,
         )
         if max_eval_batches > 0 and log_step[0] >= max_eval_batches:
@@ -970,11 +1051,18 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         total_loss=total_loss, total_steps=total_steps, expected_batches=expected_batches,
         calibrated=calibration_state is not None,
     )
+    token_weighted_loss, token_weighted_perplexity = gpt2_token_metrics(
+        token_nll_sum=token_nll_sum, valid_token_count=valid_token_count,
+    )
 
     print("-" * 30)
     print(f"Evaluation Results for {model_id}:")
     print(f"Average Loss: {avg_loss:.4f}")
     print(f"Perplexity: {perplexity:.4f}")
+    print(f"Token NLL sum: {token_nll_sum:.17g}")
+    print(f"Valid next-token count: {valid_token_count}")
+    print(f"Token-weighted loss: {token_weighted_loss:.17g}")
+    print(f"Token-weighted perplexity: {token_weighted_perplexity:.17g}")
     wandb.log({"Final Average Loss": avg_loss, "Final Perplexity": perplexity})
 
     for (module_name, clamp_name), stats in sorted(clamp_totals.items()):

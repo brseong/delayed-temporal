@@ -316,19 +316,23 @@ def verify_progress_and_optional_tensorboard():
     stream = StringIO()
     with redirect_stdout(stream):
         print_gpt2_progress(batch_index=2, total_batches=4, total_examples=6,
-                            total_loss=6.0, valid_batches=2, elapsed_seconds=5.0)
+                            total_loss=6.0, valid_batches=2, elapsed_seconds=5.0,
+                            token_nll_sum=15.0, valid_token_count=6)
         print_gpt2_progress(batch_index=1, total_batches=4, total_examples=3,
                             total_loss=0.0, valid_batches=0, elapsed_seconds=2.0)
     rows = [json.loads(line) for line in stream.getvalue().splitlines()]
     assert rows[0]["average_loss"] == 3.0
     assert rows[0]["perplexity"] == math.exp(3.0)
+    assert rows[0]["token_weighted_loss"] == 2.5
+    assert rows[0]["token_weighted_perplexity"] == math.exp(2.5)
+    assert rows[0]["token_nll_sum"] == 15.0 and rows[0]["valid_token_count"] == 6
     assert rows[0]["estimated_remaining_seconds"] == 5.0
     assert rows[1]["average_loss"] is None and rows[1]["perplexity"] is None
 
 
 def verify_strict_collection_and_outputs():
     from scripts.evaluation.error_analysis_gpt2 import (
-        gpt2_loss_metrics, validate_gpt2_batch_output,
+        gpt2_loss_metrics, gpt2_token_metrics, validate_gpt2_batch_output,
     )
     cfg = config()
     model = GPT2LMHeadModel(cfg).double().eval()
@@ -371,6 +375,14 @@ def verify_strict_collection_and_outputs():
     for calibrated in (False, True):
         avg, ppl = gpt2_loss_metrics(total_loss=6.0, total_steps=2, expected_batches=2, calibrated=calibrated)
         assert avg == 3.0 and ppl == math.exp(3.0)
+    token_loss, token_ppl = gpt2_token_metrics(token_nll_sum=15.0, valid_token_count=6)
+    assert token_loss == 2.5 and token_ppl == math.exp(2.5)
+    partitioned_nll = 2.0 * 2 + 2.75 * 4
+    assert gpt2_token_metrics(token_nll_sum=partitioned_nll, valid_token_count=6) == (token_loss, token_ppl)
+    for nll, count in ((0.0, 0), (float("nan"), 1), (float("inf"), 1)):
+        expect_error(FloatingPointError, lambda nll=nll, count=count: gpt2_token_metrics(
+            token_nll_sum=nll, valid_token_count=count,
+        ))
     for total_loss, steps in ((0.0, 0), (3.0, 1), (float("inf"), 2), (float("nan"), 2), (2000.0, 2)):
         expect_error(FloatingPointError, lambda: gpt2_loss_metrics(
             total_loss=total_loss, total_steps=steps, expected_batches=2, calibrated=True,
