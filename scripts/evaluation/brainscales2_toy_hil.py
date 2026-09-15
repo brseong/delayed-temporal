@@ -1638,7 +1638,11 @@ def _run_shared_timing_calibration(
             launch(
                 args,
                 chunk_dir,
-                replace(pool_config, calibration_trials=stop - start),
+                replace(
+                    pool_config,
+                    calibration_trials=stop - start,
+                    seed=pool_config.seed + start,
+                ),
                 spiking_config,
             )
         )

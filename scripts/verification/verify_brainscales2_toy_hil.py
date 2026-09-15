@@ -62,6 +62,7 @@ from utils.hardware.brainscales2.toy_artifacts import (
 from utils.hardware.brainscales2.toy_pooling import (
     _configure_grouped_synapse_weights,
     _grouped_input_channel_slice,
+    _timing_calibration_code_grid,
     GroupedHardwarePoolBackend,
     MockToyPoolBackend,
     ReplayToyPoolBackend,
@@ -238,6 +239,28 @@ def verify_grouped_broadcast_fan_in() -> None:
         reused_weight, reused, input_fan_in=3, synaptic_weight=5.0
     )
     torch.testing.assert_close(reused_weight, torch.full((2, 3), 5.0))
+
+
+def verify_varied_timing_calibration_inputs() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Varied timing calibration inputs]]
+    dedicated = ToyPoolConfig(
+        pool_size=1,
+        logical_neurons=30,
+        mapping="dedicated",
+        calibration_trials=4,
+        seed=11,
+    )
+    grid = _timing_calibration_code_grid(dedicated)
+    assert grid.shape == (4, 32, 30)
+    expected = torch.arange(32).reshape(1, 32, 1).expand_as(grid)
+    torch.testing.assert_close(grid.sort(dim=1).values, expected)
+    assert all(torch.unique(grid[trial, code]).numel() == 30
+               for trial in range(4) for code in range(32))
+    assert not torch.equal(grid[0], grid[1])
+
+    reused = replace(dedicated, mapping="time-multiplexed")
+    reused_grid = _timing_calibration_code_grid(reused)
+    assert bool((reused_grid == reused_grid[:, :, :1]).all())
 
 
 def verify_mock_and_all_miss_policy() -> None:
@@ -1642,6 +1665,7 @@ def main() -> None:
     verify_physical_pooling_with_torch_readout()
     verify_grouped_placement()
     verify_grouped_broadcast_fan_in()
+    verify_varied_timing_calibration_inputs()
     verify_mock_and_all_miss_policy()
     verify_mean_and_corrected_max_estimators()
     verify_chunked_pool_aggregation()

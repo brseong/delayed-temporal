@@ -128,7 +128,7 @@ At `M=16`, dedicated placement uses 480 of 512 neuron circuits. The 128-hidden-u
 
 Full hardware evaluation slices samples and caps `pool_size * samples` at 128 replica-samples, so M=8 and M=16 use 16 and 8 samples. Every chunk runs in a disposable child process to release native hxtorch memory under the 2 GB EBRAINS limit, then [[utils/hardware/brainscales2/toy_pooling.py#concatenate_toy_pool_results]] restores order and provenance.
 
-Timing calibration is acquired once per physical condition in disposable four-trial workers. Their raw events are concatenated before offset estimation across all 32 UInt5 codes, and every inference chunk reuses the same checksummed calibration; calibration and inference batches never coexist in one M=16 graph.
+Timing calibration is acquired once per physical condition in disposable four-trial workers. Their raw events are concatenated before offset estimation across all 32 UInt5 codes, and every inference chunk reuses the same checksummed calibration; calibration and inference batches never coexist in one M=16 graph. Dedicated calibration gives each logical source a deterministic permutation of the 32 codes so simultaneous input times vary, then restores canonical code order before decoder calibration.
 
 Before formal evaluation, [[scripts/evaluation/brainscales2_toy_hil.py#margin_calibration_phase]] measures unlabeled calibration activations at $M=1$ with a 100 microsecond diagnostic deadline. Code zero is excluded; for each 1 microsecond candidate extension from 0 to 40 microseconds, it bootstraps trials and samples and computes the upper confidence bound for the sample-level event that any positive hidden unit misses. The smallest common margin whose bound is at most 5% in both placements is selected, while nonfires at the diagnostic deadline form a structural floor and block the run when no candidate passes.
 
@@ -255,6 +255,10 @@ Each logical hidden source must occupy its own simultaneous fan-in lane block an
 Hardware chunks must concatenate on samples without altering trial, neuron, replica, coordinate, or miss-mask semantics.
 
 The effective hardware chunk must not exceed its configured replica-sample budget, and provenance must retain requested and effective sizes. Split calibration trials must preserve code order and coordinates, produce one shared offset estimate, and remain resumable independently of inference chunks.
+
+### Varied timing calibration inputs
+
+Every dedicated logical source must observe every UInt5 code once per calibration trial while simultaneous source times vary; time-multiplexed calibration retains identical code times.
 
 ### Pool-size-aware hardware chunk cap
 

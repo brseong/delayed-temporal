@@ -341,7 +341,18 @@ def _grouped_input_channel_slice(
         raise ValueError("input_fan_in must be positive")
     if config.mapping == "dedicated":
         start = logical * input_fan_in
-        return slice(start, start + input_fan_in)
+    return slice(start, start + input_fan_in)
+
+
+def _timing_calibration_code_grid(config: ToyPoolConfig) -> torch.Tensor:
+    """Assign every code once per trial and logical source."""
+    base = torch.arange(32, dtype=torch.long).reshape(1, 32, 1)
+    if config.mapping == "time-multiplexed":
+        return base.repeat(config.calibration_trials, 1, config.logical_neurons)
+    trials = torch.arange(config.calibration_trials, dtype=torch.long).reshape(-1, 1, 1)
+    logical = torch.arange(config.logical_neurons, dtype=torch.long).reshape(1, 1, -1)
+    offsets = trials + config.seed + 7 * logical
+    return (base + offsets) % 32
     return slice(0, input_fan_in)
 
 
@@ -986,22 +997,41 @@ class GroupedHardwarePoolBackend:
             (spiking_config.runtime_steps, calibration_batches, input_channels),
             dtype=torch.float32,
         )
+        code_grid = _timing_calibration_code_grid(config)
         batch = 0
-        for _ in range(config.calibration_trials):
-            for time_s in code_times:
-                step = int(round(float(time_s) / spiking_config.dt_s))
-                inputs[step, batch, :] = 1.0
+        for trial in range(config.calibration_trials):
+            for reference_code in range(code_times.numel()):
+                if config.mapping == "dedicated":
+                    for logical in range(config.logical_neurons):
+                        code = int(code_grid[trial, reference_code, logical])
+                        step = int(round(float(code_times[code]) / spiking_config.dt_s))
+                        lanes = _grouped_input_channel_slice(
+                            logical, config, spiking_config.input_fan_in
+                        )
+                        inputs[step, batch, lanes] = 1.0
+                else:
+                    code = int(code_grid[trial, reference_code, 0])
+                    step = int(round(float(code_times[code]) / spiking_config.dt_s))
+                    inputs[step, batch, :] = 1.0
                 batch += 1
         first, _, coordinates, metadata = self._run_inputs(
             inputs, config, spiking_config
         )
         if config.mapping == "dedicated":
-            calibration_first = first.reshape(
+            observed = first.reshape(
                 config.calibration_trials,
                 code_times.numel(),
                 config.logical_neurons,
                 config.pool_size,
             )
+            calibration_first = torch.empty_like(observed)
+            for trial in range(config.calibration_trials):
+                for reference_code in range(code_times.numel()):
+                    for logical in range(config.logical_neurons):
+                        code = int(code_grid[trial, reference_code, logical])
+                        calibration_first[trial, code, logical] = observed[
+                            trial, reference_code, logical
+                        ]
         else:
             calibration_first = first.reshape(
                 config.calibration_trials,
@@ -1018,6 +1048,9 @@ class GroupedHardwarePoolBackend:
                 "phase": "timing-calibration",
                 "calibration_trials": config.calibration_trials,
                 "calibration_code_count": code_times.numel(),
+                "calibration_simultaneous_codes_identical": (
+                    config.mapping == "time-multiplexed"
+                ),
                 "calibration_miss_rate": float(
                     (~torch.isfinite(calibration_first)).to(torch.float64).mean()
                 ),
