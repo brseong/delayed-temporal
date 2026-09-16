@@ -510,6 +510,13 @@ def build_vit_calibration_metadata(
     # tensor. JSON normalization converts tuples and mappings to a stable artifact
     # identity while rejecting non-finite numeric constants.
     processor_fields = {
+        "preprocessing_backend": getattr(processor, "preprocessing_backend", "huggingface"),
+        "preprocessing_config_sha256": getattr(processor, "preprocessing_config_sha256", None),
+        "input_size": getattr(processor, "input_size", None),
+        "interpolation": getattr(processor, "interpolation", None),
+        "crop_pct": getattr(processor, "crop_pct", None),
+        "crop_mode": getattr(processor, "crop_mode", None),
+        "antialias": getattr(processor, "antialias", None),
         "do_resize": bool(getattr(processor, "do_resize", False)),
         "size": getattr(processor, "size", None),
         "do_center_crop": bool(getattr(processor, "do_center_crop", False)),

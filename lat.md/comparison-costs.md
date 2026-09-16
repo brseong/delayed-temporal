@@ -102,6 +102,8 @@ The table caption must identify our CIFAR test 10k and ImageNet fixed validation
 
 The existing general experiment prose separately needs review: its calibration paragraph still describes the older uncalibrated noise run and 1,024-sample implementation default. Those statements must not be relabeled as the new comparison protocol. Other model families and noise-study descriptions are outside the automatic table patch.
 
+The corrected ImageNet rows must use the explicit timm evaluation transform recorded in [[conversion-comparison#ViT Conversion Comparison#ImageNet Preprocessing Correction]]. Their fixed validation 5k population remains distinct from full-validation literature results, so the table caption and discussion must identify that difference.
+
 The methodology table now writes the cubic term as $v^3$ and explicitly links it to the existing signed power construction in `sec:power-operator`. The $\phi_{\mathrm{NL}}$ encoding time constant is three times the $\psi_{\mathrm{ED}}$ decoding time constant; the established fixed synaptic-gain notation and final variable $f_{\mathrm{Mul}}$ product remain. No new operator name was introduced. This methodology correction is applied; the accuracy table remains unfilled until result validation.
 
 ## Verification

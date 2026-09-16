@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "models": {
+    "vit_small_patch16_224.augreg_in21k_ft_in1k": {
+      "input_size": [3, 224, 224],
+      "interpolation": "bicubic",
+      "mean": [0.5, 0.5, 0.5],
+      "std": [0.5, 0.5, 0.5],
+      "crop_pct": 0.9,
+      "crop_mode": "center"
+    },
+    "vit_base_patch16_224.augreg2_in21k_ft_in1k": {
+      "input_size": [3, 224, 224],
+      "interpolation": "bicubic",
+      "mean": [0.5, 0.5, 0.5],
+      "std": [0.5, 0.5, 0.5],
+      "crop_pct": 0.9,
+      "crop_mode": "center"
+    },
+    "vit_large_patch16_224.augreg_in21k_ft_in1k": {
+      "input_size": [3, 224, 224],
+      "interpolation": "bicubic",
+      "mean": [0.5, 0.5, 0.5],
+      "std": [0.5, 0.5, 0.5],
+      "crop_pct": 0.9,
+      "crop_mode": "center"
+    }
+  }
+}

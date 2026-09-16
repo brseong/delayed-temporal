@@ -65,3 +65,13 @@ raw_runs.csv, summary.csv, sop_breakdown.csv, provenance 및 생성한 LaTeX 행
 이번 태그에 한해 로컬 GPU 0--3도 명시적으로 허용하지만 전역 GPU 기본값은 바꾸지 않는다. 로컬과 UBAI 작업은 같은 최종 commit, checkpoint, dataset, preprocessing과 calibration identity를 검사하고, `/tmp`가 아닌 실제 디스크에 runtime을 둔다.
 
 각 ViT evaluator의 flush된 calibration 또는 평가 batch record는 모델별 `status` 파일과 덮어쓰지 않는 progress snapshot으로 복제된다. 부분 record는 진행 확인용이며 완료 결과나 표 생성의 근거로 승인되지 않는다.
+
+## ImageNet Preprocessing Correction
+
+ImageNet ViT calibration과 평가는 원본 timm checkpoint의 deterministic evaluation transform을 동일하게 사용하며, fixed validation 5k 결과는 prior-work의 전체 validation 결과와 절대 정확도로 순위를 매기지 않는다.
+
+세 ImageNet checkpoint의 고정 설정은 224 입력, bicubic interpolation, center crop, crop fraction 0.9, 채널별 mean/std 0.5이다. `scripts/configs/vit_timm_preprocessing.json`이 이 설정을 명시하며, evaluator는 설정 파일의 SHA-256과 resolved transform metadata를 calibration artifact 및 일반 로그에 기록한다.
+
+기존 v3 ImageNet 결과는 Hugging Face 변환 과정에서 생성된 bilinear direct-resize processor를 사용했으므로 새 결과와 합치지 않는다. CIFAR-10과 text 결과는 이 ImageNet 전처리 수정의 영향을 받지 않는다.
+
+새 실행은 training seed-0 5k calibration과 fixed validation 5k ANN/SNN 평가를 세 ImageNet 모델에 대해서만 다시 수행한다. 표와 본문에는 평가 population을 명시하고, 동일 population의 ANN과 SNN 차이를 conversion fidelity의 직접 근거로 사용한다.

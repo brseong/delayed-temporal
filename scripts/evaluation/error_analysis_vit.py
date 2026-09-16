@@ -5,7 +5,7 @@ import math
 from pathlib import Path
 import sys
 import time
-from typing import Literal
+from typing import Any, Literal
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -83,6 +83,7 @@ class Arguments:
     dataset_id: str
     evaluation_dataset_path: str
     evaluation_split: str
+    image_preprocessing_config: str
     batch_size: int
     device: Literal["cuda", "cpu"]
     precision: Literal["float32", "float64", "bfloat16", "float16"]
@@ -175,6 +176,16 @@ def parse_arguments() -> Arguments:
         help=(
             "Split key for a saved DatasetDict and metadata label for a saved "
             "Dataset; defaults to the dataset configuration's evaluation split."
+        ),
+    )
+    parser.add_argument(
+        "--image-preprocessing-config",
+        type=str,
+        default="",
+        help=(
+            "Optional checked JSON specification for the checkpoint's timm "
+            "evaluation transform. An empty value preserves the checkpoint's "
+            "Hugging Face image processor."
         ),
     )
     parser.add_argument("--batch_size", type=int, default=32,
@@ -369,6 +380,7 @@ def parse_arguments() -> Arguments:
         dataset_id=args.dataset_id,
         evaluation_dataset_path=args.evaluation_dataset_path,
         evaluation_split=args.evaluation_split,
+        image_preprocessing_config=args.image_preprocessing_config,
         batch_size=args.batch_size,
         device=args.device,
         precision=args.precision,
@@ -528,6 +540,12 @@ def validate_vit_runtime_arguments(args: Arguments) -> None:
             raise ValueError(
                 f"evaluation dataset path does not exist: {dataset_path}"
             )
+    if args.image_preprocessing_config:
+        preprocessing_path = Path(args.image_preprocessing_config).expanduser()
+        if not preprocessing_path.is_file():
+            raise ValueError(
+                f"image preprocessing config does not exist: {preprocessing_path}"
+            )
 
 
 def require_finite_logits(logits: torch.Tensor) -> None:
@@ -616,6 +634,81 @@ DATASET_CONFIGS = {
         "label_key": "label",
     },
 }
+
+
+class TimmEvaluationProcessor:
+    """Apply one explicitly recorded timm evaluation transform to PIL images."""
+
+    def __init__(self, spec: dict[str, Any], *, config_sha256: str) -> None:
+        from timm.data import create_transform
+
+        self.preprocessing_backend = "timm"
+        self.preprocessing_config_sha256 = config_sha256
+        self.input_size = tuple(spec["input_size"])
+        self.interpolation = spec["interpolation"]
+        self.crop_pct = float(spec["crop_pct"])
+        self.crop_mode = spec["crop_mode"]
+        self.image_mean = tuple(float(value) for value in spec["mean"])
+        self.image_std = tuple(float(value) for value in spec["std"])
+        self.do_resize = True
+        self.size = {"height": self.input_size[1], "width": self.input_size[2]}
+        self.do_center_crop = self.crop_mode == "center"
+        self.crop_size = dict(self.size)
+        self.do_rescale = True
+        self.rescale_factor = 1.0 / 255.0
+        self.do_normalize = True
+        self.antialias = True
+        self._transform = create_transform(
+            input_size=self.input_size,
+            is_training=False,
+            interpolation=self.interpolation,
+            mean=self.image_mean,
+            std=self.image_std,
+            crop_pct=self.crop_pct,
+            crop_mode=self.crop_mode,
+        )
+
+    def __call__(self, images: list[Any], *, return_tensors: str) -> dict[str, torch.Tensor]:
+        if return_tensors != "pt" or not images:
+            raise ValueError("timm evaluation preprocessing requires a nonempty PyTorch batch")
+        return {"pixel_values": torch.stack([self._transform(image) for image in images])}
+
+
+def load_vit_image_processor(model_id: str, config_path: str) -> Any:
+    """Load either the legacy checkpoint processor or a checked timm specification."""
+    if not config_path:
+        fallback = (
+            "google/vit-base-patch16-224-in21k"
+            if model_id == "mpiorczynski/relu-vit-base-patch16-224"
+            else model_id
+        )
+        return ViTImageProcessor.from_pretrained(fallback)
+
+    path = Path(config_path).expanduser().resolve()
+    raw = path.read_bytes()
+    payload = json.loads(raw)
+    if payload.get("schema_version") != 1 or set(payload) != {"schema_version", "models"}:
+        raise ValueError("unsupported timm preprocessing configuration schema")
+    model_name = Path(model_id).resolve().name
+    models = payload.get("models")
+    if not isinstance(models, dict) or model_name not in models:
+        raise ValueError(f"timm preprocessing configuration has no entry for {model_name}")
+    spec = models[model_name]
+    required = {"input_size", "interpolation", "mean", "std", "crop_pct", "crop_mode"}
+    if not isinstance(spec, dict) or set(spec) != required:
+        raise ValueError("timm preprocessing entry has unexpected fields")
+    if spec["input_size"] != [3, 224, 224]:
+        raise ValueError("comparison timm preprocessing requires 3x224x224 input")
+    if spec["interpolation"] != "bicubic" or spec["crop_mode"] != "center":
+        raise ValueError("comparison timm preprocessing requires bicubic center crop")
+    if spec["mean"] != [0.5, 0.5, 0.5] or spec["std"] != [0.5, 0.5, 0.5]:
+        raise ValueError("comparison timm preprocessing normalization differs")
+    if spec["crop_pct"] != 0.9:
+        raise ValueError("comparison timm preprocessing crop fraction differs")
+    return TimmEvaluationProcessor(
+        spec,
+        config_sha256=hashlib.sha256(raw).hexdigest(),
+    )
 
 def configure_vit_exact_gelu_layers(
     model: nn.Module,
@@ -956,11 +1049,18 @@ def evaluate_vit_model(args: Arguments) -> None:
             seed=args.calibration_seed,
         )
 
-    # 모델에 맞는 Feature Extractor(Image Processor) 로드
-    if model_id == "mpiorczynski/relu-vit-base-patch16-224":
-        processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
-    else:
-        processor = ViTImageProcessor.from_pretrained(model_id)
+    # Calibration and evaluation share exactly one immutable preprocessing path.
+    processor = load_vit_image_processor(model_id, args.image_preprocessing_config)
+    print("Image preprocessing — " + json.dumps({
+        "backend": getattr(processor, "preprocessing_backend", "huggingface"),
+        "config_sha256": getattr(processor, "preprocessing_config_sha256", None),
+        "input_size": getattr(processor, "input_size", None),
+        "interpolation": getattr(processor, "interpolation", None),
+        "crop_pct": getattr(processor, "crop_pct", None),
+        "crop_mode": getattr(processor, "crop_mode", None),
+        "mean": getattr(processor, "image_mean", None),
+        "std": getattr(processor, "image_std", None),
+    }, sort_keys=True), flush=True)
 
     # ---------------------------------------------------------
     # 3. 데이터 전처리 함수 정의
