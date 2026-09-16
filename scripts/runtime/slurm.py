@@ -18,4 +18,3 @@ def parse_queue(text: str) -> list[dict]:
             }
         )
     return rows
-

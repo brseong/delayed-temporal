@@ -27,4 +27,3 @@ def worker_environment(base: dict[str, str], scratch: Path, gpu: str) -> dict[st
         environment[key] = "4"
     environment.update(WANDB_MODE="disabled", WANDB_DISABLED="true", PYTHONDONTWRITEBYTECODE="1")
     return environment
-
