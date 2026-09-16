@@ -14,7 +14,7 @@ import tempfile
 from typing import Any
 
 from scripts.experiments.run_full_calibrated_text_comparison import (
-    FAMILY_CONFIG, TAG, canonical, parse_evaluation, parse_sites, sha256_file,
+    FAMILY_CONFIG, MODEL_CONFIG, TAG, canonical, parse_evaluation, parse_sites, sha256_file,
 )
 
 
@@ -43,12 +43,14 @@ def atomic_text(path: Path, value: str) -> None:
 
 
 def validate_family(root: Path, family: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    config = MODEL_CONFIG[family]
     output = root / family
     manifest = json.loads((output / "manifest.json").read_text())
     result = json.loads((output / "result.json").read_text())
-    if manifest.get("tag") != TAG or manifest.get("family") != family or result.get("state") != "complete":
-        raise ValueError(f"{family} is not a completed member of {TAG}")
-    if manifest.get("evaluation_samples") != FAMILY_CONFIG[family]["evaluation_samples"]:
+    if (manifest.get("tag") != config["tag"] or manifest.get("family") != family
+            or result.get("state") != "complete"):
+        raise ValueError(f"{family} is not a completed member of {config['tag']}")
+    if manifest.get("evaluation_samples") != config["evaluation_samples"]:
         raise ValueError(f"{family} evaluation population differs")
     if manifest.get("theta") != 40.0 or manifest.get("dtype") != "float64":
         raise ValueError(f"{family} numerical contract differs")
@@ -56,7 +58,7 @@ def validate_family(root: Path, family: str) -> tuple[list[dict[str, Any]], dict
     if set(phases) != {"collect", "ann", "snn"}:
         raise ValueError(f"{family} phase population differs")
     calibration_path = output / "calibration.json"
-    metadata, sites = parse_sites(calibration_path, FAMILY_CONFIG[family]["sites"])
+    metadata, sites = parse_sites(calibration_path, config["sites"])
     calibration_sha = sha256_file(calibration_path)
     rows: list[dict[str, Any]] = []
     for phase in ("collect", "ann", "snn"):
@@ -89,12 +91,18 @@ def validate_family(root: Path, family: str) -> tuple[list[dict[str, Any]], dict
                   "metadata_sha256": hashlib.sha256(canonical(metadata).encode()).hexdigest()}
 
 
-def build(root: Path, output: Path, *, require_complete: bool) -> dict[str, Any]:
-    families = [family for family in FAMILY_CONFIG if (root / family / "result.json").exists()]
-    if require_complete and set(families) != set(FAMILY_CONFIG):
-        raise ValueError("all three text models must be complete")
+def build(
+    root: Path, output: Path, *, require_complete: bool,
+    requested_models: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    expected = tuple(FAMILY_CONFIG) if requested_models is None else requested_models
+    if not expected or len(set(expected)) != len(expected) or any(name not in MODEL_CONFIG for name in expected):
+        raise ValueError("requested text models must be unique supported model keys")
+    families = [family for family in expected if (root / family / "result.json").exists()]
+    if require_complete and set(families) != set(expected):
+        raise ValueError("every requested text model must be complete")
     raw, sites = [], []
-    for family in FAMILY_CONFIG:
+    for family in expected:
         if family in families:
             family_rows, site = validate_family(root, family)
             raw.extend(family_rows)
@@ -103,7 +111,7 @@ def build(root: Path, output: Path, *, require_complete: bool) -> dict[str, Any]
     if len(commits) > 1:
         raise ValueError("text results mix source commits")
     summary = []
-    for family in FAMILY_CONFIG:
+    for family in expected:
         rows = {row["phase"]: row for row in raw if row["family"] == family}
         if not rows:
             continue
@@ -131,7 +139,9 @@ def build(root: Path, output: Path, *, require_complete: bool) -> dict[str, Any]
         "calibration_sites.csv": csv_text(sites, ("family", "site_count")),
     }
     provenance = {
-        "tag": TAG, "complete": set(families) == set(FAMILY_CONFIG),
+        "tag": (MODEL_CONFIG[expected[0]]["tag"]
+                if len({MODEL_CONFIG[name]["tag"] for name in expected}) == 1 else "mixed"),
+        "complete": set(families) == set(expected),
         "source_commit": next(iter(commits)) if commits else None,
         "families": families,
         "files": {name: hashlib.sha256(value.encode()).hexdigest() for name, value in files.items()},
@@ -147,8 +157,13 @@ def main() -> None:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--require-complete", action="store_true")
+    parser.add_argument("--models", nargs="+", choices=tuple(MODEL_CONFIG))
     args = parser.parse_args()
-    print(canonical(build(args.root, args.output, require_complete=args.require_complete)))
+    requested = None if args.models is None else tuple(args.models)
+    print(canonical(build(
+        args.root, args.output, require_complete=args.require_complete,
+        requested_models=requested,
+    )))
 
 
 if __name__ == "__main__":

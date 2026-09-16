@@ -16,7 +16,7 @@ Each active LayerNorm observes signed centered inputs before clipping. Its selec
 
 ## Encoder Coverage
 
-BERT and RoBERTa discover sites from active modules, including embedding normalization and nonlinear task heads. Their sequence classification configurations with twelve fully spiking blocks each contain 110 selected sites.
+BERT and RoBERTa discover sites from active modules, including embedding normalization and nonlinear task heads. Sequence classifiers contain 110 selected sites with twelve fully spiking blocks and 218 with twenty-four blocks.
 
 [[utils/transformers/models/text_calibration.py#text_calibration_specs]] registers independent Q/K/V, attention scores, both residual sums before normalization, the composed GELU input and active centered LayerNorm inputs. The first token pooler or classification head Tanh input is included. RoBERTa masked language prediction additionally includes the head GELU input and head normalization, giving 111 sites with twelve fully spiking blocks.
 
@@ -61,6 +61,8 @@ Tokenization disables on-disk `Dataset.map` cache creation and keeps transformed
 GPT-2 progress validation extracts each JSON object after an optional progress-bar prefix. It still requires exactly one valid record per expected batch and rejects malformed, missing or duplicate records.
 
 [[scripts/experiments/run_full_calibrated_text_comparison.py#main]] runs collection, ANN evaluation and SNN evaluation sequentially on one GPU while allowing different models to run in parallel. It preserves each attempt log, reuses only hash-validated completed phases, and writes flushed progress records throughout evaluation.
+
+RoBERTa-L runs under the separate `roberta_large_theta40_calibrated_float64_bounds3_v1` tag with its own checkpoint and 218-site calibration table. This diagnostic does not reuse the RoBERTa-B table or imply that its checkpoint matches SpikeZIP-TF.
 
 [[scripts/analysis/summarize_full_calibrated_text_comparison.py#build]] authenticates every phase log and calibration table again before producing raw, summary, calibration-site and provenance artifacts. Partial model results may be inspected but cannot satisfy the complete campaign gate.
 

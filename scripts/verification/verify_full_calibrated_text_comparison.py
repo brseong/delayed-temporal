@@ -92,6 +92,13 @@ def verify_commands(root: Path) -> None:
     assert commands["ann"][-2:] == ["--calibration-mode", "none"]
     assert commands["snn"][-2:] == ["--calibration-mode", "validate"]
 
+    args.family = "roberta_large"
+    commands = runner.build_commands(args, root)
+    assert commands["collect"][2].endswith("error_analysis_roberta.py")
+    assert runner.MODEL_CONFIG["roberta_large"]["sites"] == 218
+    assert runner.MODEL_CONFIG["roberta_large"]["tag"] == runner.ROBERTA_LARGE_TAG
+    assert set(runner.FAMILY_CONFIG) == {"bert", "roberta", "gpt2"}
+
 
 def verify_collection_progress(root: Path) -> None:
     log = root / "bert-collect.log"

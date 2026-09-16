@@ -26,6 +26,17 @@ FAMILY_CONFIG = {
     "roberta": {"task": "sst2", "evaluation_samples": 872, "sites": 110, "activation": "gelu"},
     "gpt2": {"task": "wikitext2", "evaluation_samples": 2891, "sites": 109, "activation": "gelu_new"},
 }
+ROBERTA_LARGE_TAG = "roberta_large_theta40_calibrated_float64_bounds3_v1"
+MODEL_CONFIG = {
+    **{
+        name: {**config, "evaluator_family": name, "tag": TAG}
+        for name, config in FAMILY_CONFIG.items()
+    },
+    "roberta_large": {
+        "task": "sst2", "evaluation_samples": 872, "sites": 218,
+        "activation": "gelu", "evaluator_family": "roberta", "tag": ROBERTA_LARGE_TAG,
+    },
+}
 CALIBRATION_SAMPLES = 5000
 BATCH_SIZE = 8
 
@@ -114,8 +125,9 @@ def verify_dataset_snapshot(identity: dict[str, Any]) -> None:
 
 
 def build_commands(args: argparse.Namespace, output: Path) -> dict[str, list[str]]:
-    family = FAMILY_CONFIG[args.family]
-    evaluator = args.source_root / "scripts/evaluation" / f"error_analysis_{args.family}.py"
+    family = MODEL_CONFIG[args.family]
+    evaluator_family = family["evaluator_family"]
+    evaluator = args.source_root / "scripts/evaluation" / f"error_analysis_{evaluator_family}.py"
     common = [
         args.python_bin, "-u", str(evaluator), "--model_id", args.model_id,
         "--task", family["task"], "--cache-dir", args.cache_dir,
@@ -130,7 +142,7 @@ def build_commands(args: argparse.Namespace, output: Path) -> dict[str, list[str
         "--evaluation-dataset-path", args.evaluation_dataset_path,
         "--evaluation-dataset-fingerprint", args.evaluation_dataset_fingerprint,
     ]
-    if args.family == "gpt2":
+    if evaluator_family == "gpt2":
         common += ["--tau-s", "1", "--attention-theta", "40"]
     calibration = [
         "--calibration-path", str(output / "calibration.json"),
@@ -233,15 +245,18 @@ def validate_site_reports(log: str, sites: set[str] | None, result: dict[str, An
 
 
 def parse_evaluation(log: str, family: str, sites: set[str] | None = None) -> dict[str, Any]:
-    samples = FAMILY_CONFIG[family]["evaluation_samples"]
-    return parse_gpt2(log, samples, sites) if family == "gpt2" else parse_classification(log, samples, sites)
+    config = MODEL_CONFIG[family]
+    samples = config["evaluation_samples"]
+    return (parse_gpt2(log, samples, sites)
+            if config["evaluator_family"] == "gpt2" else parse_classification(log, samples, sites))
 
 
 def update_progress(output: Path, family: str, phase: str, log_path: Path) -> None:
     if not log_path.exists():
         return
     text = log_path.read_text(errors="replace")
-    if phase == "collect" and family == "gpt2":
+    evaluator_family = MODEL_CONFIG[family]["evaluator_family"]
+    if phase == "collect" and evaluator_family == "gpt2":
         rows = json_event_rows(text, "calibration_progress")
         progress = rows[-1] if rows else None
     elif phase == "collect":
@@ -260,7 +275,7 @@ def update_progress(output: Path, family: str, phase: str, log_path: Path) -> No
                         "elapsed_seconds": float(elapsed),
                         "estimated_remaining_seconds": float(elapsed) *
                         (total_batches - completed) / completed}
-    elif family == "gpt2":
+    elif evaluator_family == "gpt2":
         rows = json_event_rows(text, "evaluation_progress")
         progress = rows[-1] if rows else None
     else:
@@ -316,7 +331,7 @@ def run_phase(command: list[str], *, output: Path, family: str, phase: str,
 # @lat: [[text-calibration#Text Model Calibration#Complete Comparison Execution]]
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--family", choices=tuple(FAMILY_CONFIG), required=True)
+    parser.add_argument("--family", choices=tuple(MODEL_CONFIG), required=True)
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--model-id", required=True)
@@ -338,7 +353,9 @@ def main() -> None:
     if args.host_label == "local" and args.gpu < 4 and not args.campaign_extra_local_gpus:
         raise ValueError("GPU 0 through 3 require the campaign-specific override")
     args.source_root = args.source_root.resolve(strict=True)
-    source_hashes = source_identity(args.source_root, args.expected_commit, args.family)
+    config = MODEL_CONFIG[args.family]
+    evaluator_family = config["evaluator_family"]
+    source_hashes = source_identity(args.source_root, args.expected_commit, evaluator_family)
     model = Path(args.model_id).resolve(strict=True)
     calibration_dataset = Path(args.calibration_dataset_path).resolve(strict=True)
     evaluation_dataset = Path(args.evaluation_dataset_path).resolve(strict=True)
@@ -346,13 +363,13 @@ def main() -> None:
     args.calibration_dataset_path = str(calibration_dataset)
     args.evaluation_dataset_path = str(evaluation_dataset)
     output = args.output_root.resolve()
-    allowed = ARTIFACTS / "logs/conversion_comparison" / TAG / "text"
+    allowed = ARTIFACTS / "logs/conversion_comparison" / config["tag"] / "text"
     if output.parent != allowed or output.name != args.family:
         raise ValueError("output path differs from the fixed full comparison layout")
     runtime = ((args.runtime_root / args.family) if args.runtime_root is not None else
-               ARTIFACTS / "runtime" / TAG / "text" / args.family).resolve()
+               ARTIFACTS / "runtime" / config["tag"] / "text" / args.family).resolve()
     if args.host_label == "local":
-        required_runtime = (ARTIFACTS / "runtime" / TAG / "text").resolve()
+        required_runtime = (ARTIFACTS / "runtime" / config["tag"] / "text").resolve()
         if runtime.parent != required_runtime:
             raise ValueError("local runtime differs from the fixed comparison layout")
     else:
@@ -360,7 +377,8 @@ def main() -> None:
             raise ValueError("UBAI runtime must be a Slurm-owned path below /enroot")
     commands = build_commands(args, output)
     manifest = {
-        "schema_version": 1, "tag": TAG, "family": args.family,
+        "schema_version": 1, "tag": config["tag"], "family": args.family,
+        "evaluator_family": evaluator_family,
         "source_root": str(args.source_root), "source_commit": args.expected_commit,
         "source_hashes": source_hashes, "model_id": str(model),
         "checkpoint_files_sha256": checkpoint_identity(model),
@@ -369,10 +387,10 @@ def main() -> None:
         ),
         "evaluation_dataset": dataset_identity(
             evaluation_dataset, args.evaluation_dataset_fingerprint,
-            FAMILY_CONFIG[args.family]["evaluation_samples"],
+            config["evaluation_samples"],
         ),
         "calibration_samples": CALIBRATION_SAMPLES,
-        "evaluation_samples": FAMILY_CONFIG[args.family]["evaluation_samples"],
+        "evaluation_samples": config["evaluation_samples"],
         "batch_size": BATCH_SIZE, "theta": 40.0, "dtype": "float64",
         "tau_s": 1.0, "tau_m": 1.0, "calibration_seed": 0,
         "calibration_bins": 2048, "calibration_quantiles": [0.0, 1.0],
@@ -439,7 +457,7 @@ def main() -> None:
                     if sha256_file(log_path) != phase_result["log_sha256"]:
                         raise ValueError("completed phase log hash differs")
                     if phase == "collect":
-                        _, sites = parse_sites(output / "calibration.json", FAMILY_CONFIG[args.family]["sites"])
+                        _, sites = parse_sites(output / "calibration.json", config["sites"])
                     else:
                         phase_result["metrics"] = parse_evaluation(
                             log_path.read_text(), args.family, sites if phase == "snn" else None,
@@ -450,7 +468,7 @@ def main() -> None:
                     rejected = output / "rejected" / f"orphan-collect-{time.time_ns()}"
                     rejected.mkdir(parents=True)
                     os.replace(output / "calibration.json", rejected / "calibration.json")
-                source_identity(args.source_root, args.expected_commit, args.family)
+                source_identity(args.source_root, args.expected_commit, evaluator_family)
                 log_path, elapsed = run_phase(
                     commands[phase], output=output, family=args.family, phase=phase,
                     environment=environment, lock_fd=lock.fileno(),
@@ -462,7 +480,7 @@ def main() -> None:
                 if phase == "collect":
                     if log_text.count("Saved calibration artifact") != 1:
                         raise ValueError("calibration completion marker is missing or duplicated")
-                    metadata, sites = parse_sites(output / "calibration.json", FAMILY_CONFIG[args.family]["sites"])
+                    metadata, sites = parse_sites(output / "calibration.json", config["sites"])
                     phase_result.update(calibration_sha256=sha256_file(output / "calibration.json"),
                                         calibration_metadata=metadata,
                                         calibration_site_count=len(sites))
@@ -481,7 +499,7 @@ def main() -> None:
                 raise ValueError("ANN and SNN evaluation dataset fingerprints differ")
             state["state"] = "complete"
             state["calibration_sha256"] = state["phases"]["collect"]["calibration_sha256"]
-            source_identity(args.source_root, args.expected_commit, args.family)
+            source_identity(args.source_root, args.expected_commit, evaluator_family)
             verify_dataset_snapshot(manifest["calibration_dataset"])
             verify_dataset_snapshot(manifest["evaluation_dataset"])
             atomic_json(output / "result.json", state)
