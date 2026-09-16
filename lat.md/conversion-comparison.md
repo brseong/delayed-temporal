@@ -75,3 +75,5 @@ ImageNet ViT calibration과 평가는 원본 timm checkpoint의 deterministic ev
 기존 v3 ImageNet 결과는 Hugging Face 변환 과정에서 생성된 bilinear direct-resize processor를 사용했으므로 새 결과와 합치지 않는다. CIFAR-10과 text 결과는 이 ImageNet 전처리 수정의 영향을 받지 않는다.
 
 새 실행은 training seed-0 5k calibration과 fixed validation 5k ANN/SNN 평가를 세 ImageNet 모델에 대해서만 다시 수행한다. 표와 본문에는 평가 population을 명시하고, 동일 population의 ANN과 SNN 차이를 conversion fidelity의 직접 근거로 사용한다.
+
+[[scripts/experiments/run_imagenet_timm_recheck.py#run_pipeline]]은 모델마다 새 calibration, ANN, SNN 순서를 강제하고 GPU 4--7의 단일 장치만 허용한다. 각 로그는 timm 설정 hash를 포함하며, 세 pipeline이 모두 완성되기 전에는 summary를 만들지 않는다.
