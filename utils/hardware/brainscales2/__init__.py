@@ -29,7 +29,12 @@ from .toy_pooling import (
     ToyPoolResult,
     resolve_grouped_physical_coordinates,
 )
-from .hagen import HagenConfig, HagenPWMBackend
+from .hagen import (
+    HagenConfig,
+    HagenFidelityResult,
+    HagenPWMBackend,
+    summarize_hagen_fidelity,
+)
 from .margin import (
     DeadlineMarginConfig,
     DeadlineMarginObservation,
@@ -60,7 +65,9 @@ __all__ = [
     "ToyPoolResult",
     "resolve_grouped_physical_coordinates",
     "HagenConfig",
+    "HagenFidelityResult",
     "HagenPWMBackend",
+    "summarize_hagen_fidelity",
     "DeadlineMarginConfig",
     "DeadlineMarginObservation",
     "DeadlineMarginSelection",

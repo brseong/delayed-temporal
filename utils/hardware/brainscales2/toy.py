@@ -440,9 +440,24 @@ class ConvertedToyModel:
 
     def hidden_from_input(self, value: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         input_uint5 = self.encode_input(value)
+        accumulator, hidden = self.hidden_from_uint5(input_uint5)
+        return input_uint5, accumulator, hidden
+
+    def hidden_from_uint5(
+        self,
+        input_uint5: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Evaluate the frozen first affine from an already encoded UInt5 input."""
+        if (
+            input_uint5.ndim != 2
+            or input_uint5.shape[1] != self.architecture.input_features
+        ):
+            raise ValueError("UInt5 input does not match converted architecture")
+        if bool((input_uint5 < 0).any() or (input_uint5 > 31).any()):
+            raise ValueError("encoded input must lie in UInt5")
         accumulator = self._augment_uint5(input_uint5) @ self.first.weight_with_bias.T.to(torch.int32)
         hidden = self.hidden_uint5_from_accumulator(accumulator)
-        return input_uint5, accumulator, hidden
+        return accumulator, hidden
 
     def output_from_hidden(self, hidden_uint5: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         rounded = torch.round(hidden_uint5).clamp(0, 31).to(torch.int32)

@@ -68,6 +68,45 @@ class HagenResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class HagenFidelityResult:
+    """Paired integer-reference and repeated physical affine observations."""
+
+    ideal_first_accumulator: torch.Tensor
+    physical_first_raw: torch.Tensor
+    ideal_hidden_uint5: torch.Tensor
+    physical_hidden_uint5: torch.Tensor
+    ideal_output_int8: torch.Tensor
+    physical_output_int8: torch.Tensor
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.ideal_first_accumulator.ndim != 2:
+            raise ValueError("ideal first accumulator must have shape [sample, channel]")
+        expected_first = (
+            self.physical_first_raw.ndim == 3
+            and self.physical_first_raw.shape[1:] == self.ideal_first_accumulator.shape
+        )
+        if not expected_first:
+            raise ValueError(
+                "physical first observations must have shape [trial, sample, channel]"
+            )
+        if self.ideal_hidden_uint5.shape != self.ideal_first_accumulator.shape:
+            raise ValueError("ideal hidden output does not match first accumulator")
+        if self.physical_hidden_uint5.shape != self.physical_first_raw.shape:
+            raise ValueError("physical hidden observations do not match raw observations")
+        if self.ideal_output_int8.ndim != 2:
+            raise ValueError("ideal output must have shape [sample, channel]")
+        if (
+            self.physical_output_int8.ndim != 3
+            or self.physical_output_int8.shape[0] != self.physical_first_raw.shape[0]
+            or self.physical_output_int8.shape[1:] != self.ideal_output_int8.shape
+        ):
+            raise ValueError(
+                "physical output observations must have shape [trial, sample, channel]"
+            )
+
+
 class HagenPWMBackend:
     """Execute converted affine stages with hxtorch perceptron primitives."""
 
@@ -388,6 +427,22 @@ class HagenPWMBackend:
             "host_mediated_lower_bound": False,
         }
 
+    def first_layer_raw(
+        self,
+        converted: ConvertedToyModel,
+        input_uint5: torch.Tensor,
+        *,
+        avg: int = 1,
+    ) -> HagenResult:
+        """Execute only the first physical affine before its activation boundary."""
+        raw, metadata = self._execute(
+            self._augment(input_uint5),
+            converted.first,
+            avg=avg,
+        )
+        metadata["stage"] = "first-affine-raw"
+        return HagenResult(raw.detach().cpu(), metadata)
+
     def first_layer(
         self,
         converted: ConvertedToyModel,
@@ -404,26 +459,34 @@ class HagenPWMBackend:
                 "requested hidden activation does not match the converted checkpoint: "
                 f"{resolved_activation} != {converted.manifest.activation}"
             )
-        augmented = self._augment(input_uint5)
         if resolved_activation == "relu":
-            hidden, metadata = self._execute(
-                augmented,
-                converted.first,
-                avg=avg,
-                relu_boundary=relu_boundary,
-                activation_shift=self.config.hidden_shift,
-            )
+            if relu_boundary == "implicit-lower-bound-host":
+                raw_result = self.first_layer_raw(converted, input_uint5, avg=avg)
+                hidden, boundary_metadata = self._implicit_lower_bound_uint5(
+                    raw_result.value,
+                    shift=self.config.hidden_shift,
+                )
+                metadata = {**raw_result.metadata, **boundary_metadata}
+            else:
+                hidden, metadata = self._execute(
+                    self._augment(input_uint5),
+                    converted.first,
+                    avg=avg,
+                    relu_boundary=relu_boundary,
+                    activation_shift=self.config.hidden_shift,
+                )
             metadata["activation"] = "relu"
             metadata["activation_adapter"] = relu_boundary
             metadata["host_mediated_activation"] = (
                 relu_boundary == "implicit-lower-bound-host"
             )
         elif resolved_activation == "sigmoid":
-            raw, metadata = self._execute(augmented, converted.first, avg=avg)
+            raw_result = self.first_layer_raw(converted, input_uint5, avg=avg)
             hidden, sigmoid_metadata = self._host_sigmoid_uint5(
-                raw,
+                raw_result.value,
                 input_scale=converted.first.scale,
             )
+            metadata = dict(raw_result.metadata)
             metadata.update(sigmoid_metadata)
         else:
             raise ValueError(f"unsupported hidden activation: {resolved_activation}")
@@ -431,6 +494,77 @@ class HagenPWMBackend:
         metadata["hagen_hidden_shift"] = self.config.hidden_shift
         metadata["hagen_hidden_shift_used"] = resolved_activation == "relu"
         return HagenResult(hidden.detach().cpu().to(torch.int32), metadata)
+
+    def measure_fidelity(
+        self,
+        converted: ConvertedToyModel,
+        input_uint5: torch.Tensor,
+        *,
+        trials: int,
+        relu_boundary: ReLUBoundary = "implicit-lower-bound-host",
+        activation: ToyActivation | None = None,
+    ) -> HagenFidelityResult:
+        """Pair repeated physical affine outputs with the frozen integer reference."""
+        if trials <= 0:
+            raise ValueError("Hagen fidelity trials must be positive")
+        resolved_activation = activation or converted.manifest.activation
+        if resolved_activation != converted.manifest.activation:
+            raise ValueError("hidden activation does not match converted checkpoint")
+        if resolved_activation == "relu" and relu_boundary != "implicit-lower-bound-host":
+            raise ValueError(
+                "paired raw Hagen fidelity requires implicit-lower-bound-host"
+            )
+        ideal_accumulator, ideal_hidden = converted.hidden_from_uint5(input_uint5)
+        _, ideal_output = converted.output_from_hidden(ideal_hidden)
+        raw_trials: list[torch.Tensor] = []
+        hidden_trials: list[torch.Tensor] = []
+        output_trials: list[torch.Tensor] = []
+        trial_metadata: list[dict[str, Any]] = []
+        with self.hardware_session():
+            for trial in range(trials):
+                raw_result = self.first_layer_raw(converted, input_uint5, avg=1)
+                if resolved_activation == "relu":
+                    physical_hidden, boundary_metadata = self._implicit_lower_bound_uint5(
+                        raw_result.value,
+                        shift=self.config.hidden_shift,
+                    )
+                else:
+                    physical_hidden, boundary_metadata = self._host_sigmoid_uint5(
+                        raw_result.value,
+                        input_scale=converted.first.scale,
+                    )
+                output_result = self.output_layer(converted, ideal_hidden)
+                raw_trials.append(raw_result.value.to(torch.float64))
+                hidden_trials.append(physical_hidden.to(torch.int32))
+                output_trials.append(output_result.value.to(torch.int8))
+                trial_metadata.append(
+                    {
+                        "trial": trial,
+                        "first": raw_result.metadata,
+                        "hidden_boundary": boundary_metadata,
+                        "output": output_result.metadata,
+                    }
+                )
+        return HagenFidelityResult(
+            ideal_first_accumulator=ideal_accumulator.detach().cpu().to(torch.int32),
+            physical_first_raw=torch.stack(raw_trials),
+            ideal_hidden_uint5=ideal_hidden.detach().cpu().to(torch.int32),
+            physical_hidden_uint5=torch.stack(hidden_trials),
+            ideal_output_int8=ideal_output.detach().cpu().to(torch.int8),
+            physical_output_int8=torch.stack(output_trials),
+            metadata={
+                "trials": trials,
+                "samples": int(input_uint5.shape[0]),
+                "activation": resolved_activation,
+                "relu_boundary": (
+                    relu_boundary if resolved_activation == "relu" else None
+                ),
+                "integer_reference_hidden_shift": converted.manifest.hidden_shift,
+                "hagen_hidden_shift": self.config.hidden_shift,
+                "output_input": "ideal-hidden-uint5",
+                "trial_metadata": trial_metadata,
+            },
+        )
 
     def output_layer(
         self,
@@ -479,11 +613,9 @@ class HagenPWMBackend:
             # The shift and lower clamp are host-side for this boundary. Run
             # the analog MAC once, then score every candidate from that same
             # physical observation instead of repeatedly reserving hardware.
-            shared_raw, shared_metadata = self._execute(
-                augmented,
-                converted.first,
-                avg=1,
-            )
+            raw_result = self.first_layer_raw(converted, input_uint5, avg=1)
+            shared_raw = raw_result.value
+            shared_metadata = raw_result.metadata
         for shift in candidate_shifts:
             if shared_raw is not None:
                 output, boundary_metadata = self._implicit_lower_bound_uint5(
@@ -564,3 +696,176 @@ class HagenPWMBackend:
                     }
                 )
         return {"probes": probes, "config": self.config.__dict__}
+
+
+def _pearson_correlation(left: torch.Tensor, right: torch.Tensor) -> float:
+    left = left.to(torch.float64).reshape(-1)
+    right = right.to(torch.float64).reshape(-1)
+    left = left - left.mean()
+    right = right - right.mean()
+    denominator = torch.sqrt(left.square().sum() * right.square().sum())
+    if float(denominator) <= 0.0:
+        return float("nan")
+    return float((left * right).sum() / denominator)
+
+
+def _affine_fit(reference: torch.Tensor, observed: torch.Tensor) -> dict[str, float]:
+    reference = reference.to(torch.float64).reshape(-1)
+    observed = observed.to(torch.float64).reshape(-1)
+    centered = reference - reference.mean()
+    denominator = centered.square().sum()
+    if float(denominator) <= 0.0:
+        return {
+            "regression_slope": float("nan"),
+            "regression_intercept": float("nan"),
+            "coefficient_of_determination": float("nan"),
+        }
+    slope = ((observed - observed.mean()) * centered).sum() / denominator
+    intercept = observed.mean() - slope * reference.mean()
+    predicted = slope * reference + intercept
+    residual = (observed - predicted).square().sum()
+    total = (observed - observed.mean()).square().sum()
+    r_squared = torch.where(
+        total > 0.0,
+        1.0 - residual / total,
+        torch.tensor(float("nan"), dtype=torch.float64),
+    )
+    return {
+        "regression_slope": float(slope),
+        "regression_intercept": float(intercept),
+        "coefficient_of_determination": float(r_squared),
+    }
+
+
+def _fidelity_statistics(
+    stage: str,
+    reference: torch.Tensor,
+    observations: torch.Tensor,
+    *,
+    lower_bound: float | None = None,
+    upper_bound: float | None = None,
+    include_argmax: bool = False,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if reference.ndim != 2 or observations.ndim != 3:
+        raise ValueError("fidelity comparison expects [sample, channel] references")
+    if observations.shape[1:] != reference.shape:
+        raise ValueError("fidelity observations do not match their reference")
+    reference64 = reference.to(torch.float64)
+    observed64 = observations.to(torch.float64)
+    trial_mean = observed64.mean(dim=0)
+    residual = observed64 - reference64.unsqueeze(0)
+    mean_residual = trial_mean - reference64
+    trial_noise = observed64.std(dim=0, unbiased=False)
+    summary: dict[str, Any] = {
+        "stage": stage,
+        "trials": int(observations.shape[0]),
+        "samples": int(observations.shape[1]),
+        "channels": int(observations.shape[2]),
+        "all_trial_bias": float(residual.mean()),
+        "all_trial_mae": float(residual.abs().mean()),
+        "all_trial_rmse": float(torch.sqrt(residual.square().mean())),
+        "trial_mean_bias": float(mean_residual.mean()),
+        "trial_mean_mae": float(mean_residual.abs().mean()),
+        "trial_mean_rmse": float(torch.sqrt(mean_residual.square().mean())),
+        "trial_noise_std": float(trial_noise.mean()),
+        "exact_match_rate": float(
+            (observations == reference.unsqueeze(0)).to(torch.float64).mean()
+        ),
+        "pearson_correlation": _pearson_correlation(reference64, trial_mean),
+        **_affine_fit(reference64, trial_mean),
+    }
+    if lower_bound is not None and upper_bound is not None:
+        summary.update(
+            {
+                "ideal_saturation_rate": float(
+                    (
+                        (reference64 <= lower_bound)
+                        | (reference64 >= upper_bound)
+                    ).to(torch.float64).mean()
+                ),
+                "physical_saturation_rate": float(
+                    (
+                        (observed64 <= lower_bound)
+                        | (observed64 >= upper_bound)
+                    ).to(torch.float64).mean()
+                ),
+            }
+        )
+    if include_argmax:
+        reference_prediction = reference64.argmax(dim=-1)
+        summary.update(
+            {
+                "all_trial_argmax_agreement": float(
+                    (
+                        observed64.argmax(dim=-1)
+                        == reference_prediction.unsqueeze(0)
+                    ).to(torch.float64).mean()
+                ),
+                "trial_mean_argmax_agreement": float(
+                    (trial_mean.argmax(dim=-1) == reference_prediction)
+                    .to(torch.float64)
+                    .mean()
+                ),
+            }
+        )
+    channels: list[dict[str, Any]] = []
+    for channel in range(reference.shape[1]):
+        channel_reference = reference64[:, channel]
+        channel_observed = observed64[:, :, channel]
+        channel_mean = channel_observed.mean(dim=0)
+        channel_residual = channel_mean - channel_reference
+        channels.append(
+            {
+                "stage": stage,
+                "channel": channel,
+                "trial_mean_bias": float(channel_residual.mean()),
+                "trial_mean_mae": float(channel_residual.abs().mean()),
+                "trial_mean_rmse": float(
+                    torch.sqrt(channel_residual.square().mean())
+                ),
+                "trial_noise_std": float(
+                    channel_observed.std(dim=0, unbiased=False).mean()
+                ),
+                "pearson_correlation": _pearson_correlation(
+                    channel_reference, channel_mean
+                ),
+                **_affine_fit(channel_reference, channel_mean),
+            }
+        )
+    return summary, channels
+
+
+def summarize_hagen_fidelity(
+    result: HagenFidelityResult,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Separate systematic affine error from repeated physical variation."""
+    first_raw, first_raw_channels = _fidelity_statistics(
+        "first-affine-raw",
+        result.ideal_first_accumulator,
+        result.physical_first_raw,
+    )
+    hidden, hidden_channels = _fidelity_statistics(
+        "hidden-uint5",
+        result.ideal_hidden_uint5,
+        result.physical_hidden_uint5,
+        lower_bound=0.0,
+        upper_bound=31.0,
+    )
+    output, output_channels = _fidelity_statistics(
+        "output-int8",
+        result.ideal_output_int8,
+        result.physical_output_int8,
+        lower_bound=-128.0,
+        upper_bound=127.0,
+        include_argmax=True,
+    )
+    return (
+        {
+            "schema_version": 1,
+            "first_affine_raw": first_raw,
+            "hidden_uint5": hidden,
+            "output_int8": output,
+            "measurement": result.metadata,
+        },
+        first_raw_channels + hidden_channels + output_channels,
+    )

@@ -41,6 +41,7 @@ from utils.hardware.brainscales2.hagen import (
     HagenPWMBackend,
     HagenResult,
     file_sha256,
+    summarize_hagen_fidelity,
 )
 from utils.hardware.brainscales2.toy import (
     ARCHITECTURES,
@@ -167,6 +168,8 @@ def parse_args() -> argparse.Namespace:
         help="hardware cap for pool_size times samples in one spiking graph",
     )
     parser.add_argument("--hagen-row-chunk-size", type=int, default=128)
+    parser.add_argument("--hagen-fidelity-samples", type=int, default=128)
+    parser.add_argument("--hagen-fidelity-trials", type=int, default=8)
     parser.add_argument("--condition-worker-max-attempts", type=int, default=3)
     parser.add_argument("--condition-worker-retry-backoff-s", type=float, default=20.0)
     parser.add_argument("--condition-worker-idle-timeout-s", type=float, default=180.0)
@@ -351,6 +354,11 @@ def _validate_architecture(args: argparse.Namespace) -> None:
         raise ValueError("pool_calibration_trial_chunk_size must be positive")
     if args.hagen_row_chunk_size <= 0:
         raise ValueError("hagen_row_chunk_size must be positive")
+    if (
+        getattr(args, "hagen_fidelity_samples", 128) <= 0
+        or getattr(args, "hagen_fidelity_trials", 8) <= 0
+    ):
+        raise ValueError("Hagen fidelity sample and trial counts must be positive")
     if args.condition_worker_max_attempts <= 0:
         raise ValueError("condition_worker_max_attempts must be positive")
     if args.condition_worker_retry_backoff_s < 0:
@@ -2432,19 +2440,44 @@ def probe_phase(args: argparse.Namespace) -> None:
     if hagen is None:
         raise ValueError("probe-hagen requires --pwm-backend hagen-mock or hagen-hardware")
     started = perf_counter()
-    payload = hagen.probe(converted)
     calibration_input = converted.encode_input(dataset.calibration_x[:128])
     calibration_target = converted.hidden_from_input(
         dataset.calibration_x[:128]
     )[2]
-    payload["hidden_shift_calibration"] = hagen.recommend_hidden_shift(
-        converted,
-        calibration_input,
-        calibration_target,
-        relu_boundary=args.relu_boundary,
-        activation=args.activation,
-    )
+    fidelity_samples = min(args.hagen_fidelity_samples, dataset.test_x.shape[0])
+    fidelity_input = converted.encode_input(dataset.test_x[:fidelity_samples])
+    with hagen.hardware_session():
+        payload = hagen.probe(converted)
+        payload["hidden_shift_calibration"] = hagen.recommend_hidden_shift(
+            converted,
+            calibration_input,
+            calibration_target,
+            relu_boundary=args.relu_boundary,
+            activation=args.activation,
+        )
+        fidelity = hagen.measure_fidelity(
+            converted,
+            fidelity_input,
+            trials=args.hagen_fidelity_trials,
+            relu_boundary=args.relu_boundary,
+            activation=args.activation,
+        )
+    fidelity_summary, channel_rows = summarize_hagen_fidelity(fidelity)
+    fidelity_summary["provenance"] = {
+        "dataset_split": "test",
+        "dataset": dataset.metadata,
+        "samples": fidelity_samples,
+        "input_uint5_sha256": _tensor_sha256(fidelity_input),
+        "checkpoint_sha256": file_sha256(_checkpoint_path(args)),
+        "converted_checkpoint_sha256": file_sha256(_converted_path(args)),
+        "hagen_calibration_sha256": file_sha256(args.hagen_calibration),
+        "labels_used": False,
+    }
+    payload["fidelity"] = fidelity_summary
     payload["elapsed_s"] = perf_counter() - started
+    torch.save(fidelity, args.output_dir / "hagen_fidelity.pt")
+    _json_write(args.output_dir / "hagen_fidelity.json", fidelity_summary)
+    _write_csv(args.output_dir / "hagen_fidelity_channels.csv", channel_rows)
     _json_write(args.output_dir / "hagen_probe.json", payload)
     print(json.dumps(payload, indent=2, default=str))
 

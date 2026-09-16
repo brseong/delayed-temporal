@@ -37,7 +37,13 @@ from scripts.evaluation.brainscales2_toy_hil import (
     _validate_architecture,
 )
 from utils.hardware.brainscales2.config import BrainScaleS2PoolConfig
-from utils.hardware.brainscales2.hagen import HagenConfig, HagenPWMBackend, HagenResult
+from utils.hardware.brainscales2.hagen import (
+    HagenConfig,
+    HagenFidelityResult,
+    HagenPWMBackend,
+    HagenResult,
+    summarize_hagen_fidelity,
+)
 from utils.hardware.brainscales2.margin import (
     DeadlineMarginConfig,
     DeadlineMarginObservation,
@@ -108,6 +114,9 @@ def verify_frozen_integer_conversion() -> None:
     assert before == after == converted.manifest.source_parameter_sha256
     assert int(forward.input_uint5.min()) >= 0 and int(forward.input_uint5.max()) <= 31
     assert int(forward.hidden_uint5.min()) >= 0 and int(forward.hidden_uint5.max()) <= 31
+    accumulator, hidden = converted.hidden_from_uint5(forward.input_uint5)
+    torch.testing.assert_close(accumulator, forward.hidden_accumulator)
+    torch.testing.assert_close(hidden, forward.hidden_uint5)
     assert int(converted.first.weight_with_bias.min()) >= -63
     assert int(converted.first.weight_with_bias.max()) <= 63
     assert int(forward.logits_int8.min()) >= -128
@@ -118,6 +127,36 @@ def verify_frozen_integer_conversion() -> None:
     restored_forward = restored.forward(calibration_x[:8])
     torch.testing.assert_close(forward.hidden_uint5, restored_forward.hidden_uint5)
     torch.testing.assert_close(forward.logits_int8, restored_forward.logits_int8)
+
+
+def verify_hagen_affine_fidelity_summary() -> None:
+    # @lat: [[hardware#Toy ANN2SNN Verification#Hagen affine fidelity]]
+    ideal_accumulator = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+    raw_mean = 2.0 * ideal_accumulator + 1.0
+    physical_raw = torch.stack((raw_mean - 1.0, raw_mean + 1.0))
+    ideal_hidden = torch.tensor([[5, 7], [9, 11]], dtype=torch.int32)
+    physical_hidden = torch.stack((ideal_hidden - 1, ideal_hidden + 1))
+    ideal_output = torch.tensor([[-2, 4], [3, 1]], dtype=torch.int8)
+    physical_output = torch.stack((ideal_output, ideal_output))
+    result = HagenFidelityResult(
+        ideal_first_accumulator=ideal_accumulator,
+        physical_first_raw=physical_raw,
+        ideal_hidden_uint5=ideal_hidden,
+        physical_hidden_uint5=physical_hidden,
+        ideal_output_int8=ideal_output,
+        physical_output_int8=physical_output,
+        metadata={"trials": 2},
+    )
+    summary, channels = summarize_hagen_fidelity(result)
+    assert summary["schema_version"] == 1
+    assert summary["first_affine_raw"]["regression_slope"] == 2.0
+    assert summary["first_affine_raw"]["regression_intercept"] == 1.0
+    assert summary["first_affine_raw"]["trial_noise_std"] == 1.0
+    assert summary["hidden_uint5"]["trial_mean_mae"] == 0.0
+    assert summary["hidden_uint5"]["all_trial_mae"] == 1.0
+    assert summary["output_int8"]["trial_mean_argmax_agreement"] == 1.0
+    assert summary["output_int8"]["trial_noise_std"] == 0.0
+    assert len(channels) == 6
 
 
 def verify_physical_pooling_with_torch_readout() -> None:
@@ -1731,6 +1770,7 @@ def verify_python311_and_notebook_contract() -> None:
 def main() -> None:
     verify_deterministic_yin_yang_splits()
     verify_frozen_integer_conversion()
+    verify_hagen_affine_fidelity_summary()
     verify_physical_pooling_with_torch_readout()
     verify_grouped_placement()
     verify_grouped_broadcast_fan_in()

@@ -104,6 +104,8 @@ The sigmoid control runs `Hagen raw affine -> host sigmoid -> UInt5 Potential ->
 
 The integer reference shift applies to its int32 accumulator, whereas physical Hagen output is already Int8. A separate Hagen hidden shift defaults to one and the probe recommends it from unlabeled calibration activations; physical output logits receive no second software shift. For the default host-mediated boundary, all shift candidates are scored from one physical preactivation tensor because shifting and clamping occur after Hagen. Small models also collapse duplicate 128-row and architecture-width probes.
 
+The same `probe-hagen` phase measures affine fidelity on held-out unlabeled inputs after shift selection. It repeats the first physical affine, applies the frozen hidden boundary, and drives the second physical affine with the ideal hidden UInt5 tensor so the two stages remain separately attributable. `hagen_fidelity.pt` retains paired tensors; JSON and CSV outputs report trial mean error, repeated-trial variation, channelwise affine fits, saturation, correlation, and output argmax agreement.
+
 For inputs wider than one signed Hagen array, the adapter first probes the high-level `Linear` path. Its explicit `host-128` fallback runs 128-input analog MAC tiles, sums partial Int8 values on the host, and records that host accumulation rather than presenting it as one on-chip matrix operation.
 
 TTFS-domain pooling runs Hagen with `avg=1` and assigns `M` LIF replicas to each logical hidden unit. Potential-domain pooling runs Hagen with `avg=M` and one downstream LIF. The EBRAINS acceptance launcher selects TTFS replicas with finite-$M$ analytic corrected-max decoding; Hagen `avg=M` remains a separately labeled potential-domain comparison and is never conflated with neuron pooling.
@@ -233,6 +235,12 @@ Physical pooling may use deterministic converted hidden codes and the frozen tor
 The implicit host-boundary shift sweep must reuse one physical preactivation, while native converting-ReLU candidates remain distinct hardware executions.
 
 A model narrower than 128 input lanes must issue one unique shape probe rather than executing its architecture width twice. Candidate scores and metadata must disclose shared physical observations.
+
+### Hagen affine fidelity
+
+The Hagen probe must compare repeated physical affine outputs with the exact frozen integer reference on held-out unlabeled inputs.
+
+First-affine raw output, hidden UInt5 output, and output Int8 must remain separate. The output affine receives ideal hidden codes, preventing TTFS pooling error from entering its fidelity measurement. Reports distinguish trial mean error from repeated-trial variation and retain per-channel values.
 
 ### Sigmoid host activation adapter
 
