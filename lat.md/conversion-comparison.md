@@ -48,6 +48,69 @@ UBAI에는 NAS가 직접 공유된다고 가정하지 않는다. 기존 환경�
 
 raw_runs.csv, summary.csv, sop_breakdown.csv, provenance 및 생성한 LaTeX 행은 해당 artifacts 경로에 보존한다. 비용은 실제 checkpoint 설정에서 계산하며 전체 TTFS classifier를 가정한 비용과 실제 dense classifier 평가를 구별한다. Energy는 0.9 pJ/SOP의 가정에 따른 추정치이며 GPU나 칩 측정값이 아니다. 네 쌍과 calibration 네 개가 모두 검증되기 전 논문 표를 완성된 결과로 승격하지 않는다.
 
+### Log Preservation and ICLR Handoff
+
+실험의 원시 로그와 재현에 필요한 기록은 임시 파일 및 논문과 분리해 보존한다. 실행 중 사본과 검증된 완료본을 구별하며, ICLR에는 완료본에서 확인한 결과만 반영한다.
+
+원본은 `artifacts/logs/conversion_comparison/<tag>/`, 별도 사본은 `artifacts/archives/conversion_comparison/<tag>/`에 둔다. 로그, task와 result, calibration과 admission, experiment와 assignment, 이벤트 및 controller 기록, Slurm 로그, 실패·중단 기록을 함께 보존한다. 재시도나 임시 경로 정리가 원본 로그 또는 보존 사본을 삭제해서는 안 된다.
+
+진행 중 CSV는 계속 갱신되므로 시점별 사본은 고유 경로에 저장하고 덮어쓰지 않는다. 각 사본에는 파일별 SHA-256과 진행 중이라는 표시를 남긴다. 이러한 사본은 전체 결과가 아니며 논문 반영 근거로 승인하지 않는다. GPU 잠금과 재생성 가능한 실행 도구는 사본에서 제외할 수 있다. UBAI에서 평가했다면 원격 실패·중단 로그도 별도로 가져온 뒤 보존 완전성을 확인한다.
+
+완료 후 calibration 네 개와 ANN/SNN 평가 여덟 개의 원시 로그, task 및 calibration hash를 다시 검증한다. 검증된 완료본과 CSV, 비용 부분합, provenance, 생성한 LaTeX를 별도로 고정한 뒤 ICLR의 네 Ours 행을 갱신한다. 기존 원고와 적용 diff, 빌드 로그도 해당 보존 경로에 남긴다. 논문에는 필요한 표와 설명만 복사하며 원시 로그는 이동하거나 지우지 않는다.
+
+현재 controller는 집계와 완료 상태까지만 기록하며 원고를 자동 수정하지 않는다. 논문 반영은 [[comparison-costs#Paper Integration Contract]]의 별도 검증 및 diff 검토 절차로 수행한다.
+
+## Clean Accuracy Diagnosis
+
+잡음이 없는 평가에도 연산 내부의 유한 범위 제한은 남는다. 2026-09-15 진단은 고정 역치 40에서 나타난 ViT-S 정확도 하락과 calibration 경계 clipping을 구별한다.
+
+완료된 전체 평가에서 CIFAR-10 ViT-S는 ANN 98.48%, SNN 91.56%, ImageNet ViT-S는 80.26%, 60.14%, ViT-B는 85.50%, 85.14%였다. Gaussian timing noise, deadline margin, mismatch 및 가중치·bias 잡음은 모두 꺼져 있었다. 데이터 순서, 체크포인트, 전처리, 모델별 calibration 연결과 완료 로그 hash는 검증됐다.
+
+### Calibration and Internal Limits
+
+Calibration은 측정한 범위를 전달하지만 activation 값을 재조정하거나 LayerNorm 내부 역치를 늘리지는 않는다.
+
+현재 ImageNet ViT-S의 마지막 block 출력 calibration은 약 ±234.71을 허용하는 반면, [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#forward]]는 평균을 뺀 양·음 magnitude를 각각 40으로 제한한 뒤 분산과 정규화 값을 계산한다. 따라서 calibration clipping이 거의 없어도 LayerNorm clipping과 결정적인 변환 오차가 생긴다. 수집 자체도 내부 제한이 적용되는 SNN으로 수행한다.
+
+최종 calibration site에서 CIFAR-S는 clipping 0건, ImageNet-S는 attention score 상한 272건뿐이었다. 반면 내부 LayerNorm magnitude clipping은 존재한다. ViT-B에도 더 높은 개별 clipping 비율이 있으므로 단순 원소 비율만으로 모델별 정확도 손실 크기를 설명해서는 안 된다. 비활성 양·음 경로에 붙는 log 입력 하한 count는 손실된 영상 수가 아니다.
+
+### LayerNorm Calibration Coverage
+
+현재 calibration 적용 완료는 등록된 site에 한정되며, LayerNorm 내부 입력 범위까지 수집했다는 뜻이 아니다. 정규화 출력의 해석적 bound와 정규화 전 입력의 데이터 의존 범위를 구별해야 한다.
+
+[[utils/transformers/models/spiking_vit/calibration.py#vit_calibration_specs]]는 residual 두 곳, GELU 입력, attention score를 block마다 등록한다. ViT-S/B의 48개 site와 ViT-L의 96개 site에는 LayerNorm 내부 입력이 없다. SpikingLayerNorm은 calibration record를 조회하지 않고 평균을 뺀 magnitude의 상한을 전역 theta로 정한다. 이는 기능을 켜는 옵션이 누락된 것이 아니라 수집·저장·적용 경로가 연결되지 않은 것이다.
+
+정규화된 출력은 feature 수와 학습된 affine 계수로 정해지는 해석적 bound를 유지할 수 있다. 그러나 평균을 뺀 입력의 크기는 층과 체크포인트에 따라 증폭될 수 있으므로, [[domain#Domain Propagation]]의 모델 전체 범위 정책에서 별도 수집 또는 충분한 표현 범위 설정의 대상이다. 출력이 유계라는 사실만으로 이 내부 입력을 제외할 수 없다.
+
+필요한 보완은 clipping 전의 내부 magnitude 상한을 training 데이터에서 정하고, 그 범위와 실제 인코딩·분산·log 계산의 범위를 일치시키는 것이다. 분산 상한은 입력 범위에서 유도하고 log 입력의 양의 하한은 별도로 유지한다. 현재 [[utils/transforms/functions.py#multiplication_operator]]는 호출자가 더 넓은 bound를 주어도 시간으로 인코딩하는 피연산자를 theta로 제한하므로, calibration 표에 상한만 추가해서는 해결되지 않는다.
+
+이 절은 범위 누락을 기록하며 구현 방식이나 새 실행을 승인하지 않는다. 기존 48/96-site 결과는 실제 적용 범위를 명시해 보존하고, LayerNorm 내부 calibration을 완료한 결과로 표현하지 않는다.
+
+전체 hidden layer 경로의 구분, LayerNorm 외의 고정 제한과 GELU 실행 연결은 [[vit-calibration-audit#ViT Calibration Coverage Audit]]에 기록한다.
+
+### Isolated 64-Image Check
+
+같은 첫 64장과 현재의 전체 training 5k calibration을 유지하고 LayerNorm의 역치만 2000으로 바꾸는 별도 진단을 수행했다. 본 실험 조건 또는 완료 결과를 수정한 것은 아니다.
+
+| 모델 | ANN 정답 | 현재 SNN 정답 | LayerNorm만 역치 2000 |
+|---|---:|---:|---:|
+| ImageNet ViT-S | 52/64 | 39/64 | 51/64 |
+| CIFAR-10 ViT-S | 64/64 | 59/64 | 61/64 |
+
+다른 연산의 역치 40, dtype, GELU 구현, 기존 calibration 및 LayerNorm eps는 유지했다. 역치를 바꿀 때 LayerNorm의 파생 bound를 명시적으로 다시 계산하고 호출 후 복원했다. 이는 LayerNorm 내부 magnitude, 분산, log 범위와 affine 곱셈의 역치를 함께 바꾼 진단이며, magnitude clamp 하나만 바꾼 실험이라고 부르지 않는다.
+
+ImageNet ViT-S의 큰 하락에서 LayerNorm의 작은 역치가 주된 요인이라는 증거이며, CIFAR에서는 일부 회복만 확인됐다. 64장 결과를 전체 5k 또는 test 10k 결과로 대체하거나 성능 복구 완료로 보고하지 않는다. 진단 코드와 여섯 실행 로그 및 hash는 `artifacts/diagnostics/conversion_comparison/clean-drop-20260915-zY5PAN/`에 보존하며 공식 집계와 분리한다.
+
+### Historical Comparison and Remaining Uncertainty
+
+예전 ViT-S의 높은 정확도는 현재와 다른 역치 및 구현 조건에서 얻었으므로 동일 조건의 회귀 결과로 해석하지 않는다.
+
+`artifacts/logs/fixed_domain_validation/vit_small_minmax_margin5_clean_5000.log`는 역치 2000, float32, training 1024장 calibration에서 80.36%를 기록했다. `artifacts/logs/gelu_cubic_phi_nl/validation5000_phi_nl_psi_ed.log`의 80.52%도 역치 2000이었다. 동일 모델 식별자와 validation fingerprint는 확인했지만, 시대별 checkpoint hash 규약과 모든 source 상태가 일치한다고 주장하지 않는다.
+
+더 오래된 `artifacts/wandb/wandb-theta-std.csv`의 잡음 0 행은 역치 50에서 60.42%, 200에서 79.46%이다. 이 파일은 source, dtype, calibration 증거가 부족하므로 작은 역치에서 성능이 낮았다는 보조 자료로만 사용한다. CIFAR의 옛 98.42%는 같은 조건의 원시 로그를 확인하지 못했다.
+
+실제 네 모델의 calibrated GELU 입력 범위에서 현재 합성식과 의도한 tanh 근사의 CPU 오차는 최대 약 1.4e-13, 이전 상수 처리와의 차이는 약 1.1e-13이었다. 새 GELU 상수 처리만으로 큰 하락을 설명할 근거는 발견하지 못했다. 별도로 ViT adapter가 checkpoint의 LayerNorm eps 1e-12 대신 기본값 1e-5를 쓰는 차이가 있으나 2026-04-30부터 존재하며, 이번 진단에서는 바꾸거나 원인으로 확정하지 않았다.
+
 ## Verification
 
 단위 검사와 실제 입력 검사를 분리하여 구성, 데이터 순서, 실행 조건과 결과의 일치를 검증한다.

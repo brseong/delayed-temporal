@@ -17,7 +17,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from scripts.analysis.summarize_calibrated_three_sweeps import (
-    aggregate_results, summarize, T95_THREE_SEEDS,
+    _accuracy_footer, aggregate_results, summarize, T95_THREE_SEEDS,
 )
 from scripts.experiments import calibrated_three_sweeps as contract
 from scripts.runtime import identity
@@ -142,6 +142,42 @@ def verify_partial_means_and_counts() -> None:
         expect_error(lambda: aggregate_results(broken), "finite")
 
 
+def verify_accuracy_footer() -> None:
+    def row(seeds: str, width: float | None = None) -> dict:
+        return {"kind": "noise", "seeds": seeds, "replicas": len(seeds.split()),
+                "accuracy_ci95_half_width": width}
+
+    deterministic = {"kind": "theta_validation", "seeds": "", "replicas": 1,
+                     "accuracy_ci95_half_width": None}
+    cases = (
+        ([], 0, "no completed noise evaluations; confidence intervals not shown"),
+        ([row("0"), row("0")], 2,
+         "seed 0 result; confidence intervals not shown"),
+        ([row("0 1"), row("0 1")], 4,
+         "mean of seeds 0, 1; confidence intervals not shown"),
+        ([row("0 1 2", 0.02), row("0 1 2", 0.0)], 6,
+         "mean of seeds 0, 1, 2; 95% Student-t confidence intervals"),
+        ([row("0"), row("0 1")], 3,
+         "means of available seeds; confidence intervals not shown"),
+        ([row("0 1"), row("0 1 2", 0.02)], 5,
+         "means of available seeds; 95% Student-t confidence intervals "
+         "only where all 3 seeds are complete"),
+        ([row("0 1"), row("0 1 2", 0.0)], 5,
+         "means of available seeds; 95% Student-t confidence intervals "
+         "only where all 3 seeds are complete"),
+        ([row("0 1 2", 0.0)], 3,
+         "mean of seeds 0, 1, 2; 95% Student-t confidence intervals"),
+    )
+    for rows, completed, description in cases:
+        progress = {"completed_noise_runs": completed}
+        summary = [deterministic, *rows]
+        assert _accuracy_footer(summary, progress) == (
+            f"{completed}/51 noise evaluations; {description}")
+        progress["expected_noise_runs"] = 99
+        assert _accuracy_footer(summary, progress) == (
+            f"{completed}/99 noise evaluations; {description}")
+
+
 def verify_seed_barriers_and_snapshots() -> None:
     with tempfile.TemporaryDirectory() as directory:
         fixture = Fixture(Path(directory))
@@ -202,12 +238,25 @@ def verify_early_seed_and_identity_rejection() -> None:
 
 
 def verify_plot_and_partial_theta() -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     with tempfile.TemporaryDirectory() as directory:
         fixture = Fixture(Path(directory))
         with fixture.mocks(plot=True):
             fixture.add_seed(0)
-            progress = summarize(fixture.root)
-            assert progress["completed_seed_barriers"] == [0]
+            fixture.add_seed(1)
+            original_text = plt.Figure.text
+            with patch.object(plt.Figure, "text", autospec=True,
+                              side_effect=original_text) as figure_text:
+                progress = summarize(fixture.root)
+            assert progress["completed_seed_barriers"] == [0, 1]
+            footers = [call.args[3] for call in figure_text.call_args_list
+                       if len(call.args) > 3 and call.args[1:3] == (.5, .025)]
+            assert ("34/51 noise evaluations; mean of seeds 0, 1; "
+                    "confidence intervals not shown") in footers
+            assert not any("Student-t" in footer for footer in footers)
             for filename in ("latest_accuracy.pdf", "latest_accuracy.png",
                              "latest_physical_rates.pdf", "latest_physical_rates.png"):
                 assert (fixture.root / "outputs" / filename).stat().st_size > 1000
@@ -226,7 +275,8 @@ def verify_plot_and_partial_theta() -> None:
 
 # @lat: [[evaluation#Evaluation and Verification#Calibrated Three Sweep Reporting]]
 def main() -> None:
-    for verify in (verify_partial_means_and_counts, verify_seed_barriers_and_snapshots,
+    for verify in (verify_partial_means_and_counts, verify_accuracy_footer,
+                   verify_seed_barriers_and_snapshots,
                    verify_early_seed_and_identity_rejection, verify_plot_and_partial_theta):
         verify()
         print(f"PASS {verify.__name__}")

@@ -47,6 +47,16 @@ Any sampled event later than this shared endpoint is a deadline miss. The model 
 
 The diagnostic deadline-margin sweep may allow events to arrive up to $m=k\sigma_t$ after $T_{\mathrm{code}}$, with $m\ge 0$. An event arriving during this additional interval is delivered, but its timestamp is clamped to the original upper endpoint of the encoding interval, so bounds and clean operator arithmetic do not change. This is a late-arrival tolerance diagnostic, not a calibrated hardware window.
 
+## Comparison with Stanojevic et al.
+
+Stanojevic et al.'s $\zeta$ and the maintained deadline margin both allocate temporal slack, but they target different scheduling failures; a generic margin is not a novel mechanism.
+
+Stanojevic et al. set $t_{\max}^{(n)}=t_{\min}^{(n)}+(1+\zeta)X^{(n)}$, with $t_{\min}^{(n)}=t_{\max}^{(n-1)}$, using the maximum activation observed in training data to prevent the earliest output spike in layer $n$ from preceding all input spikes from layer $n-1$. This changes the nominal layer schedule and code interval. Their main construction can also force an inactive ReLU neuron to fire at $t_{\max}^{(n)}$. Their separately reported Gaussian timing perturbation experiment changes spike times, but the paper does not define a delivery mask at a receiver deadline or a grace rule after the nominal code window.
+
+The maintained diagnostic instead keeps the nominal code interval and potential bounds fixed, samples additive timing error, and classifies delivery against $T_{\mathrm{code}}+m$. An event arriving within $m=k\sigma_t$ is delivered with its stored timestamp limited to $T_{\mathrm{code}}$. The margin targets events delayed by noise rather than output firing before the preceding layer completes. Therefore the manuscript must not claim temporal slack or the margin alone as novel; the narrower distinction is the explicit deadline miss model and downstream potential readout and evaluation for both delivered and missed events across composed Transformer operators.
+
+Primary source: [published article](https://doi.org/10.1016/j.neunet.2023.09.011).
+
 ## Numerical Precision and Endpoint Caveat
 
 Timing-noise results are interpretable only when the sampling dtype resolves the requested perturbation and nominal codewords are assessed for endpoint placement.

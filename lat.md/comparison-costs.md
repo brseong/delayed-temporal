@@ -100,6 +100,8 @@ Only a complete, validated comparison bundle may fill the four Ours rows. Paper 
 
 The table caption must identify our CIFAR test 10k and ImageNet fixed validation 5k populations, preserve literature provenance, correct SpikeZIP quantization levels, and distinguish derived energy from measured energy. A comparison-specific paragraph records fixed $\theta=40$, float64, training seed-0 5k calibration, min/max with 5% range margin, frozen bounds and disabled noise. It also discloses the dense runtime classifier and assumed TTFS head in the estimate.
 
+The ICLR appendix now derives affine projection, GELU, LayerNorm, multi-head self-attention, MLP, complete block, stem, final LayerNorm and assumed TTFS head costs under `vit_composed_sop_v1`. It distinguishes 196 image patches from 197 tokens and reports the exact SOP totals that generate the rounded table values. The comparison section links directly to this derivation.
+
 The existing general experiment prose separately needs review: its calibration paragraph still describes the older uncalibrated noise run and 1,024-sample implementation default. Those statements must not be relabeled as the new comparison protocol. Other model families and noise-study descriptions are outside the automatic table patch.
 
 The corrected ImageNet rows must use the explicit timm evaluation transform recorded in [[conversion-comparison#ViT Conversion Comparison#ImageNet Preprocessing Correction]]. Their fixed validation 5k population remains distinct from full-validation literature results, so the table caption and discussion must identify that difference.

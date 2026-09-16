@@ -20,7 +20,7 @@ The active scope is the fixed 5,000-image validation subset at $\theta=40$, a de
 
 This is the canonical status ledger for manuscript-facing work; the former review checklist remains a provenance record, and duplicate actions are consolidated here.
 
-Source details and reviewer labels remain in [the legacy Korean review checklist](../paper/neurips_2026/neurips_2026_review_checklist_ko.md). Update task status here first, then reflect completed claims in `paper/neurips_2026/neurips_2026.tex` and the submission checklist.
+Source details and reviewer labels are consolidated in [[deprecated#과거 리뷰]]. Update task status here first, then reflect completed claims in `paper/neurips_2026/neurips_2026.tex` and the submission checklist.
 
 ### Current ViT-B Noise and Time-Scale Update
 
@@ -200,7 +200,7 @@ The reviewed precision-control tooling, appendix note, and knowledge-graph updat
 - `main` contains `44ddb0b` plus the precision-control handoff commit. Their remote publication state must be checked explicitly before assuming they are pushed.
 - The requested `/root/.codex/worktrees/a4c5/delayed-temporal` worktree is removed. Other detached and EBRAINS/toy worktrees remain registered and were outside this session's scope.
 - The handoff commit adds GPT-2 dtype control, its float32-only calibration guard, verification, the precision sweep, the strict summarizer, and the updated evaluation graph.
-- `paper/neurips_2026/gpt2_fp_precision_appendix_results_ko.md` is force-tracked as an appendix-ready table and English draft. `artifacts/precision_gpt2/` remains ignored and contains the local raw logs and generated CSV/Markdown.
+- The precision results and protocol are consolidated in [[deprecated#과거 실험과 범위 감사#GPT-2 정밀도 통제 실험]]; the former appendix note is preserved in [[deprecated#원본 복구]]. `artifacts/precision_gpt2/` remains ignored and contains the local raw logs and generated tables.
 - The calibration verifier passes all 18 groups, the float64 full-model smoke and held-out run complete, Python and shell syntax pass, `git diff --check` passes, and `lat check` passes. Ruff was unavailable in the active environment.
 - Importing custom Transformer families emits pre-existing auto-docstring diagnostics labeled `[ERROR]` for unregistered custom configs and undocumented parameters even though verification exits successfully. This noise should be cleaned or filtered so it cannot hide a real failure.
 
@@ -212,7 +212,7 @@ The evidence supports a limited finite-precision claim, but several protocol and
 - The float64 $\theta=2000$ reference also widens the softmin execution score radius from 40.242257 to 350.772, so it corroborates but does not independently prove a pure dtype intervention. The fixed-radius float32 window sweep is the primary causal control.
 - Attention-score excursion counts are recorded before causal-mask overwrite and include future positions. Their absolute rate is an upper-bound diagnostic; only like-for-like sweep comparisons are currently justified.
 - `paper/neurips_2026/neurips_2026.tex` still reports the old GPT-2 row 22.40 to 23.43 ($+1.03$) and presents one GPT-2 threshold, while the current representative run is 22.7076 to 22.8991 with global/attention thresholds 2,000/100.
-- `paper/neurips_2026/reviewer_technical_verification_notes_ko.md` still cites the earlier dense value 22.4057 and $+2.6267$ shared-window gap. The current simultaneous dense reference makes that gap $+2.3248$.
+- Earlier GPT-2 reference values are retained in [[deprecated#과거 실험과 범위 감사#교차 모델 평가의 비교 한계]]; do not mix them with the simultaneous precision control.
 - “The entire conversion gap is caused by floating-point precision” is unsupported. The safe claim is that the additional degradation from sharing $\theta=2000$ with attention is predominantly a float32 timestamp-subtraction effect; roughly 0.81--0.84% relative PPL remains.
 
 ### Next Session
@@ -467,17 +467,21 @@ theta=40과 양의 하한 $10^{-5}$에서 float32/float64 모두 상한의 log �
 - [x] LayerNorm 상한 변경을 `c9f4e40`으로 별도 커밋하고 UBAI의 clean checkout에 동기화했다.
 - [x] [[evaluation#Calibrated Three Sweep Campaign]]에 71회 평가, 9회 calibration, training 선택과 validation 분리 및 경계 중단 규칙을 정의했다.
 - [x] [[evaluation#Calibrated Three Sweep Scheduling]]의 seed 0 전체 → seed 1 전체 → seed 2 전체 순서와 완료 결과 재사용을 구현했다.
-- [ ] 최종 실행 소스를 별도 커밋하고 양쪽 clean checkout을 같은 commit으로 고정한다.
+- [x] 실행기와 집계기를 `36615ab`으로 별도 커밋하고 양쪽 clean checkout을 같은 commit으로 고정했다. 기존 사용자 문서 변경은 포함하지 않았다.
+- [x] 새 계약 4그룹, 실행 순서 5그룹, 집계 4그룹, UBAI 안전성 19개 검증 및 관련 연산자·calibration·문서 검사를 통과했다.
+- [x] Slurm 준비 작업 `984373`에서 자산·의존성 해시와 Python 3.12.13을 확인했다. 첫 준비 작업 `984371`의 경로 연결 실패 로그는 보존했다.
 - [ ] CPU 검증과 Slurm 자산 검증 후 양쪽의 짧은 clean/noisy prediction 일치를 확인한다.
 - [ ] 9개 theta의 training/validation 및 반대 환경 replay를 검증해 선택을 확정한다. 범위 부족·불안정이면 noise 시작 전에 보고한다.
 - [ ] 17조건씩 세 seed를 진행하고 첫째·둘째 중간 그림과 최종 그림을 보존한다. seed 0 범위 중단 규칙을 적용한다.
 
 로컬은 GPU 4–7만, UBAI는 gpu4/gpu5만 사용하며 RAM 디스크에는 환경을 풀지 않는다. 50k와 추가 축은 진행하지 않는다. 기존 시간 추정은 약 38 GPU-hours이며 구현·검증·대기 시간을 포함하지 않는다.
 
+UBAI의 새 clean checkout에는 읽기 전용 source를 mount하기 전에 내부 연결 지점인 `artifacts/assets/theta-selection-v1`, 해당 실험의 `artifacts/logs/noise_scan` 하위 디렉터리, `src/transformers`, `src/spikingjelly`를 빈 디렉터리로 준비해야 한다. 이 경로 준비와 실패·재시도 이력은 실험의 `deployment-notes.json`에 기록했다.
+
 ## ViT Calibration Policy 2 Shared Deadline
 
-ViT-B의 짧은 calibration 수집에서 발견한 log 시간창 끝값 불일치를 해결해야 새 비교 실행을 승인할 수 있다. 같은 오류를 작은 batch로 우회하거나 기존 calibration을 재사용하지 않는다.
+공통 시간창 전달은 구현하고 CPU 회귀 검증을 통과했다. 새 source의 실제 ViT-B 재검사는 아직 필요하며, 기존 실패 기록이나 calibration을 덮어쓰지 않는다.
 
-- LayerNorm의 세 log 인코딩에 동일하게 계산한 공통 시간창을 sampling 전에 적용한다. 이후 event의 domain만 바꾸는 처리는 하지 않는다.
-- 일반 primitive의 deadline 검사는 유지한다. 상한 40.007과 반대 방향 반올림 사례, 8개 ablation, noise-off·Gaussian 표준편차 0·seeded 경로의 회귀 검증을 추가한다.
-- 경고는 전역 theta 초과와 선택된 범위의 실제 clipping을 구분한다. 수정은 새 source와 별도 실패 기록을 유지한 재검사로 검증한다.
+- [x] LayerNorm의 세 log 인코딩에 동일하게 계산한 공통 시간창을 sampling 전에 적용했다. 이후 event의 domain만 바꾸는 처리는 하지 않는다.
+- [x] 일반 primitive의 deadline 검사를 유지했다. 상한 40.007과 반대 방향 반올림 사례, 8개 ablation, noise-off·Gaussian 표준편차 0·seeded 경로의 회귀 검증을 추가했다.
+- [ ] 경고는 전역 theta 초과와 선택된 범위의 실제 clipping을 구분한다. 수정은 새 source와 별도 실패 기록을 유지한 재검사로 검증한다.

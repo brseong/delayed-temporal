@@ -14,6 +14,14 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[quick-family-checks]] — Small model comparisons and calibration requirements before language-model evaluation.
 - [[comparison-costs]] — ViT comparison SOP derivation and source audit.
 - [[conversion-comparison]] — Four-model calibrated ViT comparison and execution contract.
+- [[vit-calibration-audit]] — 현재 ViT hidden layer의 calibration 적용 범위, 내부 고정 제한과 GELU 시냅스 계수 확인.
 - [[bounds-audit]] — Complete audit of fixed potential ranges, runtime extrema, calibration cases, and migration formulas.
+- [[neurips]] — NeurIPS 검토에서 현재도 유효한 지식과 현재 문서의 안내.
+- [[neurips-current]] — 전류, 시냅스 가중치, calibration과 실행 입력을 구분하는 원칙.
+- [[neurips-hardware]] — 하드웨어 문헌 근거와 실제 칩 실행 주장의 검증 범위.
+- [[neurips-mathematics]] — 연산자 합성의 수학적 성립 조건과 구현 검증의 경계.
+- [[neurips-windows]] — 입력 범위, 표현 범위와 관측 시간의 관계.
+- [[neurips-writing]] — 원고 용어, 근거와 비교를 일관되게 작성하는 원칙.
+- [[deprecated]] — 현재 계약에서 분리한 과거 리뷰, 설계, 구현 상태와 실험 기록.
 - [[todo]] — Required manuscript and implementation work, including the only active experiment checklist.
 - [[deferred-experiments]] — Optional experiment ideas with explicit promotion conditions and no active checkboxes.
