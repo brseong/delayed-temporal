@@ -383,3 +383,65 @@ Training must precede hardware allocation, the probe-selected shift must feed sm
 The default resume path reuses the accepted checkpoint and explicit Hagen calibration, skips redundant training and shift probing, then creates and validates a spiking threshold calibration before margin selection. Setting the resume source to `None` restores the fresh train-and-probe path.
 
 Before either hardware path, the shared-client handshake has bounded retries, while Hagen initialization runs in a disposable process with a fixed watchdog and always attempts release. Every CLI phase also has a process-group timeout, stage state is recorded, and full Yin-Yang evaluation still requires the same run's smoke gate. The notebook contains no credentials.
+
+## Independent Primitive Noise Characterization
+
+The hardware characterization measures four primitive transfer functions independently and does not use logical neuron pooling.
+
+### Physical acquisition boundary
+
+Sixteen quadrant-balanced physical circuits expose repeated-trial variation within each circuit and fixed-pattern parameter differences between circuits.
+
+The $\phi_{\mathrm{NP}}$ acquisition first measures configured initial membrane states under a synchronized constant-current ramp. Only a passing static stage enables synaptic precharge, CADC confirmation, and a second ramp acquisition. A static-only result is diagnostic and cannot validate the primitive.
+
+The $\phi_{\mathrm{NL}}$ acquisition reuses the validated synaptic precharge path and measures first-spike time after a fixed exponential synaptic input. The zero code is outside its positive fit domain.
+
+The $\psi_{\mathrm{Int}}$ acquisition measures bias-free Hagen PWM integration over every UInt5 duration and signed drives $\{-2,-1,1,2\}$. `Linear.avg` remains one, so hardware neurons are not averaged.
+
+The public Hagen `Linear` API does not expose an atomic neuron placement constraint. Integration artifacts therefore identify each circuit by its stable output index within the mapped layer and label that coordinate meaning explicitly; they do not reuse spiking neuron coordinates.
+
+The $\psi_{\mathrm{NE}}$ acquisition records a non-spiking membrane CADC value at a fixed observation time after sweeping the input-spike time. Paired quiet trials provide the baseline; any output spike rejects the operating point.
+
+Public PyNN timed constant-current playback owns the NP ramp. If that capability is unavailable, the runner stops instead of replacing the ramp with a spike train or a host-mediated Hagen transform.
+
+### Fit and result boundary
+
+Each circuit is fitted on 128 calibration repetitions and evaluated with fixed parameters on 128 held-out repetitions.
+
+Per-circuit temporal sigma comes from residuals around that circuit's calibration transfer. Circuit offset, gain, slope, and effective time-constant differences remain separate fixed-pattern statistics. No circuit outputs are averaged.
+
+The NP fit is linear in potential code, the NL fit is linear in log potential, the integration fit is linear in signed duration, and the exponential-response fit searches the effective time constant while fitting baseline and response scale.
+
+Missed spikes remain missing values and are not replaced by the deadline. CADC and Int8 saturation are separate flags. Exactly-one-spike, premature-spike, monotonicity, normalized-RMSE, saturation, and parameter-drift gates determine validation.
+
+[[scripts/evaluation/brainscales2_primitive_noise.py#run]] writes checksum-indexed raw split chunks, per-stage transfer and device statistics, figures, and one `primitive_noise_calibration.json`. The combined record validates only when NP passes both stages and the other three primitives pass held-out validation.
+
+The resulting distributions are independent primitive marginals for later sensitivity analysis. They do not represent the joint error distribution of a composed BSS-2 circuit and do not include Transformer forward evaluation.
+
+## Independent Primitive Noise Verification
+
+These tests protect calibration isolation, event semantics, artifact integrity, and the boundary between temporal and fixed-pattern variation without importing EBRAINS packages.
+
+### Synthetic transfer recovery
+
+Synthetic observations must recover the four transfer parameters and nonzero within-device noise scales within declared tolerances.
+
+### Held-out validation isolation
+
+Changing only held-out observations must not change calibration parameters, while held-out fit diagnostics and normalized error must respond.
+
+### Temporal and fixed-pattern separation
+
+Device offsets with no repeated-trial noise must produce fixed-pattern spread without inflating within-device temporal sigma.
+
+### Miss and saturation semantics
+
+Missing spikes remain non-finite, multiple spikes and premature membrane-output spikes fail their gates, and saturation remains distinct from missing delivery.
+
+### NP stage gate
+
+A static-only NP artifact is diagnostic-only and cannot enter the validated four-primitive calibration.
+
+### Artifact integrity
+
+Raw chunks must round-trip with their shapes and masks, reject checksum changes, and reject duplicate or out-of-range physical coordinates.

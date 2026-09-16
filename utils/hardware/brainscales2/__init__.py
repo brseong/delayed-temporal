@@ -41,6 +41,20 @@ from .margin import (
     DeadlineMarginSelection,
     select_deadline_margin,
 )
+from .primitive_noise import (
+    PRIMITIVES,
+    MockPrimitiveNoiseBackend,
+    PrimitiveNoiseConfig,
+    PrimitiveObservation,
+    PrimitiveValidation,
+    default_primitive_coordinates,
+    validate_primitive_observation,
+)
+from .primitive_backend import (
+    PrimitiveCapabilityError,
+    PrimitiveHardwareBackend,
+    probe_primitive_capabilities,
+)
 
 __all__ = [
     "BrainScaleS2PoolConfig",
@@ -72,4 +86,14 @@ __all__ = [
     "DeadlineMarginObservation",
     "DeadlineMarginSelection",
     "select_deadline_margin",
+    "PRIMITIVES",
+    "MockPrimitiveNoiseBackend",
+    "PrimitiveNoiseConfig",
+    "PrimitiveObservation",
+    "PrimitiveValidation",
+    "default_primitive_coordinates",
+    "validate_primitive_observation",
+    "PrimitiveCapabilityError",
+    "PrimitiveHardwareBackend",
+    "probe_primitive_capabilities",
 ]

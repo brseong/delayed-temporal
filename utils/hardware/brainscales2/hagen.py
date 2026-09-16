@@ -477,6 +477,71 @@ class HagenPWMBackend:
         metadata["stage"] = "first-affine-raw"
         return HagenResult(raw.detach().cpu(), metadata)
 
+    def direct_linear(
+        self,
+        value: torch.Tensor,
+        weight: torch.Tensor,
+        *,
+        avg: int = 1,
+    ) -> HagenResult:
+        """Execute a bias-free physical Linear for direct primitive measurement.
+
+        This narrow entry point intentionally bypasses the converted-model
+        adapters.  It is used to characterize the PWM integration primitive
+        with a caller-supplied UInt5 duration and signed int6 drive.
+        """
+        value = value.detach().to(torch.float32)
+        weight = weight.detach().to(torch.float32)
+        if value.ndim != 2 or weight.ndim != 2:
+            raise ValueError("direct Hagen inputs and weights must be matrices")
+        if value.shape[1] != weight.shape[1]:
+            raise ValueError("direct Hagen input and weight widths differ")
+        if bool(((value < 0) | (value > 31)).any()):
+            raise ValueError("direct Hagen input must lie in UInt5 [0, 31]")
+        if bool(((weight < -63) | (weight > 63)).any()):
+            raise ValueError("direct Hagen weight must lie in signed int6 [-63, 63]")
+        if avg <= 0:
+            raise ValueError("direct Hagen avg must be positive")
+        started = perf_counter()
+        with self.hardware_session():
+            assert self._active_hxtorch is not None
+            hxtorch = self._active_hxtorch
+            layer = hxtorch.perceptron.nn.Linear(
+                value.shape[1],
+                weight.shape[0],
+                bias=False,
+                num_sends=self.config.num_sends,
+                wait_between_events=self.config.wait_between_events,
+                mock=self.config.mode == "mock",
+                avg=avg,
+            )
+            layer.weight.data.copy_(weight.to(layer.weight.dtype))
+            output = layer(value).detach().cpu()
+            chip_identifier = None
+            get_identifier = getattr(hxtorch, "get_unique_identifier", None)
+            if callable(get_identifier) and self.config.mode == "hardware":
+                chip_identifier = [str(item) for item in get_identifier()]
+            return HagenResult(
+                output,
+                {
+                    "backend": f"hagen-{self.config.mode}",
+                    "hxtorch_version": getattr(hxtorch, "__version__", "unknown"),
+                    "chip_identifier": chip_identifier,
+                    "calibration_path": (
+                        str(self.config.calibration_path)
+                        if self.config.calibration_path is not None
+                        else None
+                    ),
+                    "calibration_sha256": file_sha256(self.config.calibration_path),
+                    "avg": avg,
+                    "bias": False,
+                    "input_shape": list(value.shape),
+                    "weight_shape": list(weight.shape),
+                    "output_shape": list(output.shape),
+                    "elapsed_s": perf_counter() - started,
+                },
+            )
+
     def first_layer(
         self,
         converted: ConvertedToyModel,
