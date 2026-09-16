@@ -1,7 +1,7 @@
 """Lazy physical collectors for independent BrainScaleS-2 primitives.
 
 There is intentionally no automatic replacement for missing low-level
-constant-current control.  ``phi-np`` and ``phi-nl`` either use the public
+constant-current control.  ``phi-np`` and ``phi-nl`` either use the installed
 BrainScaleS-2 PyNN playback controls or fail with a capability error.
 """
 
@@ -25,6 +25,9 @@ from .primitive_noise import (
     PrimitiveObservation,
     PrimitiveStage,
 )
+
+
+PYNN_BACKEND_MODULE = "pynn_brainscales.brainscales2"
 
 
 class PrimitiveCapabilityError(RuntimeError):
@@ -66,7 +69,7 @@ def probe_primitive_capabilities() -> dict[str, Any]:
             result["hxtorch_perceptron"] = hasattr(perceptron, "nn")
 
     try:
-        pynn = import_module("pyNN.brainscales2")
+        pynn = import_module(PYNN_BACKEND_MODULE)
     except ImportError as error:
         result["missing"].append(f"pyNN.brainscales2: {error}")
     else:
@@ -487,7 +490,7 @@ class PrimitiveHardwareBackend:
         code: int,
         config: PrimitiveNoiseConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, dict[str, Any]]:
-        pynn = import_module("pyNN.brainscales2")
+        pynn = import_module(PYNN_BACKEND_MODULE)
         cell_type = self._hxneuron_type(pynn)
         chip = pynn.helper.chip_from_file(str(config.spiking_calibration_path))
         coordinates = self._pynn_coordinates(config)

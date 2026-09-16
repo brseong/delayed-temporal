@@ -402,7 +402,7 @@ The public Hagen `Linear` API does not expose an atomic neuron placement constra
 
 The $\psi_{\mathrm{NE}}$ acquisition records a non-spiking membrane CADC value at a fixed observation time after sweeping the input-spike time. Paired quiet trials provide the baseline; any output spike rejects the operating point.
 
-Public PyNN timed constant-current playback owns the NP ramp. If that capability is unavailable, the runner stops instead of replacing the ramp with a spike train or a host-mediated Hagen transform.
+The installed `pynn_brainscales.brainscales2` timed constant-current playback owns the NP ramp. If that capability is unavailable, the runner stops instead of replacing the ramp with a spike train or a host-mediated Hagen transform.
 
 ### Fit and result boundary
 
