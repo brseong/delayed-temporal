@@ -451,12 +451,10 @@ class PrimitiveHardwareBackend:
         )
 
     @staticmethod
-    def _pynn_coordinates(config: PrimitiveNoiseConfig) -> list[Any]:
-        halco = import_module("pyhalco_hicann_dls_vx_v3")
-        return [
-            halco.AtomicNeuronOnDLS(halco.common.Enum(index))
-            for index in config.physical_coordinates
-        ]
+    def _pynn_coordinates(config: PrimitiveNoiseConfig) -> list[int]:
+        # The pynn_brainscales placement API consumes atomic neuron indices and
+        # performs its own coordinate conversion.
+        return list(config.physical_coordinates)
 
     @staticmethod
     def _hxneuron_type(pynn: Any) -> Any:
