@@ -123,7 +123,7 @@ def main() -> None:
         raise FileExistsError(runtime)
 
     # Admission happens before importing torch, transformers or any evaluator.
-    from scripts.experiments.run_calibrated_three_sweeps import gpu_activity, gpu_available
+    from scripts.runtime.local_gpu import gpu_activity, gpu_available
     if "torch" in sys.modules:
         raise RuntimeError("GPU admission must precede importing torch")
     lock_root = artifact_root / "runtime" / "gpu-locks"

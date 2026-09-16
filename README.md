@@ -1,35 +1,65 @@
 # Biologically Plausible Dual Operators for TTFS-Coded Analog Spiking Transformers
 
-This repository is the official implementation of *Biologically Plausible Dual Operators for TTFS-Coded
-Analog Spiking Transformers*.
+This repository converts pretrained Transformer models to models implemented with TTFS operators and evaluates conversion accuracy, operation cost, and robustness. The main workflow evaluates existing checkpoints; it does not train them.
 
-## Requirements
-To set up the environment for reproducing the results of this paper, please follow the instructions below:
+## Start here
+
+The maintained evaluation interface is intentionally small:
+
+- `scripts/evaluation/error_analysis_vit.py`
+- `scripts/evaluation/error_analysis_bert.py`
+- `scripts/evaluation/error_analysis_roberta.py`
+- `scripts/evaluation/error_analysis_gpt2.py`
+
+These programs own model and dataset loading, backend selection, calibration binding, metrics, and diagnostics. Experiment controllers call them as subprocesses; the evaluators do not depend on a particular campaign.
+
+See [`scripts/README.md`](scripts/README.md) before adding an experiment. It distinguishes reusable evaluation code from campaign orchestration, result analysis, setup, and verification.
+
+## Environment
+
+Use Python 3.12 and install the pinned dependencies:
+
 ```bash
-conda create -n myenv python=3.12
-conda activate myenv
-pip install torch torchvision torchaudio
+conda create -n dt python=3.12
+conda activate dt
 pip install -r requirements.txt
 ```
 
-Before running the error analysis script, download the pre-trained ViT models:
+Pretrained checkpoints and datasets are external assets. Existing experiment manifests record their paths and hashes; do not silently substitute another checkpoint or dataset cache.
+
+## Basic evaluation
+
+The shell wrappers remain available for the original workflows:
+
 ```bash
 bash scripts/setup/convert_vits.sh
-```
-Make sure to place the downloaded models in the appropriate directory as specified in `scripts/experiments/error_analysis_vit.sh`.
-
-## Evaluation (ViT)
-
-To evaluate the model on ImageNet, run:
-
-```bash
 bash scripts/experiments/error_analysis_vit.sh
+bash scripts/experiments/error_analysis_bert.sh sst2
 ```
 
-## Threshold-Jitter Analysis (ViT)
-
-To perform threshold-jitter analysis on the ViT model, run:
+For a direct smoke evaluation, invoke an evaluator rather than copying a campaign controller:
 
 ```bash
-bash scripts/experiments/theta_jitter_analysis_vit.sh
+CUDA_VISIBLE_DEVICES=4 python3 scripts/evaluation/error_analysis_vit.py \
+  --experiment_name smoke --model_backend spiking \
+  --model_id /data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k \
+  --dataset_id imagenet-1k --batch_size 32 --theta 40 \
+  --spiking-layernorm --spiking-mlp --spiking-attention \
+  --max_eval_batches 5
 ```
+
+## Verification
+
+Run focused checks for the code you changed. The layout boundary itself is checked with:
+
+```bash
+python3 scripts/verification/verify_script_layout.py
+```
+
+After operator or operation-count changes, also run:
+
+```bash
+python3 scripts/verification/verify_sop.py
+```
+
+Generated logs, tables, and figures belong under `artifacts/`; publication-ready copies belong under the venue-specific `paper/` tree.

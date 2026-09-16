@@ -80,7 +80,7 @@ def main() -> None:
     source = Path(experiment["source_root"])
     sys.path.insert(0, str(source))
     from scripts.experiments.run_vit_comparison import check_assets
-    from scripts.experiments.run_calibrated_three_sweeps import gpu_activity, gpu_available
+    from scripts.runtime.local_gpu import gpu_activity, gpu_available
     from scripts.experiments.vit_comparison import (
         check_source, evaluator_command, make_task, model_by_key, require_gpu,
     )

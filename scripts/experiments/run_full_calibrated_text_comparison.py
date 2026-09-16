@@ -18,6 +18,12 @@ import sys
 import time
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.runtime.files import atomic_json
+
 
 ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", "/data/delayed-temporal/artifacts"))
 TAG = "conversion_comparison_theta40_calibrated_float64_bounds3_v3"
@@ -53,17 +59,6 @@ def canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-def atomic_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + f".tmp-{os.getpid()}")
-    with temporary.open("x") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True, allow_nan=False)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
-
-
 def write_new_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("x") as handle:
@@ -84,6 +79,8 @@ def source_identity(source: Path, expected_commit: str, family: str) -> dict[str
     paths += [
         source / "scripts/evaluation" / "text_calibration_runtime.py",
         source / "scripts/evaluation" / f"error_analysis_{family}.py",
+        source / "scripts/runtime" / "files.py",
+        source / "scripts/runtime" / "local_gpu.py",
         Path(__file__).resolve(),
     ]
     return {str(path.relative_to(source)): sha256_file(path) for path in sorted(set(paths))}
@@ -413,7 +410,7 @@ def main() -> None:
         raise RuntimeError("comparison runtime must use a disk filesystem")
 
     sys.path.insert(0, str(args.source_root))
-    from scripts.experiments.run_calibrated_three_sweeps import gpu_activity, gpu_available
+    from scripts.runtime.local_gpu import gpu_activity, gpu_available
     lock_path = ARTIFACTS / "runtime/gpu-locks" / f"gpu-{args.gpu}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a") as lock:

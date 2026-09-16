@@ -27,8 +27,9 @@ from scripts.experiments.vit_comparison import (
     sha256_file, task_sha256, validate_experiment, validate_result, validate_table,
     validate_task, write_immutable_json, require_current_experiment,
 )
-from scripts.experiments.run_calibrated_three_sweeps import atomic_json, gpu_activity, gpu_available
 from scripts.experiments.ubai.run_calibrated_three_sweep_pair import worker_environment
+from scripts.runtime.files import atomic_json
+from scripts.runtime.local_gpu import gpu_activity, gpu_available
 
 SCRIPT = "scripts/experiments/run_vit_comparison.py"
 REMOTE_BASE = "/home1/sizz1997/myubai"
@@ -119,7 +120,8 @@ def initialize(root: Path, source: Path, assets_manifest: Path) -> dict:
                      "scripts/experiments/ubai/vit_comparison_prep.sbatch",
                      "scripts/experiments/ubai/vit_comparison_task.sbatch",
                      "scripts/analysis/summarize_vit_comparison.py", "scripts/analysis/vit_comparison_costs.py",
-                     "scripts/analysis/publish_vit_comparison.py"]
+                     "scripts/analysis/publish_vit_comparison.py",
+                     "scripts/runtime/files.py", "scripts/runtime/local_gpu.py"]
     experiment["runtime_sha256"] = {name: sha256_file(source / name) for name in runtime_files}
     validate_experiment(experiment)
     check_source(experiment)

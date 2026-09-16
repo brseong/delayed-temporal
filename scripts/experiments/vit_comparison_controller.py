@@ -20,7 +20,9 @@ from scripts.experiments.vit_comparison import (
     MODEL_KEYS, TAG, check_source, model_by_key, read_json, sha256_file,
     task_sha256, validate_experiment, validate_result, validate_task, write_immutable_json,
 )
-from scripts.experiments.run_calibrated_three_sweeps import atomic_json, gpu_activity, gpu_available, parse_queue
+from scripts.runtime.files import atomic_json
+from scripts.runtime.local_gpu import gpu_activity, gpu_available
+from scripts.runtime.slurm import parse_queue
 from scripts.experiments.calibrated_three_sweep_rebalance import parse_slurm_job, TERMINAL
 from scripts.experiments.ubai.prepare_calibrated_three_sweeps_ubai import absolute_path, immutable
 from scripts.experiments.ubai.run_calibrated_three_sweep_pair import worker_environment

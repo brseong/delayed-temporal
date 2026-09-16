@@ -4,17 +4,14 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
-import math
 import os
 from pathlib import Path
-import re
 import shlex
 import signal
 import socket
 import statistics
 import subprocess
 import sys
-import tempfile
 import time
 from typing import Any
 
@@ -25,6 +22,16 @@ from scripts.experiments.calibrated_three_sweeps import (
     select_theta, sha256_file, task_sha256, theta_grid, validate_experiment,
     validate_result, validate_task, write_immutable_json,
 )
+from scripts.runtime.files import atomic_json
+from scripts.runtime.local_gpu import (
+    DEFAULT_ADMISSION_POLICY as GPU_ADMISSION_POLICY,
+    gpu_activity,
+    gpu_available,
+    gpu_occupancy,
+    parse_gpu_activity,
+    parse_gpu_occupancy,
+)
+from scripts.runtime.slurm import parse_queue
 
 LOCAL_GPUS = (4, 5, 6, 7)
 SUPPORTED_LOCAL_GPUS = tuple(range(8))
@@ -32,7 +39,6 @@ CPU_GPU_ORDER = (4, 5, 6, 7, 0, 1, 2, 3)
 LOCAL_WORKER = 'scripts/experiments/run_calibrated_three_sweep_local_task.py'
 REBALANCE_MIN_WAIT_SECONDS = 60
 TEMPORARY_GPU_SOURCE = '36615ab4390f9817e3af0e4c4a6f840fc6bd57ee'
-GPU_ADMISSION_POLICY = {'max_memory_used_mib': 1024.0, 'max_utilization_gpu_percent': 5.0}
 UBAI_RESOURCE_POLICY = {'max_gpus': 12, 'max_running_jobs': 10, 'max_submitted_jobs': 20,
                         'experiments_per_paired_job': 2}
 PAIR_FILES = ('scripts/experiments/ubai/run_calibrated_three_sweep_pair.py',
@@ -48,23 +54,6 @@ class NeedsAttention(RuntimeError):
 
 def read_json(path: Path) -> dict:
     return json.loads(path.read_text())
-
-
-def atomic_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_symlink():
-        raise ValueError(f'Refusing a symlink: {path}')
-    descriptor, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)
-    try:
-        with os.fdopen(descriptor, 'w') as handle:
-            json.dump(value, handle, indent=2, sort_keys=True, allow_nan=False)
-            handle.write('\n')
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
 
 
 def initialize(root: Path, source: Path, python_bin: str) -> dict:
@@ -124,6 +113,9 @@ def initialize(root: Path, source: Path, python_bin: str) -> dict:
         'scripts/experiments/ubai/calibrated_three_sweep_task.sbatch',
         'scripts/experiments/ubai/calibrated_three_sweep_prep.sbatch',
         'scripts/experiments/ubai/calibrated_git.sh',
+        'scripts/runtime/files.py',
+        'scripts/runtime/local_gpu.py',
+        'scripts/runtime/slurm.py',
     )}
     experiment['dependency_sha256'] = {
         package: package_source_identity(source / 'src' / package / subtree)[0]
@@ -135,87 +127,32 @@ def initialize(root: Path, source: Path, python_bin: str) -> dict:
     return experiment
 
 
-def parse_gpu_occupancy(devices: str, applications: str, gpu_ids: tuple[int, ...] = LOCAL_GPUS) -> dict[int, set[int]]:
-    uuids = {}
-    for line in devices.strip().splitlines():
-        index, uuid = [part.strip() for part in line.split(',')]
-        uuids[uuid] = int(index)
-    if not set(gpu_ids).issubset(uuids.values()):
-        raise ValueError('Required local GPU indices are missing')
-    occupied = {index: set() for index in gpu_ids}
-    for line in applications.strip().splitlines():
-        if not line.strip():
-            continue
-        uuid, pid = [part.strip() for part in line.split(',')]
-        if uuid not in uuids or not pid.isdecimal():
-            raise ValueError('Incomplete GPU occupancy information')
-        if uuids[uuid] in occupied:
-            # Host PIDs can belong to another container and need not exist in /proc here.
-            occupied[uuids[uuid]].add(int(pid))
-    return occupied
-
-
-def gpu_occupancy() -> dict[int, set[int]]:
-    def query(fields: str, kind: str) -> str:
-        return subprocess.check_output(['nvidia-smi', f'--query-{kind}={fields}',
-                                        '--format=csv,noheader,nounits'], text=True, timeout=15)
-    return parse_gpu_occupancy(query('index,uuid', 'gpu'), query('gpu_uuid,pid', 'compute-apps'))
-
-
-def parse_gpu_activity(devices: str, applications: str, gpu_ids: tuple[int, ...] = LOCAL_GPUS) -> dict[int, dict[str, Any]]:
-    identities, activity = [], {}
-    seen_uuids = set()
-    for line in devices.strip().splitlines():
-        index_text, uuid, memory_text, utilization_text = [part.strip() for part in line.split(',')]
-        index, memory, utilization = int(index_text), float(memory_text), float(utilization_text)
-        if index in activity or uuid in seen_uuids or not uuid:
-            raise ValueError('Duplicate or missing GPU identity')
-        if not math.isfinite(memory) or memory < 0 or not math.isfinite(utilization) or not 0 <= utilization <= 100:
-            raise ValueError('GPU memory and utilization must be finite and valid')
-        activity[index] = {'gpu_uuid': uuid, 'memory_used_mib': memory,
-                           'utilization_gpu_percent': utilization}
-        identities.append(f'{index},{uuid}')
-        seen_uuids.add(uuid)
-    pids = parse_gpu_occupancy('\n'.join(identities), applications, gpu_ids)
-    return {index: {**activity[index], 'pids': sorted(pids[index])} for index in gpu_ids}
-
-
-def gpu_activity(*, gpu_ids: tuple[int, ...] = LOCAL_GPUS) -> dict[int, dict[str, Any]]:
-    def query(fields: str, kind: str) -> str:
-        return subprocess.check_output(['nvidia-smi', f'--query-{kind}={fields}',
-                                        '--format=csv,noheader,nounits'], text=True, timeout=15)
-    return parse_gpu_activity(query('index,uuid,memory.used,utilization.gpu', 'gpu'),
-                              query('gpu_uuid,pid', 'compute-apps'), gpu_ids)
-
-
-def gpu_available(sample: dict[str, Any]) -> bool:
-    try:
-        memory, utilization = float(sample['memory_used_mib']), float(sample['utilization_gpu_percent'])
-    except (KeyError, TypeError, ValueError):
-        return False
-    return (math.isfinite(memory) and math.isfinite(utilization)
-            and 0 <= memory <= GPU_ADMISSION_POLICY['max_memory_used_mib']
-            and 0 <= utilization <= GPU_ADMISSION_POLICY['max_utilization_gpu_percent'])
-
-
 def controller_identity(experiment: dict[str, Any]) -> dict[str, Any]:
     head = subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip()
     dirty = subprocess.check_output(['git', '-C', str(REPO), 'status', '--porcelain', '--untracked-files=no'], text=True).strip()
     if dirty:
         raise ValueError('The controller must run from a clean tracked checkout')
     # Only scheduling may differ from the frozen experiment implementation.
+    frozen_runtime = experiment['runtime_sha256']
     for relative in ('scripts/experiments/calibrated_three_sweeps.py',
                      'scripts/experiments/run_calibrated_three_sweep_task.py',
                      'scripts/analysis/summarize_calibrated_three_sweeps.py',
                      'scripts/experiments/ubai/prepare_calibrated_three_sweeps_ubai.py'):
         if sha256_file(REPO / relative) != experiment['runtime_sha256'][relative]:
             raise ValueError(f'Controller import differs from the frozen experiment: {relative}')
+    shared_runtime = ('scripts/runtime/files.py', 'scripts/runtime/local_gpu.py',
+                      'scripts/runtime/slurm.py')
+    for relative in shared_runtime:
+        if relative in frozen_runtime and sha256_file(REPO / relative) != frozen_runtime[relative]:
+            raise ValueError(f'Controller runtime differs from the frozen experiment: {relative}')
     return {'source_commit': head, 'source_root': str(REPO),
             'controller_sha256': sha256_file(Path(__file__)),
             'evaluator_source_commit': experiment['source_commit'],
             'gpu_admission_policy': GPU_ADMISSION_POLICY,
             'local_gpu_ids': list(LOCAL_GPUS),
             'supported_local_gpu_ids': list(SUPPORTED_LOCAL_GPUS),
+            'shared_runtime_sha256': {relative: sha256_file(REPO / relative)
+                                      for relative in shared_runtime},
             'local_worker_sha256': sha256_file(REPO / LOCAL_WORKER),
             'rebalance_min_wait_seconds': REBALANCE_MIN_WAIT_SECONDS,
             'rebalance_account': 'uos',
@@ -229,16 +166,6 @@ def default_host(task: dict, ordinal: int) -> str:
         return task['host_label']
     index = task['theta_index'] if task['kind'].startswith('theta') or task['kind'] == 'collect' else ordinal
     return 'local' if index % 3 == 0 else 'ubai'
-
-
-def parse_queue(text: str) -> list[dict]:
-    rows = []
-    for line in text.strip().splitlines():
-        job, state, name, resources = line.split('|', 3)
-        matches = re.findall(r'gpu(?::[^:,]+)?:([0-9]+)', resources)
-        rows.append({'job_id': job.strip(), 'state': state.strip(), 'name': name.strip(),
-                     'gpus': sum(map(int, matches))})
-    return rows
 
 
 def quota_available(queue: list[dict], campaign_prefix: str, gpus_per_job: int = 1) -> int:

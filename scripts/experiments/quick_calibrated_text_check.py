@@ -206,7 +206,7 @@ def main() -> None:
     if runtime.exists():
         raise FileExistsError(runtime)
     sys.path.insert(0, str(args.source_root))
-    from scripts.experiments.run_calibrated_three_sweeps import gpu_activity, gpu_available
+    from scripts.runtime.local_gpu import gpu_activity, gpu_available
     if "torch" in sys.modules:
         raise RuntimeError("GPU admission must precede importing torch")
     locks = ARTIFACTS / "runtime/gpu-locks"

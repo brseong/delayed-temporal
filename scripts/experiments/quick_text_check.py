@@ -95,7 +95,7 @@ def main() -> None:
         sys.stdout.reconfigure(line_buffering=True, write_through=True)
         sys.stderr.reconfigure(line_buffering=True, write_through=True)
     sys.path.insert(0, str(source))
-    from scripts.experiments.run_calibrated_three_sweeps import gpu_activity, gpu_available
+    from scripts.runtime.local_gpu import gpu_activity, gpu_available
     if "torch" in sys.modules:
         raise RuntimeError("GPU admission must precede importing torch")
     lock_dir = Path("/data/delayed-temporal/artifacts/runtime/gpu-locks")
