@@ -132,7 +132,7 @@ Timing calibration is acquired once per physical condition in disposable four-tr
 
 Before formal evaluation, [[scripts/evaluation/brainscales2_toy_hil.py#margin_calibration_phase]] measures unlabeled calibration activations at $M=1$ with a 100 microsecond diagnostic deadline. Code zero is excluded; for each 1 microsecond candidate extension from 0 to 40 microseconds, it bootstraps trials and samples and computes the upper confidence bound for the sample-level event that any positive hidden unit misses. The smallest common margin whose bound is at most 5% in both placements is selected, while nonfires at the diagnostic deadline form a structural floor and block the run when no candidate passes.
 
-The selected margin extends only the observation deadline: the TTFS input window, UInt5 bounds, weights, and activation values are unchanged. Formal evaluation interleaves the selected margin and a zero-margin control over identical cached hidden inputs, every pool size, and both placements; the calibration context binds checkpoints, both calibration files, chip operating parameters, and the time grid before reuse.
+The selected margin extends only the observation deadline: the TTFS input window, UInt5 bounds, weights, and activation values are unchanged. Calibration acquires each declared pool size once at the diagnostic deadline, then censors the same raw events at every shorter candidate. Formal evaluation interleaves the selected margin and a zero-margin control over identical cached hidden inputs, every pool size, and both placements; the calibration context binds checkpoints, both calibration files, chip operating parameters, the selection pool size, and the time grid before reuse.
 
 Digital synaptic weights can be calibrated for each physical neuron before timing calibration using [[scripts/evaluation/brainscales2_neuron_weights.py#main]]. The sweep uses the actual grouped graph and all 32 input codes without task labels. Separate validation trials test both varied and simultaneous input times, including quiet controls. Each candidate measurement runs in a disposable process with a timeout.
 
@@ -308,13 +308,13 @@ The artifact fields `logit_mean_accuracy` and `logit_mean_nll` report results af
 
 ### Deadline margin selection
 
-Margin calibration must exclude code zero and choose the smallest hardware-grid deadline extension whose hierarchical-bootstrap miss upper bound passes in every placement.
+Margin calibration must exclude code zero and choose the smallest hardware-grid deadline extension whose hierarchical-bootstrap miss upper bound after pooling passes in every placement for the declared selection pool size.
 
-All candidates for a placement reuse the same bootstrap draws so the nested miss curve remains monotone. A persistent diagnostic-deadline floor must produce no selection rather than being hidden by a larger margin.
+Each logical pool is delivered when any physical replica fires by the candidate deadline. M=1 and M=16 diagnostic curves reuse their respective raw events acquired at the maximum observation deadline, while only the declared selection pool size controls the formal margin. All candidates reuse the same bootstrap draws so the nested miss curve remains monotone. A persistent diagnostic-deadline floor must produce no selection rather than being hidden by a larger margin.
 
 ### Deadline margin provenance
 
-A selected margin may be reused only with the exact unlabeled model, calibration files, timing grid, physical operating point, and complete 32-code timing correction that produced it.
+A selected margin may be reused only with the exact unlabeled model, calibration files, timing grid, physical operating point, selection pool size, and complete 32-code timing correction that produced it.
 
 Changed checkpoints, calibration checksums, neuron parameters, or corrected-max tables must invalidate reuse. The margin changes only the deadline and must not modify the encoded activation interval.
 

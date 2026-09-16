@@ -75,19 +75,27 @@ class DeadlineMarginConfig:
 
 @dataclass(frozen=True)
 class DeadlineMarginObservation:
-    """Raw M=1 diagnostic events for one placement and one hidden code tensor."""
+    """Raw diagnostic events for one placement, pool size, and hidden code tensor."""
 
     first_spike_s: torch.Tensor
     hidden_uint5: torch.Tensor
     metadata: dict[str, Any]
 
     def __post_init__(self) -> None:
-        if self.first_spike_s.ndim != 4 or self.first_spike_s.shape[-1] != 1:
-            raise ValueError("deadline observations must have shape [trial, sample, logical, 1]")
+        if self.first_spike_s.ndim != 4 or self.first_spike_s.shape[-1] < 1:
+            raise ValueError(
+                "deadline observations must have shape "
+                "[trial, sample, logical, replica]"
+            )
         if self.hidden_uint5.shape != self.first_spike_s.shape[1:3]:
             raise ValueError("hidden UInt5 values do not match diagnostic events")
         if bool((self.hidden_uint5 < 0).any() or (self.hidden_uint5 > 31).any()):
             raise ValueError("hidden calibration values must lie in UInt5")
+
+    @property
+    def pool_size(self) -> int:
+        """Return the number of physical replicas represented by each pool."""
+        return int(self.first_spike_s.shape[-1])
 
 
 @dataclass(frozen=True)
@@ -124,9 +132,10 @@ def _miss_matrix(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     positive = observation.hidden_uint5 > 0
     supported_samples = positive.any(dim=-1)
-    first = observation.first_spike_s[..., 0]
+    first = observation.first_spike_s
     delivered = torch.isfinite(first) & (first <= deadline_s)
-    any_positive_miss = ((~delivered) & positive.unsqueeze(0)).any(dim=-1)
+    pooled_delivered = delivered.any(dim=-1)
+    any_positive_miss = ((~pooled_delivered) & positive.unsqueeze(0)).any(dim=-1)
     return any_positive_miss[:, supported_samples], supported_samples
 
 
@@ -188,6 +197,7 @@ def select_deadline_margin(
             curve.append(
                 {
                     "placement": placement,
+                    "pool_size": observation.pool_size,
                     "margin_s": margin_s,
                     "deadline_s": deadline_s,
                     "supported_samples": int(support.sum()),
@@ -213,6 +223,7 @@ def select_deadline_margin(
         structural_floor.append(
             {
                 "placement": placement,
+                "pool_size": observation.pool_size,
                 "diagnostic_deadline_s": config.diagnostic_deadline_s,
                 "supported_samples": int(support.sum()),
                 "sample_any_positive_miss_rate": rate,

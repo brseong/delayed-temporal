@@ -1230,6 +1230,24 @@ def verify_deadline_margin_selection() -> None:
     assert not failed.viable
     assert failed.selected_margin_s is None
 
+    pooled = torch.full((4, 64, 3, 16), torch.nan, dtype=torch.float64)
+    pooled[..., 0] = 64.0e-6
+    pooled_selection = select_deadline_margin(
+        {"local-pool": DeadlineMarginObservation(pooled, hidden, {})},
+        replace(config, bootstrap_iterations=20),
+    )
+    assert pooled_selection.viable
+    assert pooled_selection.curve[0]["pool_size"] == 16
+    assert abs(float(pooled_selection.selected_margin_s) - 4.0e-6) < 1.0e-12
+
+    pooled[..., 0] = torch.nan
+    pooled[..., 7] = 64.0e-6
+    replica_invariant = select_deadline_margin(
+        {"local-pool": DeadlineMarginObservation(pooled, hidden, {})},
+        replace(config, bootstrap_iterations=20),
+    )
+    assert replica_invariant.selected_margin_s == pooled_selection.selected_margin_s
+
 
 def verify_deadline_margin_provenance_and_timing_hash() -> None:
     # @lat: [[hardware#Toy ANN2SNN Verification#Deadline margin provenance]]

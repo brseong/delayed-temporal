@@ -33,6 +33,7 @@ from utils.hardware.brainscales2.config import BrainScaleS2PoolConfig
 from utils.hardware.brainscales2.margin import (
     DeadlineMarginConfig,
     DeadlineMarginObservation,
+    DeadlineMarginSelection,
     select_deadline_margin,
 )
 from utils.hardware.brainscales2.hagen import (
@@ -190,8 +191,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--margin-calibration-samples", type=int, default=256)
     parser.add_argument("--margin-calibration-trials", type=int, default=8)
-    parser.add_argument("--margin-diagnostic-deadline-s", type=float, default=100.0e-6)
-    parser.add_argument("--margin-max-s", type=float, default=40.0e-6)
+    parser.add_argument("--margin-pool-sizes", type=int, nargs="+", default=[1, 16])
+    parser.add_argument("--margin-selection-pool-size", type=int, default=16)
+    parser.add_argument("--margin-diagnostic-deadline-s", type=float, default=140.0e-6)
+    parser.add_argument("--margin-max-s", type=float, default=80.0e-6)
     parser.add_argument("--margin-step-s", type=float, default=1.0e-6)
     parser.add_argument("--margin-target-sample-miss-rate", type=float, default=0.05)
     parser.add_argument("--margin-confidence", type=float, default=0.95)
@@ -362,6 +365,14 @@ def _validate_architecture(args: argparse.Namespace) -> None:
             raise ValueError("margin calibration requires both physical placements")
         if args.temporal_pool_estimator != "analytic-corrected-max":
             raise ValueError("margin calibration requires analytic-corrected-max")
+        if not args.margin_pool_sizes or any(
+            pool_size <= 0 for pool_size in args.margin_pool_sizes
+        ):
+            raise ValueError("margin pool sizes must be positive")
+        if args.margin_selection_pool_size not in args.margin_pool_sizes:
+            raise ValueError(
+                "margin selection pool size must be included in margin pool sizes"
+            )
     if (
         args.phase in ("hardware-smoke", "hardware-eval")
         and args.pooling_domain == "ttfs"
@@ -600,6 +611,7 @@ def _deadline_margin_context(args: argparse.Namespace) -> dict[str, Any]:
         "synapse_dac_bias": args.synapse_dac_bias,
         "synaptic_weight": args.synaptic_weight,
         "input_fan_in": args.input_fan_in,
+        "margin_selection_pool_size": getattr(args, "margin_selection_pool_size", 16),
     }
 
 
@@ -2179,13 +2191,20 @@ def _write_deadline_margin_figure(output_dir: Path, rows: list[dict[str, Any]]) 
     except ImportError:
         return
     figure, axis = plt.subplots(figsize=(7.5, 4.5))
-    for placement in sorted({str(row["placement"]) for row in rows}):
-        selected = [row for row in rows if row["placement"] == placement]
+    conditions = sorted(
+        {(int(row["pool_size"]), str(row["placement"])) for row in rows}
+    )
+    for pool_size, placement in conditions:
+        selected = [
+            row
+            for row in rows
+            if int(row["pool_size"]) == pool_size and row["placement"] == placement
+        ]
         axis.plot(
             [float(row["margin_s"]) * 1.0e6 for row in selected],
             [float(row["bootstrap_upper"]) for row in selected],
             marker="o",
-            label=placement,
+            label=f"M={pool_size}/{placement}",
         )
     axis.axhline(
         float(rows[0]["target_rate"]), color="black", linestyle="--", label="target"
@@ -2199,7 +2218,7 @@ def _write_deadline_margin_figure(output_dir: Path, rows: list[dict[str, Any]]) 
 
 
 def margin_calibration_phase(args: argparse.Namespace) -> None:
-    """Select one common temporal margin from unlabeled physical hidden events."""
+    """Select one temporal margin by applying candidate deadlines to raw events."""
     if args.pooling_domain != "ttfs":
         raise ValueError("calibrate-margin requires --pooling-domain ttfs")
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -2228,52 +2247,70 @@ def margin_calibration_phase(args: argparse.Namespace) -> None:
         observation_deadline_s=args.margin_diagnostic_deadline_s,
     )
     temporal_backend = _pool_backend(args)
-    observations: dict[str, DeadlineMarginObservation] = {}
+    selections: dict[int, DeadlineMarginSelection] = {}
     raw_archive: dict[str, Any] = {
         "hidden_uint5": hidden_uint5,
         "hidden_sha256": hidden_sha256,
-        "placements": {},
+        "pool_sizes": {},
     }
     chip_identifiers: set[str] = set()
     calibration_trials = min(4, args.pool_calibration_trials)
-    for placement in args.placements:
-        placement_args = argparse.Namespace(**vars(args))
-        placement_args.output_dir = args.output_dir / "observations" / placement
-        placement_args.condition_worker = True
-        pool_config = ToyPoolConfig(
-            pool_size=1,
-            logical_neurons=converted.architecture.hidden_features,
-            placement=placement,
-            mapping=args.pool_mapping,
-            inference_trials=trials,
-            calibration_trials=max(2, calibration_trials),
-            seed=args.seed,
-            estimator="analytic-corrected-max",
+    all_curve_rows: list[dict[str, Any]] = []
+    for pool_size in args.margin_pool_sizes:
+        observations: dict[str, DeadlineMarginObservation] = {}
+        raw_archive["pool_sizes"][pool_size] = {"placements": {}}
+        for placement in args.placements:
+            placement_args = argparse.Namespace(**vars(args))
+            placement_args.output_dir = (
+                args.output_dir / "observations" / f"M{pool_size}" / placement
+            )
+            placement_args.condition_worker = True
+            pool_config = ToyPoolConfig(
+                pool_size=pool_size,
+                logical_neurons=converted.architecture.hidden_features,
+                placement=placement,
+                mapping=args.pool_mapping,
+                inference_trials=trials,
+                calibration_trials=max(2, calibration_trials),
+                seed=args.seed,
+                estimator="analytic-corrected-max",
+            )
+            result = _run_temporal_pool(
+                placement_args,
+                temporal_backend,
+                hidden_uint5,
+                pool_config,
+                diagnostic_config,
+            )
+            observation = DeadlineMarginObservation(
+                first_spike_s=result.first_spike_s,
+                hidden_uint5=hidden_uint5,
+                metadata=result.metadata,
+            )
+            observations[placement] = observation
+            raw_archive["pool_sizes"][pool_size]["placements"][placement] = {
+                "first_spike_s": result.first_spike_s,
+                "nominal_input_s": result.nominal_input_s,
+                "physical_coordinates": result.physical_coordinates,
+                "metadata": result.metadata,
+            }
+            chip_identifiers.update(
+                _metadata_values(result.metadata, "chip_identifier")
+            )
+        pool_selection = select_deadline_margin(
+            observations, _deadline_margin_config(args)
         )
-        result = _run_temporal_pool(
-            placement_args,
-            temporal_backend,
-            hidden_uint5,
-            pool_config,
-            diagnostic_config,
-        )
-        observation = DeadlineMarginObservation(
-            first_spike_s=result.first_spike_s,
-            hidden_uint5=hidden_uint5,
-            metadata=result.metadata,
-        )
-        observations[placement] = observation
-        raw_archive["placements"][placement] = {
-            "first_spike_s": result.first_spike_s,
-            "nominal_input_s": result.nominal_input_s,
-            "physical_coordinates": result.physical_coordinates,
-            "metadata": result.metadata,
-        }
-        chip_identifiers.update(_metadata_values(result.metadata, "chip_identifier"))
+        selections[pool_size] = pool_selection
+        all_curve_rows.extend(pool_selection.curve)
 
-    selection = select_deadline_margin(observations, _deadline_margin_config(args))
+    selection = selections[args.margin_selection_pool_size]
     payload = {
         **selection.to_dict(),
+        "selection_pool_size": args.margin_selection_pool_size,
+        "pool_size_selections": {
+            str(pool_size): pool_selection.to_dict()
+            for pool_size, pool_selection in selections.items()
+        },
         "context": _deadline_margin_context(args),
         "calibration_samples": samples,
         "calibration_trials": trials,
@@ -2281,10 +2318,13 @@ def margin_calibration_phase(args: argparse.Namespace) -> None:
         "hidden_uint5_zero_rate": float((hidden_uint5 == 0).float().mean()),
         "chip_identifiers": sorted(chip_identifiers),
         "physical_coordinates": {
-            placement: raw_archive["placements"][placement][
-                "physical_coordinates"
-            ].tolist()
-            for placement in observations
+            str(pool_size): {
+                placement: raw_archive["pool_sizes"][pool_size]["placements"][
+                    placement
+                ]["physical_coordinates"].tolist()
+                for placement in args.placements
+            }
+            for pool_size in args.margin_pool_sizes
         },
         "dataset": dataset.metadata,
         "hagen_metadata": first.metadata,
@@ -2299,15 +2339,17 @@ def margin_calibration_phase(args: argparse.Namespace) -> None:
     }
     torch.save(raw_archive, args.output_dir / "deadline_margin_events.pt")
     _json_write(args.output_dir / "deadline_margin.json", payload)
-    _write_csv(args.output_dir / "deadline_margin_curve.csv", list(selection.curve))
-    _write_deadline_margin_figure(args.output_dir, list(selection.curve))
+    _write_csv(args.output_dir / "deadline_margin_curve.csv", all_curve_rows)
+    _write_deadline_margin_figure(args.output_dir, all_curve_rows)
     if not selection.viable:
         raise RuntimeError(
-            "no deadline margin met the calibration-only sample miss target; "
+            f"no M={args.margin_selection_pool_size} deadline margin met the "
+            "calibration-only sample miss target; "
             "inspect structural_floor in deadline_margin.json"
         )
     print(
-        f"Selected deadline margin {selection.selected_margin_s * 1e6:.1f} us; "
+        f"Selected M={args.margin_selection_pool_size} deadline margin "
+        f"{selection.selected_margin_s * 1e6:.1f} us; "
         f"deadline={selection.selected_deadline_s * 1e6:.1f} us",
         flush=True,
     )
