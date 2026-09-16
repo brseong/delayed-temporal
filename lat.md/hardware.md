@@ -130,6 +130,10 @@ The first raw affine retained high correlation with its integer accumulator but 
 
 The fidelity probe can therefore fit one gain and offset per channel without labels. The first sample block is used only for calibration, and all reported correction errors and accuracies use the disjoint evaluation block. The first Hagen stage is corrected at its raw affine output before the frozen UInt5 adapter; correction after UInt5 quantization is retained only as a diagnostic control. The physical output logits receive an independent channelwise correction.
 
+On the 64-sample evaluation block, raw first-affine correction reduced hidden UInt5 mean absolute error from 1.223 to 0.258 codes. Frozen torch-readout accuracy increased from 60.16% to 75.00% across trials and from 57.81% to 79.69% after averaging logits; the ideal integer accuracy on this block was 90.63%. Correcting the already quantized hidden code reached only 67.97% and 65.63%, confirming that correction belongs before the UInt5 boundary.
+
+Output-affine correction reduced Int8 mean absolute error from 14.94 to 7.09, but accuracy changed from 71.48% to 71.29% across trials and from 79.69% to 78.13% after averaging logits. Channelwise ordinary least squares therefore improves numeric fidelity in both stages but provides an accuracy recovery only at the first affine in this split.
+
 ### Network pool placement
 
 Dedicated mapping preserves persistent physical identity, while time-multiplexed mapping deliberately reuses a small pool and is reported as a different hardware method.
