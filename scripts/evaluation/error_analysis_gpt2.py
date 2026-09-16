@@ -4,6 +4,8 @@ import sys
 from typing import Any, Literal, cast
 import math
 import argparse
+import json
+import time
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -14,6 +16,7 @@ import wandb
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from utils.transformers.optional_tensorboard import create_summary_writer
+from scripts.evaluation.text_calibration_runtime import model_state_sha256
 from datasets import load_dataset
 from transformers import AttentionInterface, AutoModelForCausalLM, AutoTokenizer
 from utils.transforms.calibration import (
@@ -129,6 +132,7 @@ class Arguments:
     # Quantile collection is calibration instrumentation, not dynamic noise state.
     collect_quantiles: bool
     report_clamp_stats: bool
+    tensorboard: bool = True
 
 def parse_arguments() -> Arguments:
     """Parse GPT-2 evaluation and direct Gaussian timing options.
@@ -279,6 +283,8 @@ def parse_arguments() -> Arguments:
                         help="Collect and print 99.9%% quantiles of absolute activations.")
     parser.add_argument("--report-clamp-stats", action="store_true",
                         help="Aggregate and print per-site fixed-domain clamp counts.")
+    parser.add_argument("--tensorboard", action=argparse.BooleanOptionalAction, default=True,
+                        help="Record optional TensorBoard summaries.")
 
     # Resolve dataset defaults first and copy all Gaussian values without changing
     # units; evaluation will perform the single 2*theta conversion.
@@ -330,6 +336,7 @@ def parse_arguments() -> Arguments:
         time_noise_seed=args.time_noise_seed,
         collect_quantiles=args.collect_quantiles,
         report_clamp_stats=args.report_clamp_stats,
+        tensorboard=args.tensorboard,
     )
 
 
@@ -359,10 +366,6 @@ def validate_gpt2_calibration_arguments(
         raise TypeError("calibration_mode must be a string")
     if args.dtype not in ("float32", "float64"):
         raise ValueError("dtype must be float32 or float64")
-    if args.dtype != "float32" and args.calibration_mode != "none":
-        raise ValueError(
-            "layer-wise calibration artifacts currently require dtype=float32"
-        )
     if args.calibration_mode == "none":
         return None
     try:
@@ -375,6 +378,8 @@ def validate_gpt2_calibration_arguments(
         raise TypeError("calibration_path must be a string")
     if not args.calibration_path.strip():
         raise ValueError("calibration_path is required for active calibration")
+    if mode is CalibrationMode.COLLECT and Path(args.calibration_path).exists():
+        raise FileExistsError("preserve the existing calibration file; choose a new path")
 
     # Counts determine the exact training population and histogram representation.
     # Reject Boolean aliases before any dataset or checkpoint download can begin.
@@ -417,6 +422,54 @@ def validate_gpt2_calibration_arguments(
     if mode is CalibrationMode.COLLECT and args.gaussian_time_noise:
         raise ValueError("calibration collection requires Gaussian timing noise off")
     return mode
+
+def validate_gpt2_batch_output(output: Any, *, batch_index: int, calibrated: bool) -> None:
+    """Reject invalid calibrated outputs before accumulating any batch metrics."""
+    if not calibrated:
+        return
+    for name in ("logits", "loss"):
+        value = getattr(output, name, None)
+        if not isinstance(value, torch.Tensor) or not value.numel():
+            raise FloatingPointError(f"calibrated batch {batch_index} has missing or empty {name}")
+        if not bool(torch.isfinite(value).all()):
+            raise FloatingPointError(f"calibrated batch {batch_index} has nonfinite {name}")
+        if name == "loss" and value.numel() != 1:
+            raise ValueError(f"calibrated batch {batch_index} loss must be scalar")
+
+
+def gpt2_loss_metrics(
+    *, total_loss: float, total_steps: int, expected_batches: int, calibrated: bool,
+) -> tuple[float, float]:
+    """Keep the mean of finite batch losses and reject invalid calibrated finals."""
+    avg_loss = total_loss / total_steps if total_steps > 0 else float("inf")
+    if calibrated and (
+        total_steps != expected_batches or not math.isfinite(avg_loss)
+        or avg_loss > math.log(sys.float_info.max)
+    ):
+        raise FloatingPointError("calibrated evaluation has incomplete or nonfinite final metrics")
+    perplexity = math.exp(avg_loss) if avg_loss < float("inf") else float("inf")
+    return avg_loss, perplexity
+
+
+def print_gpt2_progress(
+    *, batch_index: int, total_batches: int, total_examples: int,
+    total_loss: float, valid_batches: int, elapsed_seconds: float,
+) -> None:
+    """Flush local progress while preserving the existing mean of batch losses."""
+    average_loss = total_loss / valid_batches if valid_batches else None
+    finite_loss = average_loss if average_loss is not None and math.isfinite(average_loss) else None
+    perplexity = math.exp(finite_loss) if finite_loss is not None and finite_loss < 709.0 else None
+    print(json.dumps({
+        "event": "evaluation_progress", "batch": batch_index,
+        "total_batches": total_batches, "evaluated_samples": total_examples,
+        "valid_loss_batches": valid_batches, "average_loss": finite_loss,
+        "perplexity": perplexity, "loss_aggregation": "mean_of_batch_losses",
+        "elapsed_seconds": round(elapsed_seconds, 3),
+        "estimated_remaining_seconds": round(
+            elapsed_seconds * max(0, total_batches - batch_index) / batch_index, 3,
+        ) if batch_index else None,
+    }, sort_keys=True, allow_nan=False), flush=True)
+
 
 def infer_text_column(column_names: list[str], preferred: str | None = None) -> str:
     if preferred is not None and preferred in column_names:
@@ -585,6 +638,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         dataset = dataset.filter(
             lambda example: len(example[text_column].strip()) > 0
         )
+        print(f"Evaluation dataset fingerprint: {dataset._fingerprint}", flush=True)
     elif calibration_dataset is not None:
         text_column = infer_text_column(
             calibration_dataset.column_names,
@@ -682,7 +736,9 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             "run one evaluation process per GPU"
         )
 
-    model = model.to(device=torch_device, dtype=torch_dtype)
+    model = model.to(dtype=torch_dtype)
+    checkpoint_sha256 = model_state_sha256(model) if calibration_mode is not None else ""
+    model = model.to(device=torch_device)
     model.eval()
 
     # Construct the clean artifact identity before collection or frozen binding. The
@@ -708,6 +764,8 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             config=config,
             max_length=max_length,
             attention_implementation=effective_attn_impl,
+            dtype=args.dtype,
+            checkpoint_sha256=checkpoint_sha256,
         )
 
     # Collection writes the immutable artifact and exits without constructing loss,
@@ -733,6 +791,8 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             device=torch_device,
             expected_samples=args.calibration_samples,
         )
+        if Path(args.calibration_path).exists():
+            raise FileExistsError(args.calibration_path)
         save_calibration_table(table, args.calibration_path)
         print(
             f"Saved calibration artifact with {len(table.layers)} layer ranges "
@@ -766,7 +826,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
     if dataloader is None:
         raise RuntimeError("GPT-2 evaluation requires an evaluation DataLoader")
 
-    tb_writer = create_summary_writer(log_dir=f"runs/{args.experiment_name}")
+    tb_writer = create_summary_writer(log_dir=f"runs/{args.experiment_name}", enabled=args.tensorboard)
     log_step = [0]
     hooks = []
     clamp_totals: dict[tuple[str, str], dict[str, int]] = {}
@@ -794,7 +854,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         return pre_hook, post_hook
 
     for name, module in model.named_modules():
-        if isinstance(module, (nn.LayerNorm, SpikingLayerNorm)):
+        if args.tensorboard and isinstance(module, (nn.LayerNorm, SpikingLayerNorm)):
             hooks.append(module.register_forward_hook(make_ln_hook(name)))
         
         if (
@@ -837,6 +897,9 @@ def evaluate_gpt2_model(args: Arguments) -> None:
 
     total_loss = 0.0
     total_steps = 0
+    total_examples = 0
+    evaluation_started = time.monotonic()
+    expected_batches = min(len(dataloader), max_eval_batches) if max_eval_batches > 0 else len(dataloader)
 
     for batch in tqdm(dataloader):
         input_ids = batch["input_ids"].to(torch_device)
@@ -847,6 +910,9 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             types.clear_clamp_stats()
         with torch.no_grad():
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        validate_gpt2_batch_output(
+            outputs, batch_index=log_step[0] + 1, calibrated=calibration_state is not None,
+        )
 
         # Log clamp stats
         clamp_stats = (
@@ -877,6 +943,12 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             wandb.log({"Batch Loss": loss.item(), "Batch Perplexity": math.exp(min(loss.item(), 20.0))})
 
         log_step[0] += 1
+        total_examples += int(input_ids.shape[0])
+        print_gpt2_progress(
+            batch_index=log_step[0], total_batches=expected_batches,
+            total_examples=total_examples, total_loss=total_loss, valid_batches=total_steps,
+            elapsed_seconds=time.monotonic() - evaluation_started,
+        )
         if max_eval_batches > 0 and log_step[0] >= max_eval_batches:
             break
 
@@ -894,8 +966,10 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         with (_QUANTILE_DIR / f"quantile_gpt2_{args.task}.txt").open("w") as f:
             f.write(str(max_q))
 
-    avg_loss = total_loss / total_steps if total_steps > 0 else float("inf")
-    perplexity = math.exp(avg_loss) if avg_loss < float("inf") else float("inf")
+    avg_loss, perplexity = gpt2_loss_metrics(
+        total_loss=total_loss, total_steps=total_steps, expected_batches=expected_batches,
+        calibrated=calibration_state is not None,
+    )
 
     print("-" * 30)
     print(f"Evaluation Results for {model_id}:")

@@ -57,6 +57,7 @@ from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_nois
 from utils.transforms.types import Potential, PotentialBounds, SpikeSample
 from utils.transformers.calibration import (
     calibrated_potential,
+    calibration_uses_explicit_bounds,
     model_calibration_is_bound,
 )
 from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
@@ -509,6 +510,19 @@ class GPT2Attention(nn.Module):
             self.split_size,
             dim=2,
         )
+        selected_bounds = None
+        if calibration_uses_explicit_bounds(self):
+            radius = max(abs(float(projected_qkv.domain.min)), abs(float(projected_qkv.domain.max)))
+            collection_bounds = PotentialBounds(-radius, radius)
+            projected = tuple(
+                calibrated_potential(self, name, value, collection_bounds=collection_bounds)
+                for name, value in zip(
+                    ("query", "key", "value"),
+                    (query_states, key_states, value_states),
+                )
+            )
+            query_states, key_states, value_states = (item.value for item in projected)
+            selected_bounds = tuple(item.domain for item in projected)
         shape_kv = (*key_states.shape[:-1], -1, self.head_dim)
         key_states = key_states.view(shape_kv).transpose(1, 2)
         value_states = value_states.view(shape_kv).transpose(1, 2)
@@ -517,6 +531,14 @@ class GPT2Attention(nn.Module):
         query_states = query_states.view(shape_q).transpose(1, 2)
 
         if past_key_values is not None:
+            if selected_bounds is not None:
+                identity = tuple((float(item.min), float(item.max)) for item in selected_bounds)
+                cache_bounds = getattr(past_key_values, "_delayed_temporal_calibration_bounds", {})
+                previous = cache_bounds.get(self.layer_idx)
+                if past_key_values.get_seq_length(self.layer_idx) > 0 and previous != identity:
+                    raise ValueError("GPT-2 cache does not match the selected calibration bounds")
+                cache_bounds[self.layer_idx] = identity
+                past_key_values._delayed_temporal_calibration_bounds = cache_bounds
             key_states, value_states = past_key_values.update(
                 key_states, value_states, self.layer_idx, {"cache_position": cache_position}
             )
@@ -541,7 +563,11 @@ class GPT2Attention(nn.Module):
                 kwargs["theta"] = theta
                 kwargs["tau"] = getattr(self.config, "tau_s", 1.0)
                 kwargs["source_length_max"] = source_length_max
-                context_domain = attention_output_bounds(theta, source_length_max)
+                if selected_bounds is not None:
+                    kwargs.update(zip(("query_bounds", "key_bounds", "value_bounds"), selected_bounds))
+                    context_domain = selected_bounds[2]
+                else:
+                    context_domain = attention_output_bounds(theta, source_length_max)
 
             attn_output, attn_weights = attention_interface(
                 self,
@@ -640,6 +666,12 @@ class GPT2MLP(nn.Module):
                 self.c_fc.freeze_parameter_bounds(hidden_states.domain),
             )
 
+        if calibration_uses_explicit_bounds(self):
+            projected = calibrated_potential(
+                self, "activation_input", projected.value,
+                collection_bounds=projected.domain,
+            )
+
         # Every maintained GPT-2 activation has a standard envelope derived from the
         # affine endpoints. Unknown custom functions must provide an explicit rule
         # instead of restoring output-tensor extrema.
@@ -720,6 +752,7 @@ class GPT2Block(GradientCheckpointingLayer):
         if _use_spiking_ln:
             _sln_kwargs = dict(
                 theta=_theta, tau_s=_tau_s,
+                clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
                 use_spiking_log=getattr(config, "spiking_ln_log", True),
                 use_spiking_expdiff=getattr(config, "spiking_ln_expdiff", True),
@@ -1054,6 +1087,7 @@ class GPT2Model(GPT2PreTrainedModel):
         if _use_spiking_ln:
             _sln_kwargs = dict(
                 theta=_theta, tau_s=_tau_s,
+                clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
                 use_spiking_log=getattr(config, "spiking_ln_log", True),
                 use_spiking_expdiff=getattr(config, "spiking_ln_expdiff", True),

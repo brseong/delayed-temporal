@@ -13,7 +13,7 @@ from utils.transforms.calibration import (
     CalibrationRuntimeState,
     apply_calibrated_activation,
     calibration_table_to_dict,
-    get_layer_calibration,
+    get_runtime_layer_calibration,
     observe_calibration_activation,
 )
 from utils.transforms.types import Potential, PotentialBounds
@@ -21,6 +21,116 @@ from utils.transforms.types import Potential, PotentialBounds
 
 _CALIBRATION_STATE_ATTRIBUTE = "_delayed_temporal_calibration_state"
 _CALIBRATION_NAME_ATTRIBUTE = "_delayed_temporal_calibration_module_name"
+VIT_CALIBRATION_POLICY_VERSION = 2
+TEXT_CALIBRATION_POLICY_VERSION = 1
+TEXT_CALIBRATION_FAMILIES = frozenset({"bert", "roberta", "gpt2"})
+
+
+def _vit_calibration_policy_enabled(
+    state: CalibrationCollectorState | CalibrationRuntimeState,
+) -> bool:
+    """Read the explicit ViT policy without changing legacy calibration paths."""
+    metadata = state.metadata if isinstance(state, CalibrationCollectorState) else state.table.metadata
+    options = dict(metadata.model_options)
+    if "vit_calibration_policy_version" not in options:
+        return False
+    version = options["vit_calibration_policy_version"]
+    if type(version) is not int or version != VIT_CALIBRATION_POLICY_VERSION:
+        raise ValueError("unsupported vit_calibration_policy_version")
+    if metadata.model_family != "vit":
+        raise ValueError("vit_calibration_policy_version requires a ViT model")
+    return True
+
+
+def vit_calibration_uses_explicit_bounds(module: nn.Module) -> bool:
+    """Return whether the bound ViT table selects Q/K/V and LayerNorm ranges."""
+    if not model_calibration_is_bound(module):
+        return False
+    return _vit_calibration_policy_enabled(
+        module.__dict__[_CALIBRATION_STATE_ATTRIBUTE]
+    )
+
+
+def _explicit_calibration_policy_enabled(
+    state: CalibrationCollectorState | CalibrationRuntimeState,
+) -> bool:
+    """Recognize versioned range transfer without relabeling text models as ViT."""
+    metadata = state.metadata if isinstance(state, CalibrationCollectorState) else state.table.metadata
+    options = dict(metadata.model_options)
+    if "vit_calibration_policy_version" in options:
+        if "text_calibration_policy_version" in options:
+            raise ValueError("calibration cannot combine ViT and text policy versions")
+        return _vit_calibration_policy_enabled(state)
+    if "text_calibration_policy_version" not in options:
+        return False
+    version = options["text_calibration_policy_version"]
+    if type(version) is not int or version != TEXT_CALIBRATION_POLICY_VERSION:
+        raise ValueError("unsupported text_calibration_policy_version")
+    if metadata.model_family not in TEXT_CALIBRATION_FAMILIES:
+        raise ValueError("text_calibration_policy_version requires BERT, RoBERTa or GPT-2")
+    return True
+
+
+def calibration_uses_explicit_bounds(module: nn.Module) -> bool:
+    """Return whether this module owns versioned input-range calibration."""
+    if not model_calibration_is_bound(module):
+        return False
+    return _explicit_calibration_policy_enabled(
+        module.__dict__[_CALIBRATION_STATE_ATTRIBUTE]
+    )
+
+
+def _calibration_execution_dtype(module: nn.Module, tensor_name: str) -> torch.dtype:
+    """Resolve the real projection dtype for separate or fused Q/K/V weights."""
+    if tensor_name in {"query", "key", "value"}:
+        projection = getattr(module, tensor_name, None)
+        if projection is None:
+            projection = getattr(module, "c_attn", None)
+        if projection is None or not isinstance(getattr(projection, "weight", None), Tensor):
+            raise ValueError(f"{tensor_name}: calibrated projection has no weight dtype")
+        return projection.weight.dtype
+    parameter = next(module.parameters(), None)
+    if parameter is None:
+        raise ValueError(f"{tensor_name}: calibrated module has no execution dtype")
+    return parameter.dtype
+
+
+def validate_symmetric_encoder_bounds(
+    bounds: PotentialBounds,
+    dtype: torch.dtype,
+    *,
+    name: str,
+    positive_floor: float = 0.0,
+) -> PotentialBounds:
+    """Validate a fixed signed range and optional squared logarithmic endpoints.
+
+    This check never widens a zero or unrepresentable range. The caller supplies a
+    site name so a rejected calibration table identifies the affected module.
+    """
+    if not isinstance(bounds, PotentialBounds):
+        raise TypeError(f"{name}: bounds must be PotentialBounds")
+    if not isinstance(dtype, torch.dtype) or not dtype.is_floating_point:
+        raise TypeError(f"{name}: dtype must be floating point")
+    if isinstance(positive_floor, bool):
+        raise TypeError(f"{name}: positive floor must be a real number")
+    lower, radius = float(bounds.min), float(bounds.max)
+    floor = float(positive_floor)
+    if (
+        not all(math.isfinite(value) for value in (lower, radius, floor))
+        or lower != -radius or floor < 0.0 or radius <= floor
+    ):
+        raise ValueError(f"{name}: require finite symmetric bounds with radius above the positive floor")
+    values = [radius, radius * 2.0]
+    if floor > 0.0:
+        values.extend((floor, floor * floor, radius * radius))
+    represented = torch.tensor(values, dtype=dtype, device="cpu")
+    if not bool(torch.isfinite(represented).all()) or not bool((represented > 0.0).all()):
+        raise ValueError(f"{name}: encoder endpoints or width are not representable in {dtype}")
+    if floor > 0.0 and not bool(represented[0] > represented[2]):
+        raise ValueError(f"{name}: logarithmic input endpoints collapse in {dtype}")
+    if floor > 0.0 and not bool(represented[4] > represented[3]):
+        raise ValueError(f"{name}: squared logarithmic endpoints collapse in {dtype}")
+    return bounds
 
 
 def select_calibration_subset(
@@ -124,6 +234,8 @@ def _calibration_site_keys(
         keys = tuple(
             (layer.module_name, layer.tensor_name) for layer in state.table.layers
         )
+        for module_name, tensor_name in keys:
+            get_runtime_layer_calibration(state, module_name, tensor_name)
         if set(state.clipping_counts) != set(keys):
             raise ValueError(
                 "calibration runtime clipping sites do not match its frozen table"
@@ -182,6 +294,37 @@ def bind_model_calibration(
         raise ValueError(
             f"calibration sites reference missing model modules: {missing_names!r}"
         )
+
+    # Validate the new physical input ranges before publishing any bindings. Legacy
+    # tables keep their former behavior; their evaluator metadata gate still rejects
+    # reuse for a new versioned run.
+    if _explicit_calibration_policy_enabled(state):
+        metadata = state.metadata if isinstance(state, CalibrationCollectorState) else state.table.metadata
+        options = dict(metadata.model_options)
+        text_policy = metadata.model_family in TEXT_CALIBRATION_FAMILIES
+        for module_name, tensor_name in site_keys:
+            if not text_policy and tensor_name not in {"query", "key", "value", "centered_input"}:
+                continue
+            module = modules_by_name[module_name]
+            name = f"{module_name}.{tensor_name}"
+            floor = 0.0
+            if tensor_name == "centered_input":
+                floor = float(module.clip_margin)
+                if (
+                    float(module.eps) != options.get("layer_norm_eps")
+                    or floor != options.get("layer_norm_clip_margin")
+                    or floor != metadata.clip_margin
+                ):
+                    raise ValueError(f"{name}: LayerNorm epsilon or positive floor differs from calibration")
+            dtype = _calibration_execution_dtype(module, tensor_name)
+            if text_policy and str(dtype).removeprefix("torch.") != metadata.dtype:
+                raise ValueError(f"{name}: execution dtype differs from calibration")
+            if isinstance(state, CalibrationRuntimeState):
+                layer = get_runtime_layer_calibration(state, module_name, tensor_name)
+                validate_symmetric_encoder_bounds(
+                    PotentialBounds(layer.bounds.min, layer.bounds.max),
+                    dtype, name=name, positive_floor=floor,
+                )
 
     # Reject pre-existing bindings as a complete set before publication. This avoids
     # mixing collection and inference states or silently reusing stale clipping counts.
@@ -425,7 +568,7 @@ def calibrated_potential(
     # Frozen phases ignore collection rails entirely. The persisted record supplies
     # both the clamp endpoints and the immutable Potential metadata returned downstream.
     if isinstance(state, CalibrationRuntimeState):
-        layer = get_layer_calibration(state.table, module_name, tensor_name)
+        layer = get_runtime_layer_calibration(state, module_name, tensor_name)
         bounds = PotentialBounds(layer.bounds.min, layer.bounds.max)
         if collection_execution_bounds is not None and (
             float(bounds.min) < execution_lower

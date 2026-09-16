@@ -113,6 +113,7 @@ The `theta` threshold controls the representable potential interval, and out-of-
 
 ## Coding conventions
 
+- Apply `$cohesive-change` before modifying source code, tests, or executable and verification scripts. Documentation-only edits and generated artifacts are outside this gate.
 - Run commands from the repository root unless a script documents otherwise.
 - Keep new paths consistent with the repository layout above; do not restore generated scripts, notebooks, logs, CSV exports, or figures to the top level.
 - Comments and diagnostic output may be Korean or English. Follow the surrounding file's language and style.
@@ -127,9 +128,9 @@ The `theta` threshold controls the representable potential interval, and out-of-
   - Immediately after the mutation, run the same checker on the exact added lines by supplying their unified diff to `--diff`, before running a generator, promoting an artifact, or reporting completion. Do not substitute the whole dirty worktree when it contains unrelated user changes.
   - Exit code 1 or 2 is a blocker: do not continue or claim completion.
   - Review every `CANDIDATE` against `paper/neurips_2026/neurips_2026.tex`; unresolved candidates also block progress until rewritten with an established form or explicitly approved by the user.
-- When a paper-review or mathematical-verification answer contains several equations, a long derivation, or multiple technical cases, write the detailed material into the relevant Markdown note under `paper/neurips_2026/` instead of presenting the full derivation only in chat.
+- When a paper-review or mathematical-verification answer contains several equations, a long derivation, or multiple technical cases, write the detailed material into the relevant `lat.md/` knowledge node instead of presenting the full derivation only in chat; keep superseded material in `lat.md/deprecated.md`.
 - Use Markdown/LaTeX math syntax (`$...$` and `$$...$$`) for equations. Do not put mathematical expressions in fenced code blocks unless the user explicitly requests plain-text math.
-- Keep sequential reviewer-issue verification in `paper/neurips_2026/reviewer_technical_verification_notes_ko.md` and improvement actions in `paper/neurips_2026/neurips_2026_review_checklist_ko.md` unless the user requests another file.
+- Keep current reviewer verification in the relevant `lat.md/` knowledge node and improvement actions in `lat.md/todo.md`. Archived verification belongs in `lat.md/deprecated.md`. Retain the Korean review and terminology audit under `paper/neurips_2026/`; do not recreate integrated notes removed at the user's request.
 - In chat, give only a concise conclusion and a clickable link to the detailed note. Continue discussing reviewer issues one at a time.
 
 %% lat:begin %%

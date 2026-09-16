@@ -117,6 +117,29 @@ def _write_csv(path: Path, rows: list[dict], default_fields: tuple[str, ...]) ->
         writer.writerows(rows)
 
 
+def _accuracy_footer(summary: list[dict], progress: dict) -> str:
+    """Describe the seed means and intervals present in this figure."""
+    noise = [row for row in summary if row["kind"] == "noise"]
+    seed_sets = {tuple(int(seed) for seed in row["seeds"].split()) for row in noise}
+    if not noise:
+        estimate = "no completed noise evaluations"
+    elif len(seed_sets) == 1:
+        seeds = next(iter(seed_sets))
+        estimate = (f"seed {seeds[0]} result" if len(seeds) == 1
+                    else "mean of seeds " + ", ".join(map(str, seeds)))
+    else:
+        estimate = "means of available seeds"
+    intervals = sum(row["accuracy_ci95_half_width"] is not None for row in noise)
+    if not intervals:
+        uncertainty = "confidence intervals not shown"
+    elif intervals == len(noise):
+        uncertainty = "95% Student-t confidence intervals"
+    else:
+        uncertainty = "95% Student-t confidence intervals only where all 3 seeds are complete"
+    return (f"{progress['completed_noise_runs']}/{progress.get('expected_noise_runs', 51)} "
+            f"noise evaluations; {estimate}; {uncertainty}")
+
+
 def _plot(output: Path, summary: list[dict], progress: dict, selected_theta: float | None) -> None:
     import matplotlib
     matplotlib.use("Agg")
@@ -167,8 +190,7 @@ def _plot(output: Path, summary: list[dict], progress: dict, selected_theta: flo
         if dense is not None or (index and clean is not None):
             ax.legend(fontsize=8, frameon=False, loc="lower right")
     title = "ViT-B/16 calibrated sweeps — validation 5k"
-    suffix = f"{progress['completed_noise_runs']}/51 noise evaluations; "
-    suffix += "three-seed 95% Student-t intervals only; incomplete cells are provisional"
+    suffix = _accuracy_footer(summary, progress)
     fig.suptitle(title, fontsize=14)
     fig.text(.5, .025, suffix, ha="center", fontsize=9)
     fig.tight_layout(rect=(0, .07, 1, .93))

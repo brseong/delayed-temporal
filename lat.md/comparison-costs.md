@@ -100,6 +100,8 @@ Only a complete, validated comparison bundle may fill the four Ours rows. Paper 
 
 The table caption must identify our CIFAR test 10k and ImageNet fixed validation 5k populations, preserve literature provenance, correct SpikeZIP quantization levels, and distinguish derived energy from measured energy. A comparison-specific paragraph records fixed $\theta=40$, float64, training seed-0 5k calibration, min/max with 5% range margin, frozen bounds and disabled noise. It also discloses the dense runtime classifier and assumed TTFS head in the estimate.
 
+The ICLR appendix now derives affine projection, GELU, LayerNorm, multi-head self-attention, MLP, complete block, stem, final LayerNorm and assumed TTFS head costs under `vit_composed_sop_v1`. It distinguishes 196 image patches from 197 tokens and reports the exact SOP totals that generate the rounded table values. The comparison section links directly to this derivation.
+
 The existing general experiment prose separately needs review: its calibration paragraph still describes the older uncalibrated noise run and 1,024-sample implementation default. Those statements must not be relabeled as the new comparison protocol. Other model families and noise-study descriptions are outside the automatic table patch.
 
 The methodology table now writes the cubic term as $v^3$ and explicitly links it to the existing signed power construction in `sec:power-operator`. The $\phi_{\mathrm{NL}}$ encoding time constant is three times the $\psi_{\mathrm{ED}}$ decoding time constant; the established fixed synaptic-gain notation and final variable $f_{\mathrm{Mul}}$ product remain. No new operator name was introduced. This methodology correction is applied; the accuracy table remains unfilled until result validation.

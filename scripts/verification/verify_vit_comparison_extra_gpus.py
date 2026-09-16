@@ -149,6 +149,10 @@ class ExtraGpuTests(unittest.TestCase):
 
     def test_exact_temporary_scope(self) -> None:
         experiment = copy.deepcopy(self.experiment)
+        experiment["tag"] = extra.TAG
+        experiment.pop("vit_calibration_policy_version")
+        for model in experiment["models"]:
+            model.pop("calibration_sites", None)
         experiment.update(source_commit=extra.SOURCE_COMMIT, source_root=str(extra.SOURCE))
         path = self.root / "experiment.json"
         put_json(path, experiment)
@@ -317,7 +321,7 @@ class ExtraGpuTests(unittest.TestCase):
             self.assertEqual(extra.execute(self.root, 1, self.key, True)["status"], "deferred")
 
     def full_execute(self, interrupted: bool) -> dict:
-        disk = ROOT / "artifacts" / "runtime"
+        disk = Path("/data/delayed-temporal/artifacts/runtime")
         handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
         with tempfile.TemporaryDirectory(prefix="comparison-extra-execute-test-", dir=disk) as runtime:
             self.experiment["runtime_root"] = runtime

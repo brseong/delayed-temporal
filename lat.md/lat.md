@@ -7,9 +7,20 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[decisions]] — Rationale and trade-offs behind the project’s major architectural choices.
 - [[noise]] — Gaussian event timing, fixed-deadline potential readout, static non-idealities, and verification.
 - [[calibration]] — Deterministic layer-wise collection, immutable ranges, clipping accounting, and strict persistence.
+- [[vit-calibration-policy2]] — ViT 범위 전달, LayerNorm 내부 calibration, 구버전 결과 보존과 짧은 실행 검증.
 - [[evaluation]] — Experiment entry points, metrics, diagnostics, sweeps, and verification boundaries.
+- [[quick-family-checks]] — Small model comparisons and calibration requirements before language-model evaluation.
+- [[text-calibration]] — Complete BERT, RoBERTa and GPT-2 range collection, execution and evaluator lifecycle.
 - [[comparison-costs]] — ViT comparison SOP derivation and source audit.
 - [[conversion-comparison]] — Four-model calibrated ViT comparison and execution contract.
+- [[vit-calibration-audit]] — 현재 ViT hidden layer의 calibration 적용 범위, 내부 고정 제한과 GELU 시냅스 계수 확인.
 - [[bounds-audit]] — Complete audit of fixed potential ranges, runtime extrema, calibration cases, and migration formulas.
 - [[todo]] — Required manuscript and implementation work, including the only active experiment checklist.
 - [[deferred-experiments]] — Optional experiment ideas with explicit promotion conditions and no active checkboxes.
+- [[neurips]] — NeurIPS에서 이어받은 현재 유효한 원칙과 유지 계약의 안내.
+- [[neurips-mathematics]] — 수학적 성립 조건과 검증 범위.
+- [[neurips-current]] — 전류 파형, 시냅스 가중치와 고정 배율.
+- [[neurips-windows]] — 인코딩 범위, 마진과 시간 이동.
+- [[neurips-hardware]] — 하드웨어 근거의 해석 한계.
+- [[neurips-writing]] — 용어, 비교와 출판의 근거 조건.
+- [[deprecated]] — 현재 계약에서 분리한 과거 리뷰·설계·구현 상태·실험 결과.

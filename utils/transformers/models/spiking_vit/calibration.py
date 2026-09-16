@@ -23,6 +23,7 @@ from utils.transforms.functions import GELU_OUTPUT_MIN, OUTPUT_BOUNDS_VERSION
 from utils.transforms.noise import get_gaussian_time_noise
 from utils.transforms.types import PotentialBounds
 from utils.transformers.calibration import (
+    VIT_CALIBRATION_POLICY_VERSION,
     bind_model_calibration,
     clear_model_calibration,
     select_calibration_subset,
@@ -272,12 +273,13 @@ def vit_calibration_specs(
     upper_quantile: float,
     margin_fraction: float,
 ) -> tuple[LayerCalibrationSpec, ...]:
-    """Declare ViT residual, GELU-input, and attention calibration sites.
+    """Declare active ViT residual, GELU, attention, and LayerNorm sites.
 
     Each block contributes the two recursive residual sites returned by
     :func:`vit_residual_calibration_specs`. Operator-composed GELU modules freeze
-    their affine pre-activation distributions, and spiking attention modules freeze
-    raw softmin score rails below a configuration- and dtype-derived ceiling. The
+    their affine pre-activation distributions. Spiking attention freezes separate
+    query, key, value and score ranges; active LayerNorm modules freeze their signed
+    centered inputs. Scores retain a dtype-derived ceiling independent of theta. The
     encoder entry keeps its analytic theta rail and therefore declares no site.
 
     Args:
@@ -287,8 +289,8 @@ def vit_calibration_specs(
         margin_fraction: Per-side expansion after symmetric range selection.
 
     Returns:
-        Two residual specifications per block, one specification per composed GELU,
-        and one per spiking attention layer.
+        Two residual specifications per block, one per composed GELU, four per
+        spiking attention layer and one per active SpikingLayerNorm.
 
     Raises:
         TypeError: If ``model`` is not an unwrapped PyTorch module.
@@ -302,6 +304,7 @@ def vit_calibration_specs(
         ViTIntermediate,
         ViTSelfAttention,
     )
+    from utils.transformers.models.spiking_ops import SpikingLayerNorm
 
     if not isinstance(model, nn.Module):
         raise TypeError("model must be a torch.nn.Module")
@@ -353,6 +356,18 @@ def vit_calibration_specs(
         if module.config._attn_implementation != "spiking_sdpa":
             continue
 
+        for tensor_name in ("query", "key", "value"):
+            attention_specs.append(
+                LayerCalibrationSpec(
+                    module_name=module_name,
+                    tensor_name=tensor_name,
+                    range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
+                    lower_quantile=lower_quantile,
+                    upper_quantile=upper_quantile,
+                    margin_fraction=margin_fraction,
+                )
+            )
+
         # Derive one request-independent source capacity from the configured patch
         # grid. The query projection weight supplies the actual execution dtype after
         # model conversion, device transfer, and evaluator precision selection.
@@ -378,6 +393,7 @@ def vit_calibration_specs(
             float(getattr(module.config, "tau_s", 1.0)),
             source_length_max,
             module.query.weight.dtype,
+            cap_by_theta=False,
         )
         attention_specs.append(
             LayerCalibrationSpec(
@@ -392,6 +408,25 @@ def vit_calibration_specs(
             )
         )
 
+    # Every active LayerNorm owns one signed centered-input range, including the
+    # final normalization outside the encoder blocks. Positive magnitudes, squared
+    # values and logarithmic domains are derived from this one symmetric interval.
+    layernorm_specs: list[LayerCalibrationSpec] = []
+    for module_name, module in sorted(model.named_modules()):
+        if not isinstance(module, SpikingLayerNorm) or not any((
+            module.use_spiking_mul, module.use_spiking_log, module.use_spiking_expdiff
+        )):
+            continue
+        layernorm_specs.append(
+            LayerCalibrationSpec(
+                module_name=module_name,
+                tensor_name="centered_input",
+                range_policy=CalibrationRangePolicy.SIGNED_SYMMETRIC,
+                lower_quantile=lower_quantile,
+                upper_quantile=upper_quantile,
+                margin_fraction=margin_fraction,
+            )
+        )
     # Grouping by semantic role keeps declarations readable; collector construction
     # canonicalizes the final identities before persistence, so runtime lookup never
     # depends on this presentation order.
@@ -399,6 +434,7 @@ def vit_calibration_specs(
         *residual_specs,
         *activation_specs,
         *attention_specs,
+        *layernorm_specs,
     )
 
 
@@ -533,6 +569,9 @@ def build_vit_calibration_metadata(
                 ("gelu_output_min", GELU_OUTPUT_MIN),
                 ("output_bounds_version", OUTPUT_BOUNDS_VERSION),
                 ("hidden_act", str(getattr(config, "hidden_act", ""))),
+                ("layer_norm_eps", float(config.layer_norm_eps)),
+                ("layer_norm_clip_margin", float(getattr(config, "clip_margin", 1.0e-5))),
+                ("vit_calibration_policy_version", VIT_CALIBRATION_POLICY_VERSION),
                 ("spiking_ln_expdiff", bool(getattr(config, "spiking_ln_expdiff", True))),
                 ("spiking_ln_log", bool(getattr(config, "spiking_ln_log", True))),
                 ("spiking_ln_mul", bool(getattr(config, "spiking_ln_mul", True))),

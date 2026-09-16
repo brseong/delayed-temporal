@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import hashlib
+import json
 import math
 from pathlib import Path
 import sys
@@ -533,6 +534,38 @@ def require_finite_logits(logits: torch.Tensor) -> None:
     """Reject invalid numeric output before it can become a finite accuracy."""
     if not bool(torch.isfinite(logits).all()):
         raise ValueError("Evaluation logits contain NaN or infinite values")
+
+
+def log_evaluation_progress(
+    *, experiment_name: str, backend: str, completed_batches: int,
+    total_batches: int, correct: int, evaluated_samples: int,
+    expected_samples: int, elapsed_seconds: float,
+) -> None:
+    """Flush cumulative accuracy to the ordinary log without marking completion."""
+    counts = (completed_batches, total_batches, correct, evaluated_samples, expected_samples)
+    if any(type(value) is not int for value in counts) or not (
+        0 < completed_batches <= total_batches
+        and 0 <= correct <= evaluated_samples <= expected_samples
+        and evaluated_samples > 0
+    ):
+        raise ValueError("Invalid evaluation progress counts")
+    if not math.isfinite(elapsed_seconds) or elapsed_seconds < 0:
+        raise ValueError("Invalid evaluation progress duration")
+    print("Evaluation progress — " + json.dumps({
+        "experiment_name": experiment_name,
+        "backend": backend,
+        "status": "partial",
+        "completed_batches": completed_batches,
+        "total_batches": total_batches,
+        "correct": correct,
+        "evaluated_samples": evaluated_samples,
+        "expected_samples": expected_samples,
+        "accuracy": correct / evaluated_samples,
+        "elapsed_seconds": round(elapsed_seconds, 3),
+        "estimated_remaining_seconds": round(
+            elapsed_seconds * (expected_samples - evaluated_samples) / evaluated_samples, 3,
+        ),
+    }, sort_keys=True, allow_nan=False), flush=True)
 
 
 def load_evaluation_dataset(
@@ -1213,7 +1246,15 @@ def evaluate_vit_model(args: Arguments) -> None:
     if benchmark_enabled and device.type != "cuda":
         raise ValueError("benchmark measurement requires a CUDA device")
 
-    for batch_index, batch in enumerate(tqdm(dataloader)):
+    evaluation_total_batches = len(dataloader)
+    if not benchmark_enabled and args.max_eval_batches > 0:
+        evaluation_total_batches = min(evaluation_total_batches, args.max_eval_batches)
+    evaluation_expected_samples = min(
+        len(dataloader.dataset), evaluation_total_batches * batch_size,
+    )
+    evaluation_started_at = time.monotonic()
+    # Redirected logs need complete lines instead of terminal carriage returns.
+    for batch_index, batch in enumerate(tqdm(dataloader, disable=not sys.stderr.isatty())):
         # 데이터를 디바이스(GPU/CPU)로 이동
         pixel_values = batch["pixel_values"].to(device, dtype=dtype)
         labels = batch["labels"].to(device)
@@ -1262,6 +1303,16 @@ def evaluate_vit_model(args: Arguments) -> None:
 
         log_step[0] += 1
         if measured_batch and evaluated_count:
+            # Keep progress I/O outside the dedicated GPU throughput benchmark.
+            if not benchmark_enabled:
+                log_evaluation_progress(
+                    experiment_name=args.experiment_name, backend=model_backend,
+                    completed_batches=batch_index + 1,
+                    total_batches=evaluation_total_batches, correct=correct_count,
+                    evaluated_samples=evaluated_count,
+                    expected_samples=evaluation_expected_samples,
+                    elapsed_seconds=time.monotonic() - evaluation_started_at,
+                )
             wandb.log(
                 {"Intermediate accuracy": correct_count / evaluated_count}
             )

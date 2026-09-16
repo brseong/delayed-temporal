@@ -20,11 +20,13 @@ Bounds serve three roles:
 
 The intended model-wide policy combines tight, depth-independent interval arithmetic with per-site calibration for nonlinear or recursively widening ranges.
 
-Range selection distinguishes three cases; whether a range is fixed is a separate question from whether it needs calibration:
+Range selection distinguishes three cases. A function's fixed output range is distinct from an interval that depends on the input bounds but is frozen for inference:
 
-1. A practical analytic range that does not grow through the network is retained, such as the normalized attention weight interval.
+1. A function whose output range is fixed by its definition and fixed parameters, independently of the input activation bounds or calibration observations, retains that range. Softmax output in $[0,1]$ is the representative example.
 2. A range that is finite but becomes too wide through weights, reductions, or repeated residual addition is a calibration target at selected boundaries. A finite formula alone does not make calibration unnecessary.
 3. A mapping with no finite output or timing bound on its original domain requires a restricted representable domain. Log encoding near zero is one example. Setting a finite limit is not, by itself, evidence that the limit was selected from data.
+
+A finite interval computed from a restricted input is not automatically the first case. Nor does freezing a calibrated interval make the function's output range independent of its input bounds. GELU retains an upper bound from its input and a fixed lower bound; this output propagation is treated separately rather than as the first case.
 
 Spiking linear layers derive output intervals from fixed input bounds and loaded weights. With frozen layer-wise calibration enabled, selected residual boundaries replace interval sums with persisted ranges after counting values outside the interval and clamping. With calibration disabled, those boundaries retain analytic interval addition. Both modes avoid bounds derived from the current batch, but only the former applies the layer-wise limits intended to control growth.
 

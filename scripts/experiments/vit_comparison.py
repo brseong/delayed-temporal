@@ -12,11 +12,12 @@ from scripts.experiments.calibrated_three_sweeps import (
 )
 from scripts.experiments.run_calibrated_three_sweep_task import check_source, require_gpu
 
-TAG = "vit_conversion_comparison_theta40_calibrated_float64_bounds3_v1"
+LEGACY_TAG = "vit_conversion_comparison_theta40_calibrated_float64_bounds3_v1"
+TAG = "vit_conversion_comparison_theta40_calibrated_float64_bounds3_v2"
 MODEL_KEYS = ("cifar10_vit_small", "imagenet_vit_small", "imagenet_vit_base", "imagenet_vit_large")
 KINDS = {"collect", "dense", "spiking", "smoke_collect", "smoke_spiking", "environment_spiking"}
 PYTHON = "/opt/conda/envs/dt/bin/python"
-SOURCE = "/data/delayed-temporal-worktrees/vit-conversion-comparison"
+SOURCE = "/data/delayed-temporal-worktrees/vit-conversion-comparison-v2"
 DEFAULT_ROOT = "/data/delayed-temporal/artifacts/logs/conversion_comparison/" + TAG
 
 
@@ -31,8 +32,56 @@ def model_by_key(experiment: dict, key: str) -> dict:
     return rows[0]
 
 
+def calibration_policy_version(experiment: dict) -> int:
+    """Recognize archived evidence separately from the current run contract."""
+    version = experiment.get("vit_calibration_policy_version")
+    if experiment.get("tag") == LEGACY_TAG and version is None:
+        return 1
+    if experiment.get("tag") == TAG and type(version) is int and version == 2:
+        return 2
+    raise ValueError("Comparison tag and calibration policy differ")
+
+
+def require_current_experiment(experiment: dict) -> None:
+    if calibration_policy_version(experiment) != 2:
+        raise ValueError("Archived comparison evidence is read-only; new execution requires policy 2")
+
+
+def calibration_site_records(experiment: dict, model: dict) -> list[dict]:
+    """Read the topology captured from actual modules, retaining archived lookup."""
+    depth = model["checkpoint_config"]["num_hidden_layers"]
+    names = {(f"vit.encoder.layer.{index}{suffix}", name)
+             for index in range(depth)
+             for suffix, name in (("", "attention_residual"), ("", "output"),
+                                  (".attention.attention", "attention_score"),
+                                  (".intermediate", "activation_input"))}
+    if calibration_policy_version(experiment) == 1:
+        return [{"module_name": module, "tensor_name": name} for module, name in sorted(names)]
+    names.update((f"vit.encoder.layer.{index}.attention.attention", name)
+                 for index in range(depth) for name in ("query", "key", "value"))
+    names.update((f"vit.encoder.layer.{index}.{name}", "centered_input")
+                 for index in range(depth) for name in ("layernorm_before", "layernorm_after"))
+    names.add(("vit.layernorm", "centered_input"))
+    records = model.get("calibration_sites", [])
+    if len(records) != len(names) or {(r["module_name"], r["tensor_name"]) for r in records} != names:
+        raise ValueError("Stored calibration sites differ from the complete model topology")
+    for record in records:
+        policy = "signed_symmetric_ceiling" if record["tensor_name"] == "attention_score" else "signed_symmetric"
+        if record.get("range_policy") != policy:
+            raise ValueError("Stored calibration site policy differs")
+        endpoints = (record.get("fixed_min"), record.get("fixed_max"))
+        if policy == "signed_symmetric_ceiling":
+            low, high = endpoints
+            if not isinstance(low, (int, float)) or not isinstance(high, (int, float)) or not math.isfinite(high) or high <= 0 or low != -high:
+                raise ValueError("Invalid stored attention score ceiling")
+        elif endpoints != (None, None):
+            raise ValueError("Unexpected calibration endpoint limit")
+    return records
+
+
 def validate_experiment(experiment: dict) -> None:
-    for key, value in {"tag": TAG, "theta": 40.0, "precision": "float64",
+    version = calibration_policy_version(experiment)
+    for key, value in {"theta": 40.0, "precision": "float64",
                        "output_bounds_version": 3, "tau_s": 1.0,
                        "local_gpu_ids": [4, 5, 6, 7], "evaluation_count": 8,
                        "calibration_count": 4, "tracking": "disabled"}.items():
@@ -82,6 +131,11 @@ def validate_experiment(experiment: dict) -> None:
         expected_depth = 24 if row["model_key"] == "imagenet_vit_large" else 12
         if config["num_hidden_layers"] != expected_depth:
             raise ValueError("Unexpected checkpoint depth")
+        if version == 2:
+            epsilon = config.get("layer_norm_eps")
+            if isinstance(epsilon, bool) or not isinstance(epsilon, (float, int)) or not math.isfinite(epsilon) or epsilon < 0:
+                raise ValueError("Checkpoint LayerNorm epsilon is missing or invalid")
+            calibration_site_records(experiment, row)
         width, heads, intermediate = ((1024, 16, 4096) if expected_depth == 24 else
                                       (768, 12, 3072) if row["model_key"] == "imagenet_vit_base" else
                                       (384, 6, 1536))
@@ -128,6 +182,8 @@ def make_task(experiment: dict, model_key: str, kind: str, batch_size: int,
             "deadline_margin_std": 0.0, "deadline_margin_abs": 0.0}
     for key in ("source_commit", "evaluator_sha256", "calibration_evaluator_sha256", "gelu_evaluator_sha256"):
         task[key] = experiment[key]
+    if calibration_policy_version(experiment) == 2:
+        task["vit_calibration_policy_version"] = 2
     if host_label is not None:
         task["host_label"] = host_label
     return task
@@ -148,14 +204,11 @@ def validate_table(path: Path, task: dict, experiment: dict) -> dict:
     table = read_json(path)
     metadata = table["metadata"]
     layers = table["layers"]
-    expected_sites = 4 * model["checkpoint_config"]["num_hidden_layers"]
+    records = calibration_site_records(experiment, model)
+    expected_sites = len(records)
     if len(layers) != expected_sites or len({(r["module_name"], r["tensor_name"]) for r in layers}) != expected_sites:
         raise ValueError("Incomplete or duplicate model calibration sites")
-    expected_names = {(f"vit.encoder.layer.{index}{suffix}", name)
-                      for index in range(model["checkpoint_config"]["num_hidden_layers"])
-                      for suffix, name in (("", "attention_residual"), ("", "output"),
-                                           (".attention.attention", "attention_score"),
-                                           (".intermediate", "activation_input"))}
+    expected_names = {(r["module_name"], r["tensor_name"]) for r in records}
     if {(r["module_name"], r["tensor_name"]) for r in layers} != expected_names:
         raise ValueError("Calibration model sites differ")
     for key, value in {"theta": 40.0, "dtype": "float64", "dataset_split": "train",
@@ -177,6 +230,10 @@ def validate_table(path: Path, task: dict, experiment: dict) -> dict:
                 "attention_implementation": "spiking_sdpa", "spiking_mlp_exact_gelu": False,
                 "spiking_ln_mul": True, "spiking_ln_log": True, "spiking_ln_expdiff": True,
                 "use_spiking_layernorm": True, "use_spiking_mlp": True}
+    if calibration_policy_version(experiment) == 2:
+        expected.update(vit_calibration_policy_version=2,
+                        layer_norm_eps=model["checkpoint_config"]["layer_norm_eps"],
+                        layer_norm_clip_margin=1e-5)
     for key, value in expected.items():
         if options.get(key) != value:
             raise ValueError(f"Calibration implementation mismatch: {key}")
@@ -191,6 +248,14 @@ def validate_table(path: Path, task: dict, experiment: dict) -> dict:
         low, high = layer["bounds"]["min"], layer["bounds"]["max"]
         if not all(math.isfinite(v) for v in (low, high)) or low >= high:
             raise ValueError("Nonfinite or unordered calibration bounds")
+        if calibration_policy_version(experiment) == 2:
+            spec = next(r for r in records if (r["module_name"], r["tensor_name"]) == (layer["module_name"], layer["tensor_name"]))
+            if any(layer.get(field) != spec[field] for field in ("range_policy", "fixed_min", "fixed_max")):
+                raise ValueError("Calibration record policy differs from the frozen model sites")
+            if low != -high or (layer["tensor_name"] == "centered_input" and high <= 1e-5):
+                raise ValueError("Invalid symmetric calibration encoder range")
+            if spec["fixed_max"] is not None and high > spec["fixed_max"]:
+                raise ValueError("Calibration score exceeds its numerical ceiling")
         if (layer["lower_quantile"], layer["upper_quantile"], layer["margin_fraction"]) != (0.0, 1.0, 0.05):
             raise ValueError("Calibration endpoint policy differs")
         histogram = layer.get("histogram", {})
@@ -253,7 +318,7 @@ def validate_result(task: dict, result: dict, experiment: dict, root: Path) -> N
             raise ValueError("Assigned calibration differs")
         validate_table(table, task, experiment)
     if task["kind"] in {"collect", "smoke_collect"}:
-        expected = 4 * model_by_key(experiment, task["model_key"])["checkpoint_config"]["num_hidden_layers"]
+        expected = len(calibration_site_records(experiment, model_by_key(experiment, task["model_key"])))
         if result.get("sites") != expected:
             raise ValueError("Incomplete calibration collection")
         if result.get("samples") != task["calibration_samples"] or result.get("total") != task["calibration_samples"]:

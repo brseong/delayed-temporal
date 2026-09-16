@@ -30,6 +30,14 @@ This makes multiplication, division, attention, GELU, tanh, and SwiGLU auditable
 
 The trade-off is repeated encoding: the same tensor may cross several potential-to-spike boundaries inside one logical layer. That behavior is especially important for interpreting [[noise#Injection Scope and Compounding]].
 
+## Keep One Canonical Implementation Path
+
+Each maintained behavior has one owning module and one canonical execution path so follow-up work does not accumulate alternate implementations around the original.
+
+Changes extend or correct the owner identified by [[architecture#System Boundary]] and preserve [[architecture#Architectural Invariants]]. When one path replaces another, callers move and the superseded code, configuration, and tests are removed in the same change unless an explicit compatibility contract requires coexistence.
+
+Necessary multi-file changes are acceptable; file count is not a cohesion metric. Caller-specific exceptions, duplicate state, silent fallbacks, and parallel `new`, `v2`, or `legacy` paths are rejected when they encode policy that belongs in the canonical owner. Unrelated cleanup remains outside the change.
+
 ## Carry Domains with Values
 
 The model passes numerical bounds beside tensors so finite TTFS windows and interval arithmetic are part of the forward contract.

@@ -27,7 +27,18 @@ from utils.transforms.types import Potential
 from utils.transforms import types
 from utils.transformers.models.spiking_ops import SpikingLinear
 from utils.transforms.noise import get_gaussian_noise_stats, set_gaussian_time_noise
-import evaluate
+from utils.transforms.calibration import CalibrationMode
+from scripts.evaluation.text_calibration_runtime import (
+    ClassificationProgress,
+    add_text_calibration_arguments,
+    finish_text_calibration,
+    load_text_calibration_subset,
+    make_text_dataloader,
+    model_state_sha256,
+    run_text_calibration,
+    text_calibration_argument_values,
+    validate_text_calibration_arguments,
+)
 from tqdm import tqdm
 
 _TB_LOG_BATCHES = 10  # 처음 N 배치에서만 히스토그램 로그
@@ -102,6 +113,16 @@ class Arguments:
     # dynamic-noise control.
     collect_quantiles: bool
     report_clamp_stats: bool
+    dtype: Literal["float32", "float64"] = "float32"
+    tensorboard: bool = True
+    calibration_mode: Literal["none", "collect", "validate", "inference"] = "none"
+    calibration_path: str = ""
+    calibration_samples: int = 5000
+    calibration_seed: int = 0
+    calibration_bins: int = 2048
+    calibration_lower_quantile: float = 0.0
+    calibration_upper_quantile: float = 1.0
+    calibration_margin_fraction: float = 0.05
 
 def parse_arguments() -> Arguments:
     """Parse BERT evaluation and direct Gaussian timing options.
@@ -190,6 +211,7 @@ def parse_arguments() -> Arguments:
 
     # Resolve optional dataset overrides before constructing the typed result; the
     # Gaussian values themselves are copied without unit conversion or reseeding.
+    add_text_calibration_arguments(parser)
     args = parser.parse_args()
     preset = DATASET_PRESETS[args.task]
     model_id = cast(str, args.model_id or preset["model_id"])
@@ -224,6 +246,7 @@ def parse_arguments() -> Arguments:
         time_noise_seed=args.time_noise_seed,
         collect_quantiles=args.collect_quantiles,
         report_clamp_stats=args.report_clamp_stats,
+        **text_calibration_argument_values(args),
     )
 
 
@@ -265,6 +288,8 @@ def evaluate_bert_model(args: Arguments) -> None:
     max_eval_batches = args.max_eval_batches
     device_str = args.device
     
+    calibration_mode = validate_text_calibration_arguments(args)
+    torch_dtype = torch.float32 if args.dtype == "float32" else torch.float64
     torch_device = torch.device(device_str)
 
     # Convert the dimensionless CLI scale exactly once using the common identity
@@ -294,7 +319,7 @@ def evaluate_bert_model(args: Arguments) -> None:
         "time_noise_std": time_noise_std,
     }
     effective_attn_impl = "eager"
-    if model_backend == "spiking" and torch_device.type != "cpu" and args.spiking_attention:
+    if model_backend == "spiking" and args.spiking_attention:
         effective_attn_impl = "spiking_sdpa"
     cfg["attn_impl"] = effective_attn_impl
     wandb.init(entity="CIDA", project="bert-evaluation", config=cfg, name=args.experiment_name)
@@ -318,33 +343,20 @@ def evaluate_bert_model(args: Arguments) -> None:
             f"act:{args.activation}, theta:{args.theta}"
         )
 
-    print(f"Loading dataset: {dataset_name}/{dataset_config_name} ({dataset_split})...")
     assert dataset_name is not None
-    if dataset_config_name is None:
-        dataset = load_dataset(dataset_name, split=dataset_split, cache_dir=args.cache_dir)
-    else:
-        dataset = load_dataset(dataset_name, dataset_config_name, split=dataset_split, cache_dir=args.cache_dir)
     preferred_text_column = DATASET_PRESETS.get(args.task, {}).get("text_column")
-    text_column = infer_text_column(dataset.column_names, preferred=preferred_text_column)
-    
+
+    def load_requested_split(split: str) -> Any:
+        print(f"Loading dataset: {dataset_name}/{dataset_config_name} ({split})...", flush=True)
+        if dataset_config_name is None:
+            return load_dataset(dataset_name, split=split, cache_dir=args.cache_dir)
+        return load_dataset(dataset_name, dataset_config_name, split=split, cache_dir=args.cache_dir)
+
+    # Collection loads training data only; frozen phases verify this same identity.
+    calibration_dataset = None
+    if calibration_mode is not None:
+        calibration_dataset = load_text_calibration_subset(args, load_requested_split)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
-
-    metric_tot = evaluate.load("accuracy")
-
-    def tokenize_batch(examples):
-        tokenized = tokenizer(
-            examples[text_column],
-            padding="max_length",
-            truncation=True,
-            max_length=max_length,
-        )
-        tokenized["labels"] = examples["label"]
-        return tokenized
-
-    processed_dataset = dataset.map(tokenize_batch, batched=True, remove_columns=dataset.column_names)
-    processed_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
-
-    dataloader = DataLoader(cast(Any, processed_dataset), batch_size=batch_size, shuffle=False)
 
     print(f"Loading model: {model_id}...")
     model: nn.Module
@@ -361,6 +373,7 @@ def evaluate_bert_model(args: Arguments) -> None:
         config.use_spiking_mlp = args.spiking_mlp
         config.hidden_act = args.activation
         config.theta = args.theta
+        config.use_cache = False
         model = BertForSequenceClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl)
 
     # This evaluator does not create DataParallel itself. Keep an explicit boundary
@@ -371,13 +384,43 @@ def evaluate_bert_model(args: Arguments) -> None:
             "run one evaluation process per GPU"
         )
 
-    if torch_device.type == "cuda":
-        model = nn.Module.cuda(model)
-    else:
-        model = nn.Module.cpu(model)
+    model = model.to(dtype=torch_dtype)
+    checkpoint_sha256 = model_state_sha256(model) if calibration_mode is not None else ""
+    model = model.to(device=torch_device)
     model.eval()
 
-    tb_writer = create_summary_writer(log_dir=f"runs/{args.experiment_name}")
+    calibration_state = None
+    if calibration_mode is not None:
+        if isinstance(model, nn.DataParallel):
+            raise RuntimeError("calibration does not support DataParallel")
+        assert calibration_dataset is not None
+        calibration_text_column = infer_text_column(
+            calibration_dataset.column_names, preferred=preferred_text_column,
+        )
+        calibration_state = run_text_calibration(
+            model, args, model_family="bert",
+            calibration_dataset=calibration_dataset,
+            text_column=calibration_text_column, tokenizer=tokenizer,
+            config=model.config, device=torch_device,
+            attention_implementation=effective_attn_impl,
+            checkpoint_sha256=checkpoint_sha256,
+        )
+        if calibration_mode is CalibrationMode.COLLECT:
+            wandb.finish()
+            return
+
+    dataset = load_requested_split(dataset_split)
+    text_column = infer_text_column(dataset.column_names, preferred=preferred_text_column)
+    dataloader = make_text_dataloader(
+        dataset, tokenizer, text_column=text_column, max_length=max_length,
+        batch_size=batch_size, include_labels=True,
+    )
+    batches_total = min(len(dataloader), max_eval_batches) if max_eval_batches else len(dataloader)
+    expected_total = min(len(dataset), batches_total * batch_size)
+    progress = ClassificationProgress(expected_total, batches_total)
+    print(f"Floating dtype: {args.dtype}", flush=True)
+    print(f"Evaluation dataset fingerprint: {dataset._fingerprint}", flush=True)
+    tb_writer = create_summary_writer(log_dir=f"runs/{args.experiment_name}", enabled=args.tensorboard)
     log_step = [0]
     hooks = []
     clamp_totals: dict[tuple[str, str], dict[str, int]] = {}
@@ -405,7 +448,7 @@ def evaluate_bert_model(args: Arguments) -> None:
         return hook_fn
 
     for name, module in model.named_modules():
-        if isinstance(module, (nn.LayerNorm, SpikingLayerNorm)):
+        if args.tensorboard and isinstance(module, (nn.LayerNorm, SpikingLayerNorm)):
             hooks.append(module.register_forward_hook(make_ln_hook(name)))
 
     if model_backend == "spiking" and args.report_clamp_stats:
@@ -436,17 +479,20 @@ def evaluate_bert_model(args: Arguments) -> None:
             if isinstance(module, (nn.Linear, nn.LayerNorm, nn.Embedding, SpikingLayerNorm)):
                 hooks.append(module.register_forward_hook(make_quantile_hook()))
 
-    print("Starting evaluation...")
+    print("Starting evaluation...", flush=True)
 
     for batch in tqdm(dataloader):
-        input_ids = batch["input_ids"].to(torch_device)
-        attention_mask = batch["attention_mask"].to(torch_device)
+        model_inputs = {
+            name: value.to(torch_device) for name, value in batch.items() if name != "labels"
+        }
         labels = batch["labels"].to(torch_device)
 
         if model_backend == "spiking" and args.report_clamp_stats:
             types.clear_clamp_stats()
         with torch.no_grad():
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            outputs = model(**model_inputs)
+        if not bool(torch.isfinite(outputs.logits).all()):
+            raise ValueError("non-finite logits cannot produce valid accuracy")
 
         if model_backend == "spiking" and args.report_clamp_stats:
             for tag, stats in types.get_clamp_stats().items():
@@ -461,8 +507,8 @@ def evaluate_bert_model(args: Arguments) -> None:
 
         predictions = torch.argmax(outputs.logits, dim=-1)
 
-        metric_tot.add_batch(predictions=predictions, references=labels)
-        wandb.log({"Batch Accuracy": (predictions == labels).float().mean().item()})
+        batch_accuracy = progress.update(predictions, labels)
+        wandb.log({"Batch Accuracy": batch_accuracy, "Cumulative Accuracy": progress.correct / progress.total})
 
         if max_eval_batches > 0 and log_step[0] >= max_eval_batches:
             break
@@ -482,10 +528,11 @@ def evaluate_bert_model(args: Arguments) -> None:
         with (_QUANTILE_DIR / f"quantile_bert_{args.task}_{model_name}.txt").open("w") as f:
             f.write(str(max_q))
 
-    final_score = cast(dict[str, float], metric_tot.compute())
+    final_score = {"accuracy": progress.final_accuracy()}
     print("-" * 30)
     print(f"Evaluation Results for {model_id}:")
-    print(f"Accuracy: {final_score['accuracy']:.4f}")
+    print(f"Accuracy: {final_score['accuracy']:.4f}", flush=True)
+    finish_text_calibration(model, calibration_state)
     wandb.log({"Final Accuracy": final_score["accuracy"]})
 
     for (module_name, clamp_name), stats in sorted(clamp_totals.items()):

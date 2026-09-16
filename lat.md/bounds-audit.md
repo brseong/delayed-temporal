@@ -579,7 +579,7 @@ Transform algebra, time window, attention, LayerNorm, affine, embedding, activat
 
 일괄 수정 승인 전 GELU 작업 트리의 함수별 고정 출력 범위와 범위 축소 적용을 재검토한 기록이다. 아래 판단은 역사적 감사이며 후속 적용 상태는 [[bounds-audit#2026-09-14 Bound Corrections]]가 대체한다.
 
-자세한 함수군 목록, CPU counterexample과 우선순위는 [검산 노트](../paper/neurips_2026/reviewer_technical_verification_notes_ko.md#2026-09-14-함수별-고정-출력-범위와-범위-축소-적용-전수-감사)에 기록했다. 이 절은 앞의 역사적 감사에서 남아 있는 과거형 구현 설명과 구분한다.
+함수군 감사의 핵심 판정은 [[deprecated#과거 실험과 범위 감사#함수 출력 범위 전수 감사]]에 통합했다. 상세 원문은 [[deprecated#원본 복구]]의 압축본에 보존하며, 현재 적용 상태는 아래 후속 수정 절을 따른다.
 
 - GELU는 [[calibration#Layer-wise Calibration#Frozen Execution#Fixed GELU Output Bounds]]로 수정됐고, division/softmin/gate/tanh/LayerNorm의 고정 출력 제한도 적용돼 있다.
 - ViT/GPT-2 직접 Swish 분기와 SwiGLU 내부 Swish는 고정 하한을 활용하지 않는다. 현재 ViT GELU 실험에서는 사용하지 않으므로 추가 실험을 요구하지 않는다.

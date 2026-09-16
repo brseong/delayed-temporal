@@ -2116,6 +2116,14 @@ class CalibrationCollectorState:
     finalized: bool = False
 
 
+@dataclass(frozen=True)
+class _CalibrationRuntimeIndex:
+    """Retain validated immutable records without repeating persistence checks."""
+
+    table: CalibrationTable
+    records: Mapping[tuple[str, str], LayerCalibration]
+
+
 @dataclass
 class CalibrationRuntimeState:
     """Apply one frozen calibration table during validation or inference.
@@ -2130,6 +2138,11 @@ class CalibrationRuntimeState:
     clipping_counts: dict[
         tuple[str, str], CalibrationClippingCounts
     ] = field(default_factory=dict)
+    # Only the runtime factory installs this index after full table validation.
+    # Direct dataclass construction cannot silently bypass that setup boundary.
+    _record_index: _CalibrationRuntimeIndex | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True)
@@ -2434,11 +2447,55 @@ def create_calibration_runtime(
         (layer.module_name, layer.tensor_name): CalibrationClippingCounts()
         for layer in table.layers
     }
-    return CalibrationRuntimeState(
+    runtime = CalibrationRuntimeState(
         mode=mode,
         table=table,
         clipping_counts=clipping_counts,
     )
+    runtime._record_index = _CalibrationRuntimeIndex(
+        table=table,
+        records=MappingProxyType({
+            (layer.module_name, layer.tensor_name): layer for layer in table.layers
+        }),
+    )
+    return runtime
+
+
+def get_runtime_layer_calibration(
+    state: CalibrationRuntimeState,
+    module_name: str,
+    tensor_name: str,
+) -> LayerCalibration:
+    """Resolve one factory-validated immutable record during frozen execution.
+
+    Public table lookup remains strict for setup and persistence. Runtime lookup
+    instead retains the validated table identity and never rebuilds its histograms.
+    Replacing that table requires creating a new runtime through the factory.
+    """
+    if not isinstance(state, CalibrationRuntimeState):
+        raise TypeError("state must be a CalibrationRuntimeState")
+    if state.mode not in (CalibrationMode.VALIDATE, CalibrationMode.INFERENCE):
+        raise ValueError("calibration runtime must be validation or inference")
+    index = state._record_index
+    if not isinstance(index, _CalibrationRuntimeIndex):
+        raise ValueError("calibration runtime must be created by create_calibration_runtime")
+    if state.table is not index.table:
+        raise ValueError("calibration runtime table was replaced after validation")
+    if not isinstance(index.records, MappingProxyType):
+        raise ValueError("calibration runtime record index must be immutable")
+    if len(index.records) != len(state.table.layers):
+        raise ValueError("calibration runtime record index differs from its table")
+    key = _calibration_site_key(module_name, tensor_name)
+    try:
+        layer = index.records[key]
+    except KeyError:
+        raise KeyError(
+            "missing layer calibration for "
+            f"module={module_name!r}, tensor={tensor_name!r}"
+        ) from None
+    if not isinstance(layer, LayerCalibration) or (layer.module_name, layer.tensor_name) != key:
+        raise ValueError("calibration runtime record identity differs from its key")
+    return layer
 
 
 def apply_calibrated_activation(
@@ -2461,9 +2518,9 @@ def apply_calibrated_activation(
         raise ValueError("calibration runtime must be validation or inference")
     key = _calibration_site_key(module_name, tensor_name)
 
-    # Use the strict table lookup rather than constructing a range from the current
-    # tensor. A missing entry is a configuration failure, never an adaptive fallback.
-    layer = get_layer_calibration(state.table, module_name, tensor_name)
+    # The factory already validated every immutable record. Exact runtime lookup
+    # rejects missing identities without repeating whole-table histogram checks.
+    layer = get_runtime_layer_calibration(state, module_name, tensor_name)
     counts = state.clipping_counts.get(key)
     if counts is None:
         raise ValueError(

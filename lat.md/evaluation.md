@@ -64,6 +64,16 @@ The text-model runners accept `--cache-dir` so a documented local dataset cache 
 
 Each spiking runner prints per-site Gaussian rates and logs them under `Gaussian/<site>/...` in W&B. Gaussian counters are process-wide mutable state and are reset whenever a new seeded replica is configured.
 
+### ViT Accuracy Progress
+
+ViT evaluations flush cumulative accuracy to the ordinary log after every evaluated batch, independently of W&B and TensorBoard. Intermediate records never replace the final exact counts and prediction digest.
+
+[[scripts/evaluation/error_analysis_vit.py#log_evaluation_progress]] writes one `Evaluation progress` JSON record per batch with the experiment name, backend, completed and total batches, correct count, evaluated and expected samples, accuracy, elapsed time and estimated remaining seconds. The expected sample count respects `max_eval_batches` and an uneven last batch. Each record remains `partial`, including the last batch, until the existing final result and provenance checks succeed. Missing or interrupted final results remain incomplete.
+
+Redirected evaluation logs disable the terminal progress bar so records occupy complete lines; each accuracy record is flushed immediately. Logging does not change predictions, dataset order, calibration or the final accuracy calculation. Dedicated throughput benchmarks omit this extra output inside their measured interval. Calibration collection retains its separate progress report for the two collection passes and does not report task accuracy.
+
+[[scripts/verification/verify_vit_evaluation_progress.py#verify_cumulative_accuracy_and_flush]] checks cumulative counts, uneven batches, immediate flushing and invalid input rejection. Other checks cover integration without tracking services, bounded evaluation length, benchmark exclusion and the final parser rejecting logs containing only progress records.
+
 ## Fixed-Domain ViT-S Real-Data Audit
 
 The fixed-domain audit measures one cached pretrained ViT-S checkpoint on the same 5,000-image ImageNet-1k validation subset and separates analytic rails, residual calibration, and Gaussian event effects.
@@ -379,7 +389,21 @@ A separate experiment repeats the existing timing noise and deadline margin swee
 
 [[scripts/experiments/run_calibrated_noise_vit.py#execute]] uses [[scripts/analysis/evaluate_calibrated_vit.py#main]] to consume the same seed-0 training 5k artifact in both collection passes without reshuffling. Observed minimum and maximum values receive an additional 5% of interval width on each calibrated side. All 48 configured sites are required; validation 5k never selects ranges. The 65-condition union reuses only the dense reference and keeps three seeds per stochastic condition. This is a controlled comparison at threshold 40, not a repeated threshold selection.
 
-Source, checkpoint, training artifact, GELU implementation, floor, wrapper, and frozen table identities are checked before reuse. A complete clean evaluation precedes the stochastic sweep; clean accuracy at or below 1% stops execution for inspection. Partial outputs show all completed replicas but compute confidence intervals only for complete three-seed cells. GPU capacity waits never terminate the campaign merely because a device is occupied. GPU devices 4–7 and persistent runtime storage remain mandatory.
+Source, checkpoint, training artifact, GELU implementation, floor, wrapper, and frozen table identities are checked before reuse. A complete clean evaluation precedes the stochastic sweep; clean accuracy at or below 1% stops execution for inspection. Partial outputs show all completed replicas but compute confidence intervals only for complete three-seed cells. GPU capacity waits never terminate the campaign merely because a device is occupied. Local execution remains restricted to GPU devices 4–7 and persistent runtime storage.
+
+[[scripts/analysis/plot_calibrated_noise_progress.py#plot_snapshot]] creates an immutable intermediate figure from validated completed logs without rewriting runner outputs. Individual finished seeds remain visible for incomplete conditions; only complete three-seed conditions receive means and Student-t intervals. The figure includes source identity, calibration identity in its snapshot, and separate full-scale accuracy, detailed noisy accuracy, and pooled physical rates. Baseline counters are not plotted as measured zero rates. These snapshots stay in artifacts and are not promoted to the manuscript.
+
+## Calibrated ViT UBAI Preparation
+
+UBAI preparation copies the existing calibrated experiment contract into a separate deployment and verifies runtime compatibility without changing the numerical source or submitting the noise sweep.
+
+[[scripts/experiments/ubai/prepare_calibrated_noise_ubai.py#prepare]] preserves the 65-condition manifest, calibration table, collection evidence, and checkpoint identity. Its pending manifest is a snapshot of stochastic conditions, not an assignment: the deployment remains `prepared` while the local runner retains ownership. GPU execution requires a separate, non-overlapping assignment and a validated clean reference.
+
+The new task uses one RTX A6000, four CPUs, and 64 GiB of host memory. The account currently permits ten running jobs, twenty submitted jobs, and twelve GPUs; these limits do not imply that twelve devices are immediately available. An array must remain within both the running and submitted job limits.
+
+Environment extraction and temporary caches use a checked disk filesystem under `/enroot`. The task rejects `tmpfs` and `ramfs`, reserves space for the environment and scratch data, and removes only its own runtime directory. It never deletes another job's directories by age. Large checksum and environment checks run on a Slurm CPU node, not a login node.
+
+Separate clean checkouts retain the existing numerical source and calibrated evaluator. Container mounts reproduce the original checkpoint and dataset paths so calibration metadata stays identical. W&B and TensorBoard remain disabled. Preparation validation covers checksums, source identity, rejected overlapping execution, and the one-GPU resource contract.
 
 ## Calibrated Three Sweep Campaign
 
@@ -445,6 +469,14 @@ When cluster allocation is delayed, available local devices can take over pendin
 
 [[scripts/experiments/calibrated_three_sweep_rebalance.py#poll_rebalance]] waits for terminal Slurm accounting and validates any available results before releasing either assignment. A cancelled job with an explicitly absent start time and zero elapsed time returns to local scheduling without consuming an evaluation retry. Completed results are reused independently. Missing accounting or transport failures leave assignments reserved. Returned conditions cannot be resubmitted remotely, and seed completion order is unchanged. The verification covers paired identity, cancellation races, restart, external holds, partial results and duplicate prevention.
 
+## Calibrated Three Sweep Controller Lifetime
+
+The local controller runs in a detached tmux session so closing the command session does not end scheduling; completed results and frozen experiment identities remain reusable.
+
+The tmux socket is stored under the campaign's `artifacts/runtime/` directory, not `/tmp`. The controller uses the existing clean checkout and writes both standard output and errors to the persistent controller log. The pane remains after command exit so the return status is inspectable. The controller lock still prevents duplicate scheduling, and a failed controller is not restarted automatically before its exit reason is checked.
+
+Before resuming, verify that no controller or assigned evaluator remains active. Completed task results and seed snapshots must pass the existing identity checks. Temporary devices 0–3 require the explicit current-campaign option; devices 4–7 remain the default. A detached controller does not survive host or container termination, and stale assignment records alone are not evidence of live evaluation.
+
 ## Calibrated Three Sweep Reporting
 
 Live figures show completed evaluations only; immutable seed snapshots distinguish provisional one- and two-seed results from final three-seed Student-t confidence intervals.
@@ -452,6 +484,10 @@ Live figures show completed evaluations only; immutable seed snapshots distingui
 [[scripts/analysis/summarize_calibrated_three_sweeps.py#summarize]] regenerates replica, cell and site CSVs plus progress and source evidence from verified raw logs. Training selection results have a separate CSV from validation plots. Accuracy has three panels: logarithmic threshold and timing noise axes, and a linear deadline margin/noise standard deviation ratio axis. Deadline-miss and pre-clamp rail-saturation rates use a separate figure with true zeros retained.
 
 One seed is a single observation; two seeds give a provisional mean without a 95% interval. Three seeds give the mean and 95% Student-t interval with two degrees of freedom. Physical rates always pool raw numerators and denominators. The shared timing noise and margin condition is evaluated once per seed but appears in both corresponding panels. [[scripts/verification/verify_calibrated_three_sweep_summary.py#main]] checks incomplete evidence, duplicate seeds, pooled rates, confidence intervals and immutable snapshots. Results remain under the campaign artifact tag and are not automatically promoted to the paper.
+
+The accuracy footer describes the seeds and confidence intervals actually displayed. With only seeds 0 and 1 it states that their mean is shown without confidence intervals; it mentions Student-t intervals only when at least one plotted condition has a complete three-seed interval. Mixed completion states are described separately. [[scripts/analysis/summarize_calibrated_three_sweeps.py#_accuracy_footer]] and the reporting verification cover empty, single-seed, two-seed, three-seed, mixed, and zero-width interval cases.
+
+This presentation change applies to future rendering with the updated plotter. Existing immutable snapshots and the active campaign's frozen checkout are not rewritten; future manual plots must use the updated plotter rather than the old frozen reporting copy.
 
 ## Symbolic Operation-Count Check
 
