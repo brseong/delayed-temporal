@@ -118,6 +118,16 @@ Two paired causal controls operate on the same pooled hidden tensor. The miss-re
 
 Hardware phases also permit `pwm-backend=torch` with `pool-backend=hardware` for the physical pooling control. It sends the deterministic converted hidden code through the physical LIF pool and frozen torch readout, while the manifest keeps this result separate from execution with two Hagen affine layers. Potential-domain pooling still requires Hagen. A development control may use an explicit observation deadline without a margin artifact; formal Hagen execution still requires a margin selected from calibration data.
 
+### Hagen affine fidelity outcome
+
+The 128-sample, eight-trial physical comparison shows that systematic affine error exceeds repeated-trial variation in both Hagen stages.
+
+For hidden UInt5, the trial mean MAE was 1.23 codes, bias was -0.90 codes, RMSE was 2.07 codes, and repeated-trial standard deviation was 0.42 codes. The frozen integer reference reached 92.97% accuracy on this test subset, while the physical hidden tensor followed by the frozen torch readout averaged 67.87% across trials.
+
+With ideal hidden UInt5 supplied directly to the physical output affine, the trial mean Int8 MAE was 15.23, bias was 3.70, RMSE was 21.98, and repeated-trial standard deviation was 2.10. Physical argmax agreed with the ideal output for 72.07% of individual trials and 82.81% after trial mean. Accuracy was 71.88% across trials and 82.03% after logit averaging.
+
+The first raw affine retained high correlation with its integer accumulator but used a much smaller physical scale and channel-dependent offsets. These results identify first-affine transfer error as the largest measured bottleneck, with an additional output-affine contribution; neither is explained primarily by repeated-trial variation.
+
 ### Network pool placement
 
 Dedicated mapping preserves persistent physical identity, while time-multiplexed mapping deliberately reuses a small pool and is reported as a different hardware method.
