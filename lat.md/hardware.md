@@ -128,6 +128,8 @@ With ideal hidden UInt5 supplied directly to the physical output affine, the tri
 
 The first raw affine retained high correlation with its integer accumulator but used a much smaller physical scale and channel-dependent offsets. These results identify first-affine transfer error as the largest measured bottleneck, with an additional output-affine contribution; neither is explained primarily by repeated-trial variation.
 
+The fidelity probe can therefore fit one gain and offset per channel without labels. The first sample block is used only for calibration, and all reported correction errors and accuracies use the disjoint evaluation block. The first Hagen stage is corrected at its raw affine output before the frozen UInt5 adapter; correction after UInt5 quantization is retained only as a diagnostic control. The physical output logits receive an independent channelwise correction.
+
 ### Network pool placement
 
 Dedicated mapping preserves persistent physical identity, while time-multiplexed mapping deliberately reuses a small pool and is reported as a different hardware method.
@@ -251,6 +253,8 @@ A model narrower than 128 input lanes must issue one unique shape probe rather t
 The Hagen probe must compare repeated physical affine outputs with the exact frozen integer reference on held-out unlabeled inputs.
 
 First-affine raw output, hidden UInt5 output, and output Int8 must remain separate. The output affine receives ideal hidden codes, preventing TTFS pooling error from entering its fidelity measurement. Reports distinguish trial mean error from repeated-trial variation and retain per-channel values.
+
+Channelwise affine correction must fit only the calibration sample block, without labels, and report all error and accuracy changes on the disjoint evaluation block. The primary hidden correction maps raw first-affine output back to the integer accumulator before applying the frozen UInt5 adapter; direct hidden-code correction is secondary.
 
 ### Sigmoid host activation adapter
 

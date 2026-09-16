@@ -42,6 +42,8 @@ from utils.hardware.brainscales2.hagen import (
     HagenFidelityResult,
     HagenPWMBackend,
     HagenResult,
+    fit_hagen_affine_correction,
+    summarize_hagen_affine_correction,
     summarize_hagen_fidelity,
 )
 from utils.hardware.brainscales2.margin import (
@@ -157,6 +159,53 @@ def verify_hagen_affine_fidelity_summary() -> None:
     assert summary["output_int8"]["trial_mean_argmax_agreement"] == 1.0
     assert summary["output_int8"]["trial_noise_std"] == 0.0
     assert len(channels) == 6
+
+    _, converted, calibration_x = _converted_fixture()
+    forward = converted.forward(calibration_x[:12])
+    channel_offset = torch.arange(30, dtype=torch.float64).remainder(5)
+    raw_mean = (
+        forward.hidden_accumulator.to(torch.float64) * 0.25
+        + channel_offset
+    )
+    output_offset = torch.tensor([3, -2, 1], dtype=torch.int8)
+    affine_result = HagenFidelityResult(
+        ideal_first_accumulator=forward.hidden_accumulator,
+        physical_first_raw=torch.stack((raw_mean - 0.25, raw_mean + 0.25)),
+        ideal_hidden_uint5=forward.hidden_uint5,
+        physical_hidden_uint5=torch.stack(
+            (forward.hidden_uint5, forward.hidden_uint5)
+        ),
+        ideal_output_int8=forward.logits_int8,
+        physical_output_int8=torch.stack(
+            (
+                forward.logits_int8 + output_offset,
+                forward.logits_int8 + output_offset,
+            )
+        ),
+        metadata={"trials": 2},
+    )
+    correction = fit_hagen_affine_correction(
+        affine_result,
+        converted,
+        calibration_samples=6,
+    )
+    corrected_summary, corrected_channels = summarize_hagen_affine_correction(
+        affine_result,
+        correction,
+    )
+    assert correction.evaluation_samples == 6
+    assert correction.metadata["labels_used"] is False
+    assert (
+        corrected_summary["evaluation"]["first-affine-raw-corrected"]
+        ["trial_mean_mae"]
+        < 1.0e-10
+    )
+    assert (
+        corrected_summary["evaluation"]["output-int8-corrected"]
+        ["trial_mean_argmax_agreement"]
+        == 1.0
+    )
+    assert len(corrected_channels) == 30 * 5 + 3 * 2
 
 
 def verify_physical_pooling_with_torch_readout() -> None:

@@ -107,6 +107,40 @@ class HagenFidelityResult:
             )
 
 
+@dataclass(frozen=True)
+class HagenAffineCorrection:
+    """Label-free channelwise affine correction fitted on a calibration split."""
+
+    calibration_samples: int
+    evaluation_samples: int
+    first_gain: torch.Tensor
+    first_offset: torch.Tensor
+    hidden_gain: torch.Tensor
+    hidden_offset: torch.Tensor
+    output_gain: torch.Tensor
+    output_offset: torch.Tensor
+    corrected_first_accumulator: torch.Tensor
+    corrected_hidden_from_raw_uint5: torch.Tensor
+    corrected_hidden_from_code_uint5: torch.Tensor
+    corrected_output: torch.Tensor
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.calibration_samples <= 0 or self.evaluation_samples <= 0:
+            raise ValueError("affine correction requires non-empty splits")
+        if self.corrected_first_accumulator.ndim != 3:
+            raise ValueError("corrected first-affine observations must be three-dimensional")
+        if self.corrected_hidden_from_raw_uint5.ndim != 3:
+            raise ValueError("corrected hidden observations must be three-dimensional")
+        if (
+            self.corrected_hidden_from_code_uint5.shape
+            != self.corrected_hidden_from_raw_uint5.shape
+        ):
+            raise ValueError("corrected hidden paths must have matching shapes")
+        if self.corrected_output.ndim != 3:
+            raise ValueError("corrected output observations must be three-dimensional")
+
+
 class HagenPWMBackend:
     """Execute converted affine stages with hxtorch perceptron primitives."""
 
@@ -737,6 +771,98 @@ def _affine_fit(reference: torch.Tensor, observed: torch.Tensor) -> dict[str, fl
     }
 
 
+def _fit_channelwise_correction(
+    reference: torch.Tensor,
+    observations: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fit reference = gain * trial_mean(observation) + offset per channel."""
+    if reference.ndim != 2 or observations.ndim != 3:
+        raise ValueError("affine correction expects two- and three-dimensional tensors")
+    if observations.shape[1:] != reference.shape:
+        raise ValueError("affine correction observations do not match their reference")
+    target = reference.to(torch.float64)
+    predictor = observations.to(torch.float64).mean(dim=0)
+    predictor_centered = predictor - predictor.mean(dim=0, keepdim=True)
+    target_centered = target - target.mean(dim=0, keepdim=True)
+    denominator = predictor_centered.square().sum(dim=0)
+    numerator = (predictor_centered * target_centered).sum(dim=0)
+    gain = torch.where(
+        denominator > torch.finfo(torch.float64).eps,
+        numerator / denominator,
+        torch.zeros_like(denominator),
+    )
+    offset = target.mean(dim=0) - gain * predictor.mean(dim=0)
+    return gain, offset
+
+
+def fit_hagen_affine_correction(
+    result: HagenFidelityResult,
+    converted: ConvertedToyModel,
+    *,
+    calibration_samples: int,
+) -> HagenAffineCorrection:
+    """Fit label-free channel corrections and apply them only to later samples."""
+    total_samples = int(result.ideal_hidden_uint5.shape[0])
+    if calibration_samples <= 0 or calibration_samples >= total_samples:
+        raise ValueError("calibration_samples must leave a non-empty evaluation split")
+    calibration = slice(0, calibration_samples)
+    evaluation = slice(calibration_samples, total_samples)
+
+    first_gain, first_offset = _fit_channelwise_correction(
+        result.ideal_first_accumulator[calibration],
+        result.physical_first_raw[:, calibration],
+    )
+    hidden_gain, hidden_offset = _fit_channelwise_correction(
+        result.ideal_hidden_uint5[calibration],
+        result.physical_hidden_uint5[:, calibration],
+    )
+    output_gain, output_offset = _fit_channelwise_correction(
+        result.ideal_output_int8[calibration],
+        result.physical_output_int8[:, calibration],
+    )
+
+    corrected_first = (
+        result.physical_first_raw[:, evaluation].to(torch.float64)
+        * first_gain.reshape(1, 1, -1)
+        + first_offset.reshape(1, 1, -1)
+    )
+    corrected_hidden_from_raw = converted.hidden_uint5_from_accumulator(
+        corrected_first
+    )
+    corrected_hidden_from_code = torch.round(
+        result.physical_hidden_uint5[:, evaluation].to(torch.float64)
+        * hidden_gain.reshape(1, 1, -1)
+        + hidden_offset.reshape(1, 1, -1)
+    ).clamp(0, 31).to(torch.int32)
+    corrected_output = (
+        result.physical_output_int8[:, evaluation].to(torch.float64)
+        * output_gain.reshape(1, 1, -1)
+        + output_offset.reshape(1, 1, -1)
+    ).clamp(-128, 127)
+    return HagenAffineCorrection(
+        calibration_samples=calibration_samples,
+        evaluation_samples=total_samples - calibration_samples,
+        first_gain=first_gain,
+        first_offset=first_offset,
+        hidden_gain=hidden_gain,
+        hidden_offset=hidden_offset,
+        output_gain=output_gain,
+        output_offset=output_offset,
+        corrected_first_accumulator=corrected_first,
+        corrected_hidden_from_raw_uint5=corrected_hidden_from_raw,
+        corrected_hidden_from_code_uint5=corrected_hidden_from_code,
+        corrected_output=corrected_output,
+        metadata={
+            "fit": "per-channel-ordinary-least-squares",
+            "predictor": "physical-trial-mean",
+            "target": "frozen-integer-reference",
+            "labels_used": False,
+            "calibration_sample_range": [0, calibration_samples],
+            "evaluation_sample_range": [calibration_samples, total_samples],
+        },
+    )
+
+
 def _fidelity_statistics(
     stage: str,
     reference: torch.Tensor,
@@ -869,3 +995,100 @@ def summarize_hagen_fidelity(
         },
         first_raw_channels + hidden_channels + output_channels,
     )
+
+
+def summarize_hagen_affine_correction(
+    result: HagenFidelityResult,
+    correction: HagenAffineCorrection,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Report uncorrected and corrected errors on the evaluation split only."""
+    start = correction.calibration_samples
+    ideal_first = result.ideal_first_accumulator[start:]
+    ideal_hidden = result.ideal_hidden_uint5[start:]
+    ideal_output = result.ideal_output_int8[start:]
+    comparisons = (
+        (
+            "first-affine-raw-uncorrected",
+            ideal_first,
+            result.physical_first_raw[:, start:],
+            None,
+            None,
+            False,
+        ),
+        (
+            "first-affine-raw-corrected",
+            ideal_first,
+            correction.corrected_first_accumulator,
+            None,
+            None,
+            False,
+        ),
+        (
+            "hidden-uint5-uncorrected",
+            ideal_hidden,
+            result.physical_hidden_uint5[:, start:],
+            0.0,
+            31.0,
+            False,
+        ),
+        (
+            "hidden-uint5-corrected-from-raw",
+            ideal_hidden,
+            correction.corrected_hidden_from_raw_uint5,
+            0.0,
+            31.0,
+            False,
+        ),
+        (
+            "hidden-uint5-corrected-from-code",
+            ideal_hidden,
+            correction.corrected_hidden_from_code_uint5,
+            0.0,
+            31.0,
+            False,
+        ),
+        (
+            "output-int8-uncorrected",
+            ideal_output,
+            result.physical_output_int8[:, start:],
+            -128.0,
+            127.0,
+            True,
+        ),
+        (
+            "output-int8-corrected",
+            ideal_output,
+            correction.corrected_output,
+            -128.0,
+            127.0,
+            True,
+        ),
+    )
+    summary: dict[str, Any] = {
+        "schema_version": 1,
+        "calibration": {
+            **correction.metadata,
+            "calibration_samples": correction.calibration_samples,
+            "evaluation_samples": correction.evaluation_samples,
+            "first_gain": correction.first_gain.tolist(),
+            "first_offset": correction.first_offset.tolist(),
+            "hidden_gain": correction.hidden_gain.tolist(),
+            "hidden_offset": correction.hidden_offset.tolist(),
+            "output_gain": correction.output_gain.tolist(),
+            "output_offset": correction.output_offset.tolist(),
+        },
+        "evaluation": {},
+    }
+    channel_rows: list[dict[str, Any]] = []
+    for stage, reference, observations, lower, upper, argmax in comparisons:
+        statistics, channels = _fidelity_statistics(
+            stage,
+            reference,
+            observations,
+            lower_bound=lower,
+            upper_bound=upper,
+            include_argmax=argmax,
+        )
+        summary["evaluation"][stage] = statistics
+        channel_rows.extend(channels)
+    return summary, channel_rows

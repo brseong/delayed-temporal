@@ -41,6 +41,8 @@ from utils.hardware.brainscales2.hagen import (
     HagenPWMBackend,
     HagenResult,
     file_sha256,
+    fit_hagen_affine_correction,
+    summarize_hagen_affine_correction,
     summarize_hagen_fidelity,
 )
 from utils.hardware.brainscales2.toy import (
@@ -170,6 +172,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hagen-row-chunk-size", type=int, default=128)
     parser.add_argument("--hagen-fidelity-samples", type=int, default=128)
     parser.add_argument("--hagen-fidelity-trials", type=int, default=8)
+    parser.add_argument("--hagen-fidelity-calibration-samples", type=int, default=64)
     parser.add_argument("--condition-worker-max-attempts", type=int, default=3)
     parser.add_argument("--condition-worker-retry-backoff-s", type=float, default=20.0)
     parser.add_argument("--condition-worker-idle-timeout-s", type=float, default=180.0)
@@ -359,6 +362,14 @@ def _validate_architecture(args: argparse.Namespace) -> None:
         or getattr(args, "hagen_fidelity_trials", 8) <= 0
     ):
         raise ValueError("Hagen fidelity sample and trial counts must be positive")
+    if not (
+        0
+        < getattr(args, "hagen_fidelity_calibration_samples", 64)
+        < getattr(args, "hagen_fidelity_samples", 128)
+    ):
+        raise ValueError(
+            "Hagen fidelity calibration samples must leave a non-empty evaluation split"
+        )
     if args.condition_worker_max_attempts <= 0:
         raise ValueError("condition_worker_max_attempts must be positive")
     if args.condition_worker_retry_backoff_s < 0:
@@ -2445,6 +2456,11 @@ def probe_phase(args: argparse.Namespace) -> None:
         dataset.calibration_x[:128]
     )[2]
     fidelity_samples = min(args.hagen_fidelity_samples, dataset.test_x.shape[0])
+    calibration_samples = args.hagen_fidelity_calibration_samples
+    if calibration_samples >= fidelity_samples:
+        raise ValueError(
+            "Hagen fidelity calibration samples must leave evaluation samples"
+        )
     fidelity_input = converted.encode_input(dataset.test_x[:fidelity_samples])
     with hagen.hardware_session():
         payload = hagen.probe(converted)
@@ -2463,6 +2479,90 @@ def probe_phase(args: argparse.Namespace) -> None:
             activation=args.activation,
         )
     fidelity_summary, channel_rows = summarize_hagen_fidelity(fidelity)
+    correction = fit_hagen_affine_correction(
+        fidelity,
+        converted,
+        calibration_samples=calibration_samples,
+    )
+    correction_summary, correction_channel_rows = summarize_hagen_affine_correction(
+        fidelity,
+        correction,
+    )
+    evaluation_labels = dataset.test_y[calibration_samples:fidelity_samples]
+
+    def accuracy(logits: torch.Tensor) -> float:
+        return float(
+            (logits.argmax(dim=-1) == evaluation_labels)
+            .to(torch.float64)
+            .mean()
+        )
+
+    def trial_accuracy(logits: torch.Tensor) -> float:
+        return float(
+            torch.tensor([accuracy(trial) for trial in logits], dtype=torch.float64)
+            .mean()
+        )
+
+    def torch_readout(hidden: torch.Tensor) -> torch.Tensor:
+        return torch.stack(
+            [
+                converted.output_from_hidden(trial)[1].to(torch.float64)
+                for trial in hidden
+            ]
+        )
+
+    uncorrected_hidden_logits = torch_readout(
+        fidelity.physical_hidden_uint5[:, calibration_samples:]
+    )
+    raw_corrected_hidden_logits = torch_readout(
+        correction.corrected_hidden_from_raw_uint5
+    )
+    code_corrected_hidden_logits = torch_readout(
+        correction.corrected_hidden_from_code_uint5
+    )
+    uncorrected_output = fidelity.physical_output_int8[
+        :, calibration_samples:
+    ].to(torch.float64)
+    corrected_output = correction.corrected_output
+    correction_accuracy = {
+        "schema_version": 1,
+        "labels_used_for_calibration": False,
+        "labels_used_for_evaluation": True,
+        "calibration_samples": calibration_samples,
+        "evaluation_samples": int(evaluation_labels.numel()),
+        "ideal_integer_accuracy": accuracy(
+            fidelity.ideal_output_int8[calibration_samples:]
+        ),
+        "uncorrected_hidden_torch_readout_trial_accuracy_mean": trial_accuracy(
+            uncorrected_hidden_logits
+        ),
+        "uncorrected_hidden_torch_readout_logit_mean_accuracy": accuracy(
+            uncorrected_hidden_logits.mean(dim=0)
+        ),
+        "raw_corrected_hidden_torch_readout_trial_accuracy_mean": trial_accuracy(
+            raw_corrected_hidden_logits
+        ),
+        "raw_corrected_hidden_torch_readout_logit_mean_accuracy": accuracy(
+            raw_corrected_hidden_logits.mean(dim=0)
+        ),
+        "code_corrected_hidden_torch_readout_trial_accuracy_mean": trial_accuracy(
+            code_corrected_hidden_logits
+        ),
+        "code_corrected_hidden_torch_readout_logit_mean_accuracy": accuracy(
+            code_corrected_hidden_logits.mean(dim=0)
+        ),
+        "uncorrected_output_trial_accuracy_mean": trial_accuracy(
+            uncorrected_output
+        ),
+        "uncorrected_output_logit_mean_accuracy": accuracy(
+            uncorrected_output.mean(dim=0)
+        ),
+        "corrected_output_trial_accuracy_mean": trial_accuracy(corrected_output),
+        "corrected_output_logit_mean_accuracy": accuracy(
+            corrected_output.mean(dim=0)
+        ),
+    }
+    correction_summary["accuracy"] = correction_accuracy
     fidelity_summary["provenance"] = {
         "dataset_split": "test",
         "dataset": dataset.metadata,
@@ -2473,11 +2573,32 @@ def probe_phase(args: argparse.Namespace) -> None:
         "hagen_calibration_sha256": file_sha256(args.hagen_calibration),
         "labels_used": False,
     }
+    correction_summary["provenance"] = {
+        **fidelity_summary["provenance"],
+        "calibration_sample_range": [0, calibration_samples],
+        "evaluation_sample_range": [calibration_samples, fidelity_samples],
+        "labels_used_for_calibration": False,
+        "labels_used_for_evaluation": True,
+    }
     payload["fidelity"] = fidelity_summary
+    payload["affine_correction"] = correction_summary
     payload["elapsed_s"] = perf_counter() - started
     torch.save(fidelity, args.output_dir / "hagen_fidelity.pt")
+    torch.save(correction, args.output_dir / "hagen_affine_correction.pt")
     _json_write(args.output_dir / "hagen_fidelity.json", fidelity_summary)
     _write_csv(args.output_dir / "hagen_fidelity_channels.csv", channel_rows)
+    _json_write(
+        args.output_dir / "hagen_affine_correction.json",
+        correction_summary,
+    )
+    _write_csv(
+        args.output_dir / "hagen_affine_correction_channels.csv",
+        correction_channel_rows,
+    )
+    _json_write(
+        args.output_dir / "hagen_affine_correction_accuracy.json",
+        correction_accuracy,
+    )
     _json_write(args.output_dir / "hagen_probe.json", payload)
     print(json.dumps(payload, indent=2, default=str))
 
