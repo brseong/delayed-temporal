@@ -318,6 +318,14 @@ A selected margin may be reused only with the exact unlabeled model, calibration
 
 Changed checkpoints, calibration checksums, neuron parameters, or corrected-max tables must invalidate reuse. The margin changes only the deadline and must not modify the encoded activation interval.
 
+### Deadline margin diagnostic outcome
+
+At the tested operating point, no physical event arrived after the 60 us base deadline, so extending the observation deadline to 140 us cannot recover missed activations or accuracy.
+
+The quick calibration artifact `20260916T025150Z_deadline_margin_M1_M16_quick` acquired $M=1$ and $M=16$ events at 140 us and applied the 60, 80, 100, 120, and 140 us deadlines to the same raw events. The maximum finite time was 29.82 us, with zero events between 60 and 140 us. For $M=16$, the positive UInt5 logical all-miss rate was 1.27% for `local-pool` and 0.106% for `cross-quadrant`; samples containing any positive logical all-miss position were 17.19% and 1.56%, respectively. The earlier 150-sample $M=16$ network run likewise had no event after 60 us and a maximum of 30.48 us.
+
+The deadline margin remains a diagnostic and safety parameter, but it is not a robustness mechanism for this chip, calibration, and operating point. Placement and physical event delivery reliability are the relevant controls here. A changed threshold, gain, time constant, routing, or calibration requires a new margin diagnostic before reusing this conclusion.
+
 ### Paired deadline comparison
 
 Every formal margin run must report selected-versus-zero deadline changes from matched task, placement, mapping, pooling method, pool size, and cached hidden inputs.
