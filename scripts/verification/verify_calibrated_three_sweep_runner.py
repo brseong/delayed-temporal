@@ -13,12 +13,14 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from scripts.experiments.calibrated_three_sweeps import make_task, make_tasks, task_sha256
+from scripts.experiments.calibrated_three_sweeps import make_task, make_tasks
 from scripts.experiments.run_calibrated_three_sweeps import (
     Controller, LOCAL_GPUS, NeedsAttention, assert_seed_barrier, controller_identity, default_host,
-    gpu_available, pair_tasks_compatible, parse_gpu_activity, parse_gpu_occupancy,
-    parse_queue, quota_available, seed_range_reason,
+    pair_tasks_compatible, quota_available, seed_range_reason,
 )
+from scripts.runtime.local_gpu import gpu_available, parse_gpu_activity, parse_gpu_occupancy
+from scripts.runtime import identity as runtime_identity
+from scripts.runtime.slurm import parse_queue
 from scripts.verification.verify_calibrated_three_sweep_contract import experiment_fixture, result_fixture
 
 
@@ -182,8 +184,8 @@ def verify_separate_controller_identity(experiment: dict) -> None:
     def content_hash(path):
         return "d" * 64 if path.name == "run_calibrated_three_sweeps.py" else "c" * 64
 
-    with patch("subprocess.check_output", side_effect=["b" * 40 + "\n", ""]), patch(
-            "scripts.experiments.run_calibrated_three_sweeps.sha256_file", side_effect=content_hash):
+    with patch("subprocess.check_output", side_effect=["b" * 40 + "\n", ""]), patch.object(
+            runtime_identity, "sha256_file", side_effect=content_hash):
         identity = controller_identity(identity_experiment)
     assert identity["source_commit"] == "b" * 40
     assert identity["evaluator_source_commit"] == experiment["source_commit"]
@@ -196,8 +198,8 @@ def verify_separate_controller_identity(experiment: dict) -> None:
         must_reject(lambda: controller_identity(identity_experiment))
     for helper in helpers:
         changed = {**identity_experiment, "runtime_sha256": {**identity_experiment["runtime_sha256"], helper: "e" * 64}}
-        with patch("subprocess.check_output", side_effect=["b" * 40 + "\n", ""]), patch(
-                "scripts.experiments.run_calibrated_three_sweeps.sha256_file", side_effect=content_hash):
+        with patch("subprocess.check_output", side_effect=["b" * 40 + "\n", ""]), patch.object(
+                runtime_identity, "sha256_file", side_effect=content_hash):
             must_reject(lambda: controller_identity(changed))
 
 
@@ -234,7 +236,7 @@ class FakeController(Controller):
         self.source = ROOT
         self.prefix = "c3-test-"
         self.state_path = root / "assignments.json"
-        self.state = {"tasks": {}, "experiment_sha256": task_sha256(experiment)}
+        self.state = {"tasks": {}, "experiment_sha256": runtime_identity.json_sha256(experiment)}
         self.children = {}
         self.gpu_locks = {}
         self.poll_seconds = 0
@@ -317,7 +319,7 @@ class FakeController(Controller):
 def verify_resume_retries_and_reassignment(experiment: dict, root: Path) -> None:
     free = activity_fixture()
     tasks = noise_tasks(experiment)
-    with patch("scripts.experiments.run_calibrated_three_sweeps.gpu_activity", return_value=free), patch("time.sleep"):
+    with patch("scripts.runtime.local_gpu.gpu_activity", return_value=free), patch("time.sleep"):
         controller = FakeController(root / "resume", experiment)
         controller.outputs[tasks[0]["run_id"]] = result_fixture(experiment, tasks[0])
         results = controller.run_tasks("noise-seed-0", tasks)
@@ -348,11 +350,11 @@ def verify_resume_retries_and_reassignment(experiment: dict, root: Path) -> None
         remote_full.run_tasks("move-local", tasks[:2])
         assert remote_full.starts == [(tasks[1]["run_id"], "local", 4)]
     busy = activity_fixture(memory=1025)
-    with patch("scripts.experiments.run_calibrated_three_sweeps.gpu_activity", return_value=busy), patch("time.sleep"):
+    with patch("scripts.runtime.local_gpu.gpu_activity", return_value=busy), patch("time.sleep"):
         local_full = FakeController(root / "local-full", experiment)
         local_full.run_tasks("move-remote", tasks[:1])
         assert local_full.starts == [(tasks[0]["run_id"], "ubai", None)]
-    with patch("scripts.experiments.run_calibrated_three_sweeps.gpu_activity", side_effect=ValueError("Invalid GPU measurements")), patch("time.sleep"):
+    with patch("scripts.runtime.local_gpu.gpu_activity", side_effect=ValueError("Invalid GPU measurements")), patch("time.sleep"):
         unavailable = FakeController(root / "no-measurements", experiment)
         unavailable.run_tasks("move-after-invalid-measurements", tasks[:1])
         assert unavailable.starts == [(tasks[0]["run_id"], "ubai", None)]
@@ -366,7 +368,7 @@ def verify_owned_worker_reservation(experiment: dict, root: Path) -> None:
         controller.state["tasks"][f"existing-worker-{gpu}"] = {
             "status": "running", "host": "local", "gpu": gpu, "attempt": 1,
             "cpu_ids": list(range(4 * index, 4 * index + 4))}
-    with patch("scripts.experiments.run_calibrated_three_sweeps.gpu_activity", return_value=activity_fixture(gpu_ids=tuple(range(8)))), patch("time.sleep"):
+    with patch("scripts.runtime.local_gpu.gpu_activity", return_value=activity_fixture(gpu_ids=tuple(range(8)))), patch("time.sleep"):
         controller.run_tasks("reserved-device", tasks[:1], force_hosts={tasks[0]["run_id"]: "local"})
     assert controller.starts == [(tasks[0]["run_id"], "local", 0)]
     assert all(controller.state["tasks"][f"existing-worker-{gpu}"]["status"] == "running"
@@ -399,7 +401,7 @@ def verify_pair_schedule_and_retry(experiment: dict, root: Path) -> None:
     retry = FakeController(root / "pair-peer-retry", experiment)
     retry.failures[tasks[1]["run_id"]] = 1
     retry.accounting_state = "FAILED"
-    with patch("scripts.experiments.run_calibrated_three_sweeps.gpu_activity", return_value=activity_fixture()), patch("time.sleep"):
+    with patch("scripts.runtime.local_gpu.gpu_activity", return_value=activity_fixture()), patch("time.sleep"):
         result = retry.run_tasks("pair-retry", tasks[:2], force_hosts={task["run_id"]: "ubai" for task in tasks[:2]})
         starts = list(retry.starts)
         assert len(result) == 2 and len(retry.pair_starts) == 1
@@ -474,7 +476,7 @@ def verify_locked_launch_recheck(experiment: dict, root: Path) -> None:
     with ExitStack() as stack:
         stack.enter_context(patch.object(Path, "open", local_open))
         stack.enter_context(patch.object(Path, "mkdir", local_mkdir))
-        activity = stack.enter_context(patch("scripts.experiments.run_calibrated_three_sweeps.gpu_activity", return_value=activity_fixture(gpu_ids=tuple(range(8)))))
+        activity = stack.enter_context(patch("scripts.runtime.local_gpu.gpu_activity", return_value=activity_fixture(gpu_ids=tuple(range(8)))))
         spawn = stack.enter_context(patch("subprocess.Popen", return_value=SimpleNamespace(pid=123456789)))
         stack.enter_context(patch("os.sched_getaffinity", return_value=set(range(32))))
         stack.enter_context(patch("os.sched_setaffinity"))
@@ -521,7 +523,7 @@ def verify_eight_worker_cpu_affinity(experiment: dict, root: Path) -> None:
     with ExitStack() as stack:
         stack.enter_context(patch.object(Path, "open", local_open))
         stack.enter_context(patch.object(Path, "mkdir", local_mkdir))
-        stack.enter_context(patch("scripts.experiments.run_calibrated_three_sweeps.gpu_activity",
+        stack.enter_context(patch("scripts.runtime.local_gpu.gpu_activity",
                                   return_value=activity_fixture(gpu_ids=tuple(range(8)))))
         spawn = stack.enter_context(patch("subprocess.Popen", side_effect=[
             SimpleNamespace(pid=123450000 + i) for i in range(8)]))

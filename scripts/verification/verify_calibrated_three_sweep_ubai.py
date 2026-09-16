@@ -18,7 +18,8 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from scripts.experiments.ubai import prepare_calibrated_three_sweeps_ubai as ubai
-from scripts.setup.hash_artifact import artifact_identity
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
 
 
 class UBAISafetyTests(unittest.TestCase):
@@ -46,7 +47,7 @@ class UBAISafetyTests(unittest.TestCase):
             package = self.assets / 'source-checkouts' / name / subtree
             package.mkdir(parents=True)
             (package / '__init__.py').write_bytes(f'# {name} package fixture\n'.encode())
-            self.experiment['dependency_sha256'][name] = ubai.package_source_identity(package)[0]
+            self.experiment['dependency_sha256'][name] = identity.package_source_identity(package)[0]
         for directory, path_key, hash_key in (
             ('checkpoint', 'checkpoint_path', 'checkpoint_sha256'),
             ('training', 'calibration_dataset_path', 'calibration_dataset_sha256'),
@@ -56,14 +57,17 @@ class UBAISafetyTests(unittest.TestCase):
             path.mkdir()
             (path / 'payload').write_bytes(directory.encode())
             self.experiment[path_key] = str(path)
-            self.experiment[hash_key] = artifact_identity(path)['aggregate_sha256']
-        (self.experiment_root / 'experiment.json').write_bytes(ubai.json_bytes(self.experiment))
+            self.experiment[hash_key] = identity.artifact_identity(path)['aggregate_sha256']
+        (self.experiment_root / 'experiment.json').write_bytes(runtime_files.json_bytes(self.experiment))
         for relative in (
             'scripts/experiments/ubai/calibrated_three_sweep_task.sbatch',
             'scripts/experiments/ubai/calibrated_three_sweep_prep.sbatch',
             'scripts/experiments/ubai/prepare_calibrated_three_sweeps_ubai.py',
             'scripts/experiments/run_calibrated_three_sweep_task.py',
             'scripts/experiments/ubai/calibrated_git.sh',
+            'scripts/runtime/files.py',
+            'scripts/runtime/identity.py',
+            'scripts/runtime/local_gpu.py',
         ):
             path = self.source / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,7 +82,7 @@ class UBAISafetyTests(unittest.TestCase):
     def owner(self, base: Path, job: str, name: str = 'task') -> Path:
         path = base / f'{ubai.RUNTIME_PREFIX}{job}-{name}-fixture'
         path.mkdir(parents=True)
-        (path / '.owner.json').write_bytes(ubai.json_bytes({
+        (path / '.owner.json').write_bytes(runtime_files.json_bytes({
             'uid': os.getuid(), 'job_id': job, 'task_id': name, 'scratch_bytes': 8 * ubai.GIB,
         }))
         return path
@@ -99,35 +103,37 @@ class UBAISafetyTests(unittest.TestCase):
         self.assertEqual(first['limits']['max_gpus'], 12)
         self.assertEqual(first['runtime']['env_unpacked_bytes'], 96 * ubai.GIB)
         self.assertEqual(first['runtime']['minimum_scratch_bytes'], 8 * ubai.GIB)
-        (self.experiment_root / 'experiment.json').write_bytes(ubai.json_bytes(dict(self.experiment, changed=True)))
+        (self.experiment_root / 'experiment.json').write_bytes(
+            runtime_files.json_bytes(dict(self.experiment, changed=True))
+        )
         with self.assertRaisesRegex(ValueError, 'different preparation'):
             self.deployment()
 
     def test_artifact_hash_matches_shared_identity_and_detects_change(self) -> None:
         path = self.assets / 'training'
-        aggregate, records = ubai.artifact_records(path)
-        self.assertEqual(aggregate, artifact_identity(path)['aggregate_sha256'])
+        aggregate, records = identity.artifact_records(path)
+        self.assertEqual(aggregate, identity.artifact_identity(path)['aggregate_sha256'])
         self.assertEqual(records[0]['bytes'], len(b'training'))
         (path / 'payload').write_bytes(b'changed')
-        self.assertNotEqual(ubai.artifact_records(path)[0], aggregate)
+        self.assertNotEqual(identity.artifact_records(path)[0], aggregate)
 
     def test_package_identity_is_location_independent_and_ignores_only_transient_files(self) -> None:
         package = self.assets / 'source-checkouts/transformers/src'
-        original, records = ubai.package_source_identity(package)
+        original, records = identity.package_source_identity(package)
         for relative in ('.git/config', '__pycache__/bytecode.pyc', '.pytest_cache/cache',
                          'nested/__pycache__/bytecode.pyc', 'loose.pyc'):
             path = package / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b'ignored transient content')
-        self.assertEqual(original, ubai.package_source_identity(package)[0])
+        self.assertEqual(original, identity.package_source_identity(package)[0])
         self.assertEqual([item['path'] for item in records],
-                         [item['path'] for item in ubai.package_source_identity(package)[1]])
+                         [item['path'] for item in identity.package_source_identity(package)[1]])
         relocated = self.base / 'relocated'
         relocated.mkdir()
         (relocated / '__init__.py').write_bytes((package / '__init__.py').read_bytes())
-        self.assertEqual(original, ubai.package_source_identity(relocated)[0])
+        self.assertEqual(original, identity.package_source_identity(relocated)[0])
         (package / 'new_module.py').write_bytes(b'import math\n')
-        self.assertNotEqual(original, ubai.package_source_identity(package)[0])
+        self.assertNotEqual(original, identity.package_source_identity(package)[0])
 
     def test_missing_wrong_or_unselected_dependency_sources_are_rejected(self) -> None:
         value = self.deployment()
@@ -178,9 +184,9 @@ class UBAISafetyTests(unittest.TestCase):
         runtime = value['runtime']
         runtime.update(host_source_root=str(self.source), host_experiment_root=str(self.experiment_root),
                        host_deployment_root=str(self.output), env_archive=str(archive),
-                       env_archive_sha256=ubai.sha256(archive), container_image=str(self.image))
+                       env_archive_sha256=identity.sha256_file(archive), container_image=str(self.image))
         deployment_path = self.output / 'deployment.json'
-        deployment_path.write_bytes(ubai.json_bytes(value))
+        deployment_path.write_bytes(runtime_files.json_bytes(value))
         with patch.object(ubai, 'source_identity'), \
              patch.object(subprocess, 'check_output', return_value=str(self.source / '.git') + '\n'):
             ubai.verify_files(value, deployment_path)
@@ -340,12 +346,12 @@ class UBAISafetyTests(unittest.TestCase):
         value = self.deployment()
         value['runtime']['host_assets_root'] = str(self.assets)
         deployment_path = self.output / 'deployment.json'
-        deployment_path.write_bytes(ubai.json_bytes(value))
+        deployment_path.write_bytes(runtime_files.json_bytes(value))
         records = ubai.verify_assets(value)
-        report = {'state': 'verified', 'deployment_sha256': ubai.sha256(deployment_path),
+        report = {'state': 'verified', 'deployment_sha256': identity.sha256_file(deployment_path),
                   'python_version': '3.12.13', 'asset_files': records,
                   'dependency_files': ubai.verify_dependency_sources(value)}
-        (self.output / 'prep-result.json').write_bytes(ubai.json_bytes(report))
+        (self.output / 'prep-result.json').write_bytes(runtime_files.json_bytes(report))
         ubai.verify_preparation(value, deployment_path)
         (self.assets / 'training/extra').write_bytes(b'new file')
         with self.assertRaises(ValueError):
@@ -359,11 +365,11 @@ class UBAISafetyTests(unittest.TestCase):
         value = self.deployment()
         value['runtime']['host_assets_root'] = str(self.assets)
         deployment_path = self.output / 'deployment.json'
-        deployment_path.write_bytes(ubai.json_bytes(value))
-        report = {'state': 'verified', 'deployment_sha256': ubai.sha256(deployment_path),
+        deployment_path.write_bytes(runtime_files.json_bytes(value))
+        report = {'state': 'verified', 'deployment_sha256': identity.sha256_file(deployment_path),
                   'python_version': '3.12.13', 'asset_files': ubai.verify_assets(value),
                   'dependency_files': ubai.verify_dependency_sources(value)}
-        (self.output / 'prep-result.json').write_bytes(ubai.json_bytes(report))
+        (self.output / 'prep-result.json').write_bytes(runtime_files.json_bytes(report))
         package = self.assets / 'source-checkouts/transformers/src'
         cache = package / '__pycache__'
         cache.mkdir()

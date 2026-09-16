@@ -6,13 +6,19 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import asdict, dataclass, field
-import hashlib
 import json
 import math
 from pathlib import Path
 import re
 import statistics
+import sys
 from typing import Sequence
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.runtime import identity
 
 
 FLOAT = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
@@ -655,14 +661,6 @@ def plot_summary(
     plt.close(figure)
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def validated_wandb_run(
     spec: ManifestRun,
     log_dir: Path,
@@ -683,7 +681,7 @@ def validated_wandb_run(
     if fields.get("run_id") != spec.run_id:
         raise ValueError(f"W&B marker run mismatch: {marker}")
     log_path = log_dir / spec.log_file
-    log_sha256 = sha256_file(log_path)
+    log_sha256 = identity.sha256_file(log_path)
     if fields.get("log_sha256") != log_sha256:
         raise ValueError(f"W&B marker log hash mismatch: {marker}")
     mode = fields.get("mode", "offline")
@@ -777,7 +775,7 @@ def write_provenance(
         "checkpoint_sha256": first.checkpoint_sha256,
         "dataset_fingerprint": first.dataset_fingerprint,
         "gpu_family": first.gpu_family,
-        "manifest_sha256": sha256_file(manifest),
+        "manifest_sha256": identity.sha256_file(manifest),
         **{name: first.row[name] for name in HASH_FIELDS},
     }
     output.parent.mkdir(parents=True, exist_ok=True)

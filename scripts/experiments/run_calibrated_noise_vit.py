@@ -19,6 +19,7 @@ import threading
 import time
 from types import SimpleNamespace
 
+CODE_ROOT = Path(__file__).resolve().parents[2]
 REPO = Path('/data/delayed-temporal')
 SOURCE = Path('/data/delayed-temporal-worktrees/gelu-timeconstant-noise')
 BASE = REPO / 'artifacts/logs/noise_scan/vit_base_rt_sweep_ratio4_theta40_gelu_synaptic_scaling_float64_v5'
@@ -28,15 +29,15 @@ WRAPPER = REPO / 'scripts/analysis/evaluate_calibrated_vit.py'
 PYTHON = Path('/opt/conda/envs/dt/bin/python')
 TABLE = ROOT / 'calibration.json'
 GPUS = ('4', '5', '6', '7')
-sys.path[:0] = [str(SOURCE), str(REPO / 'artifacts/runtime')]
+sys.path[:0] = [str(SOURCE), str(CODE_ROOT), str(REPO / 'artifacts/runtime')]
 import ratio_gpu_runner as gpu_policy
 from scripts.experiments import run_sigma_margin_local as local
-from scripts.experiments.ubai.build_sigma_margin_manifest import FIELDS, write_immutable
+from scripts.experiments.ubai.build_sigma_margin_manifest import FIELDS
 from scripts.analysis.summarize_sigma_margin_sweep import read_manifest, parse_run_log, aggregate_runs, aggregate_sites, write_csv, build_frontier
 from scripts.analysis.summarize_adaptive_timing_noise_sweep import validate_gelu_log_contract
-from scripts.setup.hash_artifact import artifact_identity
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
 
-sha = local.sha256_file
 OUTPUT_LOCK = threading.Lock()
 
 
@@ -55,7 +56,9 @@ def serialize(rows, *, calibrated=False):
 
 
 def state(phase, **details):
-    local.atomic_json(ROOT / 'campaign-status.json', {'phase': phase, 'updated_at': time.time(), **details})
+    runtime_files.atomic_json(
+        ROOT / 'campaign-status.json', {'phase': phase, 'updated_at': time.time(), **details}
+    )
 
 
 def condition(row):
@@ -78,18 +81,20 @@ def prepare():
     rows = list(by_condition.values())
     assert len(rows) == 65 and len({r['run_id'] for r in rows}) == 65
     assert local.validate_source_identity(SOURCE, rows) == previous['source_commit']
-    if sha(SOURCE / previous['evaluator_path']) != previous['evaluator_sha256']:
+    if identity.sha256_file(SOURCE / previous['evaluator_path']) != previous['evaluator_sha256']:
         raise ValueError('Frozen evaluator changed')
-    training_identity = artifact_identity(TRAIN)
+    training_identity = identity.artifact_identity(TRAIN)
     if training_identity['aggregate_sha256'] != 'fb4b6b81318ba9d00f8ede2ecde7ae9aaa831d32e38d2c26fa6e1776544cc74b':
         raise ValueError('Training artifact mismatch')
-    if artifact_identity(Path(previous['checkpoint_path']))['aggregate_sha256'] != previous['checkpoint_sha256']:
+    if identity.artifact_identity(Path(previous['checkpoint_path']))['aggregate_sha256'] != previous['checkpoint_sha256']:
         raise ValueError('Checkpoint mismatch')
     experiment = {
         'tag': ROOT.name, 'source_commit': previous['source_commit'],
         'evaluator_path': previous['evaluator_path'], 'evaluator_sha256': previous['evaluator_sha256'],
-        'calibration_evaluator_path': str(WRAPPER), 'calibration_evaluator_sha256': sha(WRAPPER),
-        'driver_sha256': sha(Path(__file__)), 'gpu_policy_sha256': sha(Path(gpu_policy.__file__)),
+        'calibration_evaluator_path': str(WRAPPER),
+        'calibration_evaluator_sha256': identity.sha256_file(WRAPPER),
+        'driver_sha256': identity.sha256_file(Path(__file__)),
+        'gpu_policy_sha256': identity.sha256_file(Path(gpu_policy.__file__)),
         'checkpoint_path': previous['checkpoint_path'], 'checkpoint_sha256': previous['checkpoint_sha256'],
         'calibration_dataset_path': str(TRAIN), 'calibration_dataset_fingerprint': 'cabf903d14d1b1ac',
         'calibration_dataset_sha256': training_identity['aggregate_sha256'],
@@ -99,17 +104,21 @@ def prepare():
         'theta': 40, 'theta_selection_revalidated': False, 'precision': 'float64', 'batch_size': 32,
         'gelu_cubic_implementation': 'phi_nl_psi_ed', 'gelu_cubic_floor': 1e-5,
         'physical_gpus': list(GPUS), 'runs': 65, 'seeds': [0, 1, 2],
-        'source_manifest_sha256': {str(p): sha(p) for p in sources},
-        'dense_reference_log_sha256': sha(BASE / 'local-assets/logs/dense_reference.log'),
+        'source_manifest_sha256': {str(p): identity.sha256_file(p) for p in sources},
+        'dense_reference_log_sha256': identity.sha256_file(
+            BASE / 'local-assets/logs/dense_reference.log'
+        ),
         'paper_promotion_allowed': False,
     }
-    write_immutable(ROOT / 'experiment.json', json.dumps(experiment, indent=2) + '\n')
-    write_immutable(ROOT / 'manifests/planned.tsv', serialize(rows))
+    runtime_files.immutable(
+        ROOT / 'experiment.json', (json.dumps(experiment, indent=2) + '\n').encode()
+    )
+    runtime_files.immutable(ROOT / 'manifests/planned.tsv', serialize(rows).encode())
     (ROOT / 'logs').mkdir(parents=True, exist_ok=True)
     dense_target = ROOT / 'logs/dense_reference.log'
     if not dense_target.exists():
         shutil.copy2(BASE / 'local-assets/logs/dense_reference.log', dense_target)
-    if sha(dense_target) != experiment['dense_reference_log_sha256']:
+    if identity.sha256_file(dense_target) != experiment['dense_reference_log_sha256']:
         raise ValueError('Dense reference changed')
     return rows, experiment
 
@@ -122,7 +131,7 @@ def check_runtime_identity(experiment):
                            (Path(__file__), experiment['driver_sha256']),
                            (Path(gpu_policy.__file__), experiment['gpu_policy_sha256']),
                            (SOURCE / experiment['evaluator_path'], experiment['evaluator_sha256'])]:
-        if sha(path) != expected:
+        if identity.sha256_file(path) != expected:
             raise ValueError(f'Runtime file changed: {path}')
 
 
@@ -162,9 +171,9 @@ class CalibratedScheduler(local.LocalScheduler):
         try:
             parse_run_log(spec, self.args.log_dir)
             if spec.backend == 'hf':
-                return sha(path) == self.experiment['dense_reference_log_sha256']
+                return identity.sha256_file(path) == self.experiment['dense_reference_log_sha256']
             check_runtime_identity(self.experiment)
-            if sha(TABLE) != self.table_sha:
+            if identity.sha256_file(TABLE) != self.table_sha:
                 return False
             text = path.read_text()
             expected = f'Calibration identity — mode: validate, sha256: {self.table_sha}'
@@ -177,7 +186,7 @@ class CalibratedScheduler(local.LocalScheduler):
 
     def run_one(self, gpu, row):
         check_runtime_identity(self.experiment)
-        if sha(TABLE) != self.table_sha:
+        if identity.sha256_file(TABLE) != self.table_sha:
             raise ValueError('Frozen calibration table changed')
         super().run_one(gpu, row)
         with OUTPUT_LOCK:
@@ -214,7 +223,7 @@ def summarize(scheduler, *, complete):
     sites = aggregate_sites(ready)
     if sites:
         write_csv(ROOT / 'outputs/site_summary.csv', sites)
-    local.atomic_json(ROOT / 'outputs/progress.json', {
+    runtime_files.atomic_json(ROOT / 'outputs/progress.json', {
         'complete': complete, 'validated_runs': len(runs), 'total_runs': 65,
         'complete_stochastic_cells': sum(1 for s in summary if s['stage'] == 'sigma_margin'),
         'calibration_sha256': scheduler.table_sha,
@@ -230,14 +239,17 @@ def summarize(scheduler, *, complete):
                             '--summary', str(csv_path), '--axis', axis,
                             '--output', str(ROOT / f'outputs/{axis}/accuracy-physical-rate')], check=True)
             if axis == 'ratio':
-                local.atomic_json(ROOT / 'outputs/ratio/frontier.json', build_frontier(selected))
+                runtime_files.atomic_json(
+                    ROOT / 'outputs/ratio/frontier.json', build_frontier(selected)
+                )
 
 
 def collect(rows, experiment):
     evidence_path = ROOT / 'calibration-evidence.json'
     if evidence_path.exists():
         evidence = json.loads(evidence_path.read_text())
-        if evidence['experiment_sha256'] != sha(ROOT / 'experiment.json') or evidence['calibration_sha256'] != sha(TABLE):
+        if (evidence['experiment_sha256'] != identity.sha256_file(ROOT / 'experiment.json')
+                or evidence['calibration_sha256'] != identity.sha256_file(TABLE)):
             raise ValueError('Calibration evidence changed')
         return evidence['calibration_sha256']
     if TABLE.exists():
@@ -266,10 +278,17 @@ def collect(rows, experiment):
     table = load_calibration_table(TABLE)
     if len(table.layers) != 48:
         raise ValueError('Expected 48 calibrated sites')
-    table_sha = sha(TABLE)
-    evidence = {'calibration_sha256': table_sha, 'experiment_sha256': sha(ROOT / 'experiment.json'),
-                'collection_log_sha256': sha(log), 'sites': 48, 'gpu': gpu}
-    write_immutable(evidence_path, json.dumps(evidence, indent=2) + '\n')
+    table_sha = identity.sha256_file(TABLE)
+    evidence = {
+        'calibration_sha256': table_sha,
+        'experiment_sha256': identity.sha256_file(ROOT / 'experiment.json'),
+        'collection_log_sha256': identity.sha256_file(log),
+        'sites': 48,
+        'gpu': gpu,
+    }
+    runtime_files.immutable(
+        evidence_path, (json.dumps(evidence, indent=2) + '\n').encode()
+    )
     return table_sha
 
 
@@ -280,7 +299,9 @@ def execute(rows, experiment):
         table_sha = collect(rows, experiment)
         rows = [{**r, 'calibration_sha256': table_sha,
                  'calibration_mode': 'none' if r['backend'] == 'hf' else 'validate'} for r in rows]
-        write_immutable(ROOT / 'manifests/grid.tsv', serialize(rows, calibrated=True))
+        runtime_files.immutable(
+            ROOT / 'manifests/grid.tsv', serialize(rows, calibrated=True).encode()
+        )
         local.live_compute_pids = gpu_policy.admission_pids
         local.wait_for_gpu_child = lambda child, gpu: gpu_policy.physical_wait(child, gpu, pid_reader=gpu_policy.physical_pids)
         pool = gpu_policy.available_gpus()

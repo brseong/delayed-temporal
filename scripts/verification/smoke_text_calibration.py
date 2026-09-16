@@ -19,13 +19,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
 
 
 def source_hashes(family: str) -> dict[str, str]:
@@ -47,15 +42,10 @@ def source_hashes(family: str) -> dict[str, str]:
     if family in ("bert", "roberta"):
         other = "roberta" if family == "bert" else "bert"
         paths.extend((ROOT / "utils/transformers/models" / f"spiking_{other}").rglob("*.py"))
-    return {str(path.relative_to(ROOT)): sha256_file(path) for path in sorted(set(paths))}
-
-
-def write_new_json(path: Path, value: dict) -> None:
-    with path.open("x") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True, allow_nan=False)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    return {
+        str(path.relative_to(ROOT)): identity.sha256_file(path)
+        for path in sorted(set(paths))
+    }
 
 
 def build_commands(args, output: Path) -> dict[str, list[str]]:
@@ -167,7 +157,7 @@ def main() -> None:
                 "HF_DATASETS_OFFLINE", "TMPDIR", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
             )},
         }
-        write_new_json(output / "manifest.json", manifest)
+        runtime_files.new_json(output / "manifest.json", manifest)
         started = time.monotonic()
         result = {"state": "failed", "completed_phases": [], "diagnostic_only": True}
         child = None
@@ -188,9 +178,11 @@ def main() -> None:
                         stderr=subprocess.STDOUT, start_new_session=True,
                         pass_fds=(lock.fileno(),),
                     )
-                    write_new_json(output / (phase + "-started.json"), {"pid": child.pid, "phase": phase})
+                    runtime_files.new_json(
+                        output / (phase + "-started.json"), {"pid": child.pid, "phase": phase}
+                    )
                     exit_code = child.wait()
-                write_new_json(output / (phase + "-exit.json"), {
+                runtime_files.new_json(output / (phase + "-exit.json"), {
                     "phase": phase, "exit_code": exit_code,
                     "elapsed_seconds": time.monotonic() - phase_started,
                 })
@@ -206,7 +198,7 @@ def main() -> None:
             if source_hashes(args.family) != hashes:
                 raise RuntimeError("source changed during the diagnostic")
             result["state"] = "complete"
-            result["calibration_sha256"] = sha256_file(output / "calibration.json")
+            result["calibration_sha256"] = identity.sha256_file(output / "calibration.json")
         except BaseException as error:
             if child is not None:
                 stop_child(child)
@@ -216,7 +208,7 @@ def main() -> None:
             for sig, handler in previous_handlers.items():
                 signal.signal(sig, handler)
             result["elapsed_seconds"] = time.monotonic() - started
-            write_new_json(output / "result.json", result)
+            runtime_files.new_json(output / "result.json", result)
             print(json.dumps(result, sort_keys=True), flush=True)
 
 

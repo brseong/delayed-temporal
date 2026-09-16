@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 from scripts.experiments.ubai import run_calibrated_three_sweep_pair as pair
 from scripts.experiments.ubai import prepare_calibrated_three_sweeps_ubai as helper
 from scripts.experiments.calibrated_three_sweeps import make_task, make_tasks
+from scripts.runtime import identity
 from scripts.verification.verify_calibrated_three_sweep_contract import experiment_fixture
 
 
@@ -38,10 +39,10 @@ class PairTests(unittest.TestCase):
         self.tasks = make_tasks(self.experiment, 'noise', selected_theta=40.0, seed=0,
                                 calibration_sha256='2' * 64)[:2]
         self.manifest = {'format_version': 1, 'pair_id': 'test-pair',
-                         'experiment_sha256': pair.sha256(self.root / 'experiment.json'),
-                         'deployment_sha256': pair.sha256(self.deployment),
+                         'experiment_sha256': identity.sha256_file(self.root / 'experiment.json'),
+                         'deployment_sha256': identity.sha256_file(self.deployment),
                          'source_commit': self.experiment['source_commit'], 'controller_commit': 'b' * 40,
-                         'controller_sha256': {relative: pair.sha256(ROOT / relative)
+                         'controller_sha256': {relative: identity.sha256_file(ROOT / relative)
                                                for relative in (pair.PAIR_SCRIPT, pair.PAIR_BATCH)}, 'tasks': []}
         self.path = self.root / 'pairs/test-pair.json'
         self.refresh()
@@ -55,7 +56,9 @@ class PairTests(unittest.TestCase):
         for task in self.tasks:
             path = self.root / 'tasks' / (task['run_id'] + '.json')
             self.write(path, task)
-            self.manifest['tasks'].append({'run_id': task['run_id'], 'task_sha256': pair.sha256(path)})
+            self.manifest['tasks'].append({
+                'run_id': task['run_id'], 'task_sha256': identity.sha256_file(path)
+            })
         self.write(self.path, self.manifest)
 
     def validate(self) -> tuple[dict, list]:
@@ -243,7 +246,7 @@ class PairTests(unittest.TestCase):
         results.mkdir()
         completed = results / (self.tasks[0]['run_id'] + '.json')
         completed.write_bytes(b'validated result preserved by frozen worker')
-        before = pair.sha256(completed)
+        before = identity.sha256_file(completed)
         scratch = self.base / 'scratch'
         scratch.mkdir()
         child = Mock()
@@ -252,7 +255,7 @@ class PairTests(unittest.TestCase):
         with patch.object(os, 'sched_getaffinity', return_value=set(range(8))), \
              patch.object(subprocess, 'Popen', return_value=child):
             self.assertEqual(pair.run_workers(ROOT, self.root, self.tasks, scratch, '0,1'), [0, 0])
-        self.assertEqual(pair.sha256(completed), before)
+        self.assertEqual(identity.sha256_file(completed), before)
 
     def test_reaping_terminates_and_waits_for_both_children(self) -> None:
         children = [Mock(pid=123), Mock(pid=456)]

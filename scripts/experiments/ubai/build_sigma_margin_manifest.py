@@ -6,11 +6,18 @@ from __future__ import annotations
 import argparse
 import csv
 from decimal import Decimal
-import hashlib
 import json
 import math
 from pathlib import Path
+import sys
 from typing import Any, Sequence
+
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
 
 
 TIME_NOISE_STD_FRACS = (
@@ -83,14 +90,6 @@ PILOT_RUN_IDS = (
     "sigma_1p000em09_margin_0_seed_0",
     "sigma_1p000em09_margin_12_seed_0",
 )
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def read_tsv(path: Path) -> list[dict[str, str]]:
@@ -328,15 +327,6 @@ def serialized_tsv(rows: Sequence[dict[str, str]]) -> str:
     return buffer.getvalue()
 
 
-def write_immutable(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if path.read_text(encoding="utf-8") != content:
-            raise FileExistsError(f"refusing to replace different immutable artifact: {path}")
-        return
-    path.write_text(content, encoding="utf-8")
-
-
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
@@ -379,10 +369,10 @@ def main() -> None:
         raise ValueError("GPU selection partition does not match its family")
 
     evidence_hashes = {
-        "theta_selection_sha256": sha256_file(args.selection_json),
-        "theta_selection_raw_sha256": sha256_file(args.theta_raw_csv),
-        "theta_confirmation_manifest_sha256": sha256_file(args.theta_confirmation_manifest),
-        "gpu_selection_sha256": sha256_file(args.gpu_selection),
+        "theta_selection_sha256": identity.sha256_file(args.selection_json),
+        "theta_selection_raw_sha256": identity.sha256_file(args.theta_raw_csv),
+        "theta_confirmation_manifest_sha256": identity.sha256_file(args.theta_confirmation_manifest),
+        "gpu_selection_sha256": identity.sha256_file(args.gpu_selection),
     }
     common = {
         "split": "validation",
@@ -399,12 +389,12 @@ def main() -> None:
     rows = build_rows(theta=selected_theta, common=common)
     if len(rows) != 470:
         raise AssertionError(f"canonical manifest must contain 470 runs, got {len(rows)}")
-    write_immutable(args.output, serialized_tsv(rows))
+    runtime_files.immutable(args.output, serialized_tsv(rows).encode())
     if args.pilot_output is not None:
         pilot_rows = [row for row in rows if row["run_id"] in PILOT_RUN_IDS]
         if {row["run_id"] for row in pilot_rows} != set(PILOT_RUN_IDS):
             raise AssertionError("canonical manifest is missing pilot conditions")
-        write_immutable(args.pilot_output, serialized_tsv(pilot_rows))
+        runtime_files.immutable(args.pilot_output, serialized_tsv(pilot_rows).encode())
 
     experiment_path = args.experiment_json or args.output.with_name("experiment.json")
     experiment: dict[str, Any] = {
@@ -428,9 +418,9 @@ def main() -> None:
         "gpu_partition": FAMILY_PARTITIONS[gpu_family],
         **evidence_hashes,
     }
-    write_immutable(
+    runtime_files.immutable(
         experiment_path,
-        json.dumps(experiment, indent=2, sort_keys=True) + "\n",
+        (json.dumps(experiment, indent=2, sort_keys=True) + "\n").encode(),
     )
     print(f"{len(rows)}\t{gpu_family}\t{FAMILY_PARTITIONS[gpu_family]}\t{decimal_text(selected_theta)}")
 

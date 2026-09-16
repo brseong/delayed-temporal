@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,18 +12,16 @@ import sys
 import time
 from typing import Any, Callable
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.runtime import identity
+
 
 CALIBRATION_SAMPLES = 5000
 CALIBRATION_SEED = 0
 DATASET_IMAGE_KEYS = {"imagenet-1k": "image", "cifar10": "img"}
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def validate_source(source: Path, expected_commit: str) -> None:
@@ -187,7 +184,6 @@ def main() -> None:
     from datasets import Dataset, load_from_disk
     from scripts.analysis import gelu_cubic_phi_nl_vit as gelu
     from scripts.evaluation import error_analysis_vit as evaluator
-    from scripts.setup.hash_artifact import artifact_identity
 
     original_argv = sys.argv
     sys.argv = [original_argv[0], *remaining, "--no-tensorboard"]
@@ -195,7 +191,7 @@ def main() -> None:
     try:
         vit_args, implementation, floor = gelu.parse_arguments()
         validate_arguments(vit_args, implementation, floor, smoke_samples=own.calibration_smoke_samples)
-        if artifact_identity(Path(vit_args.model_id))["aggregate_sha256"] != vit_args.checkpoint_sha256:
+        if identity.artifact_identity(Path(vit_args.model_id))["aggregate_sha256"] != vit_args.checkpoint_sha256:
             raise ValueError("checkpoint contents do not match the expected SHA-256")
         dataset = load_from_disk(str(own.calibration_dataset_path.resolve()))
         if not isinstance(dataset, Dataset):
@@ -215,9 +211,9 @@ def main() -> None:
             "checkpoint_sha256": vit_args.checkpoint_sha256,
             "gelu_cubic_implementation": implementation,
             "gelu_cubic_floor": floor,
-            "gelu_evaluator_sha256": sha256_file(Path(gelu.__file__)),
-            "vit_evaluator_sha256": sha256_file(Path(evaluator.__file__)),
-            "calibration_wrapper_sha256": sha256_file(Path(__file__)),
+            "gelu_evaluator_sha256": identity.sha256_file(Path(gelu.__file__)),
+            "vit_evaluator_sha256": identity.sha256_file(Path(evaluator.__file__)),
+            "calibration_wrapper_sha256": identity.sha256_file(Path(__file__)),
             "calibration_dataset_fingerprint": dataset._fingerprint,
             "calibration_source_fingerprint": own.calibration_dataset_fingerprint,
             "calibration_dataset_id": vit_args.dataset_id,
@@ -242,7 +238,7 @@ def main() -> None:
             if table_path.exists():
                 raise FileExistsError("refusing to replace an existing calibration table")
         else:
-            initial_table_hash = sha256_file(table_path)
+            initial_table_hash = identity.sha256_file(table_path)
             print(
                 f"Calibration input — mode: {vit_args.calibration_mode}, sha256: {initial_table_hash}",
                 flush=True,
@@ -257,7 +253,7 @@ def main() -> None:
             "purpose": "smoke" if own.calibration_smoke_samples else "final",
         }, sort_keys=True), flush=True)
         gelu.main()
-        final_table_hash = sha256_file(table_path)
+        final_table_hash = identity.sha256_file(table_path)
         if initial_table_hash is not None and final_table_hash != initial_table_hash:
             raise ValueError("calibration table changed during evaluation")
         print(

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import os
 from pathlib import Path
 import queue
@@ -18,10 +17,17 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.runtime import files as runtime_files
 
 
 ALLOWED_GPUS = ("4", "5", "6", "7")
@@ -76,15 +82,6 @@ def live_compute_pids(gpu: str) -> list[int]:
     return pids
 
 
-def atomic_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(
-        f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}"
-    )
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
-
-
 class LocalScheduler:
     def __init__(self, args: argparse.Namespace, rows: list[dict[str, str]]) -> None:
         self.args = args
@@ -127,7 +124,7 @@ class LocalScheduler:
                 "mean_run_seconds": mean_seconds,
                 "estimated_remaining_seconds": eta_seconds,
             }
-            atomic_json(self.args.status_json, payload)
+            runtime_files.atomic_json(self.args.status_json, payload)
 
     def validate(self, run_id: str) -> bool:
         command = [

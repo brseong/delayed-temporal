@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 from datasets import Dataset, Image, load_from_disk
 
-from scripts.setup.hash_artifact import artifact_identity, hash_file
+from scripts.runtime import identity
 from scripts.setup.prepare_imagenet_theta_selection import label_sha256, save_artifact
 from utils.transformers.calibration import select_calibration_subset
 
@@ -76,8 +76,8 @@ def export_cifar(cache: Path, output: Path) -> dict[str, Any]:
         raise ValueError("CIFAR training selection differs from the maintained selector")
     return {
         "source_files": {
-            "train": {"path": str(train_file), "sha256": hash_file(train_file)},
-            "test": {"path": str(test_file), "sha256": hash_file(test_file)},
+            "train": {"path": str(train_file), "sha256": identity.sha256_file(train_file)},
+            "test": {"path": str(test_file), "sha256": identity.sha256_file(test_file)},
         },
         "train": {**save_cifar(selected, output / "train_seed0_5000", split="train"), "selection_seed": 0},
         "evaluation": {
@@ -101,10 +101,10 @@ def identify_imagenet(root: Path) -> dict[str, Any]:
             raise ValueError("existing ImageNet dataset identity changed")
         if label_sha256(dataset) != old["label_sha256"]:
             raise ValueError("existing ImageNet label order changed")
-        identity = artifact_identity(path)
-        if identity["aggregate_sha256"] != old["aggregate_sha256"]:
+        artifact = identity.artifact_identity(path)
+        if artifact["aggregate_sha256"] != old["aggregate_sha256"]:
             raise ValueError("existing ImageNet artifact SHA-256 changed")
-        result[name] = {**old, **identity, "image_key": "image", "split": old["source_split"]}
+        result[name] = {**old, **artifact, "image_key": "image", "split": old["source_split"]}
         if name == "evaluation":
             prefix = dataset.select(range(5000))
             if prefix._fingerprint != old["quick_prefix_fingerprint"]:
@@ -129,7 +129,7 @@ def identify_checkpoint(path: Path, *, classes: int, width: int, layers: int) ->
         raise ValueError("checkpoint image processor is missing")
     if not any((path / name).is_file() for name in ("model.safetensors", "pytorch_model.bin")):
         raise ValueError("checkpoint weights are missing")
-    return {**artifact_identity(path), "config": config}
+    return {**identity.artifact_identity(path), "config": config}
 
 
 def build_model_record(

@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import fcntl
-import hashlib
 import importlib.util
 import json
 import os
@@ -17,6 +16,15 @@ import sys
 import threading
 import time
 import uuid
+
+REPO = Path(__file__).resolve().parents[2]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from scripts.runtime import environment as runtime_environment
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity as runtime_identity
+from scripts.runtime import local_gpu
 
 TAG = "vit_conversion_comparison_theta40_calibrated_float64_bounds3_v1"
 DEFAULT_ROOT = Path("/data/delayed-temporal/artifacts/logs/conversion_comparison") / TAG
@@ -34,17 +42,13 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
-def digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def validate_scope(root: Path, gpu: int, model: str, temporary_local_gpus: bool) -> dict:
     if not temporary_local_gpus or type(gpu) is not int or gpu not in EXTRA_GPUS:
         raise ValueError("An explicit current-comparison authorization for GPU1,2,3 is required")
     if root.resolve() != DEFAULT_ROOT or model not in MODEL_KEYS:
         raise ValueError("Temporary authorization does not cover this root or model")
     path = root / "experiment.json"
-    if digest(path) != EXPERIMENT_FILE_SHA256:
+    if runtime_identity.sha256_file(path) != EXPERIMENT_FILE_SHA256:
         raise ValueError("The frozen experiment file differs")
     experiment = read_json(path)
     if (experiment.get("tag") != TAG or experiment.get("source_commit") != SOURCE_COMMIT
@@ -134,16 +138,16 @@ def prepare_dense(root: Path, experiment: dict, model: str, runner) -> dict:
 def require_window(root: Path, experiment: dict, model: str, runner,
                    minimum_remaining: int = MINIMUM_REMAINING) -> dict:
     assignments = read_json(root / "assignments.json")
-    if assignments.get("experiment_sha256") != runner.task_sha256(experiment):
+    if assignments.get("experiment_sha256") != runtime_identity.json_sha256(experiment):
         raise ValueError("Central assignment identity differs")
     assignment = assignments.get("models", {}).get(model, {})
     worker = assignments.get("local", {}).get(model, {})
     if (assignment.get("owner") != "local" or assignment.get("status") != "running"
             or worker.get("status") != "running" or worker.get("mode") != "pipeline"):
         raise ValueError("The main model pipeline is not running locally")
-    identity = process_identity(int(worker.get("pid", -1)))
-    if not identity or identity["state"] == "Z" or any(
-            identity[field] != worker.get(field) for field in ("pid", "start_ticks", "command")):
+    process = process_identity(int(worker.get("pid", -1)))
+    if not process or process["state"] == "Z" or any(
+            process[field] != worker.get(field) for field in ("pid", "start_ticks", "command")):
         raise ValueError("The main pipeline process identity differs")
     task = runner.make_task(experiment, model, "collect", prepare_dense(root, experiment, model, runner)["batch_size"])
     if (root / task["result_file"]).exists() or not lock_held(root / "locks" / (task["run_id"] + ".lock")):
@@ -154,22 +158,25 @@ def require_window(root: Path, experiment: dict, model: str, runner,
     log = (root / task["log_file"]).read_text()
     headers = [json.loads(line.removeprefix("Comparison task — ")) for line in log.splitlines()
                if line.startswith("Comparison task — ")]
-    if headers != [{"task_sha256": runner.task_sha256(task), "batch_size": task["batch_size"]}]:
+    if headers != [{
+        "task_sha256": runtime_identity.json_sha256(task),
+        "batch_size": task["batch_size"],
+    }]:
         raise ValueError("The running collection log identity differs")
     progress = calibration_progress(log)
     if progress["total_batches"] != 2 * ((5000 + task["batch_size"] - 1) // task["batch_size"]):
         raise ValueError("The collection progress total differs")
     if progress["remaining_batches"] < minimum_remaining:
         raise ValueError("Insufficient collection time remains for an extra evaluation")
-    return {**progress, "main_pid": identity["pid"], "main_start_ticks": identity["start_ticks"],
-            "collect_task_sha256": runner.task_sha256(task)}
+    return {**progress, "main_pid": process["pid"], "main_start_ticks": process["start_ticks"],
+            "collect_task_sha256": runtime_identity.json_sha256(task)}
 
 
-def gpu_probe(experiment: dict, gpu: int, runner) -> dict:
+def gpu_probe(experiment: dict, gpu: int) -> dict:
     if gpu not in EXTRA_GPUS or os.environ.get("CUDA_VISIBLE_DEVICES") != str(gpu):
         raise ValueError("Exactly the explicitly authorized GPU must be visible")
-    sample = runner.gpu_activity(gpu_ids=(gpu,))[gpu]
-    if not runner.gpu_available(sample):
+    sample = local_gpu.gpu_activity(gpu_ids=(gpu,))[gpu]
+    if not local_gpu.gpu_available(sample):
         raise RuntimeError("The extra GPU is occupied")
     output = subprocess.check_output([
         experiment["python_bin"], "-c",
@@ -231,21 +238,24 @@ def execute(root: Path, gpu: int, model: str, temporary_local_gpus: bool) -> dic
             runtime.mkdir(parents=True, exist_ok=True)
             if subprocess.check_output(["stat", "-f", "-c", "%T", str(runtime)], text=True).strip() in {"tmpfs", "ramfs"}:
                 raise ValueError("The extra worker cannot use a RAM filesystem")
-            environment = runner.worker_environment(dict(os.environ), runtime / f"extra-gpu-{gpu}", str(gpu))
+            environment = runtime_environment.worker_environment(
+                dict(os.environ), runtime / f"extra-gpu-{gpu}", str(gpu)
+            )
             for secret in ("WANDB_API_KEY", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
                 os.environ.pop(secret, None)
             os.environ.update(environment)
             Path(os.environ["TMPDIR"]).mkdir(parents=True, exist_ok=True)
-            probe = gpu_probe(experiment, gpu, runner)
+            probe = gpu_probe(experiment, gpu)
             progress = require_window(root, experiment, model, runner)
             own = process_identity(os.getpid())
             grant = {"tag": TAG, "root": str(root.resolve()), "source_commit": SOURCE_COMMIT,
-                     "experiment_sha256": EXPERIMENT_FILE_SHA256, "control_script_sha256": digest(Path(__file__)),
+                     "experiment_sha256": EXPERIMENT_FILE_SHA256,
+                     "control_script_sha256": runtime_identity.sha256_file(Path(__file__)),
                      "gpu": gpu, "cpus": sorted(cpus), "run_id": task["run_id"], "model_key": model,
                      "pid": os.getpid(), "start_ticks": own["start_ticks"], "progress": progress,
                      "gpu_probe": probe, "temporary_local_gpus": True, "started_at": time.time()}
             grant_id = uuid.uuid4().hex
-            runner.write_immutable_json(control / "grants" / (grant_id + ".json"), grant)
+            runtime_files.immutable_json(control / "grants" / (grant_id + ".json"), grant)
             runner.event(root, "temporary_gpu_started", grant_id=grant_id, gpu=gpu,
                          run_id=task["run_id"], authorization=grant)
             stop_event, reason = threading.Event(), []
@@ -267,8 +277,10 @@ def execute(root: Path, gpu: int, model: str, temporary_local_gpus: bool) -> dic
                 watcher.join(timeout=5)
                 for sig, handler in previous.items():
                     signal.signal(sig, handler)
-                runner.write_immutable_json(control / "end" / (grant_id + ".json"),
-                                            {**outcome, "grant_id": grant_id, "finished_at": time.time()})
+                runtime_files.immutable_json(
+                    control / "end" / (grant_id + ".json"),
+                    {**outcome, "grant_id": grant_id, "finished_at": time.time()},
+                )
                 runner.event(root, "temporary_gpu_finished", grant_id=grant_id, gpu=gpu, **outcome)
             return outcome
     except BlockingIOError:

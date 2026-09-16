@@ -16,6 +16,13 @@ import time
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[3]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from scripts.runtime import environment as runtime_environment
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
+
 HELPER_PATH = "scripts/experiments/ubai/prepare_calibrated_three_sweeps_ubai.py"
 PAIR_PATH = "scripts/experiments/ubai/run_calibrated_three_sweep_pair.py"
 SCRIPT_PATH = "scripts/experiments/ubai/run_vit_comparison_ubai.py"
@@ -51,24 +58,24 @@ def validate_deployment(value: dict[str, Any], helper: Any) -> None:
     if not re.fullmatch(r"[0-9a-f]{40}", value.get("source_commit", "")):
         raise ValueError("An exact source commit is required")
     for key in ("source_root", "experiment_root", "host_source_root", "host_experiment_root"):
-        path = helper.absolute_path(value[key])
+        path = runtime_files.absolute_path(value[key])
         if len(path.parts) < 4:
             raise ValueError("A specific source or experiment directory is required")
     experiment = Path(value["experiment_root"])
     if experiment.name != value["tag"] or not experiment.is_relative_to(REPOSITORY / "artifacts"):
         raise ValueError("The experiment must use its tagged artifact directory")
     if "experiment_sha256" in value:
-        helper.checked_hash(value["experiment_sha256"])
+        identity.checked_hash(value["experiment_sha256"])
     for path in value.get("host_git_metadata_paths", []):
-        if helper.absolute_path(path).name != ".git":
+        if runtime_files.absolute_path(path).name != ".git":
             raise ValueError("Git metadata mounts must name a .git directory")
     if not value.get("assets"):
         raise ValueError("Artifact identities are required")
     for item in [*value["assets"], *value["dependency_sources"]]:
         for key in ("path", "host_path"):
-            if len(helper.absolute_path(item[key]).parts) < 4:
+            if len(runtime_files.absolute_path(item[key]).parts) < 4:
                 raise ValueError("An artifact mount cannot be a broad filesystem root")
-        helper.checked_hash(item["aggregate_sha256"])
+        identity.checked_hash(item["aggregate_sha256"])
     if len({item["path"] for item in value["assets"]}) != len(value["assets"]):
         raise ValueError("Duplicate artifact mounts are not allowed")
     dependencies = value["dependency_sources"]
@@ -76,8 +83,8 @@ def validate_deployment(value: dict[str, Any], helper: Any) -> None:
         raise ValueError("Both editable package source identities are required")
     runtime = value["runtime"]
     for key in ("env_archive", "container_image"):
-        helper.absolute_path(runtime[key])
-        helper.checked_hash(runtime[key + "_sha256"])
+        runtime_files.absolute_path(runtime[key])
+        identity.checked_hash(runtime[key + "_sha256"])
     if runtime.get("env_unpacked_bytes") != 96 * GIB or runtime.get("minimum_scratch_bytes") != 16 * GIB:
         raise ValueError("The paired runtime requires a 96 GiB environment and 16 GiB scratch allowance")
     tools = value.get("runtime_tools", [])
@@ -85,7 +92,7 @@ def validate_deployment(value: dict[str, Any], helper: Any) -> None:
         path = Path(item["path"])
         if path.is_absolute() or not path.parts or path.parts[0] != "tools" or ".." in path.parts:
             raise ValueError("Runtime tools must use relative tools paths")
-        helper.checked_hash(item["sha256"])
+        identity.checked_hash(item["sha256"])
 
 
 def allocation(helper: Any, *, prep: bool) -> str:
@@ -124,7 +131,7 @@ def file_records(value: dict[str, Any], helper: Any) -> dict[str, Any]:
         collected = []
         for item in value[group]:
             path = Path(item["host_path"])
-            method = helper.artifact_records if group == "assets" else helper.package_source_identity
+            method = identity.artifact_records if group == "assets" else identity.package_source_identity
             digest, files = method(path)
             if digest != item["aggregate_sha256"]:
                 raise ValueError(f"Checksum mismatch: {path}")
@@ -133,7 +140,7 @@ def file_records(value: dict[str, Any], helper: Any) -> dict[str, Any]:
     records["runtime"] = []
     for key in ("env_archive", "container_image"):
         path = Path(value["runtime"][key])
-        digest = helper.sha256(path)
+        digest = identity.sha256_file(path)
         if digest != value["runtime"][key + "_sha256"]:
             raise ValueError(f"Checksum mismatch: {path}")
         stat = path.stat()
@@ -145,11 +152,11 @@ def file_records(value: dict[str, Any], helper: Any) -> dict[str, Any]:
 
 def verify_tools(value: dict[str, Any], deployment: Path, helper: Any) -> None:
     for item in value.get("runtime_tools", []):
-        if helper.sha256(deployment.parent / item["path"]) != item["sha256"]:
+        if identity.sha256_file(deployment.parent / item["path"]) != item["sha256"]:
             raise ValueError("Runtime Git tool checksum mismatch")
     if "experiment_sha256" in value:
         path = Path(value["host_experiment_root"]) / "experiment.json"
-        if helper.sha256(path) != value["experiment_sha256"]:
+        if identity.sha256_file(path) != value["experiment_sha256"]:
             raise ValueError("Experiment identity differs from the deployment")
 
 
@@ -160,7 +167,7 @@ def verify_preparation(value: dict[str, Any], deployment: Path, helper: Any) -> 
         raise ValueError("Preparation result must be a regular immutable file")
     report = json.loads(report_path.read_text())
     if (report.get("state") != "verified"
-            or report.get("deployment_sha256") != helper.sha256(deployment)
+            or report.get("deployment_sha256") != identity.sha256_file(deployment)
             or report.get("source_commit") != value["source_commit"]
             or report.get("python_version") != "3.12.13"):
         raise ValueError("A matching successful CPU preparation is required")
@@ -175,7 +182,7 @@ def verify_preparation(value: dict[str, Any], deployment: Path, helper: Any) -> 
                 raise ValueError("Preparation aggregate identity differs")
             files = (
                 [root] if root.is_file() else sorted(path for path in root.rglob("*") if path.is_file())
-            ) if group == "assets" else helper.package_source_files(root)
+            ) if group == "assets" else identity.package_source_files(root)
             stored = record.get("files", [])
             if not stored or len(stored) != len({item["path"] for item in stored}):
                 raise ValueError("Preparation file records are empty or duplicated")
@@ -258,7 +265,9 @@ def run_workers(value: dict[str, Any], scratch: Path, pair: Any) -> list[int]:
             directory = scratch / f"worker-{index}"
             directory.mkdir(mode=0o700)
             (directory / "xdg-runtime").mkdir(mode=0o700)
-            environments.append(pair.worker_environment(dict(os.environ), directory, device))
+            environments.append(runtime_environment.worker_environment(
+                dict(os.environ), directory, device
+            ))
         common = [PYTHON, str(source / WORKER_PATH)]
         probe = subprocess.Popen(
             [*common, "environment", "--root", str(experiment), "--host-label", "ubai"],
@@ -290,11 +299,13 @@ def run_workers(value: dict[str, Any], scratch: Path, pair: Any) -> list[int]:
 def inside(value: dict[str, Any], deployment: Path, helper: Any, pair: Any, *, prep: bool) -> None:
     allocation(helper, prep=prep)
     verify_source(value, helper, inside=True)
-    scratch = helper.absolute_path(os.environ.get("TMPDIR", ""))
+    scratch = runtime_files.absolute_path(os.environ.get("TMPDIR", ""))
     if scratch == Path("/tmp") or scratch.is_relative_to("/tmp"):
         raise ValueError("Comparison scratch cannot use an unverified /tmp path")
     helper.disk_directory(scratch)
-    environment = pair.worker_environment(dict(os.environ), scratch, os.environ.get("CUDA_VISIBLE_DEVICES", ""))
+    environment = runtime_environment.worker_environment(
+        dict(os.environ), scratch, os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    )
     os.environ.update(environment)
     experiment = Path(value["experiment_root"])
     if prep:
@@ -312,15 +323,17 @@ def inside(value: dict[str, Any], deployment: Path, helper: Any, pair: Any, *, p
         record = {"python_version": platform.python_version(), "torch_version": torch.__version__,
                   "transformers_version": transformers.__version__, "datasets_version": datasets.__version__,
                   "spikingjelly_path": spikingjelly.__file__,
-                  "deployment_sha256": helper.sha256(deployment), "package_versions": versions}
-        helper.atomic_json(experiment / "ubai" / "prep-environment.json", record)
+                  "deployment_sha256": identity.sha256_file(deployment), "package_versions": versions}
+        runtime_files.atomic_json(experiment / "ubai" / "prep-environment.json", record)
     else:
         codes = run_workers(value, scratch, pair)
-        record = {"source_commit": value["source_commit"], "deployment_sha256": helper.sha256(deployment),
+        record = {"source_commit": value["source_commit"], "deployment_sha256": identity.sha256_file(deployment),
                   "job_id": os.environ["SLURM_JOB_ID"], "node": socket.gethostname(),
                   "models": dict(zip(MODELS, codes)), "gpus": 2, "cpus_per_worker": 4}
-        helper.immutable(experiment / "ubai" / f'pair-result-{os.environ["SLURM_JOB_ID"]}-{time.time_ns()}.json',
-                         helper.json_bytes(record))
+        runtime_files.immutable(
+            experiment / "ubai" / f'pair-result-{os.environ["SLURM_JOB_ID"]}-{time.time_ns()}.json',
+            runtime_files.json_bytes(record),
+        )
         if any(codes):
             raise RuntimeError("One or more comparison models failed; completed results are preserved")
 
@@ -346,7 +359,9 @@ def host(value: dict[str, Any], deployment: Path, helper: Any, pair: Any, *, pre
     try:
         scratch = runtime / "scratch"
         (scratch / "xdg-runtime").mkdir(mode=0o700)
-        environment = pair.worker_environment(dict(os.environ), scratch, os.environ.get("CUDA_VISIBLE_DEVICES", ""))
+        environment = runtime_environment.worker_environment(
+            dict(os.environ), scratch, os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        )
         for key, name in (("ENROOT_RUNTIME_PATH", "enroot-runtime"),
                           ("ENROOT_DATA_PATH", "enroot-data"), ("ENROOT_CACHE_PATH", "enroot-cache")):
             (scratch / name).mkdir(mode=0o700)
@@ -359,10 +374,10 @@ def host(value: dict[str, Any], deployment: Path, helper: Any, pair: Any, *, pre
         if prep:
             environment_record = json.loads((Path(value["host_experiment_root"]) / "ubai" / "prep-environment.json").read_text())
             if (environment_record.get("python_version") != "3.12.13"
-                    or environment_record.get("deployment_sha256") != helper.sha256(deployment)):
+                    or environment_record.get("deployment_sha256") != identity.sha256_file(deployment)):
                 raise ValueError("Portable environment verification is incomplete")
-            helper.immutable(deployment.parent / "prep-result.json", helper.json_bytes({
-                "state": "verified", "deployment_sha256": helper.sha256(deployment),
+            runtime_files.immutable(deployment.parent / "prep-result.json", runtime_files.json_bytes({
+                "state": "verified", "deployment_sha256": identity.sha256_file(deployment),
                 "source_commit": value["source_commit"], "python_version": "3.12.13",
                 "job_id": job, "node": socket.gethostname(), **records,
             }))
@@ -385,7 +400,7 @@ def main() -> None:
     parser.add_argument("--inside", action="store_true")
     arguments = parser.parse_args()
     helper, pair = load_helpers()
-    deployment = helper.absolute_path(str(arguments.deployment))
+    deployment = runtime_files.absolute_path(str(arguments.deployment))
     value = json.loads(deployment.read_text())
     validate_deployment(value, helper)
     previous = {}

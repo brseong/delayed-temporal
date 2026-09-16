@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import io
 import json
 import math
-import os
 from pathlib import Path
 import re
 import sys
-import tempfile
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[2]
@@ -20,6 +17,8 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from scripts.analysis.vit_comparison_costs import estimate_vit_cost
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity as runtime_identity
 
 
 MODEL_KEYS = (
@@ -27,11 +26,6 @@ MODEL_KEYS = (
     "imagenet_vit_large",
 )
 KINDS = ("collect", "dense", "spiking")
-
-
-def _hash(value: Any) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
-                                     allow_nan=False).encode()).hexdigest()
 
 
 def _integer(value: Any, name: str, *, minimum: int = 0) -> int:
@@ -236,20 +230,6 @@ def _csv(rows: list[dict], *, empty_fields: tuple[str, ...] = ()) -> str:
     return stream.getvalue()
 
 
-def _atomic_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, name = tempfile.mkstemp(prefix=".comparison-", dir=path.parent)
-    try:
-        with os.fdopen(handle, "w") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(name, path)
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
-
-
 def build_outputs(experiment: dict, validated_runs: list[dict], output_dir: Path,
                   *, require_complete: bool = False) -> dict:
     """Write progressive CSVs and complete-only LaTeX with a final status marker."""
@@ -259,10 +239,10 @@ def build_outputs(experiment: dict, validated_runs: list[dict], output_dir: Path
         raise ValueError("Four calibrations and eight evaluations must complete")
     output_dir = Path(output_dir)
     previous_path = output_dir / "provenance.json"
-    identity = _hash(experiment)
+    experiment_identity = runtime_identity.json_sha256(experiment)
     if previous_path.exists():
         previous = json.loads(previous_path.read_text())
-        if previous.get("experiment_content_sha256") != identity:
+        if previous.get("experiment_content_sha256") != experiment_identity:
             raise ValueError("Output directory belongs to a different experiment")
         if previous.get("complete") and not complete:
             raise ValueError("Refusing to replace complete results with partial results")
@@ -275,12 +255,14 @@ def build_outputs(experiment: dict, validated_runs: list[dict], output_dir: Path
         files["ours_rows.tex"] = render_latex_rows(summary)
     provenance = {
         "tag": experiment["tag"], "complete": complete,
-        "experiment_content_sha256": identity, "experiment": experiment,
-        "validated_results_content_sha256": _hash(normalized),
+        "experiment_content_sha256": experiment_identity, "experiment": experiment,
+        "validated_results_content_sha256": runtime_identity.json_sha256(normalized),
         "validated_results": normalized,
         "calibrations_complete": sum(kind == "collect" for _, kind in indexed),
         "evaluations_complete": sum(kind != "collect" for _, kind in indexed),
-        "files": {name: hashlib.sha256(text.encode()).hexdigest() for name, text in files.items()},
+        "files": {
+            name: runtime_identity.sha256_bytes(text.encode()) for name, text in files.items()
+        },
         "cost_assumptions": estimate_vit_cost(experiment["models"][0]["checkpoint_config"])["assumptions"],
         "publication_note": "ImageNet results use fixed validation 5k; CIFAR-10 uses test 10k. "
                             "ANN and SNN use identical examples and preprocessing. "
@@ -288,8 +270,11 @@ def build_outputs(experiment: dict, validated_runs: list[dict], output_dir: Path
     }
     # A consumer must verify every file against provenance, which is replaced last.
     for name, content in files.items():
-        _atomic_text(output_dir / name, content)
-    _atomic_text(previous_path, json.dumps(provenance, indent=2, sort_keys=True, allow_nan=False) + "\n")
+        runtime_files.atomic_text(output_dir / name, content)
+    runtime_files.atomic_text(
+        previous_path,
+        json.dumps(provenance, indent=2, sort_keys=True, allow_nan=False) + "\n",
+    )
     return provenance
 
 
@@ -304,13 +289,14 @@ def verify_publication_bundle(output_dir: Path) -> dict:
     if set(provenance["files"]) != {"raw_runs.csv", "summary.csv", "sop_breakdown.csv", "ours_rows.tex"}:
         raise ValueError("Unexpected comparison bundle members")
     for name, digest in provenance["files"].items():
-        if hashlib.sha256((output_dir / name).read_bytes()).hexdigest() != digest:
+        if runtime_identity.sha256_file(output_dir / name) != digest:
             raise ValueError(f"Generated artifact checksum mismatch: {name}")
     experiment = provenance["experiment"]
-    if _hash(experiment) != provenance["experiment_content_sha256"]:
+    if runtime_identity.json_sha256(experiment) != provenance["experiment_content_sha256"]:
         raise ValueError("Experiment provenance checksum mismatch")
     runs, indexed = validate_results(experiment, provenance["validated_results"])
-    if len(indexed) != 12 or _hash(runs) != provenance["validated_results_content_sha256"]:
+    if (len(indexed) != 12
+            or runtime_identity.json_sha256(runs) != provenance["validated_results_content_sha256"]):
         raise ValueError("Validated result provenance checksum mismatch")
     summary, breakdown = comparison_rows(experiment, indexed)
     reproduced = {

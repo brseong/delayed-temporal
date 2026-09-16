@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.util
 import json
 import os
@@ -17,20 +16,20 @@ import time
 from typing import Any
 import uuid
 
+REPO = Path(__file__).resolve().parents[3]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from scripts.runtime import environment as runtime_environment
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
+
 
 HELPER = 'scripts/experiments/ubai/prepare_calibrated_three_sweeps_ubai.py'
 WORKER = 'scripts/experiments/run_calibrated_three_sweep_task.py'
 CONTRACT = 'scripts/experiments/calibrated_three_sweeps.py'
 PAIR_SCRIPT = 'scripts/experiments/ubai/run_calibrated_three_sweep_pair.py'
 PAIR_BATCH = 'scripts/experiments/ubai/calibrated_three_sweep_pair.sbatch'
-
-
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open('rb') as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def load_module(path: Path, name: str) -> Any:
@@ -99,7 +98,8 @@ def controller_identity(root: Path, commit: str, expected_files: dict[str, str])
     if head != commit or dirty:
         raise ValueError('Controller checkout differs from its frozen commit')
     for relative, digest in expected_files.items():
-        if not re.fullmatch(r'[0-9a-f]{64}', digest) or sha256(root / relative) != digest:
+        if (not re.fullmatch(r'[0-9a-f]{64}', digest)
+                or identity.sha256_file(root / relative) != digest):
             raise ValueError(f'Paired controller file checksum mismatch: {relative}')
 
 
@@ -126,7 +126,7 @@ def validate_pair(pair_path: Path, experiment_root: Path, deployment_path: Path,
     # These are raw file hashes, not reserialized JSON object hashes.
     for path, field in ((experiment_root / 'experiment.json', 'experiment_sha256'),
                         (deployment_path, 'deployment_sha256')):
-        if pair.get(field) != sha256(path):
+        if pair.get(field) != identity.sha256_file(path):
             raise ValueError(f'Paired manifest identity mismatch: {field}')
     experiment = json.loads((experiment_root / 'experiment.json').read_text())
     if pair.get('source_commit') != experiment['source_commit'] or pair.get('controller_commit') != commit:
@@ -141,7 +141,7 @@ def validate_pair(pair_path: Path, experiment_root: Path, deployment_path: Path,
     tasks = []
     for entry in entries:
         task_path = experiment_root / 'tasks' / (entry['run_id'] + '.json')
-        if entry.get('task_sha256') != sha256(task_path):
+        if entry.get('task_sha256') != identity.sha256_file(task_path):
             raise ValueError('Paired task raw file checksum mismatch')
         task = json.loads(task_path.read_text())
         contract.validate_task(task, experiment)
@@ -172,9 +172,11 @@ def reserve_second_scratch(helper: Any, base: Path, job_id: str, pair_id: str) -
         owner = {'uid': os.getuid(), 'job_id': job_id, 'task_id': pair_id + '-scratch',
                  'scratch_bytes': reservation}
         try:
-            helper.immutable(path / '.owner.json', helper.json_bytes(owner))
-            helper.atomic_json(base / '.calibrated-three-sweep-reservations.json',
-                               live + [{'path': str(path), **owner}])
+            runtime_files.immutable(path / '.owner.json', runtime_files.json_bytes(owner))
+            runtime_files.atomic_json(
+                base / '.calibrated-three-sweep-reservations.json',
+                live + [{'path': str(path), **owner}],
+            )
         except BaseException:
             if (path.is_dir() and not path.is_symlink() and path.parent == base
                     and path.stat().st_uid == os.getuid()
@@ -213,28 +215,6 @@ def pair_container_command(helper: Any, deployment: dict[str, Any], runtime: Pat
         '--controller-commit', commit]
 
 
-def worker_environment(base: dict[str, str], scratch: Path, gpu: str) -> dict[str, str]:
-    environment = dict(base)
-    for key in ('WANDB_API_KEY', 'HF_TOKEN', 'HUGGING_FACE_HUB_TOKEN'):
-        environment.pop(key, None)
-    environment['CUDA_VISIBLE_DEVICES'] = gpu
-    for key in ('TMPDIR', 'TMP', 'TEMP'):
-        environment[key] = str(scratch)
-    for key, name in (
-        ('XDG_CACHE_HOME', 'cache'), ('XDG_RUNTIME_DIR', 'xdg-runtime'), ('HF_HOME', 'huggingface'),
-        ('HF_DATASETS_CACHE', 'huggingface/datasets'), ('HUGGINGFACE_HUB_CACHE', 'huggingface/hub'),
-        ('HF_MODULES_CACHE', 'huggingface/modules'), ('TORCH_HOME', 'torch'),
-        ('TORCHINDUCTOR_CACHE_DIR', 'torchinductor'), ('TRITON_CACHE_DIR', 'triton'),
-        ('CUDA_CACHE_PATH', 'cuda'), ('CUPY_CACHE_DIR', 'cupy'), ('NUMBA_CACHE_DIR', 'numba'),
-        ('PIP_CACHE_DIR', 'pip'), ('MPLCONFIGDIR', 'matplotlib'), ('WANDB_DIR', 'wandb'),
-    ):
-        environment[key] = str(scratch / name)
-    for key in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS'):
-        environment[key] = '4'
-    environment.update(WANDB_MODE='disabled', WANDB_DISABLED='true', PYTHONDONTWRITEBYTECODE='1')
-    return environment
-
-
 def reap_children(children: list[subprocess.Popen]) -> None:
     for child in children:
         if child.poll() is None:
@@ -268,7 +248,9 @@ def run_workers(source: Path, experiment: Path, tasks: list[dict[str, Any]], scr
             task_scratch = scratch / f'worker-{index}'
             task_scratch.mkdir(mode=0o700)
             (task_scratch / 'xdg-runtime').mkdir(mode=0o700)
-            environment = worker_environment(dict(os.environ), task_scratch, devices[index])
+            environment = runtime_environment.worker_environment(
+                dict(os.environ), task_scratch, devices[index]
+            )
             affinity = set(cpus[4 * index:4 * index + 4])
             command = ['/opt/conda/envs/dt/bin/python', str(source / WORKER),
                        '--experiment', str(experiment / 'experiment.json'),
@@ -291,7 +273,7 @@ def run_workers(source: Path, experiment: Path, tasks: list[dict[str, Any]], scr
 def inside(source: Path, deployment_path: Path, pair_path: Path,
            controller: Path, commit: str) -> int:
     deployment = json.loads(deployment_path.read_text())
-    if sha256(source / HELPER) != deployment['script_sha256'][HELPER]:
+    if identity.sha256_file(source / HELPER) != deployment['script_sha256'][HELPER]:
         raise ValueError('Frozen helper content differs')
     helper = load_module(source / HELPER, '_frozen_pair_helper_inside')
     helper.require_compute_allocation()
@@ -309,15 +291,17 @@ def inside(source: Path, deployment_path: Path, pair_path: Path,
                       'gpu_uuids': devices}, sort_keys=True), flush=True)
     started = time.time_ns()
     codes = run_workers(source, experiment, tasks, scratch, ','.join(devices))
-    record = {'pair_id': pair['pair_id'], 'pair_manifest_sha256': sha256(pair_path),
+    record = {'pair_id': pair['pair_id'], 'pair_manifest_sha256': identity.sha256_file(pair_path),
               'controller_commit': commit, 'controller_sha256': pair['controller_sha256'],
               'source_commit': pair['source_commit'], 'experiment_sha256': pair['experiment_sha256'],
               'controller_source': str(controller), 'allocation_gpus': 2, 'cpus_per_worker': 4,
               'visible_input': visible, 'gpu_uuids': devices,
               'job_id': os.environ['SLURM_JOB_ID'],
               'tasks': [{'run_id': task['run_id'], 'exit_code': code} for task, code in zip(tasks, codes)]}
-    helper.immutable(experiment / 'pair-runs' / pair['pair_id'] / f'{os.environ["SLURM_JOB_ID"]}-{started}.json',
-                     helper.json_bytes(record))
+    runtime_files.immutable(
+        experiment / 'pair-runs' / pair['pair_id'] / f'{os.environ["SLURM_JOB_ID"]}-{started}.json',
+        runtime_files.json_bytes(record),
+    )
     return 0 if codes == [0, 0] else 1
 
 
@@ -328,12 +312,12 @@ def host() -> None:
     pair_path = Path(os.environ['PAIR_MANIFEST'])
     commit = os.environ['CONTROLLER_COMMIT']
     deployment = json.loads(deployment_path.read_text())
-    if sha256(source / HELPER) != deployment['script_sha256'][HELPER]:
+    if identity.sha256_file(source / HELPER) != deployment['script_sha256'][HELPER]:
         raise ValueError('Frozen bootstrap helper content differs')
     helper = load_module(source / HELPER, '_frozen_pair_helper_host')
     job_id = helper.require_compute_allocation()
     for value in (str(source), str(controller), str(deployment_path), str(pair_path)):
-        helper.absolute_path(value)
+        runtime_files.absolute_path(value)
     if (os.environ.get('SLURM_CPUS_PER_TASK') != '8' or os.environ.get('SLURM_NTASKS', '1') != '1'
             or os.environ.get('SLURM_MEM_PER_NODE') != '131072'
             or os.environ.get('SLURM_GPUS_ON_NODE', '2') != '2'

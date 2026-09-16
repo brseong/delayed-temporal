@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import fcntl
-import hashlib
 import json
 import math
 import os
@@ -22,7 +21,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.runtime.files import atomic_json
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
+from scripts.runtime import local_gpu
 
 
 ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", "/data/delayed-temporal/artifacts"))
@@ -47,25 +48,8 @@ CALIBRATION_SAMPLES = 5000
 BATCH_SIZE = 8
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
-
-
-def write_new_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("x") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True, allow_nan=False)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
 
 
 def source_identity(source: Path, expected_commit: str, family: str) -> dict[str, str]:
@@ -80,15 +64,19 @@ def source_identity(source: Path, expected_commit: str, family: str) -> dict[str
         source / "scripts/evaluation" / "text_calibration_runtime.py",
         source / "scripts/evaluation" / f"error_analysis_{family}.py",
         source / "scripts/runtime" / "files.py",
+        source / "scripts/runtime" / "identity.py",
         source / "scripts/runtime" / "local_gpu.py",
         Path(__file__).resolve(),
     ]
-    return {str(path.relative_to(source)): sha256_file(path) for path in sorted(set(paths))}
+    return {
+        str(path.relative_to(source)): identity.sha256_file(path)
+        for path in sorted(set(paths))
+    }
 
 
 def checkpoint_identity(path: Path) -> dict[str, str]:
     return {
-        str(item.relative_to(path)): sha256_file(item)
+        str(item.relative_to(path)): identity.sha256_file(item)
         for item in sorted(path.rglob("*"))
         if item.is_file()
     }
@@ -101,7 +89,7 @@ def dataset_identity(path: Path, expected_fingerprint: str, expected_samples: in
     if str(dataset._fingerprint) != expected_fingerprint or len(dataset) != expected_samples:
         raise ValueError("self-contained text dataset identity differs")
     files = {
-        str(item.relative_to(path)): sha256_file(item)
+        str(item.relative_to(path)): identity.sha256_file(item)
         for item in sorted(path.rglob("*"))
         if item.is_file()
     }
@@ -109,15 +97,15 @@ def dataset_identity(path: Path, expected_fingerprint: str, expected_samples: in
             "samples": expected_samples, "files_sha256": files}
 
 
-def verify_dataset_snapshot(identity: dict[str, Any]) -> None:
+def verify_dataset_snapshot(snapshot: dict[str, Any]) -> None:
     """Reject tokenization or another phase that mutates the saved Dataset tree."""
-    path = Path(identity["path"])
+    path = Path(snapshot["path"])
     files = {
-        str(item.relative_to(path)): sha256_file(item)
+        str(item.relative_to(path)): identity.sha256_file(item)
         for item in sorted(path.rglob("*"))
         if item.is_file()
     }
-    if files != identity["files_sha256"]:
+    if files != snapshot["files_sha256"]:
         raise ValueError("self-contained text dataset files changed during evaluation")
 
 
@@ -289,11 +277,11 @@ def update_progress(output: Path, family: str, phase: str, log_path: Path) -> No
                         "estimated_remaining_seconds": float(eta)}
     value = {"family": family, "phase": phase, "state": "running", "progress": progress,
              "updated_at": time.time()}
-    atomic_json(output / "status.json", value)
+    runtime_files.atomic_json(output / "status.json", value)
     if progress and "batch" in progress:
         snapshot = output / "progress" / f"{phase}-batch-{int(progress['batch']):04d}.json"
         if not snapshot.exists():
-            write_new_json(snapshot, value)
+            runtime_files.new_json(snapshot, value)
 
 
 def run_phase(command: list[str], *, output: Path, family: str, phase: str,
@@ -403,22 +391,21 @@ def main() -> None:
         if canonical(json.loads(manifest_path.read_text())) != canonical(manifest):
             raise ValueError("existing model manifest differs")
     else:
-        write_new_json(manifest_path, manifest)
+        runtime_files.new_json(manifest_path, manifest)
     runtime.mkdir(parents=True, exist_ok=True)
     filesystem = subprocess.check_output(["findmnt", "-n", "-o", "FSTYPE", "-T", str(runtime)], text=True).strip()
     if filesystem in {"tmpfs", "ramfs"}:
         raise RuntimeError("comparison runtime must use a disk filesystem")
 
     sys.path.insert(0, str(args.source_root))
-    from scripts.runtime.local_gpu import gpu_activity, gpu_available
     lock_path = ARTIFACTS / "runtime/gpu-locks" / f"gpu-{args.gpu}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.host_label == "local":
             for check in range(2):
-                sample = gpu_activity(gpu_ids=(args.gpu,))[args.gpu]
-                if not gpu_available(sample):
+                sample = local_gpu.gpu_activity(gpu_ids=(args.gpu,))[args.gpu]
+                if not local_gpu.gpu_available(sample):
                     raise RuntimeError(f"GPU {args.gpu} is occupied")
                 if check == 0:
                     time.sleep(10)
@@ -441,7 +428,7 @@ def main() -> None:
             ))),
         )
         state: dict[str, Any] = {"state": "running", "family": args.family, "phases": {}}
-        atomic_json(output / "result.json", state)
+        runtime_files.atomic_json(output / "result.json", state)
         try:
             sites: set[str] | None = None
             for phase in ("collect", "ann", "snn"):
@@ -451,7 +438,7 @@ def main() -> None:
                 if phase_path.exists():
                     phase_result = json.loads(phase_path.read_text())
                     log_path = output / phase_result["log_file"]
-                    if sha256_file(log_path) != phase_result["log_sha256"]:
+                    if identity.sha256_file(log_path) != phase_result["log_sha256"]:
                         raise ValueError("completed phase log hash differs")
                     if phase == "collect":
                         _, sites = parse_sites(output / "calibration.json", config["sites"])
@@ -473,21 +460,22 @@ def main() -> None:
                 log_text = log_path.read_text()
                 phase_result = {"phase": phase, "elapsed_seconds": elapsed,
                                 "log_file": str(log_path.relative_to(output)),
-                                "log_sha256": sha256_file(log_path)}
+                                "log_sha256": identity.sha256_file(log_path)}
                 if phase == "collect":
                     if log_text.count("Saved calibration artifact") != 1:
                         raise ValueError("calibration completion marker is missing or duplicated")
                     metadata, sites = parse_sites(output / "calibration.json", config["sites"])
-                    phase_result.update(calibration_sha256=sha256_file(output / "calibration.json"),
+                    phase_result.update(
+                        calibration_sha256=identity.sha256_file(output / "calibration.json"),
                                         calibration_metadata=metadata,
                                         calibration_site_count=len(sites))
                 else:
                     phase_result["metrics"] = parse_evaluation(
                         log_text, args.family, sites if phase == "snn" else None,
                     )
-                write_new_json(phase_path, phase_result)
+                runtime_files.new_json(phase_path, phase_result)
                 state["phases"][phase] = phase_result
-                atomic_json(output / "result.json", state)
+                runtime_files.atomic_json(output / "result.json", state)
                 verify_dataset_snapshot(manifest["calibration_dataset"])
                 verify_dataset_snapshot(manifest["evaluation_dataset"])
             ann = state["phases"]["ann"]["metrics"]
@@ -499,14 +487,14 @@ def main() -> None:
             source_identity(args.source_root, args.expected_commit, evaluator_family)
             verify_dataset_snapshot(manifest["calibration_dataset"])
             verify_dataset_snapshot(manifest["evaluation_dataset"])
-            atomic_json(output / "result.json", state)
-            atomic_json(output / "status.json", {"state": "complete", "family": args.family,
+            runtime_files.atomic_json(output / "result.json", state)
+            runtime_files.atomic_json(output / "status.json", {"state": "complete", "family": args.family,
                                                    "updated_at": time.time()})
             print(canonical(state), flush=True)
         except BaseException as error:
             state.update(state="failed", error_type=type(error).__name__, error=str(error))
-            atomic_json(output / "result.json", state)
-            atomic_json(output / "status.json", {"state": "failed", "family": args.family,
+            runtime_files.atomic_json(output / "result.json", state)
+            runtime_files.atomic_json(output / "status.json", {"state": "failed", "family": args.family,
                                                    "error_type": type(error).__name__,
                                                    "error": str(error), "updated_at": time.time()})
             raise

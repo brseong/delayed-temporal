@@ -16,7 +16,13 @@ Several completed campaigns are source-hashed in their artifacts. Their recorded
 
 ## Reusable runtime support
 
-`runtime/` contains host and process helpers that do not know about model families or scientific conditions. GPU admission, atomic status writes, and Slurm output parsing live here instead of being imported from an unrelated campaign controller.
+`runtime/` contains host and process helpers that do not know about model families or scientific conditions. It is the only owner of filesystem writes, artifact identity, device admission, worker environments, and Slurm output parsing.
+
+- `files.py` owns safe paths and durable mutable or immutable writes.
+- `identity.py` owns file, structured record, artifact, package source, and source checkout identities.
+- `environment.py` owns worker scratch and cache environment variables.
+- `local_gpu.py` owns device discovery, idle admission, and checks for one allocated device.
+- `slurm.py` owns scheduler queue parsing.
 
 ## Analysis, setup, and verification
 
@@ -39,5 +45,4 @@ analysis     ->  artifacts
 verification ->  any maintained layer
 ```
 
-Do not import `scripts.experiments.run_*` merely to reuse a filesystem, GPU, or scheduler helper. Move that helper to `scripts/runtime/` and test it independently.
-
+Do not import a campaign module to reuse a filesystem, identity, environment, device, or scheduler helper. Move the behavior and all callers to `scripts/runtime/`, remove the superseded definition, and test the public invariant there.

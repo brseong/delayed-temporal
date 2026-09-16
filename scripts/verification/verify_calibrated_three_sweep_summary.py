@@ -20,6 +20,7 @@ from scripts.analysis.summarize_calibrated_three_sweeps import (
     aggregate_results, summarize, T95_THREE_SEEDS,
 )
 from scripts.experiments import calibrated_three_sweeps as contract
+from scripts.runtime import identity
 
 
 def expect_error(action, message: str) -> None:
@@ -50,7 +51,7 @@ class Fixture:
         for index, theta in enumerate(contract.theta_grid()):
             path = root / f"calibration/theta_{index:02d}.json"
             write_json(path, {"theta": theta, "synthetic": True})
-            self.table_hashes[index] = contract.sha256_file(path)
+            self.table_hashes[index] = identity.sha256_file(path)
         self.results: dict[str, dict] = {}
         for index in range(9):
             for kind in ("collect", "theta_train", "theta_validation"):
@@ -67,8 +68,8 @@ class Fixture:
             ratio: float = 0.0, host: str = "local") -> dict:
         task = contract.make_task(self.exp, kind, theta_index=index, seed=seed, rt=rt, ratio=ratio,
             calibration_sha256="" if kind in {"collect", "dense"} else self.table_hashes[index])
-        result = {**task, "success": True, "task_sha256": contract.task_sha256(task),
-            "experiment_sha256": contract.task_sha256(self.exp), "host_label": host,
+        result = {**task, "success": True, "task_sha256": identity.json_sha256(task),
+            "experiment_sha256": identity.json_sha256(self.exp), "host_label": host,
             "elapsed_seconds": 10.0, "calibration_sha256": self.table_hashes[index]}
         log = self.root / task["log_file"]
         log.parent.mkdir(parents=True, exist_ok=True)
@@ -92,7 +93,7 @@ class Fixture:
                 result["sites"] = [{"site": "layer.0", **counts,
                                     "deadline_ulp_min": 1e-14, "deadline_ulp_max": 2e-14}]
             log.write_text(f"Synthetic complete evaluation {task['run_id']}\n")
-        result["log_sha256"] = contract.sha256_file(log)
+        result["log_sha256"] = identity.sha256_file(log)
         write_json(self.root / "tasks" / (task["run_id"] + ".json"), task)
         write_json(self.root / task["result_file"], result)
         self.results[task["run_id"]] = result

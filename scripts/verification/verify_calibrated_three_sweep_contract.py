@@ -13,10 +13,13 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from scripts.experiments.calibrated_three_sweeps import (
     TAG, RATIOS, confirm_selection, make_task, make_tasks, parse_result_log,
-    rt_grid, select_theta, sha256_file, task_sha256, theta_grid, validate_experiment,
-    validate_result, validate_table, validate_task, write_immutable_json,
+    rt_grid, select_theta, theta_grid, validate_experiment,
+    validate_result, validate_table, validate_task,
 )
 from scripts.experiments.run_calibrated_three_sweep_task import check_source, evaluator_command, require_gpu
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
+from scripts.runtime import identity
 
 
 def must_reject(callback) -> None:
@@ -59,8 +62,8 @@ def table_fixture(experiment: dict, theta: float = 40.0) -> dict:
 
 
 def result_fixture(experiment: dict, task: dict, *, correct: int = 4250, host: str = "local") -> dict:
-    return {**task, "success": True, "task_sha256": task_sha256(task),
-            "experiment_sha256": task_sha256(experiment), "host_label": host,
+    return {**task, "success": True, "task_sha256": identity.json_sha256(task),
+            "experiment_sha256": identity.json_sha256(experiment), "host_label": host,
             "elapsed_seconds": 1.0, "correct": correct, "samples": task["expected_samples"],
             "accuracy": correct / task["expected_samples"], "prediction_sha256": "9" * 64}
 
@@ -162,7 +165,10 @@ def verify_logs(experiment: dict, root: Path) -> None:
     table = root / "calibration/theta_04.json"
     table.parent.mkdir()
     table.write_text(json.dumps(table_fixture(experiment)))
-    task = make_tasks(experiment, "noise", selected_theta=40.0, seed=0, calibration_sha256=sha256_file(table))[0]
+    task = make_tasks(
+        experiment, "noise", selected_theta=40.0, seed=0,
+        calibration_sha256=identity.sha256_file(table),
+    )[0]
     validate_table(table, task, experiment)
     for field, value in (("output_bounds_version", 2), ("gelu_evaluator_sha256", "9" * 64),
                          ("source_commit", "b" * 40)):
@@ -177,7 +183,10 @@ def verify_logs(experiment: dict, root: Path) -> None:
     write_log(log, task)
     parsed = parse_result_log(task, root)
     assert parsed["events"] == 100 and parsed["misses"] == 10 and parsed["underflows"] == 1
-    result = {**result_fixture(experiment, task), **parsed, "log_sha256": sha256_file(log)}
+    result = {
+        **result_fixture(experiment, task), **parsed,
+        "log_sha256": identity.sha256_file(log),
+    }
     validate_result(task, result, experiment, root)
     for field, value in (("task_sha256", "wrong"), ("correct", 0), ("accuracy", float("nan")),
                          ("samples", 4999), ("experiment_sha256", "wrong"), ("events", 200)):
@@ -189,9 +198,9 @@ def verify_logs(experiment: dict, root: Path) -> None:
         log.write_text(content)
         must_reject(lambda: parse_result_log(task, root))
     log.write_text(original)
-    write_immutable_json(root / "task.json", task)
-    write_immutable_json(root / "task.json", task)
-    must_reject(lambda: write_immutable_json(root / "task.json", {**task, "theta": 80}))
+    runtime_files.immutable_json(root / "task.json", task)
+    runtime_files.immutable_json(root / "task.json", task)
+    must_reject(lambda: runtime_files.immutable_json(root / "task.json", {**task, "theta": 80}))
 
 
 def verify_runtime(experiment: dict) -> None:

@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-import hashlib
 import json
 import math
-import os
 from pathlib import Path
 import re
-import tempfile
 from typing import Any
+
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
 
 TAG = "vit_base_calibrated_theta_rt_ratio_float64_bounds3_v1"
 RATIOS = (0.0, 1.0, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0)
@@ -24,50 +24,6 @@ def theta_grid() -> tuple[float, ...]:
 
 def rt_grid() -> tuple[float, ...]:
     return tuple(1e-5 * 10.0 ** (i / 8.0) for i in range(9))
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def task_sha256(value: dict[str, Any]) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
-                                     allow_nan=False).encode()).hexdigest()
-
-
-def write_immutable_json(path: Path, payload: dict[str, Any]) -> None:
-    content = json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if path.read_text() != content:
-            raise ValueError(f"Immutable identity changed: {path}")
-        return
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.link(temporary, path)
-        except FileExistsError:
-            if path.read_text() != content:
-                raise ValueError(f"Immutable identity changed: {path}")
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def safe_output(root: Path, relative: str) -> Path:
-    path = Path(relative)
-    target = (root / path).resolve()
-    if path.is_absolute() or not target.is_relative_to(root.resolve()) or ".." in path.parts:
-        raise ValueError("Task output must remain inside its experiment directory")
-    return target
 
 
 def make_task(experiment: dict[str, Any], kind: str, *, theta_index: int = 4,
@@ -221,7 +177,7 @@ def parse_result_log(task: dict[str, Any], root: Path) -> dict[str, Any]:
     spec = ManifestRun(**{key: task[key] for key in keys},
                        stage="sigma_margin" if noisy else "baseline", row={})
     parsed = asdict(parse_run_log(spec, root))
-    text = safe_output(root, task["log_file"]).read_text()
+    text = runtime_files.safe_output(root, task["log_file"]).read_text()
     if task["backend"] == "spiking":
         for line in ("GELU cubic implementation: phi_nl_psi_ed", "GELU cubic magnitude floor: 1e-05",
                      f"Calibration identity — mode: validate, sha256: {task['calibration_sha256']}"):
@@ -248,9 +204,9 @@ def validate_result(task: dict[str, Any], result: dict[str, Any], experiment: di
                 "evaluator_sha256", "calibration_evaluator_sha256"):
         if result.get(key) != task[key]:
             raise ValueError(f"Result identity mismatch: {key}")
-    if result.get("success") is not True or result.get("task_sha256") != task_sha256(task):
+    if result.get("success") is not True or result.get("task_sha256") != identity.json_sha256(task):
         raise ValueError("Incomplete result or task hash mismatch")
-    if result.get("experiment_sha256") != task_sha256(experiment):
+    if result.get("experiment_sha256") != identity.json_sha256(experiment):
         raise ValueError("Result experiment identity mismatch")
     if result.get("host_label") not in {"local", "ubai"}:
         raise ValueError("Result execution environment is required")
@@ -273,12 +229,12 @@ def validate_result(task: dict[str, Any], result: dict[str, Any], experiment: di
         if task["kind"] != "dense" and result.get("calibration_sha256") != task["calibration_sha256"]:
             raise ValueError("Result calibration identity mismatch")
     if output_root is not None:
-        log = safe_output(output_root, task["log_file"])
-        if sha256_file(log) != result.get("log_sha256"):
+        log = runtime_files.safe_output(output_root, task["log_file"])
+        if identity.sha256_file(log) != result.get("log_sha256"):
             raise ValueError("Completed log identity changed")
         if task["kind"] != "dense":
-            table = safe_output(output_root, task["calibration_file"])
-            if sha256_file(table) != result.get("calibration_sha256"):
+            table = runtime_files.safe_output(output_root, task["calibration_file"])
+            if identity.sha256_file(table) != result.get("calibration_sha256"):
                 raise ValueError("Frozen calibration table changed")
             validate_table(table, task, experiment)
         if task["kind"] == "collect":
@@ -329,7 +285,8 @@ def select_theta(training_results: list[dict[str, Any]]) -> dict[str, Any]:
         raise RangeInsufficient("Largest theta candidate is still improving by more than 0.1 percentage points")
     return {"status": "selected", "theta": theta_grid()[index], "theta_index": index,
             "training_correct": rows[index]["correct"], "training_samples": 5000,
-            "maximum_training_correct": highest, "training_result_sha256": task_sha256(rows[index]),
+            "maximum_training_correct": highest,
+            "training_result_sha256": identity.json_sha256(rows[index]),
             "source_commit": rows[index]["source_commit"],
             "checkpoint_sha256": rows[index]["checkpoint_sha256"],
             "calibration_sha256": rows[index]["calibration_sha256"]}
@@ -357,5 +314,6 @@ def confirm_selection(selection: dict[str, Any], validation_results: list[dict[s
         raise ValueError("Validation selection stability failed")
     return {**selection, "status": "confirmed", "validation_correct": validation[index]["correct"],
             "validation_samples": 5000, "validation_neighbor_indices": neighbors,
-            "replay_result_sha256": task_sha256(replay_result),
-            "validation_result_sha256": task_sha256(validation[index]), "full_validation": False}
+            "replay_result_sha256": identity.json_sha256(replay_result),
+            "validation_result_sha256": identity.json_sha256(validation[index]),
+            "full_validation": False}

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import math
 import os
@@ -17,6 +16,8 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from scripts.runtime import identity
+
 SCIENCE_KINDS = {"theta_train", "theta_validation", "theta_replay", "dense", "noise"}
 COUNTS = ("events", "misses", "deadline_events", "outputs", "underflows", "overflows")
 T95_THREE_SEEDS = 4.302652729911275
@@ -27,10 +28,6 @@ def _read(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Expected a JSON object: {path}")
     return value
-
-
-def _sha(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _same(left: float, right: float) -> bool:
@@ -246,7 +243,7 @@ def summarize(root: Path, *, snapshot_seed: int | None = None,
                 raise ValueError("Accuracy does not match correct and total counts")
             runs.append(result)
         completed.append(result)
-        hashes[run_id] = _sha(path)
+        hashes[run_id] = identity.sha256_file(path)
     noisy = [run for run in runs if run["kind"] == "noise"]
     expected_cells = {(float(rt), 4.0) for rt in rt_grid()} | {(1e-5, float(k)) for k in RATIOS}
     expected_thetas = set(map(float, theta_grid()))
@@ -308,8 +305,8 @@ def summarize(root: Path, *, snapshot_seed: int | None = None,
               for kind in ("theta_replay", "dense"))
     progress = {
         "format_version": 1, "source_commit": experiment["source_commit"],
-        "experiment_sha256": _sha(root / "experiment.json"),
-        "selection_sha256": _sha(selection_path) if selection else None,
+        "experiment_sha256": identity.sha256_file(root / "experiment.json"),
+        "selection_sha256": identity.sha256_file(selection_path) if selection else None,
         "selected_theta": selected, "snapshot_seed": snapshot_seed,
         "completed_evaluations": len(runs), "expected_evaluations": 71,
         "completed_noise_runs": len(noisy), "expected_noise_runs": 51,
@@ -327,7 +324,7 @@ def summarize(root: Path, *, snapshot_seed: int | None = None,
         if {key: value for key, value in previous.items() if key != "artifact_sha256"} != progress:
             raise ValueError("Refusing to replace an immutable snapshot with different evidence")
         for name, digest in previous.get("artifact_sha256", {}).items():
-            if Path(name).name != name or _sha(destination / name) != digest:
+            if Path(name).name != name or identity.sha256_file(destination / name) != digest:
                 raise ValueError("Saved snapshot output changed")
         return previous
     with tempfile.TemporaryDirectory(prefix=".summary-", dir=output_root) as temporary:
@@ -340,7 +337,9 @@ def summarize(root: Path, *, snapshot_seed: int | None = None,
         _write_csv(staging / "summary.csv", summary, ("kind", "theta", "accuracy_mean", "replicas"))
         _write_csv(staging / "site_summary.csv", sites, ("site", "events", "misses", "miss_rate"))
         _plot(staging, summary, progress, selected)
-        progress["artifact_sha256"] = {path.name: _sha(path) for path in sorted(staging.iterdir())}
+        progress["artifact_sha256"] = {
+            path.name: identity.sha256_file(path) for path in sorted(staging.iterdir())
+        }
         (staging / "progress.json").write_text(json.dumps(progress, indent=2, sort_keys=True) + "\n")
         if snapshot_seed is not None:
             os.replace(staging, destination)

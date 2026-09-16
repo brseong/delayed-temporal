@@ -27,9 +27,8 @@ The flat `.sh` files predate the manifest-based controllers and remain for repro
 
 1. Add model or metric behavior to an `error_analysis_*` evaluator or reusable `utils/` module.
 2. Keep scientific conditions and resume rules in a campaign contract, separate from host scheduling.
-3. Import generic host helpers from `scripts/runtime/`, never from another campaign controller.
+3. Import generic host helpers from their single owner in `scripts/runtime/`, never from another campaign controller or cluster deployment module.
 4. Write outputs only under `artifacts/` and keep generated files out of the source tree.
 5. Add a focused verifier and document the behavior in `lat.md/`.
 
-Source paths recorded in completed artifact manifests are evidence. Moving a frozen campaign requires an explicit compatibility migration; cosmetic directory changes alone are not sufficient.
-
+Source paths recorded in completed artifact manifests identify the historical commit. Current code does not retain duplicate implementations merely to reproduce an old path; use the recorded commit when reproducing that artifact.

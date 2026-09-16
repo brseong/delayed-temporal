@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,6 +19,12 @@ from typing import Any, Iterator
 
 
 REPO = Path(__file__).resolve().parents[3]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
+
 CANONICAL_REPO = Path('/data/delayed-temporal')
 CANONICAL_SOURCE = Path('/data/delayed-temporal-worktrees/calibrated-three-sweeps')
 CANONICAL_ASSETS = CANONICAL_REPO / 'artifacts/assets/theta-selection-v1'
@@ -33,61 +38,6 @@ TERMINAL_STATES = {
 }
 DISK_FILESYSTEMS = {'ext2', 'ext3', 'ext4', 'xfs', 'btrfs', 'zfs'}
 PACKAGE_SUBTREES = {'transformers': 'src', 'spikingjelly': 'spikingjelly'}
-IGNORED_SOURCE_DIRECTORIES = {'.git', '__pycache__', '.pytest_cache'}
-
-
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open('rb') as handle:
-        for block in iter(lambda: handle.read(8 * 1024 * 1024), b''):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def checked_hash(value: Any) -> str:
-    if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value):
-        raise ValueError('Invalid SHA-256 identity')
-    return value
-
-
-def absolute_path(value: Any) -> Path:
-    if not isinstance(value, str):
-        raise ValueError('An absolute path is required')
-    path = Path(value)
-    if not path.is_absolute() or '..' in path.parts or any(c in value for c in '\n\r\0,:'):
-        raise ValueError(f'Unsafe absolute path: {value!r}')
-    return path
-
-
-def json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, indent=2, sort_keys=True) + '\n').encode()
-
-
-def immutable(path: Path, content: bytes) -> None:
-    if path.exists():
-        if path.is_symlink() or path.read_bytes() != content:
-            raise ValueError(f'Refusing to replace a different preparation file: {path}')
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('xb') as handle:
-        handle.write(content)
-
-
-def atomic_json(path: Path, value: Any) -> None:
-    if path.is_symlink():
-        raise ValueError(f'Refusing a symlink: {path}')
-    descriptor, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)
-    try:
-        with os.fdopen(descriptor, 'wb') as handle:
-            handle.write(json_bytes(value))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-
-
 def source_identity(source: Path, expected: str) -> None:
     if not re.fullmatch(r'[0-9a-f]{40}', expected):
         raise ValueError('An exact source commit is required')
@@ -99,60 +49,6 @@ def source_identity(source: Path, expected: str) -> None:
         raise ValueError('Source HEAD or tracked files differ from the frozen deployment')
 
 
-def artifact_records(path: Path) -> tuple[str, list[dict[str, Any]]]:
-    """Use the same aggregate hash as scripts/setup/hash_artifact.py."""
-    if path.is_file():
-        files, root = [path], path.parent
-    elif path.is_dir():
-        files, root = sorted(item for item in path.rglob('*') if item.is_file()), path
-    else:
-        raise FileNotFoundError(path)
-    if not files:
-        raise ValueError(f'Empty artifact: {path}')
-    aggregate = hashlib.sha256()
-    records = []
-    for item in files:
-        stat = item.stat()
-        relative = item.relative_to(root).as_posix()
-        digest = sha256(item)
-        aggregate.update(f'{relative}\0{stat.st_size}\0{digest}\n'.encode())
-        records.append({'path': str(item), 'bytes': stat.st_size, 'mtime_ns': stat.st_mtime_ns,
-                        'sha256': digest})
-    return aggregate.hexdigest(), records
-
-
-def package_source_files(path: Path) -> list[Path]:
-    """Enumerate importable source trees without transient caches or Git metadata."""
-    if not path.is_dir():
-        raise ValueError(f'Package source must be a directory: {path}')
-    files = []
-    for current, directories, names in os.walk(path, followlinks=False):
-        root = Path(current)
-        directories[:] = sorted(name for name in directories if name not in IGNORED_SOURCE_DIRECTORIES)
-        if any((root / name).is_symlink() for name in directories):
-            raise ValueError('Package source directory symlinks require an explicit source root')
-        files.extend(root / name for name in names
-                     if name not in IGNORED_SOURCE_DIRECTORIES and not name.endswith('.pyc'))
-    return sorted(files)
-
-
-def package_source_identity(path: Path) -> tuple[str, list[dict[str, Any]]]:
-    """Hash relative source names, sizes, and bytes, independently of installation path."""
-    files = package_source_files(path)
-    if not files:
-        raise ValueError(f'Empty package source: {path}')
-    aggregate = hashlib.sha256()
-    records = []
-    for item in files:
-        stat = item.stat()
-        relative = item.relative_to(path).as_posix()
-        digest = sha256(item)
-        aggregate.update(f'{relative}\0{stat.st_size}\0{digest}\n'.encode())
-        records.append({'path': str(item), 'bytes': stat.st_size, 'mtime_ns': stat.st_mtime_ns,
-                        'sha256': digest})
-    return aggregate.hexdigest(), records
-
-
 def asset_paths(experiment: dict[str, Any]) -> list[dict[str, str]]:
     result = []
     for path_field, hash_field in (
@@ -160,10 +56,10 @@ def asset_paths(experiment: dict[str, Any]) -> list[dict[str, str]]:
         ('calibration_dataset_path', 'calibration_dataset_sha256'),
         ('dataset_path', 'dataset_sha256'),
     ):
-        path = absolute_path(experiment[path_field])
+        path = runtime_files.absolute_path(experiment[path_field])
         if not path.is_relative_to(CANONICAL_ASSETS):
             raise ValueError(f'Artifact must use the shared asset mount: {path}')
-        result.append({'path': str(path), 'aggregate_sha256': checked_hash(experiment[hash_field])})
+        result.append({'path': str(path), 'aggregate_sha256': identity.checked_hash(experiment[hash_field])})
     return result
 
 
@@ -174,7 +70,7 @@ def prepare(root: Path, output: Path, *, image: Path, host_base: Path,
     root = root.resolve()
     experiment_path = root / 'experiment.json'
     experiment = json.loads(experiment_path.read_text())
-    source = absolute_path(experiment.get('source_root', str(CANONICAL_SOURCE)))
+    source = runtime_files.absolute_path(experiment.get('source_root', str(CANONICAL_SOURCE)))
     source_identity(source, experiment['source_commit'])
     tag = experiment.get('tag', root.name)
     if not re.fullmatch(r'[A-Za-z0-9_.-]+', tag):
@@ -187,7 +83,7 @@ def prepare(root: Path, output: Path, *, image: Path, host_base: Path,
         raise ValueError('Both editable package source hashes are required')
     dependency_sources = [
         {'name': name, 'path': str(CANONICAL_ASSETS / 'source-checkouts' / name / subtree),
-         'aggregate_sha256': checked_hash(dependencies[name])}
+         'aggregate_sha256': identity.checked_hash(dependencies[name])}
         for name, subtree in PACKAGE_SUBTREES.items()
     ]
     host_assets = host_base / 'delayed-temporal-assets/theta-selection-v1'
@@ -199,23 +95,28 @@ def prepare(root: Path, output: Path, *, image: Path, host_base: Path,
         (Path('/lib/x86_64-linux-gnu/libpcre2-8.so.0'), 'tools/lib/libpcre2-8.so.0'),
         (Path('/lib/x86_64-linux-gnu/libz.so.1'), 'tools/lib/libz.so.1'),
     ):
-        immutable(output / relative, original.read_bytes())
+        runtime_files.immutable(output / relative, original.read_bytes())
         if relative in {'tools/git', 'tools/git.bin'}:
             (output / relative).chmod(0o755)
-        runtime_tools.append({'path': relative, 'sha256': sha256(output / relative)})
+        runtime_tools.append({'path': relative, 'sha256': identity.sha256_file(output / relative)})
     script_hashes = {}
     for name in ('calibrated_three_sweep_task.sbatch', 'calibrated_three_sweep_prep.sbatch',
                  'prepare_calibrated_three_sweeps_ubai.py'):
-        script_hashes['scripts/experiments/ubai/' + name] = sha256(source / 'scripts/experiments/ubai' / name)
-    script_hashes['scripts/experiments/run_calibrated_three_sweep_task.py'] = sha256(
+        script_hashes['scripts/experiments/ubai/' + name] = identity.sha256_file(source / 'scripts/experiments/ubai' / name)
+    script_hashes['scripts/experiments/run_calibrated_three_sweep_task.py'] = identity.sha256_file(
         source / 'scripts/experiments/run_calibrated_three_sweep_task.py')
+    for name in (
+        'scripts/runtime/files.py', 'scripts/runtime/identity.py',
+        'scripts/runtime/local_gpu.py',
+    ):
+        script_hashes[name] = identity.sha256_file(source / name)
     deployment = {
         'format_version': 1, 'state': 'prepared', 'tag': tag,
         'source_root': str(source), 'repository_root': str(CANONICAL_REPO),
         'assets_root': str(CANONICAL_ASSETS),
         'source_commit': experiment['source_commit'],
         'experiment_root': str(CANONICAL_REPO / 'artifacts/logs/noise_scan' / tag),
-        'experiment_sha256': sha256(experiment_path),
+        'experiment_sha256': identity.sha256_file(experiment_path),
         'script_sha256': script_hashes, 'runtime_tools': runtime_tools, 'assets': assets,
         'dependency_sources': dependency_sources,
         'assignment_required': True, 'paper_promotion_allowed': False,
@@ -228,15 +129,15 @@ def prepare(root: Path, output: Path, *, image: Path, host_base: Path,
             'host_deployment_root': str(host_experiment / 'ubai'),
             'host_git_metadata_paths': [str(host_git_common_dir)] if host_git_common_dir else [],
             'env_archive': str(host_assets / 'runtime/dt-environment.tar.zst'),
-            'env_archive_sha256': checked_hash(archive_sha256),
+            'env_archive_sha256': identity.checked_hash(archive_sha256),
             'env_unpacked_bytes': 96 * GIB, 'minimum_scratch_bytes': 8 * GIB,
             'expected_python': '3.12.13',
             'container_image': str(host_assets / 'runtime/ubuntu-24.04.sqsh'),
-            'container_image_sha256': sha256(image),
+            'container_image_sha256': identity.sha256_file(image),
         },
     }
     validate_deployment(deployment)
-    immutable(output / 'deployment.json', json_bytes(deployment))
+    runtime_files.immutable(output / 'deployment.json', runtime_files.json_bytes(deployment))
     return deployment
 
 
@@ -244,20 +145,20 @@ def validate_deployment(deployment: dict[str, Any]) -> None:
     if deployment.get('format_version') != 1 or deployment.get('state') != 'prepared':
         raise ValueError('Unsupported deployment')
     for key in ('source_root', 'repository_root', 'assets_root', 'experiment_root'):
-        absolute_path(deployment[key])
+        runtime_files.absolute_path(deployment[key])
     runtime = deployment['runtime']
     for key in ('host_source_root', 'host_assets_root', 'host_experiment_root',
                 'host_deployment_root', 'env_archive', 'container_image'):
-        absolute_path(runtime[key])
+        runtime_files.absolute_path(runtime[key])
     for key in ('env_archive_sha256', 'container_image_sha256'):
-        checked_hash(runtime[key])
+        identity.checked_hash(runtime[key])
     for metadata_path in runtime['host_git_metadata_paths']:
-        path = absolute_path(metadata_path)
+        path = runtime_files.absolute_path(metadata_path)
         if path.name != '.git':
             raise ValueError('A Git common metadata directory is required')
     if runtime.get('expected_python') != '3.12.13':
         raise ValueError('The portable Python version must remain 3.12.13')
-    checked_hash(deployment['experiment_sha256'])
+    identity.checked_hash(deployment['experiment_sha256'])
     for key, expected in (('env_unpacked_bytes', 96 * GIB), ('minimum_scratch_bytes', 8 * GIB)):
         if type(runtime[key]) is not int or runtime[key] != expected:
             raise ValueError(f'Unexpected disk reservation: {key}')
@@ -269,24 +170,24 @@ def validate_deployment(deployment: dict[str, Any]) -> None:
     for relative, digest in deployment['script_sha256'].items():
         if Path(relative).is_absolute() or '..' in Path(relative).parts:
             raise ValueError('Unsafe script path')
-        checked_hash(digest)
+        identity.checked_hash(digest)
     for item in deployment['runtime_tools']:
         if not item['path'].startswith('tools/') or '..' in Path(item['path']).parts:
             raise ValueError('Unsafe runtime tool path')
-        checked_hash(item['sha256'])
+        identity.checked_hash(item['sha256'])
     for item in deployment['assets']:
-        path = absolute_path(item['path'])
-        if not path.is_relative_to(absolute_path(deployment['assets_root'])):
+        path = runtime_files.absolute_path(item['path'])
+        if not path.is_relative_to(runtime_files.absolute_path(deployment['assets_root'])):
             raise ValueError('Asset lies outside its read-only mount')
-        checked_hash(item['aggregate_sha256'])
+        identity.checked_hash(item['aggregate_sha256'])
     dependencies = deployment.get('dependency_sources', [])
     if len(dependencies) != 2 or {item.get('name') for item in dependencies} != set(PACKAGE_SUBTREES):
         raise ValueError('Both editable package source roots are required')
     for item in dependencies:
-        expected = absolute_path(deployment['assets_root']) / 'source-checkouts' / item['name'] / PACKAGE_SUBTREES[item['name']]
-        if absolute_path(item['path']) != expected:
+        expected = runtime_files.absolute_path(deployment['assets_root']) / 'source-checkouts' / item['name'] / PACKAGE_SUBTREES[item['name']]
+        if runtime_files.absolute_path(item['path']) != expected:
             raise ValueError('Editable source must use its declared importable subtree')
-        checked_hash(item['aggregate_sha256'])
+        identity.checked_hash(item['aggregate_sha256'])
 
 
 def require_compute_allocation() -> str:
@@ -298,26 +199,26 @@ def require_compute_allocation() -> str:
 
 def verify_files(deployment: dict[str, Any], deployment_path: Path) -> None:
     runtime = deployment['runtime']
-    if deployment_path.parent.resolve() != absolute_path(runtime['host_deployment_root']).resolve():
+    if deployment_path.parent.resolve() != runtime_files.absolute_path(runtime['host_deployment_root']).resolve():
         raise ValueError('Deployment was not installed at its declared host path')
-    source = absolute_path(runtime['host_source_root'])
+    source = runtime_files.absolute_path(runtime['host_source_root'])
     source_identity(source, deployment['source_commit'])
     git_dir = Path(subprocess.check_output(
         ['git', '-C', str(source), 'rev-parse', '--absolute-git-dir'], text=True,
     ).strip()).resolve()
-    allowed_metadata = [source.resolve(), *(absolute_path(path).resolve()
+    allowed_metadata = [source.resolve(), *(runtime_files.absolute_path(path).resolve()
                                           for path in runtime['host_git_metadata_paths'])]
     if not any(git_dir.is_relative_to(root) for root in allowed_metadata):
         raise ValueError('External Git metadata has no declared container mount')
     paths = [(source / relative, digest) for relative, digest in deployment['script_sha256'].items()]
     paths += [(deployment_path.parent / item['path'], item['sha256'])
               for item in deployment['runtime_tools']]
-    paths.append((absolute_path(runtime['host_experiment_root']) / 'experiment.json',
+    paths.append((runtime_files.absolute_path(runtime['host_experiment_root']) / 'experiment.json',
                   deployment['experiment_sha256']))
-    paths += [(absolute_path(runtime[key]), runtime[key + '_sha256'])
+    paths += [(runtime_files.absolute_path(runtime[key]), runtime[key + '_sha256'])
               for key in ('env_archive', 'container_image')]
     for path, expected in paths:
-        if sha256(path) != expected:
+        if identity.sha256_file(path) != expected:
             raise ValueError(f'Checksum mismatch: {path}')
 
 
@@ -411,15 +312,19 @@ def admit_runtime(base: Path, job_id: str, task_id: str, runtime: dict[str, Any]
         path = Path(tempfile.mkdtemp(prefix=f'{RUNTIME_PREFIX}{job_id}-{task_id}-', dir=base))
         owner = {'uid': os.getuid(), 'job_id': job_id, 'task_id': task_id,
                  'scratch_bytes': runtime['minimum_scratch_bytes']}
-        immutable(path / '.owner.json', json_bytes(owner))
-        atomic_json(base / '.calibrated-three-sweep-reservations.json', live + [{'path': str(path), **owner}])
+        runtime_files.immutable(path / '.owner.json', runtime_files.json_bytes(owner))
+        runtime_files.atomic_json(
+            base / '.calibrated-three-sweep-reservations.json', live + [{'path': str(path), **owner}],
+        )
         try:
             (path / 'scratch').mkdir(mode=0o700)
-            extract_environment(absolute_path(runtime['env_archive']), path, runtime['env_unpacked_bytes'])
+            extract_environment(
+                runtime_files.absolute_path(runtime['env_archive']), path, runtime['env_unpacked_bytes'],
+            )
         except BaseException:
             owned_runtime(base, path)
             shutil.rmtree(path)
-            atomic_json(base / '.calibrated-three-sweep-reservations.json', live)
+            runtime_files.atomic_json(base / '.calibrated-three-sweep-reservations.json', live)
             raise
         return path
 
@@ -463,19 +368,21 @@ def release_runtime(base: Path, path: Path, job_id: str) -> None:
         shutil.rmtree(path)
         live = [{'path': str(other), **owned_runtime(base, other)}
                 for other in sorted(base.glob(RUNTIME_PREFIX + '*'))]
-        atomic_json(base / '.calibrated-three-sweep-reservations.json', live)
+        runtime_files.atomic_json(base / '.calibrated-three-sweep-reservations.json', live)
 
 
 def host_asset_path(deployment: dict[str, Any], canonical: str) -> Path:
-    relative = absolute_path(canonical).relative_to(absolute_path(deployment['assets_root']))
-    return absolute_path(deployment['runtime']['host_assets_root']) / relative
+    relative = runtime_files.absolute_path(canonical).relative_to(
+        runtime_files.absolute_path(deployment['assets_root'])
+    )
+    return runtime_files.absolute_path(deployment['runtime']['host_assets_root']) / relative
 
 
 def verify_assets(deployment: dict[str, Any]) -> list[dict[str, Any]]:
     records = []
     for asset in deployment['assets']:
         path = host_asset_path(deployment, asset['path'])
-        digest, files = artifact_records(path)
+        digest, files = identity.artifact_records(path)
         if digest != asset['aggregate_sha256']:
             raise ValueError(f'Artifact checksum mismatch: {path}')
         records.extend(files)
@@ -486,7 +393,7 @@ def verify_dependency_sources(deployment: dict[str, Any]) -> list[dict[str, Any]
     records = []
     for source in deployment['dependency_sources']:
         path = host_asset_path(deployment, source['path'])
-        digest, files = package_source_identity(path)
+        digest, files = identity.package_source_identity(path)
         if digest != source['aggregate_sha256']:
             raise ValueError(f'Editable package source checksum mismatch: {path}')
         records.extend(files)
@@ -496,7 +403,8 @@ def verify_dependency_sources(deployment: dict[str, Any]) -> list[dict[str, Any]
 def verify_preparation(deployment: dict[str, Any], deployment_path: Path) -> None:
     report_path = deployment_path.parent / 'prep-result.json'
     report = json.loads(report_path.read_text())
-    if report.get('state') != 'verified' or report.get('deployment_sha256') != sha256(deployment_path):
+    if (report.get('state') != 'verified'
+            or report.get('deployment_sha256') != identity.sha256_file(deployment_path)):
         raise ValueError('A matching successful CPU preparation is required')
     if (not report.get('asset_files') or not report.get('dependency_files')
             or report.get('python_version') != '3.12.13'):
@@ -507,18 +415,20 @@ def verify_preparation(deployment: dict[str, Any], deployment_path: Path) -> Non
     if expected_files != {record['path'] for record in report['asset_files']}:
         raise ValueError('Artifact file membership changed after CPU preparation')
     for record in report['asset_files']:
-        path = absolute_path(record['path'])
+        path = runtime_files.absolute_path(record['path'])
         if not any(path == root or path.is_relative_to(root) for root in expected_roots):
             raise ValueError('Preparation record lies outside the asset mounts')
         stat = path.stat()
         if (stat.st_size, stat.st_mtime_ns) != (record['bytes'], record['mtime_ns']):
             raise ValueError(f'Artifact changed after CPU checksum verification: {path}')
     dependency_roots = [host_asset_path(deployment, item['path']) for item in deployment['dependency_sources']]
-    expected_dependency_files = {str(path) for root in dependency_roots for path in package_source_files(root)}
+    expected_dependency_files = {
+        str(path) for root in dependency_roots for path in identity.package_source_files(root)
+    }
     if expected_dependency_files != {record['path'] for record in report['dependency_files']}:
         raise ValueError('Editable package file membership changed after CPU preparation')
     for record in report['dependency_files']:
-        path = absolute_path(record['path'])
+        path = runtime_files.absolute_path(record['path'])
         if not any(path.is_relative_to(root) for root in dependency_roots):
             raise ValueError('Preparation record lies outside the editable source mounts')
         stat = path.stat()
@@ -535,7 +445,7 @@ def task_identifier() -> str:
         index = os.environ.get('SLURM_ARRAY_TASK_ID', '')
         if not re.fullmatch(r'[0-9]+', index):
             raise ValueError('An array index is required with TASK_IDS_FILE')
-        rows = absolute_path(table).read_text().splitlines()
+        rows = runtime_files.absolute_path(table).read_text().splitlines()
         if len(rows) != len(set(rows)) or not rows:
             raise ValueError('Task list is empty or contains duplicate identifiers')
         if int(index) >= len(rows):
@@ -549,10 +459,10 @@ def task_identifier() -> str:
 def container_command(deployment: dict[str, Any], runtime_path: Path,
                       task_id: str, *, check_only: bool) -> list[str]:
     runtime = deployment['runtime']
-    source = absolute_path(deployment['source_root'])
-    repository = absolute_path(deployment['repository_root'])
-    assets = absolute_path(deployment['assets_root'])
-    experiment = absolute_path(deployment['experiment_root'])
+    source = runtime_files.absolute_path(deployment['source_root'])
+    repository = runtime_files.absolute_path(deployment['repository_root'])
+    assets = runtime_files.absolute_path(deployment['assets_root'])
+    experiment = runtime_files.absolute_path(deployment['experiment_root'])
     host_source, host_assets = runtime['host_source_root'], runtime['host_assets_root']
     mounts = [f'{host_source}:{source}:ro', f'{host_source}:{repository}:ro',
               f'{host_assets}:{assets}:ro',
@@ -648,7 +558,9 @@ def _execute_allocated(deployment_path: Path, *, check_only: bool) -> None:
         if os.environ.get('SLURM_JOB_PARTITION') not in {'gpu4', 'gpu5'}:
             raise ValueError('Only the RTX A6000 partitions gpu4 and gpu5 are supported')
         verify_preparation(deployment, deployment_path)
-        task_path = absolute_path(deployment['runtime']['host_experiment_root']) / 'tasks' / (task_id + '.json')
+        task_path = runtime_files.absolute_path(
+            deployment['runtime']['host_experiment_root']
+        ) / 'tasks' / (task_id + '.json')
         task = json.loads(task_path.read_text())
         if task.get('run_id') != task_id:
             raise ValueError('Task file and run identifier differ')
@@ -674,8 +586,8 @@ def _execute_allocated(deployment_path: Path, *, check_only: bool) -> None:
         if result:
             raise RuntimeError(f'Container task failed with exit status {result}')
         if check_only:
-            atomic_json(deployment_path.parent / 'prep-result.json', {
-                'state': 'verified', 'deployment_sha256': sha256(deployment_path),
+            runtime_files.atomic_json(deployment_path.parent / 'prep-result.json', {
+                'state': 'verified', 'deployment_sha256': identity.sha256_file(deployment_path),
                 'source_commit': deployment['source_commit'], 'python_version': '3.12.13',
                 'asset_files': assets, 'dependency_files': dependencies,
                 'job_id': job_id, 'node': socket.gethostname(),

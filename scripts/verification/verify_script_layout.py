@@ -11,6 +11,35 @@ EVALUATORS = tuple(
     ROOT / "scripts" / "evaluation" / f"error_analysis_{family}.py"
     for family in ("vit", "bert", "roberta", "gpt2")
 )
+GENERIC_OWNERS = {
+    "absolute_path": "scripts/runtime/files.py",
+    "atomic_json": "scripts/runtime/files.py",
+    "atomic_text": "scripts/runtime/files.py",
+    "immutable": "scripts/runtime/files.py",
+    "immutable_json": "scripts/runtime/files.py",
+    "json_bytes": "scripts/runtime/files.py",
+    "new_json": "scripts/runtime/files.py",
+    "safe_output": "scripts/runtime/files.py",
+    "artifact_records": "scripts/runtime/identity.py",
+    "artifact_identity": "scripts/runtime/identity.py",
+    "checked_hash": "scripts/runtime/identity.py",
+    "json_sha256": "scripts/runtime/identity.py",
+    "package_source_files": "scripts/runtime/identity.py",
+    "package_source_identity": "scripts/runtime/identity.py",
+    "sha256_file": "scripts/runtime/identity.py",
+    "sha256_bytes": "scripts/runtime/identity.py",
+    "verify_clean_checkout": "scripts/runtime/identity.py",
+    "verify_file_identities": "scripts/runtime/identity.py",
+    "verify_package_identities": "scripts/runtime/identity.py",
+    "gpu_activity": "scripts/runtime/local_gpu.py",
+    "gpu_available": "scripts/runtime/local_gpu.py",
+    "gpu_occupancy": "scripts/runtime/local_gpu.py",
+    "parse_gpu_activity": "scripts/runtime/local_gpu.py",
+    "parse_gpu_occupancy": "scripts/runtime/local_gpu.py",
+    "parse_queue": "scripts/runtime/slurm.py",
+    "require_single_gpu": "scripts/runtime/local_gpu.py",
+    "worker_environment": "scripts/runtime/environment.py",
+}
 
 
 def imported_modules(path: Path) -> set[str]:
@@ -22,6 +51,14 @@ def imported_modules(path: Path) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and node.module:
             modules.add(node.module)
     return modules
+
+
+def defined_functions(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    return {
+        node.name for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
 
 
 # @lat: [[code-layout#Script Architecture#Dependency Boundary Verification]]
@@ -45,17 +82,28 @@ def verify_layout() -> None:
         if forbidden:
             raise AssertionError(f"Runtime helper depends on a higher layer: {path.name}: {forbidden}")
 
-    deprecated_import = "scripts.experiments.run_calibrated_three_sweeps"
-    allowed = {
-        ROOT / "scripts" / "verification" / "verify_calibrated_three_sweep_runner.py",
+    forbidden_providers = {
+        "scripts.experiments.run_calibrated_three_sweeps",
+        "scripts.experiments.ubai.prepare_calibrated_three_sweeps_ubai",
+        "scripts.experiments.ubai.run_calibrated_three_sweep_pair",
     }
     for path in sorted((ROOT / "scripts").rglob("*.py")):
-        if path in allowed or path.name == "run_calibrated_three_sweeps.py":
-            continue
-        if deprecated_import in imported_modules(path):
+        providers = imported_modules(path).intersection(forbidden_providers)
+        if path.is_relative_to(ROOT / "scripts/experiments") and providers:
             raise AssertionError(
-                f"Generic helper imported from a campaign controller: {path.relative_to(ROOT)}"
+                f"Campaign module imported as a generic helper: {path.relative_to(ROOT)}: "
+                f"{sorted(providers)}"
             )
+        relative = path.relative_to(ROOT).as_posix()
+        for name in defined_functions(path).intersection(GENERIC_OWNERS):
+            if relative != GENERIC_OWNERS[name]:
+                raise AssertionError(
+                    f"Duplicate owner for {name}: {relative}; expected {GENERIC_OWNERS[name]}"
+                )
+
+    setup_imports = imported_modules(ROOT / "scripts/setup/hash_artifact.py")
+    if "scripts.runtime.identity" not in setup_imports:
+        raise AssertionError("The artifact hashing command must use the canonical runtime identity")
 
     for relative in (
         "scripts/README.md",
@@ -69,4 +117,3 @@ def verify_layout() -> None:
 if __name__ == "__main__":
     verify_layout()
     print("Script layout verification passed.")
-

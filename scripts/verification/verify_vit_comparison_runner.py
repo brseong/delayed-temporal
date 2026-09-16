@@ -15,6 +15,8 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.experiments import run_vit_comparison as runner
 from scripts.experiments import vit_comparison as contract
+from scripts.runtime import identity
+from scripts.runtime import local_gpu
 
 
 def reject(action, errors=(ValueError, KeyError, FileNotFoundError, RuntimeError)) -> None:
@@ -142,7 +144,9 @@ def log_fixture(experiment: dict, task: dict) -> str:
     samples, correct = task["expected_samples"], task["expected_samples"] * 4 // 5
     text = (
         "Slurm identity — job: fixture, gpu_family: rtxa6000\n"
-        "Comparison task — " + json.dumps({"task_sha256": contract.task_sha256(task), "batch_size": task["batch_size"]}) + "\n"
+        "Comparison task — " + json.dumps({
+            "task_sha256": identity.json_sha256(task), "batch_size": task["batch_size"],
+        }) + "\n"
         "GPU model: NVIDIA RTX A6000\n"
         f"Model backend: {task['backend']}\n"
         f"Artifact identity — source_commit: {task['source_commit']}, checkpoint_sha256: {task['checkpoint_sha256']}\n"
@@ -171,7 +175,7 @@ def completed_fixture(root: Path, experiment: dict, task: dict) -> dict:
     if task["calibration_file"]:
         table_path = root / task["calibration_file"]
         put_json(table_path, table_fixture(experiment, task))
-        table_hash = contract.sha256_file(table_path)
+        table_hash = identity.sha256_file(table_path)
     else:
         table_hash = ""
     if not collect and task["kind"] != "dense":
@@ -182,7 +186,9 @@ def completed_fixture(root: Path, experiment: dict, task: dict) -> dict:
     log.parent.mkdir(parents=True, exist_ok=True)
     if collect:
         log.write_text(
-            "Comparison task — " + json.dumps({"task_sha256": contract.task_sha256(task), "batch_size": task["batch_size"]}) + "\n"
+            "Comparison task — " + json.dumps({
+                "task_sha256": identity.json_sha256(task), "batch_size": task["batch_size"],
+            }) + "\n"
             "Calibration progress — " + json.dumps({"completed_batches": 2 * math.ceil(task["calibration_samples"] / task["batch_size"]),
                 "total_batches": 2 * math.ceil(task["calibration_samples"] / task["batch_size"]),
                 "completed_samples": 2 * task["calibration_samples"], "pass": 2, "elapsed_seconds": 1.0}) + "\n"
@@ -190,9 +196,11 @@ def completed_fixture(root: Path, experiment: dict, task: dict) -> dict:
     else:
         log.write_text(log_fixture(experiment, task))
     result = {
-        **task, "success": True, "task_sha256": contract.task_sha256(task),
-        "experiment_sha256": contract.task_sha256(experiment), "host_label": task.get("host_label", "local"),
-        "elapsed_seconds": 1.0, "log_sha256": contract.sha256_file(log), "calibration_sha256": table_hash,
+        **task, "success": True, "task_sha256": identity.json_sha256(task),
+        "experiment_sha256": identity.json_sha256(experiment),
+        "host_label": task.get("host_label", "local"),
+        "elapsed_seconds": 1.0, "log_sha256": identity.sha256_file(log),
+        "calibration_sha256": table_hash,
     }
     if collect:
         result["sites"] = len(contract.calibration_site_records(experiment, contract.model_by_key(experiment, task["model_key"])))
@@ -236,7 +244,7 @@ def verify_worker_integration(root: Path) -> None:
         experiment["runtime_root"] = runtime
         for kind in ("collect", "dense", "spiking", "smoke_collect", "smoke_spiking"):
             table_name = "smoke/cifar10_vit_small/bs32/calibration.json" if kind.startswith("smoke") else "calibration/cifar10_vit_small.json"
-            digest = contract.sha256_file(root / table_name) if kind in {"spiking", "smoke_spiking"} else ""
+            digest = identity.sha256_file(root / table_name) if kind in {"spiking", "smoke_spiking"} else ""
             task = contract.make_task(experiment, "cifar10_vit_small", kind, 32, calibration_sha256=digest)
             class Child:
                 def __init__(self, command, *, stdout, **kwargs):
@@ -251,7 +259,9 @@ def verify_worker_integration(root: Path) -> None:
                             "completed_batches": total_batches, "total_batches": total_batches,
                             "completed_samples": 2 * task["calibration_samples"], "pass": 2,
                             "elapsed_seconds": 0.01}) + "\n")
-                        stdout.write(f"Calibration identity — mode: collect, sha256: {contract.sha256_file(path)}\n")
+                        stdout.write(
+                            f"Calibration identity — mode: collect, sha256: {identity.sha256_file(path)}\n"
+                        )
                     else:
                         text = "\n".join(line for line in log_fixture(experiment, task).splitlines()
                                          if not line.startswith(("Slurm identity — ", "Comparison task — ")))
@@ -421,16 +431,16 @@ def verify_source_and_gpu(root: Path) -> None:
         path = Path(experiment["source_root"]) / experiment[prefix + "_path"]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("fixture " + prefix)
-        experiment[prefix + "_sha256"] = contract.sha256_file(path)
+        experiment[prefix + "_sha256"] = identity.sha256_file(path)
     for name in experiment["runtime_sha256"]:
         path = Path(experiment["source_root"]) / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("fixture runtime " + name)
-        experiment["runtime_sha256"][name] = contract.sha256_file(path)
+        experiment["runtime_sha256"][name] = identity.sha256_file(path)
     def dependency_identity(path):
         return experiment["dependency_sha256"]["transformers" if path.name == "src" else "spikingjelly"], []
     with patch("subprocess.check_output", side_effect=lambda args, **kwargs: experiment["source_commit"] + "\n" if args[-1] == "HEAD" else ""), \
-            patch("scripts.experiments.ubai.prepare_calibrated_three_sweeps_ubai.package_source_identity", side_effect=dependency_identity):
+            patch("scripts.runtime.identity.package_source_identity", side_effect=dependency_identity):
         contract.check_source(experiment)
         for prefix in ("evaluator", "calibration_evaluator", "gelu_evaluator"):
             reject(lambda: contract.check_source({**experiment, prefix + "_sha256": "0" * 64}))
@@ -452,9 +462,9 @@ def verify_source_and_gpu(root: Path) -> None:
     with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "1"}), patch("subprocess.check_output") as query:
         reject(lambda: contract.require_gpu(without_override, "local"))
         query.assert_not_called()
-    assert not runner.gpu_available({"memory_used_mib": 20000, "utilization_gpu_percent": 0, "pids": []})
-    assert not runner.gpu_available({"memory_used_mib": 0, "utilization_gpu_percent": 100, "pids": []})
-    assert runner.gpu_available({"memory_used_mib": 0, "utilization_gpu_percent": 0, "pids": [12345]})
+    assert not local_gpu.gpu_available({"memory_used_mib": 20000, "utilization_gpu_percent": 0, "pids": []})
+    assert not local_gpu.gpu_available({"memory_used_mib": 0, "utilization_gpu_percent": 100, "pids": []})
+    assert local_gpu.gpu_available({"memory_used_mib": 0, "utilization_gpu_percent": 0, "pids": [12345]})
     for changed in ({"count": 2, "model": "NVIDIA RTX A6000"}, {"count": 1, "model": "NVIDIA RTX 3090"}):
         with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "4"}), patch("subprocess.check_output", return_value=json.dumps(changed)):
             reject(lambda: contract.require_gpu(experiment, "local"))
@@ -508,8 +518,8 @@ def verify_policy2_and_preparation(root: Path) -> None:
     with patch.object(runner, "admission", return_value={"batch_size": 32}), \
             patch.object(runner, "pipeline") as launch, patch.object(runner, "check_source"), \
             patch.object(runner.fcntl, "flock"), \
-            patch.object(runner, "require_gpu"), patch.object(runner, "gpu_activity", return_value={4: {}}), \
-            patch.object(runner, "gpu_available", return_value=True), \
+            patch.object(runner, "require_gpu"), patch.object(runner.local_gpu, "gpu_activity", return_value={4: {}}), \
+            patch.object(runner.local_gpu, "gpu_available", return_value=True), \
             patch.object(runner, "package_versions", return_value=experiment["package_versions"]), \
             patch.object(runner.platform, "python_version", return_value="3.12.13"), \
             patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "4"}):

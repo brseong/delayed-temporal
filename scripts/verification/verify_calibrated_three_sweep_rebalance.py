@@ -13,7 +13,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from scripts.experiments import calibrated_three_sweep_rebalance as rebalance
-from scripts.experiments.calibrated_three_sweeps import make_tasks, task_sha256
+from scripts.experiments.calibrated_three_sweeps import make_tasks
+from scripts.runtime import identity
 from scripts.verification.verify_calibrated_three_sweep_contract import experiment_fixture
 
 
@@ -44,7 +45,8 @@ class FakeController:
             name = self.prefix + 'job-' + job_id
             row = {'status': 'running', 'host': 'ubai', 'preferred_host': 'ubai',
                    'fixed_host': None, 'attempt': 2, 'started_at': 100.0,
-                   'job_id': job_id, 'slurm_name': name, 'task_sha256': task_sha256(task)}
+                   'job_id': job_id, 'slurm_name': name,
+                   'task_sha256': identity.json_sha256(task)}
             if paired:
                 row['pair_id'] = 'pair-' + job_id
             self.state['tasks'][task['run_id']] = row
@@ -188,7 +190,7 @@ class RebalanceTests(unittest.TestCase):
                     tasks = tasks[:1]
                 elif change == 'phase':
                     tasks[1]['seed'] = 2
-                    self.rows(controller)[1]['task_sha256'] = task_sha256(tasks[1])
+                    self.rows(controller)[1]['task_sha256'] = identity.json_sha256(tasks[1])
                     (controller.root / 'tasks' / (tasks[1]['run_id'] + '.json')).write_text(json.dumps(tasks[1]))
                 elif change == 'queue_running':
                     controller.queue[0]['state'] = 'RUNNING'

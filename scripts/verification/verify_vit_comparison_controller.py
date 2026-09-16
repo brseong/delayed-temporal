@@ -135,8 +135,8 @@ class QuotaAndProcessTests(unittest.TestCase):
     def test_free_gpus_intersects_occupancy_and_assignments(self) -> None:
         subject = controller()
         subject.state["local"] = {"cifar10_vit_small": {"gpu": 4}}
-        with patch.object(module, "gpu_activity", return_value={4: True, 5: False, 6: True, 7: True}) as sample, \
-             patch.object(module, "gpu_available", side_effect=lambda value: value):
+        with patch.object(module.local_gpu, "gpu_activity", return_value={4: True, 5: False, 6: True, 7: True}) as sample, \
+             patch.object(module.local_gpu, "gpu_available", side_effect=lambda value: value):
             self.assertEqual(subject.free_gpus(), [6, 7])
             sample.assert_called_once_with(gpu_ids=(4, 5, 6, 7))
 

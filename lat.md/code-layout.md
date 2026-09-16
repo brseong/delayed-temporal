@@ -12,16 +12,18 @@ They own model and dataset loading, preprocessing, backend selection, calibratio
 
 Generic host operations live under `scripts/runtime` and have no dependency on a model family, scientific condition, or campaign.
 
-Atomic JSON replacement, local GPU telemetry and admission, and Slurm queue parsing are shared runtime concerns. A campaign may import these helpers, but another evaluator or campaign must not import a controller solely to reach them.
+Atomic status replacement, immutable evidence writes, artifact identity, worker environments, local device admission, and Slurm parsing each have one owner in this layer. Campaign modules consume these APIs and do not expose substitute implementations.
+
+The owners are `files.py`, `identity.py`, `environment.py`, `local_gpu.py`, and `slurm.py`, respectively. Content and source checks use `identity.py`; mutable and immutable output paths use `files.py`.
 
 ## Campaign and Artifact Boundary
 
 Experiment modules own manifests, scientific condition grids, scheduling, retries, and evidence validation; analysis modules read completed artifacts and create aggregate outputs.
 
-Completed manifests may record source paths and file hashes. Those paths remain stable until an explicit migration preserves the old interface and updates identity checks. Generated logs, tables, and figures remain under `artifacts/` and are not source modules.
+Completed manifests identify their historical source commit and file hashes. Reproduction uses that commit; the current implementation does not keep duplicate policy or compatibility wrappers solely to preserve an old source path. Generated outputs remain under `artifacts/`.
 
 ## Dependency Boundary Verification
 
 The layout check prevents stable evaluators and generic runtime helpers from depending on campaign controllers.
 
-[[scripts/verification/verify_script_layout.py#verify_layout]] requires all four evaluator entry points, rejects imports from experiments into those evaluators, rejects higher-layer imports from runtime helpers, and prevents generic helpers from again being borrowed from the calibrated sweep controller.
+[[scripts/verification/verify_script_layout.py#verify_layout]] requires all four evaluator entry points, enforces the owner of every generic helper, rejects runtime imports from dependent layers, and prevents campaign or cluster modules from serving as generic helper libraries.

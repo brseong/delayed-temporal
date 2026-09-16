@@ -19,9 +19,9 @@ from scripts.analysis.summarize_sigma_margin_sweep import (
     aggregate_sites,
     parse_run_log,
     read_manifest,
-    sha256_file,
     write_csv,
 )
+from scripts.runtime import identity
 
 
 def collect_complete_cells(
@@ -192,10 +192,10 @@ def write_preview_outputs(
     write_csv(site_csv, site_rows)
     payload = {
         **metadata,
-        "manifest_sha256": sha256_file(manifest),
-        "raw_csv_sha256": sha256_file(raw_csv),
-        "summary_csv_sha256": sha256_file(summary_csv),
-        "site_csv_sha256": sha256_file(site_csv),
+        "manifest_sha256": identity.sha256_file(manifest),
+        "raw_csv_sha256": identity.sha256_file(raw_csv),
+        "summary_csv_sha256": identity.sha256_file(summary_csv),
+        "site_csv_sha256": identity.sha256_file(site_csv),
     }
     snapshot_json.parent.mkdir(parents=True, exist_ok=True)
     temporary = snapshot_json.with_suffix(snapshot_json.suffix + ".tmp")

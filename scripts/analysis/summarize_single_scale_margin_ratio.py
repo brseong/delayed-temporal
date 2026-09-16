@@ -14,9 +14,9 @@ from scripts.analysis.summarize_sigma_margin_sweep import (
     aggregate_sites,
     parse_run_log,
     read_manifest,
-    sha256_file,
     write_csv,
 )
+from scripts.runtime import identity
 
 
 def plot(summary: list[dict[str, object]], output_prefix: Path) -> None:
@@ -152,10 +152,10 @@ def main() -> None:
         "source_commit": first.source_commit,
         "checkpoint_sha256": first.checkpoint_sha256,
         "dataset_fingerprint": first.dataset_fingerprint,
-        "manifest_sha256": sha256_file(args.manifest),
-        "raw_csv_sha256": sha256_file(args.raw_csv),
-        "summary_csv_sha256": sha256_file(args.summary_csv),
-        "site_csv_sha256": sha256_file(args.site_csv),
+        "manifest_sha256": identity.sha256_file(args.manifest),
+        "raw_csv_sha256": identity.sha256_file(args.raw_csv),
+        "summary_csv_sha256": identity.sha256_file(args.summary_csv),
+        "site_csv_sha256": identity.sha256_file(args.site_csv),
         "paper_promotion_allowed": False,
     }
     args.provenance_json.parent.mkdir(parents=True, exist_ok=True)

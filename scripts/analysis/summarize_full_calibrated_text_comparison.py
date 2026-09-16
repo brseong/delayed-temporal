@@ -5,17 +5,21 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import io
 import json
-import os
 from pathlib import Path
-import tempfile
+import sys
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from scripts.experiments.run_full_calibrated_text_comparison import (
-    FAMILY_CONFIG, MODEL_CONFIG, TAG, canonical, parse_evaluation, parse_sites, sha256_file,
+    FAMILY_CONFIG, MODEL_CONFIG, TAG, canonical, parse_evaluation, parse_sites,
 )
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
 
 
 def csv_text(rows: list[dict[str, Any]], empty: tuple[str, ...]) -> str:
@@ -26,20 +30,6 @@ def csv_text(rows: list[dict[str, Any]], empty: tuple[str, ...]) -> str:
     for row in rows:
         writer.writerow(row)
     return stream.getvalue()
-
-
-def atomic_text(path: Path, value: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, temporary = tempfile.mkstemp(prefix=".text-summary-", dir=path.parent)
-    try:
-        with os.fdopen(handle, "w") as stream:
-            stream.write(value)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
 
 
 def validate_family(root: Path, family: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -59,18 +49,18 @@ def validate_family(root: Path, family: str) -> tuple[list[dict[str, Any]], dict
         raise ValueError(f"{family} phase population differs")
     calibration_path = output / "calibration.json"
     metadata, sites = parse_sites(calibration_path, config["sites"])
-    calibration_sha = sha256_file(calibration_path)
+    calibration_sha = identity.sha256_file(calibration_path)
     rows: list[dict[str, Any]] = []
     for phase in ("collect", "ann", "snn"):
         evidence = phases[phase]
         log_path = output / evidence["log_file"]
-        if sha256_file(log_path) != evidence["log_sha256"]:
+        if identity.sha256_file(log_path) != evidence["log_sha256"]:
             raise ValueError(f"{family} {phase} log hash differs")
         row: dict[str, Any] = {
             "family": family, "phase": phase, "source_commit": manifest["source_commit"],
-            "checkpoint_identity_sha256": hashlib.sha256(
-                canonical(manifest["checkpoint_files_sha256"]).encode()
-            ).hexdigest(),
+            "checkpoint_identity_sha256": identity.json_sha256(
+                manifest["checkpoint_files_sha256"]
+            ),
             "dataset_fingerprint": manifest[
                 "calibration_dataset" if phase == "collect" else "evaluation_dataset"
             ]["fingerprint"],
@@ -88,7 +78,7 @@ def validate_family(root: Path, family: str) -> tuple[list[dict[str, Any]], dict
         raise ValueError(f"{family} final calibration identity differs")
     return rows, {"family": family, "site_count": len(sites),
                   "calibration_sha256": calibration_sha,
-                  "metadata_sha256": hashlib.sha256(canonical(metadata).encode()).hexdigest()}
+                  "metadata_sha256": identity.json_sha256(metadata)}
 
 
 def build(
@@ -144,11 +134,13 @@ def build(
         "complete": set(families) == set(expected),
         "source_commit": next(iter(commits)) if commits else None,
         "families": families,
-        "files": {name: hashlib.sha256(value.encode()).hexdigest() for name, value in files.items()},
+        "files": {name: identity.sha256_bytes(value.encode()) for name, value in files.items()},
     }
     for name, value in files.items():
-        atomic_text(output / name, value)
-    atomic_text(output / "provenance.json", json.dumps(provenance, indent=2, sort_keys=True) + "\n")
+        runtime_files.atomic_text(output / name, value)
+    runtime_files.atomic_text(
+        output / "provenance.json", json.dumps(provenance, indent=2, sort_keys=True) + "\n"
+    )
     return provenance
 
 

@@ -23,13 +23,14 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 from scripts.experiments.vit_comparison import (
     DEFAULT_ROOT, MODEL_KEYS, PYTHON, SOURCE, TAG, check_source, evaluator_command,
-    make_task, model_by_key, parsed_result, read_json, require_gpu, safe_output,
-    sha256_file, task_sha256, validate_experiment, validate_result, validate_table,
-    validate_task, write_immutable_json, require_current_experiment,
+    make_task, model_by_key, parsed_result, read_json, require_gpu,
+    validate_experiment, validate_result, validate_table, validate_task,
+    require_current_experiment,
 )
-from scripts.experiments.ubai.run_calibrated_three_sweep_pair import worker_environment
-from scripts.runtime.files import atomic_json
-from scripts.runtime.local_gpu import gpu_activity, gpu_available
+from scripts.runtime import environment as runtime_environment
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
+from scripts.runtime import local_gpu
 
 SCRIPT = "scripts/experiments/run_vit_comparison.py"
 REMOTE_BASE = "/home1/sizz1997/myubai"
@@ -75,7 +76,6 @@ def discover_calibration_sites(config_fields: dict) -> list[dict]:
 
 
 def initialize(root: Path, source: Path, assets_manifest: Path) -> dict:
-    from scripts.experiments.ubai.prepare_calibrated_three_sweeps_ubai import artifact_records, package_source_identity
     if socket.gethostname() != "baekryun-cuda129" or root.name != TAG:
         raise ValueError("Initialization requires the local host and fixed comparison tag")
     if (root / "experiment.json").exists():
@@ -92,7 +92,8 @@ def initialize(root: Path, source: Path, assets_manifest: Path) -> dict:
                   "tau_s": 1.0, "tracking": "disabled", "local_gpu_ids": list(range(8)),
                   "campaign_extra_local_gpus": [0, 1, 2, 3],
                   "evaluation_count": 8, "calibration_count": 4,
-                  "models": assets["models"], "assets_manifest_sha256": sha256_file(assets_manifest),
+                  "models": assets["models"],
+                  "assets_manifest_sha256": identity.sha256_file(assets_manifest),
                   "runtime_root": f"/data/delayed-temporal/artifacts/runtime/{TAG}",
                   "package_versions": package_versions(),
                   "asset_checks": {}}
@@ -100,33 +101,38 @@ def initialize(root: Path, source: Path, assets_manifest: Path) -> dict:
                              ("calibration_evaluator", "scripts/analysis/evaluate_calibrated_vit.py"),
                              ("gelu_evaluator", "scripts/analysis/gelu_cubic_phi_nl_vit.py")):
         experiment[prefix + "_path"] = relative
-        experiment[prefix + "_sha256"] = sha256_file(source / relative)
+        experiment[prefix + "_sha256"] = identity.sha256_file(source / relative)
     for row in experiment["models"]:
         row["calibration_sites"] = discover_calibration_sites(row["checkpoint_config"])
-        row["preprocessing_sha256"] = sha256_file(Path(row["checkpoint_path"]) / "preprocessor_config.json")
+        row["preprocessing_sha256"] = identity.sha256_file(
+            Path(row["checkpoint_path"]) / "preprocessor_config.json"
+        )
         for field in ("checkpoint", "dataset", "calibration_dataset"):
             path = row[field + "_path"]
             if path not in experiment["asset_checks"]:
-                digest, records = artifact_records(Path(path))
+                digest, records = identity.artifact_records(Path(path))
                 experiment["asset_checks"][path] = {"sha256": digest, "files": records}
             if experiment["asset_checks"][path]["sha256"] != row[field + "_sha256"]:
                 raise ValueError("Prepared asset hash differs")
     experiment["dependency_sha256"] = {
-        name: package_source_identity(source / "src" / name / subtree)[0]
+        name: identity.package_source_identity(source / "src" / name / subtree)[0]
         for name, subtree in (("transformers", "src"), ("spikingjelly", "spikingjelly"))}
-    runtime_files = [SCRIPT, "scripts/experiments/vit_comparison.py",
+    runtime_paths = [SCRIPT, "scripts/experiments/vit_comparison.py",
                      "scripts/experiments/vit_comparison_controller.py",
                      "scripts/experiments/ubai/run_vit_comparison_ubai.py",
                      "scripts/experiments/ubai/vit_comparison_prep.sbatch",
                      "scripts/experiments/ubai/vit_comparison_task.sbatch",
                      "scripts/analysis/summarize_vit_comparison.py", "scripts/analysis/vit_comparison_costs.py",
                      "scripts/analysis/publish_vit_comparison.py",
-                     "scripts/runtime/files.py", "scripts/runtime/local_gpu.py"]
-    experiment["runtime_sha256"] = {name: sha256_file(source / name) for name in runtime_files}
+                     "scripts/runtime/environment.py", "scripts/runtime/files.py",
+                     "scripts/runtime/identity.py", "scripts/runtime/local_gpu.py"]
+    experiment["runtime_sha256"] = {
+        name: identity.sha256_file(source / name) for name in runtime_paths
+    }
     validate_experiment(experiment)
     check_source(experiment)
     root.mkdir(parents=True, exist_ok=True)
-    write_immutable_json(root / "experiment.json", experiment)
+    runtime_files.immutable_json(root / "experiment.json", experiment)
     return experiment
 
 
@@ -149,7 +155,7 @@ def check_assets(experiment: dict, model: dict, host_label: str) -> None:
 
 
 def completed(root: Path, experiment: dict, task: dict) -> dict | None:
-    path = safe_output(root, task["result_file"])
+    path = runtime_files.safe_output(root, task["result_file"])
     if not path.exists():
         return None
     result = read_json(path)
@@ -172,20 +178,20 @@ def update_task_progress(root: Path, task: dict, log_path: Path) -> None:
     progress = rows[-1] if rows else None
     value = {"state": "running", "model_key": task["model_key"], "run_id": task["run_id"],
              "phase": task["kind"], "progress": progress, "updated_at": time.time()}
-    atomic_json(root / "status" / f'{task["model_key"]}.json', value)
+    runtime_files.atomic_json(root / "status" / f'{task["model_key"]}.json', value)
     if progress is not None:
         batch = progress.get("completed_batches")
         if type(batch) is int and batch > 0:
             snapshot = root / "progress" / task["run_id"] / f"batch-{batch:04d}.json"
             if not snapshot.exists():
-                write_immutable_json(snapshot, value)
+                runtime_files.immutable_json(snapshot, value)
 
 
 def run_task(root: Path, experiment: dict, task: dict, host_label: str) -> dict:
     require_current_experiment(experiment)
     validate_task(task, experiment)
     task_path = root / "tasks" / (task["run_id"] + ".json")
-    write_immutable_json(task_path, task)
+    runtime_files.immutable_json(task_path, task)
     locks = root / "locks"
     locks.mkdir(exist_ok=True)
     with (locks / (task["run_id"] + ".lock")).open("a") as lock:
@@ -203,12 +209,15 @@ def run_task(root: Path, experiment: dict, task: dict, host_label: str) -> dict:
         model = model_by_key(experiment, task["model_key"])
         check_assets(experiment, model, host_label)
         collect = task["kind"] in {"collect", "smoke_collect"}
-        table_path = safe_output(root, task["calibration_file"]) if task["calibration_file"] else None
+        table_path = (
+            runtime_files.safe_output(root, task["calibration_file"])
+            if task["calibration_file"] else None
+        )
         if table_path is not None and not collect:
-            if sha256_file(table_path) != task["calibration_sha256"]:
+            if identity.sha256_file(table_path) != task["calibration_sha256"]:
                 raise ValueError("Assigned calibration hash differs")
             validate_table(table_path, task, experiment)
-        log_path = safe_output(root, task["log_file"])
+        log_path = runtime_files.safe_output(root, task["log_file"])
         rejected = root / "rejected" / (task["run_id"] + "-" + str(time.time_ns()))
         for path in [log_path] + ([table_path] if collect and table_path is not None else []):
             if path.exists():
@@ -222,7 +231,9 @@ def run_task(root: Path, experiment: dict, task: dict, host_label: str) -> dict:
             raise ValueError("Task runtime cannot reside in /tmp")
         base.mkdir(parents=True, exist_ok=True)
         scratch = Path(tempfile.mkdtemp(prefix=task["run_id"] + "-", dir=base))
-        environment = worker_environment(dict(os.environ), scratch, os.environ["CUDA_VISIBLE_DEVICES"])
+        environment = runtime_environment.worker_environment(
+            dict(os.environ), scratch, os.environ["CUDA_VISIBLE_DEVICES"]
+        )
         environment.update(HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1", TRANSFORMERS_OFFLINE="1",
                            PYTHONUNBUFFERED="1", TOKENIZERS_PARALLELISM="false")
         source = Path(experiment["source_root"])
@@ -239,7 +250,10 @@ def run_task(root: Path, experiment: dict, task: dict, host_label: str) -> dict:
             previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGINT)}
             with log_path.open("x") as log:
                 log.write(f"Slurm identity — job: {os.environ.get('SLURM_JOB_ID', 'local')}, gpu_family: rtxa6000\n")
-                log.write("Comparison task — " + json.dumps({"task_sha256": task_sha256(task), "batch_size": task["batch_size"]}) + "\n")
+                log.write("Comparison task — " + json.dumps({
+                    "task_sha256": identity.json_sha256(task),
+                    "batch_size": task["batch_size"],
+                }) + "\n")
                 log.flush()
                 child = subprocess.Popen(evaluator_command(experiment, task, root), cwd=source,
                                          env=environment, stdout=log, stderr=subprocess.STDOUT,
@@ -263,26 +277,27 @@ def run_task(root: Path, experiment: dict, task: dict, host_label: str) -> dict:
                     child.wait()
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
-        result = {**task, "success": True, "task_sha256": task_sha256(task),
-                  "experiment_sha256": task_sha256(experiment), "host_label": host_label,
-                  "elapsed_seconds": time.monotonic() - started, "log_sha256": sha256_file(log_path)}
+        result = {**task, "success": True, "task_sha256": identity.json_sha256(task),
+                  "experiment_sha256": identity.json_sha256(experiment), "host_label": host_label,
+                  "elapsed_seconds": time.monotonic() - started,
+                  "log_sha256": identity.sha256_file(log_path)}
         if collect:
             assert table_path is not None
             table = validate_table(table_path, task, experiment)
-            result.update(calibration_sha256=sha256_file(table_path), sites=len(table["layers"]),
+            result.update(calibration_sha256=identity.sha256_file(table_path), sites=len(table["layers"]),
                           samples=task["calibration_samples"], total=task["calibration_samples"])
         else:
             result.update(parsed_result(task, root))
         check_source(experiment)
         validate_result(task, result, experiment, root)
-        write_immutable_json(safe_output(root, task["result_file"]), result)
+        runtime_files.immutable_json(runtime_files.safe_output(root, task["result_file"]), result)
         # The exact task-owned scratch directory is recoverable data only until
         # successful completion; failed runtime directories remain for inspection.
         if scratch.parent == base and not scratch.is_symlink() and scratch.stat().st_uid == os.getuid():
             shutil.rmtree(scratch)
         event(root, "task_completed", run_id=task["run_id"], model_key=task["model_key"],
               host_label=host_label, elapsed_seconds=result["elapsed_seconds"], correct=result.get("correct"))
-        atomic_json(root / "status" / f'{task["model_key"]}.json', {
+        runtime_files.atomic_json(root / "status" / f'{task["model_key"]}.json', {
             "state": "phase_complete", "model_key": task["model_key"], "run_id": task["run_id"],
             "phase": task["kind"], "updated_at": time.time(),
         })
@@ -293,7 +308,7 @@ def admission(root: Path, experiment: dict, key: str, host_label: str) -> dict:
     path = root / "admissions" / (key + ".json")
     if path.exists():
         selected = read_json(path)
-        if (selected.get("experiment_sha256") != task_sha256(experiment)
+        if (selected.get("experiment_sha256") != identity.json_sha256(experiment)
                 or selected.get("model_key") != key or type(selected.get("batch_size")) is not int
                 or selected["batch_size"] not in (32, 16, 8)):
             raise ValueError("Admission source differs")
@@ -304,7 +319,7 @@ def admission(root: Path, experiment: dict, key: str, host_label: str) -> dict:
         evidence = {}
         for run_id, digest in selected["result_sha256"].items():
             result_path = root / "results" / (run_id + ".json")
-            if sha256_file(result_path) != digest:
+            if identity.sha256_file(result_path) != digest:
                 raise ValueError("Admission evidence changed")
             validate_result(read_json(root / "tasks" / (run_id + ".json")), read_json(result_path), experiment, root)
             evidence[run_id] = read_json(result_path)
@@ -324,18 +339,24 @@ def admission(root: Path, experiment: dict, key: str, host_label: str) -> dict:
                              calibration_sha256=collection["calibration_sha256"])
             evaluated = run_task(root, experiment, task, host_label)
         except RuntimeError:
-            log = safe_output(root, task["log_file"])
+            log = runtime_files.safe_output(root, task["log_file"])
             content = log.read_text() if log.exists() else ""
             if not re.search(r"(?:CUDA out of memory|torch\.OutOfMemoryError)", content):
                 raise
             event(root, "memory_candidate_rejected", model_key=key, batch_size=batch, log_file=task["log_file"])
             continue
-        selected = {"model_key": key, "batch_size": batch, "experiment_sha256": task_sha256(experiment),
+        selected = {"model_key": key, "batch_size": batch,
+                    "experiment_sha256": identity.json_sha256(experiment),
                     "calibration_sha256": collection["calibration_sha256"],
                     "correct": evaluated["correct"], "samples": evaluated["samples"],
                     "prediction_sha256": evaluated["prediction_sha256"],
-                    "result_sha256": {r["run_id"]: sha256_file(safe_output(root, r["result_file"])) for r in (collection, evaluated)}}
-        write_immutable_json(path, selected)
+                    "result_sha256": {
+                        r["run_id"]: identity.sha256_file(
+                            runtime_files.safe_output(root, r["result_file"])
+                        )
+                        for r in (collection, evaluated)
+                    }}
+        runtime_files.immutable_json(path, selected)
         event(root, "model_admitted", model_key=key, batch_size=batch)
         return selected
     raise RuntimeError(f"All batch sizes failed memory admission: {key}")
@@ -382,7 +403,8 @@ def worker(root: Path, mode: str, key: str, host_label: str) -> None:
         gpu_lock = (lock_dir / f"gpu-{visible}.lock").open("a")
         fcntl.flock(gpu_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         for check in range(2):
-            if not gpu_available(gpu_activity(gpu_ids=(int(visible),))[int(visible)]):
+            sample = local_gpu.gpu_activity(gpu_ids=(int(visible),))[int(visible)]
+            if not local_gpu.gpu_available(sample):
                 raise RuntimeError("Assigned local GPU is occupied")
             if check == 0:
                 time.sleep(10)
@@ -428,11 +450,12 @@ def prepare_execution(root: Path, experiment: dict) -> dict:
                          "requires_full_calibration": True, "command": command,
                          "commands_by_gpu": {str(gpu): ["env", f"CUDA_VISIBLE_DEVICES={gpu}", *command]
                                              for gpu in range(8)}})
-    value = {"experiment_sha256": task_sha256(experiment), "source_commit": experiment["source_commit"],
+    value = {"experiment_sha256": identity.json_sha256(experiment),
+             "source_commit": experiment["source_commit"],
              "vit_calibration_policy_version": 2, "allowed_gpu_ids": list(range(8)),
              "launch_performed": False, "models": prepared}
-    destination = root / "prepared" / (task_sha256(value) + ".json")
-    write_immutable_json(destination, value)
+    destination = root / "prepared" / (identity.json_sha256(value) + ".json")
+    runtime_files.immutable_json(destination, value)
     event(root, "execution_prepared", manifest=str(destination), launch_performed=False)
     return value
 

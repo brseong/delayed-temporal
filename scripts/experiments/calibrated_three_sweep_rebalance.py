@@ -7,7 +7,7 @@ import re
 import time
 from typing import Any
 
-from scripts.experiments.calibrated_three_sweeps import task_sha256
+from scripts.runtime import identity
 
 MIN_WAIT_SECONDS = 60
 RETRY_SECONDS = 10
@@ -46,7 +46,7 @@ def _group(controller: Any, job_id: str) -> list[tuple[dict, dict]]:
         if row.get('host') != 'ubai' or str(row.get('job_id')) != job_id:
             continue
         task = json.loads((controller.root / 'tasks' / (run_id + '.json')).read_text())
-        if task['run_id'] != run_id or row.get('task_sha256') != task_sha256(task):
+        if task['run_id'] != run_id or row.get('task_sha256') != identity.json_sha256(task):
             raise ValueError('Assignment task identity changed during reassignment')
         members.append((task, row))
     return members

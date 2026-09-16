@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.experiments import run_full_calibrated_text_comparison as runner
 from scripts.analysis import summarize_full_calibrated_text_comparison as summary
+from scripts.runtime import identity
 
 
 def reject(function, error=Exception):
@@ -160,8 +161,8 @@ def verify_summarizer(root: Path) -> None:
             ))
             phases[phase] = {"phase": phase, "elapsed_seconds": 1.0,
                              "log_file": str(log.relative_to(output)),
-                             "log_sha256": runner.sha256_file(log)}
-        calibration_sha = runner.sha256_file(output / "calibration.json")
+                             "log_sha256": identity.sha256_file(log)}
+        calibration_sha = identity.sha256_file(output / "calibration.json")
         output.joinpath("manifest.json").write_text(json.dumps({
             "tag": runner.TAG, "family": family, "source_commit": "a" * 40,
             "checkpoint_files_sha256": {"model": "b" * 64},

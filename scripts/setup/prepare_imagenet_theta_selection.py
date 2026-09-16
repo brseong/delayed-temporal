@@ -16,30 +16,8 @@ if str(_REPO_ROOT) not in sys.path:
 
 from datasets import Dataset, load_dataset, load_from_disk
 
+from scripts.runtime import identity
 from utils.transformers.calibration import select_calibration_subset
-
-
-def directory_sha256(path: Path) -> tuple[str, list[dict[str, Any]]]:
-    """Hash every regular file in a saved dataset with stable relative ordering."""
-
-    digest = hashlib.sha256()
-    files: list[dict[str, Any]] = []
-    for item in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
-        relative = item.relative_to(path).as_posix()
-        file_digest = hashlib.sha256()
-        with item.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
-                file_digest.update(chunk)
-        size = item.stat().st_size
-        value = file_digest.hexdigest()
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(str(size).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(value.encode("ascii"))
-        digest.update(b"\n")
-        files.append({"path": relative, "bytes": size, "sha256": value})
-    return digest.hexdigest(), files
 
 
 def label_sha256(dataset: Dataset) -> str:
@@ -63,7 +41,8 @@ def save_artifact(dataset: Dataset, path: Path) -> dict[str, Any]:
     source_label_sha256 = label_sha256(dataset)
     if label_sha256(reloaded) != source_label_sha256:
         raise RuntimeError(f"saved dataset changed label order: {path}")
-    aggregate_sha256, files = directory_sha256(path)
+    artifact = identity.artifact_identity(path)
+    aggregate_sha256, files = artifact["aggregate_sha256"], artifact["files"]
     return {
         "path": str(path.resolve()),
         "samples": len(dataset),

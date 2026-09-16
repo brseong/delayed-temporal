@@ -16,6 +16,7 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 from scripts.experiments.ubai import run_vit_comparison_ubai as runner
+from scripts.runtime import identity
 
 
 def fixture() -> dict:
@@ -122,7 +123,7 @@ def verify_preparation_records() -> None:
                 root = base / name
                 root.mkdir()
                 (root / "content").write_bytes(name.encode())
-                method = helper.artifact_records if group == "assets" else helper.package_source_identity
+                method = identity.artifact_records if group == "assets" else identity.package_source_identity
                 digest, _records = method(root)
                 value[group].append({"path": f"/data/artifacts/{name}", "host_path": str(root),
                                      "aggregate_sha256": digest, "package": name})
@@ -130,12 +131,12 @@ def verify_preparation_records() -> None:
             path = base / key
             path.write_bytes(key.encode())
             value["runtime"][key] = str(path)
-            value["runtime"][key + "_sha256"] = helper.sha256(path)
+            value["runtime"][key + "_sha256"] = identity.sha256_file(path)
         deployment = base / "deployment.json"
         deployment.write_text(json.dumps(value))
         records = runner.file_records(value, helper)
         report = {
-            "state": "verified", "deployment_sha256": helper.sha256(deployment),
+            "state": "verified", "deployment_sha256": identity.sha256_file(deployment),
             "source_commit": value["source_commit"], "python_version": "3.12.13", **records,
         }
         report_path = base / "prep-result.json"

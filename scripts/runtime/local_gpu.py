@@ -1,7 +1,9 @@
 """Local NVIDIA GPU discovery and admission independent of any campaign."""
 from __future__ import annotations
 
+import json
 import math
+import os
 import subprocess
 from typing import Any, Mapping
 
@@ -116,3 +118,30 @@ def gpu_available(
         and 0 <= utilization <= max_utilization
     )
 
+
+def require_single_gpu(
+    python_bin: str,
+    host_label: str,
+    *,
+    allowed_local_gpus: tuple[int, ...] = DEFAULT_LOCAL_GPUS,
+    required_model: str = "RTX A6000",
+) -> str:
+    """Validate one allocated GPU and the host-specific allocation boundary."""
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if not visible.isdecimal() or int(visible) not in allowed_local_gpus:
+        if host_label == "local":
+            raise ValueError("Exactly one approved local GPU must be visible")
+        if not visible or "," in visible or visible in {"-1", "all", "none"}:
+            raise ValueError("Exactly one allocated GPU must be visible")
+    if host_label == "ubai" and not os.environ.get("SLURM_JOB_ID"):
+        raise ValueError("UBAI evaluation requires a Slurm allocation")
+    probe = subprocess.check_output([
+        python_bin,
+        "-c",
+        "import json,torch; print(json.dumps({'count':torch.cuda.device_count(),"
+        "'model':torch.cuda.get_device_name(0) if torch.cuda.device_count() else ''}))",
+    ], text=True)
+    data = json.loads(probe)
+    if data["count"] != 1 or required_model not in data["model"]:
+        raise ValueError(f"Exactly one {required_model} GPU is required")
+    return data["model"]

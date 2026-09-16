@@ -8,24 +8,22 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from datasets import load_dataset, load_from_disk
 
 from utils.transformers.calibration import select_calibration_subset
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+from scripts.runtime import identity
 
 
 def tree_identity(path: Path) -> tuple[str, dict[str, str]]:
     files = {
-        str(item.relative_to(path)): file_sha256(item)
+        str(item.relative_to(path)): identity.sha256_file(item)
         for item in sorted(path.rglob("*"))
         if item.is_file()
     }

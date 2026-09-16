@@ -21,6 +21,7 @@ from scripts.experiments import run_vit_comparison_extra_gpus as extra
 from scripts.experiments import run_vit_comparison as runner
 from scripts.experiments import vit_comparison as contract
 from scripts.experiments import vit_comparison_controller as controller
+from scripts.runtime import identity as runtime_identity
 from scripts.verification.verify_vit_comparison_runner import (
     completed_fixture, experiment_fixture, log_fixture, put_json,
 )
@@ -121,9 +122,9 @@ class ExtraGpuTests(unittest.TestCase):
             calibration_sha256=collected["calibration_sha256"]))
         selected = {field: evaluated[field] for field in (
             "model_key", "batch_size", "correct", "samples", "prediction_sha256", "calibration_sha256")}
-        selected["experiment_sha256"] = contract.task_sha256(self.experiment)
+        selected["experiment_sha256"] = runtime_identity.json_sha256(self.experiment)
         selected["result_sha256"] = {
-            value["run_id"]: contract.sha256_file(self.root / value["result_file"])
+            value["run_id"]: runtime_identity.sha256_file(self.root / value["result_file"])
             for value in (collected, evaluated)}
         put_json(self.root / "admissions" / (self.key + ".json"), selected)
         return selected
@@ -132,7 +133,7 @@ class ExtraGpuTests(unittest.TestCase):
         self.admission_evidence()
         identity = {"pid": 123456789, "start_ticks": 987, "command": ["fixture-worker"], "state": "R"}
         assignments = {
-            "experiment_sha256": contract.task_sha256(self.experiment),
+            "experiment_sha256": runtime_identity.json_sha256(self.experiment),
             "models": {self.key: {"owner": "local", "status": "running"}},
             "local": {self.key: {**identity, "mode": "pipeline", "status": "running"}},
         }
@@ -142,7 +143,9 @@ class ExtraGpuTests(unittest.TestCase):
         path = self.root / task["log_file"]
         path.parent.mkdir(exist_ok=True)
         path.write_text(
-            "Comparison task — " + json.dumps({"task_sha256": contract.task_sha256(task), "batch_size": 32}) + "\n" +
+            "Comparison task — " + json.dumps({
+                "task_sha256": runtime_identity.json_sha256(task), "batch_size": 32,
+            }) + "\n" +
             "Calibration progress — " + json.dumps({"completed_batches": 314 - remaining,
                 "total_batches": 314, "completed_samples": 8000, "pass": 2}) + "\n")
         return identity, task, path
@@ -157,7 +160,7 @@ class ExtraGpuTests(unittest.TestCase):
         path = self.root / "experiment.json"
         put_json(path, experiment)
         with patch.object(extra, "DEFAULT_ROOT", self.root), \
-                patch.object(extra, "EXPERIMENT_FILE_SHA256", extra.digest(path)):
+                patch.object(extra, "EXPERIMENT_FILE_SHA256", runtime_identity.sha256_file(path)):
             self.assertEqual(extra.validate_scope(self.root, 1, self.key, True), experiment)
             for gpu in (0, 4, 5, 6, 7, -1, True, "1"):
                 with self.subTest(gpu=gpu), self.assertRaises(ValueError):
@@ -175,7 +178,9 @@ class ExtraGpuTests(unittest.TestCase):
                               ("source_root", "/different/source"), ("local_gpu_ids", [1, 2, 3])):
             put_json(path, {**experiment, field: value})
             with patch.object(extra, "DEFAULT_ROOT", self.root), \
-                    patch.object(extra, "EXPERIMENT_FILE_SHA256", extra.digest(path)), self.assertRaises(ValueError):
+                    patch.object(
+                        extra, "EXPERIMENT_FILE_SHA256", runtime_identity.sha256_file(path)
+                    ), self.assertRaises(ValueError):
                 extra.validate_scope(self.root, 1, self.key, True)
 
     def test_mutable_imports_are_rejected(self) -> None:
@@ -280,25 +285,25 @@ class ExtraGpuTests(unittest.TestCase):
 
     def test_gpu_probe_rejects_occupancy_multiple_devices_and_wrong_family(self) -> None:
         sample = {"memory_used_mib": 271, "utilization_gpu_percent": 0}
-        with patch.object(runner, "gpu_activity", return_value={1: sample}), \
+        with patch.object(extra.local_gpu, "gpu_activity", return_value={1: sample}), \
                 patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "1"}), \
                 patch.object(extra.subprocess, "check_output", return_value=json.dumps({"count": 1, "model": "NVIDIA RTX A6000"})):
-            self.assertEqual(extra.gpu_probe(self.experiment, 1, runner)["count"], 1)
+            self.assertEqual(extra.gpu_probe(self.experiment, 1)["count"], 1)
             sample["memory_used_mib"] = 10000
             with self.assertRaises(RuntimeError):
-                extra.gpu_probe(self.experiment, 1, runner)
+                extra.gpu_probe(self.experiment, 1)
             sample["memory_used_mib"] = 271
             sample["utilization_gpu_percent"] = 99
             with self.assertRaises(RuntimeError):
-                extra.gpu_probe(self.experiment, 1, runner)
+                extra.gpu_probe(self.experiment, 1)
             sample["utilization_gpu_percent"] = 0
             for result in ({"count": 2, "model": "NVIDIA RTX A6000"},
                            {"count": 1, "model": "NVIDIA RTX 3090"}, {"count": 0, "model": ""}):
                 with patch.object(extra.subprocess, "check_output", return_value=json.dumps(result)), self.assertRaises(ValueError):
-                    extra.gpu_probe(self.experiment, 1, runner)
+                    extra.gpu_probe(self.experiment, 1)
             for visible in ("1,2", "0", "4", ""):
                 with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": visible}), self.assertRaises(ValueError):
-                    extra.gpu_probe(self.experiment, 1, runner)
+                    extra.gpu_probe(self.experiment, 1)
 
     def test_execute_reuses_result_before_gpu_or_window_checks(self) -> None:
         self.admission_evidence()

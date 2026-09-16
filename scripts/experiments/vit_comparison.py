@@ -6,13 +6,11 @@ import math
 import os
 from pathlib import Path
 import re
-import subprocess
 from typing import Any
 
-from scripts.experiments.calibrated_three_sweeps import (
-    parse_result_log, safe_output, sha256_file, task_sha256, write_immutable_json,
-)
-from scripts.experiments.run_calibrated_three_sweep_task import check_source, require_gpu as require_default_gpu
+from scripts.experiments.calibrated_three_sweeps import parse_result_log
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity, local_gpu
 
 LEGACY_TAG = "vit_conversion_comparison_theta40_calibrated_float64_bounds3_v1"
 PREVIOUS_TAG = "vit_conversion_comparison_theta40_calibrated_float64_bounds3_v2"
@@ -27,19 +25,35 @@ DEFAULT_ROOT = "/data/delayed-temporal/artifacts/logs/conversion_comparison/" + 
 def require_gpu(experiment: dict[str, Any], host_label: str) -> str:
     """Allow every local A6000 only for the explicitly versioned comparison campaign."""
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    if host_label != "local":
-        return require_default_gpu(experiment, host_label)
-    if not visible.isdecimal() or int(visible) not in experiment.get("local_gpu_ids", []):
-        raise ValueError("Exactly one campaign-approved local GPU must be visible")
-    if int(visible) < 4 and experiment.get("campaign_extra_local_gpus") != [0, 1, 2, 3]:
-        raise ValueError("GPU 0 through 3 require the campaign-specific manifest override")
-    probe = subprocess.check_output([
-        experiment["python_bin"], "-c", "import json,torch; print(json.dumps({'count':torch.cuda.device_count(),"
-        "'model':torch.cuda.get_device_name(0) if torch.cuda.device_count() else ''}))"], text=True)
-    data = json.loads(probe)
-    if data["count"] != 1 or "RTX A6000" not in data["model"]:
-        raise ValueError("Exactly one RTX A6000 GPU is required")
-    return data["model"]
+    allowed = tuple(experiment.get("local_gpu_ids", []))
+    if host_label == "local" and visible.isdecimal() and int(visible) < 4:
+        if experiment.get("campaign_extra_local_gpus") != [0, 1, 2, 3]:
+            raise ValueError("GPU 0 through 3 require the campaign-specific manifest override")
+    return local_gpu.require_single_gpu(
+        experiment["python_bin"], host_label, allowed_local_gpus=allowed,
+    )
+
+
+def check_source(experiment: dict[str, Any]) -> None:
+    """Verify the comparison's frozen checkout and recorded executable inputs."""
+    source = Path(experiment["source_root"])
+    identity.verify_clean_checkout(source, experiment["source_commit"])
+    files = {
+        source / experiment[f"{prefix}_path"]: experiment[f"{prefix}_sha256"]
+        for prefix in ("evaluator", "calibration_evaluator", "gelu_evaluator")
+    }
+    files.update({
+        runtime_files.safe_output(source, relative): expected
+        for relative, expected in experiment.get("runtime_sha256", {}).items()
+    })
+    identity.verify_file_identities(files)
+    dependencies = experiment.get("dependency_sha256", {})
+    if set(dependencies) != {"transformers", "spikingjelly"}:
+        raise ValueError("Editable dependency source identities are required")
+    identity.verify_package_identities({
+        source / "src" / package / subtree: dependencies[package]
+        for package, subtree in (("transformers", "src"), ("spikingjelly", "spikingjelly"))
+    })
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -296,13 +310,13 @@ def validate_log_header(task: dict, text: str) -> None:
     headers = [line.removeprefix("Comparison task — ") for line in text.splitlines()
                if line.startswith("Comparison task — ")]
     if len(headers) != 1 or json.loads(headers[0]) != {
-            "task_sha256": task_sha256(task), "batch_size": task["batch_size"]}:
+            "task_sha256": identity.json_sha256(task), "batch_size": task["batch_size"]}:
         raise ValueError("Comparison task identity differs")
 
 
 def parsed_result(task: dict, root: Path) -> dict:
     result = json.loads(json.dumps(parse_result_log(task, root)))
-    text = safe_output(root, task["log_file"]).read_text()
+    text = runtime_files.safe_output(root, task["log_file"]).read_text()
     validate_log_header(task, text)
     if task["backend"] == "spiking" and not result["clamp_sites"]:
         raise ValueError("Spiking evaluation lacks named clamp counts")
@@ -321,20 +335,20 @@ def validate_result(task: dict, result: dict, experiment: dict, root: Path) -> N
     validate_task(task, experiment)
     if any(result.get(key) != value for key, value in task.items() if key != "calibration_sha256"):
         raise ValueError("Result differs from the assigned task")
-    if result.get("success") is not True or result.get("task_sha256") != task_sha256(task):
+    if result.get("success") is not True or result.get("task_sha256") != identity.json_sha256(task):
         raise ValueError("Missing successful task identity")
-    if result.get("experiment_sha256") != task_sha256(experiment):
+    if result.get("experiment_sha256") != identity.json_sha256(experiment):
         raise ValueError("Result experiment differs")
     if result.get("host_label") not in {"local", "ubai"}:
         raise ValueError("Missing execution environment")
     if not math.isfinite(result.get("elapsed_seconds", -1)) or result["elapsed_seconds"] < 0:
         raise ValueError("Invalid run duration")
-    log = safe_output(root, task["log_file"])
-    if result.get("log_sha256") != sha256_file(log):
+    log = runtime_files.safe_output(root, task["log_file"])
+    if result.get("log_sha256") != identity.sha256_file(log):
         raise ValueError("Result log changed")
     if task["kind"] != "dense":
-        table = safe_output(root, task["calibration_file"])
-        if result.get("calibration_sha256") != sha256_file(table):
+        table = runtime_files.safe_output(root, task["calibration_file"])
+        if result.get("calibration_sha256") != identity.sha256_file(table):
             raise ValueError("Calibration artifact changed")
         if task["kind"] not in {"collect", "smoke_collect"} and result["calibration_sha256"] != task["calibration_sha256"]:
             raise ValueError("Assigned calibration differs")
@@ -389,10 +403,13 @@ def evaluator_command(experiment: dict, task: dict, root: Path) -> list[str]:
                 "--no-mismatch-enabled", "--mismatch-theta-std", "0", "--mismatch-seed", "0",
                 "--weight-noise-std", "0", "--bias-noise-std", "0"]
     if not dense:
-        command += ["--calibration-path", str(safe_output(root, task["calibration_file"])),
-                    "--calibration-samples", str(task["calibration_samples"]), "--calibration-seed", "0",
-                    "--calibration-bins", "2048", "--calibration-lower-quantile", "0",
-                    "--calibration-upper-quantile", "1", "--calibration-margin-fraction", "0.05"]
+        command += [
+            "--calibration-path",
+            str(runtime_files.safe_output(root, task["calibration_file"])),
+            "--calibration-samples", str(task["calibration_samples"]), "--calibration-seed", "0",
+            "--calibration-bins", "2048", "--calibration-lower-quantile", "0",
+            "--calibration-upper-quantile", "1", "--calibration-margin-fraction", "0.05",
+        ]
     if model.get("evaluation_quick_test", model["task"] == "imagenet-1k"):
         command += ["--quick-test"]
     if smoke and not collect:

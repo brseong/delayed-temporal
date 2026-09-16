@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from functools import partial
-import hashlib
 import importlib.util
 import json
 import os
@@ -17,20 +16,17 @@ from typing import Any
 
 
 CONTROL_ROOT = Path(__file__).resolve().parents[2]
+if str(CONTROL_ROOT) not in sys.path:
+    sys.path.insert(0, str(CONTROL_ROOT))
+
+from scripts.runtime import identity as runtime_identity
+
 WORKER_PATH = "scripts/experiments/run_calibrated_three_sweep_task.py"
 COMMON_PATH = "scripts/experiments/calibrated_three_sweeps.py"
 LOCAL_GPU_IDS = (4, 5, 6, 7)
 SUPPORTED_LOCAL_GPU_IDS = tuple(range(8))
 TEMPORARY_TAG = "vit_base_calibrated_theta_rt_ratio_float64_bounds3_v1"
 TEMPORARY_SOURCE_COMMIT = "36615ab4390f9817e3af0e4c4a6f840fc6bd57ee"
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def clean_head(source: Path) -> str:
@@ -54,10 +50,10 @@ def check_control_identity(output_root: Path, experiment: dict[str, Any]) -> dic
         raise ValueError("The controller must record the approved local GPU set")
     if identity.get("supported_local_gpu_ids") != list(SUPPORTED_LOCAL_GPU_IDS):
         raise ValueError("The controller must record its supported local GPU set")
-    if identity.get("local_worker_sha256") != sha256_file(Path(__file__)):
+    if identity.get("local_worker_sha256") != runtime_identity.sha256_file(Path(__file__)):
         raise ValueError("Local wrapper content differs from the controller record")
     controller_path = CONTROL_ROOT / "scripts/experiments/run_calibrated_three_sweeps.py"
-    if identity.get("controller_sha256") != sha256_file(controller_path):
+    if identity.get("controller_sha256") != runtime_identity.sha256_file(controller_path):
         raise ValueError("Controller content differs from its recorded identity")
     return identity
 
@@ -68,7 +64,8 @@ def load_frozen_worker(experiment: dict[str, Any]) -> ModuleType:
         raise ValueError("Frozen evaluator source commit mismatch")
     for relative in (WORKER_PATH, COMMON_PATH):
         expected = experiment["runtime_sha256"][relative]
-        if not re.fullmatch(r"[0-9a-f]{64}", expected) or sha256_file(source / relative) != expected:
+        if (not re.fullmatch(r"[0-9a-f]{64}", expected)
+                or runtime_identity.sha256_file(source / relative) != expected):
             raise ValueError(f"Frozen experiment source content mismatch: {relative}")
     # This entry point imports no repository code before establishing the source.
     for name in ("scripts", "scripts.experiments", "scripts.experiments.calibrated_three_sweeps"):

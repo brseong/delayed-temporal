@@ -14,6 +14,11 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.runtime import identity as runtime_identity
+
 WRAPPER = ROOT / "scripts/experiments/run_calibrated_three_sweep_local_task.py"
 spec = importlib.util.spec_from_file_location("_local_worker_adapter_test", WRAPPER)
 assert spec is not None and spec.loader is not None
@@ -41,8 +46,9 @@ def verify_control_identity(root: Path) -> None:
     experiment = {"source_commit": "b" * 40}
     identity = {"source_commit": head, "source_root": str(control),
                 "evaluator_source_commit": experiment["source_commit"],
-                "controller_sha256": adapter.sha256_file(controller),
-                "local_worker_sha256": adapter.sha256_file(WRAPPER), "local_gpu_ids": [4, 5, 6, 7],
+                "controller_sha256": runtime_identity.sha256_file(controller),
+                "local_worker_sha256": runtime_identity.sha256_file(WRAPPER),
+                "local_gpu_ids": [4, 5, 6, 7],
                 "supported_local_gpu_ids": list(range(8))}
     identity_path = records / f"{head}.json"
     identity_path.write_text(json.dumps(identity))
@@ -70,8 +76,10 @@ def verify_frozen_import(root: Path) -> None:
     worker_path.write_text("MARKER = 'frozen'\ndef require_gpu(experiment, host_label): return 'unchanged'\ndef main(): return MARKER\n")
     common_path.write_text("BOUND_POLICY = 3\n")
     experiment = {"source_commit": "b" * 40, "source_root": str(source),
-                  "runtime_sha256": {adapter.WORKER_PATH: adapter.sha256_file(worker_path),
-                                     adapter.COMMON_PATH: adapter.sha256_file(common_path)}}
+                  "runtime_sha256": {
+                      adapter.WORKER_PATH: runtime_identity.sha256_file(worker_path),
+                      adapter.COMMON_PATH: runtime_identity.sha256_file(common_path),
+                  }}
     original_path = list(sys.path)
     try:
         with patch.object(adapter, "clean_head", return_value=experiment["source_commit"]):

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,6 +19,12 @@ from typing import Any
 TAG = "conversion_comparison_imagenet_timm_theta40_float64_v4"
 MODEL_KEYS = ("imagenet_vit_small", "imagenet_vit_base", "imagenet_vit_large")
 SOURCE = Path(__file__).resolve().parents[2]
+if str(SOURCE) not in sys.path:
+    sys.path.insert(0, str(SOURCE))
+
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
+
 PYTHON = Path("/opt/conda/envs/dt/bin/python")
 ROOT = Path("/data/delayed-temporal/artifacts/logs/conversion_comparison") / TAG
 V3_ROOT = Path("/data/delayed-temporal/artifacts/logs/conversion_comparison/conversion_comparison_theta40_calibrated_float64_bounds3_v3")
@@ -27,34 +32,8 @@ PREPROCESSING = SOURCE / "scripts/configs/vit_timm_preprocessing.json"
 PHASES = ("collect", "dense", "spiking")
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def canonical_sha256(value: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-    ).hexdigest()
-
-
 def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
-
-
-def write_immutable(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rendered = json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
-    if path.exists():
-        if path.read_text() != rendered:
-            raise ValueError(f"refusing to replace immutable artifact: {path}")
-        return
-    temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    temporary.write_text(rendered)
-    temporary.replace(path)
 
 
 def source_commit() -> str:
@@ -96,12 +75,16 @@ def build_experiment() -> dict[str, Any]:
         "calibration_population": "training_seed0_5000",
         "preprocessing_backend": "timm",
         "preprocessing_config": str(PREPROCESSING),
-        "preprocessing_config_sha256": sha256_file(PREPROCESSING),
+        "preprocessing_config_sha256": identity.sha256_file(PREPROCESSING),
         "v3_experiment": str(previous_path),
-        "v3_experiment_sha256": sha256_file(previous_path),
-        "evaluator_sha256": sha256_file(SOURCE / "scripts/evaluation/error_analysis_vit.py"),
-        "calibration_evaluator_sha256": sha256_file(SOURCE / "scripts/analysis/evaluate_calibrated_vit.py"),
-        "gelu_evaluator_sha256": sha256_file(SOURCE / "scripts/analysis/gelu_cubic_phi_nl_vit.py"),
+        "v3_experiment_sha256": identity.sha256_file(previous_path),
+        "evaluator_sha256": identity.sha256_file(SOURCE / "scripts/evaluation/error_analysis_vit.py"),
+        "calibration_evaluator_sha256": identity.sha256_file(
+            SOURCE / "scripts/analysis/evaluate_calibrated_vit.py"
+        ),
+        "gelu_evaluator_sha256": identity.sha256_file(
+            SOURCE / "scripts/analysis/gelu_cubic_phi_nl_vit.py"
+        ),
         "models": models,
     }
     return experiment
@@ -120,7 +103,7 @@ def initialize() -> dict[str, Any]:
     ROOT.mkdir(parents=True, exist_ok=True)
     for directory in ("calibration", "logs", "results", "locks", "status", "rejected", "outputs"):
         (ROOT / directory).mkdir(exist_ok=True)
-    write_immutable(ROOT / "experiment.json", experiment)
+    runtime_files.immutable_json(ROOT / "experiment.json", experiment)
     validate_experiment(experiment)
     return experiment
 
@@ -220,14 +203,14 @@ def parse_phase(experiment: dict[str, Any], model: dict[str, Any], phase: str, l
         "source_commit": experiment["source_commit"],
         "checkpoint_sha256": model["checkpoint_sha256"],
         "preprocessing_config_sha256": experiment["preprocessing_config_sha256"],
-        "log_file": str(log.relative_to(ROOT)), "log_sha256": sha256_file(log),
+        "log_file": str(log.relative_to(ROOT)), "log_sha256": identity.sha256_file(log),
         "gpu_model": single(r"^GPU model: (.+)$", text, "GPU model"),
         "success": True,
     }
     calibration = ROOT / "calibration" / f"{model['model_key']}.json"
     if phase == "collect":
         table = validate_calibration(experiment, model, calibration)
-        digest = sha256_file(calibration)
+        digest = identity.sha256_file(calibration)
         marker = single(r"^Calibration identity — mode: collect, sha256: ([0-9a-f]{64})$", text, "calibration identity")
         if marker != digest:
             raise ValueError("saved calibration hash differs from its log")
@@ -242,7 +225,7 @@ def parse_phase(experiment: dict[str, Any], model: dict[str, Any], phase: str, l
         raise ValueError("evaluation metric is incomplete or inconsistent")
     result.update(correct=correct, samples=samples, accuracy=correct / samples, prediction_sha256=digest)
     if phase == "spiking":
-        calibration_sha256 = sha256_file(calibration)
+        calibration_sha256 = identity.sha256_file(calibration)
         marker = single(r"^Calibration identity — mode: validate, sha256: ([0-9a-f]{64})$", text, "calibration replay")
         if marker != calibration_sha256:
             raise ValueError("spiking evaluation used another calibration table")
@@ -282,7 +265,7 @@ def run_phase(experiment: dict[str, Any], model: dict[str, Any], phase: str) -> 
     result = parse_phase(experiment, model, phase, log)
     result["elapsed_seconds"] = time.monotonic() - started
     # Elapsed time is controller metadata and is removed for deterministic replay validation.
-    write_immutable(result_path, result)
+    runtime_files.immutable_json(result_path, result)
     return result
 
 
@@ -309,7 +292,7 @@ def run_pipeline(experiment: dict[str, Any], model_key: str, physical_gpu: int) 
         for phase in PHASES:
             if completed_result(experiment, model, phase) is None:
                 run_phase(experiment, model, phase)
-            write_immutable(ROOT / "status" / f"{model_key}_{phase}.json", {
+            runtime_files.immutable_json(ROOT / "status" / f"{model_key}_{phase}.json", {
                 "model_key": model_key, "phase": phase, "state": "complete",
                 "result": f"results/{model_key}_{phase}.json",
             })
@@ -337,8 +320,8 @@ def summarize(experiment: dict[str, Any]) -> None:
             "snn_prediction_sha256": spiking["prediction_sha256"],
             "calibration_sha256": collect["calibration_sha256"],
         })
-    write_immutable(ROOT / "outputs" / "summary.json", {
-        "tag": TAG, "experiment_sha256": canonical_sha256(experiment), "rows": rows,
+    runtime_files.immutable_json(ROOT / "outputs" / "summary.json", {
+        "tag": TAG, "experiment_sha256": identity.json_sha256(experiment), "rows": rows,
     })
     csv = ["model_key,evaluation_population,ann_correct,snn_correct,total,ann_accuracy_percent,snn_accuracy_percent,delta_percentage_points"]
     for row in rows:

@@ -18,48 +18,35 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from scripts.experiments.calibrated_three_sweeps import (
-    TAG, parse_result_log, safe_output, sha256_file, task_sha256, validate_experiment,
-    validate_result, validate_table, validate_task, write_immutable_json,
+    TAG, parse_result_log, validate_experiment, validate_result, validate_table, validate_task,
 )
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity, local_gpu
 
 
 def check_source(experiment: dict[str, Any]) -> None:
     source = Path(experiment["source_root"])
-    head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
-    dirty = subprocess.check_output(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"], text=True)
-    if head != experiment["source_commit"] or dirty.strip():
-        raise ValueError("Source root must have its frozen HEAD and no tracked modifications")
-    for prefix in ("evaluator", "calibration_evaluator", "gelu_evaluator"):
-        path = source / experiment[f"{prefix}_path"]
-        if sha256_file(path) != experiment[f"{prefix}_sha256"]:
-            raise ValueError(f"Evaluator content mismatch: {prefix}")
-    for relative, expected in experiment.get("runtime_sha256", {}).items():
-        if sha256_file(safe_output(source, relative)) != expected:
-            raise ValueError(f"Runtime content mismatch: {relative}")
-    from scripts.experiments.ubai.prepare_calibrated_three_sweeps_ubai import package_source_identity
+    identity.verify_clean_checkout(source, experiment["source_commit"])
+    files = {
+        source / experiment[f"{prefix}_path"]: experiment[f"{prefix}_sha256"]
+        for prefix in ("evaluator", "calibration_evaluator", "gelu_evaluator")
+    }
+    files.update({
+        runtime_files.safe_output(source, relative): expected
+        for relative, expected in experiment.get("runtime_sha256", {}).items()
+    })
+    identity.verify_file_identities(files)
     dependencies = experiment.get("dependency_sha256", {})
     if set(dependencies) != {"transformers", "spikingjelly"}:
         raise ValueError("Editable dependency source identities are required")
-    for package, subtree in (("transformers", "src"), ("spikingjelly", "spikingjelly")):
-        if package_source_identity(source / "src" / package / subtree)[0] != dependencies[package]:
-            raise ValueError(f"Editable dependency source differs: {package}")
+    identity.verify_package_identities({
+        source / "src" / package / subtree: dependencies[package]
+        for package, subtree in (("transformers", "src"), ("spikingjelly", "spikingjelly"))
+    })
 
 
 def require_gpu(experiment: dict[str, Any], host_label: str) -> str:
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    if not visible or "," in visible or visible in {"-1", "all", "none"}:
-        raise ValueError("Exactly one allocated GPU must be visible")
-    if host_label == "local" and visible not in {"4", "5", "6", "7"}:
-        raise ValueError("Local evaluation is restricted to physical GPU devices 4 through 7")
-    if host_label == "ubai" and not os.environ.get("SLURM_JOB_ID"):
-        raise ValueError("UBAI evaluation requires a Slurm allocation")
-    probe = subprocess.check_output([
-        experiment["python_bin"], "-c", "import json,torch; print(json.dumps({'count':torch.cuda.device_count(),"
-        "'model':torch.cuda.get_device_name(0) if torch.cuda.device_count() else ''}))"], text=True)
-    data = json.loads(probe)
-    if data["count"] != 1 or "RTX A6000" not in data["model"]:
-        raise ValueError("Exactly one RTX A6000 GPU is required")
-    return data["model"]
+    return local_gpu.require_single_gpu(experiment["python_bin"], host_label)
 
 
 def evaluator_command(experiment: dict[str, Any], task: dict[str, Any], output_root: Path) -> list[str]:
@@ -81,7 +68,7 @@ def evaluator_command(experiment: dict[str, Any], task: dict[str, Any], output_r
                 "--spiking-mlp", "--spiking-attention", "--no-spiking-mlp-exact-gelu",
                 "--calibration-mode", "none" if dense else "collect" if collect else "validate"]
     if not dense:
-        command += ["--calibration-path", str(safe_output(output_root, task["calibration_file"])),
+        command += ["--calibration-path", str(runtime_files.safe_output(output_root, task["calibration_file"])),
                     "--calibration-samples", "5000", "--calibration-seed", "0", "--calibration-bins", "2048",
                     "--calibration-lower-quantile", "0", "--calibration-upper-quantile", "1", "--calibration-margin-fraction", "0.05"]
     if task["split"] == "validation":
@@ -109,8 +96,8 @@ def execute(experiment_path: Path, task_path: Path, output_root: Path, host_labe
         raise ValueError("Python 3.12.13 is required")
     check_source(experiment)
     output_root = output_root.resolve()
-    result_path = safe_output(output_root, task["result_file"])
-    log_path = safe_output(output_root, task["log_file"])
+    result_path = runtime_files.safe_output(output_root, task["result_file"])
+    log_path = runtime_files.safe_output(output_root, task["log_file"])
     locks = output_root / "locks"
     locks.mkdir(parents=True, exist_ok=True)
     with (locks / f"{task['run_id']}.lock").open("a") as lock:
@@ -121,15 +108,15 @@ def execute(experiment_path: Path, task_path: Path, output_root: Path, host_labe
             return result
         require_gpu(experiment, host_label)
         if task["kind"] not in {"dense", "collect"}:
-            table_path = safe_output(output_root, task["calibration_file"])
-            if sha256_file(table_path) != task["calibration_sha256"]:
+            table_path = runtime_files.safe_output(output_root, task["calibration_file"])
+            if identity.sha256_file(table_path) != task["calibration_sha256"]:
                 raise ValueError("Calibration table differs from its assigned hash")
             validate_table(table_path, task, experiment)
         # Only this exclusively locked task's unfinished outputs are moved.
         rejected = output_root / "rejected" / f"{task['run_id']}-{time.time_ns()}"
         leftovers = [log_path]
         if task["kind"] == "collect":
-            leftovers.append(safe_output(output_root, task["calibration_file"]))
+            leftovers.append(runtime_files.safe_output(output_root, task["calibration_file"]))
         for path in leftovers:
             if path.exists():
                 rejected.mkdir(parents=True, exist_ok=True)
@@ -153,7 +140,9 @@ def execute(experiment_path: Path, task_path: Path, output_root: Path, host_labe
             environment.pop(key, None)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         if task["calibration_file"]:
-            safe_output(output_root, task["calibration_file"]).parent.mkdir(parents=True, exist_ok=True)
+            runtime_files.safe_output(output_root, task["calibration_file"]).parent.mkdir(
+                parents=True, exist_ok=True
+            )
         started = time.monotonic()
         previous_handlers = {}
         child: subprocess.Popen | None = None
@@ -185,18 +174,19 @@ def execute(experiment_path: Path, task_path: Path, output_root: Path, host_labe
                     os.killpg(child.pid, signal.SIGKILL)
                     child.wait()
         check_source(experiment)
-        result = {**task, "success": True, "task_sha256": task_sha256(task),
-                  "experiment_sha256": task_sha256(experiment), "host_label": host_label,
-                  "elapsed_seconds": time.monotonic() - started, "log_sha256": sha256_file(log_path)}
+        result = {**task, "success": True, "task_sha256": identity.json_sha256(task),
+                  "experiment_sha256": identity.json_sha256(experiment), "host_label": host_label,
+                  "elapsed_seconds": time.monotonic() - started,
+                  "log_sha256": identity.sha256_file(log_path)}
         if task["kind"] == "collect":
-            table = safe_output(output_root, task["calibration_file"])
+            table = runtime_files.safe_output(output_root, task["calibration_file"])
             validate_table(table, task, experiment)
-            result.update(calibration_sha256=sha256_file(table), sites=48)
+            result.update(calibration_sha256=identity.sha256_file(table), sites=48)
         else:
             result.update(parse_result_log(task, output_root))
             result["log_file"] = task["log_file"]
         validate_result(task, result, experiment, output_root)
-        write_immutable_json(result_path, result)
+        runtime_files.immutable_json(result_path, result)
         return result
 
 

@@ -17,15 +17,15 @@ from typing import Any
 import uuid
 
 from scripts.experiments.vit_comparison import (
-    MODEL_KEYS, TAG, check_source, model_by_key, read_json, sha256_file,
-    task_sha256, validate_experiment, validate_result, validate_task, write_immutable_json,
+    MODEL_KEYS, TAG, check_source, model_by_key, read_json,
+    validate_experiment, validate_result, validate_task,
 )
-from scripts.runtime.files import atomic_json
-from scripts.runtime.local_gpu import gpu_activity, gpu_available
-from scripts.runtime.slurm import parse_queue
 from scripts.experiments.calibrated_three_sweep_rebalance import parse_slurm_job, TERMINAL
-from scripts.experiments.ubai.prepare_calibrated_three_sweeps_ubai import absolute_path, immutable
-from scripts.experiments.ubai.run_calibrated_three_sweep_pair import worker_environment
+from scripts.runtime import environment as runtime_environment
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
+from scripts.runtime import local_gpu
+from scripts.runtime import slurm
 
 REMOTE_BASE = "/home1/sizz1997/myubai"
 USER = "sizz1997"
@@ -154,7 +154,8 @@ def deployment_for(experiment: dict, root: Path, old: dict) -> dict:
     runtime["minimum_scratch_bytes"] = 16 * 1024 ** 3
     return {
         "tag": TAG, "source_root": experiment["source_root"], "source_commit": experiment["source_commit"],
-        "experiment_root": str(root), "experiment_sha256": sha256_file(root / "experiment.json"),
+        "experiment_root": str(root),
+        "experiment_sha256": identity.sha256_file(root / "experiment.json"),
         "host_source_root": f'{REMOTE_BASE}/delayed-temporal-comparisons/{experiment["source_commit"]}',
         "host_experiment_root": f"{REMOTE_BASE}/delayed-temporal-experiments/{TAG}",
         "host_git_metadata_paths": [], "assets": list(assets.values()),
@@ -174,12 +175,12 @@ class Controller:
         self.remote_root = f"{REMOTE_BASE}/delayed-temporal-experiments/{TAG}"
         self.state_path = self.root / "assignments.json"
         self.state = read_json(self.state_path) if self.state_path.exists() else {
-            "experiment_sha256": task_sha256(self.experiment), "models": {
+            "experiment_sha256": identity.json_sha256(self.experiment), "models": {
                 key: {"owner": "ubai" if key in REMOTE_MODELS else "local", "status": "admission_pending",
                       "admission_attempts": 0, "pipeline_attempts": 0} for key in MODEL_KEYS},
             "local": {}, "remote": {"staged": False, "prep": {}, "pair": {}}, "phase": "running",
         }
-        if (self.state["experiment_sha256"] != task_sha256(self.experiment)
+        if (self.state["experiment_sha256"] != identity.json_sha256(self.experiment)
                 or set(self.state["models"]) != set(MODEL_KEYS)):
             raise ValueError("Central assignments differ from the immutable experiment")
         self.children: dict[str, subprocess.Popen] = {}
@@ -191,7 +192,7 @@ class Controller:
 
     def save(self) -> None:
         self.state["updated_at"] = time.time()
-        atomic_json(self.state_path, self.state)
+        runtime_files.atomic_json(self.state_path, self.state)
 
     def event(self, name: str, **fields: Any) -> None:
         from scripts.experiments.run_vit_comparison import event
@@ -233,12 +234,12 @@ class Controller:
         destination = self.root / "ubai"
         for item in deployment["runtime_tools"]:
             original = OLD_DEPLOYMENT.parent / item["path"]
-            if sha256_file(original) != item["sha256"]:
+            if identity.sha256_file(original) != item["sha256"]:
                 raise ValueError("Preserved portable Git tool differs")
             target = destination / item["path"]
-            immutable(target, original.read_bytes())
+            runtime_files.immutable(target, original.read_bytes())
             target.chmod(original.stat().st_mode & 0o777)
-        write_immutable_json(destination / "deployment.json", deployment)
+        runtime_files.immutable_json(destination / "deployment.json", deployment)
         self.remote(["mkdir", "-p", self.remote_root + "/ubai",
                      str(Path(deployment["host_source_root"]).parent)])
         self.transfer(["experiment.json", "ubai/deployment.json",
@@ -316,7 +317,7 @@ class Controller:
         self.save()
         scratch = Path(self.experiment["runtime_root"]) / "controllers" / record["launch_id"]
         scratch.mkdir(parents=True)
-        environment = worker_environment(dict(os.environ), scratch, str(gpu))
+        environment = runtime_environment.worker_environment(dict(os.environ), scratch, str(gpu))
         environment.update(VIT_COMPARISON_LAUNCH_ID=record["launch_id"], PYTHONUNBUFFERED="1")
         log = self.root / "worker_logs" / f"{key}-{mode}-{record['launch_id']}.log"
         with log.open("x") as handle:
@@ -377,11 +378,16 @@ class Controller:
 
     def free_gpus(self) -> list[int]:
         occupied = {record["gpu"] for record in self.state["local"].values()}
-        samples = gpu_activity(gpu_ids=LOCAL_GPUS)
-        return [gpu for gpu in LOCAL_GPUS if gpu not in occupied and gpu_available(samples[gpu])]
+        samples = local_gpu.gpu_activity(gpu_ids=LOCAL_GPUS)
+        return [
+            gpu for gpu in LOCAL_GPUS
+            if gpu not in occupied and local_gpu.gpu_available(samples[gpu])
+        ]
 
     def queue(self) -> list[dict]:
-        return parse_queue(self.remote(["squeue", "--noheader", "--user", USER, "--format=%i|%T|%j|%b"]))
+        return slurm.parse_queue(
+            self.remote(["squeue", "--noheader", "--user", USER, "--format=%i|%T|%j|%b"])
+        )
 
     def accounting(self, job: dict) -> list[dict]:
         text = self.remote(["sacct", "-n", "-X", "-j", str(job["job_id"]),
@@ -511,8 +517,9 @@ class Controller:
                 shutil.copy2(original, incoming / task["calibration_file"])
             log = incoming / task["log_file"]
             table = incoming / task["calibration_file"] if task["calibration_file"] else None
-            if (not log.exists() or sha256_file(log) != result.get("log_sha256")
-                    or (table is not None and sha256_file(table) != result.get("calibration_sha256"))):
+            if (not log.exists() or identity.sha256_file(log) != result.get("log_sha256")
+                    or (table is not None
+                        and identity.sha256_file(table) != result.get("calibration_sha256"))):
                 # A result may appear after its earlier live log snapshot was copied.
                 # Wait for one internally consistent snapshot instead of accepting it.
                 continue
@@ -527,7 +534,8 @@ class Controller:
                 continue
             prior = self.root / "results" / (collection + ".json")
             table = self.root / task["calibration_file"]
-            if not prior.exists() or not table.exists() or sha256_file(table) != task["calibration_sha256"]:
+            if (not prior.exists() or not table.exists()
+                    or identity.sha256_file(table) != task["calibration_sha256"]):
                 accepted_results.remove(run_id)
                 continue
             validate_result(read_json(self.root / "tasks" / (collection + ".json")), read_json(prior),
@@ -541,7 +549,8 @@ class Controller:
                 continue
             if name.startswith("calibration/") and source.stem + "_collect" not in accepted_results:
                 continue
-            if destination.exists() and sha256_file(source) == sha256_file(destination):
+            if (destination.exists()
+                    and identity.sha256_file(source) == identity.sha256_file(destination)):
                 continue
             if destination.exists() and not name.endswith(".log"):
                 raise ValueError("Remote transfer would replace an immutable local result")
@@ -565,7 +574,8 @@ class Controller:
         report = read_json(path)
         if (report.get("state") != "verified" or report.get("python_version") != "3.12.13"
                 or report.get("source_commit") != self.experiment["source_commit"]
-                or report.get("deployment_sha256") != sha256_file(self.root / "ubai/deployment.json")):
+                or report.get("deployment_sha256")
+                != identity.sha256_file(self.root / "ubai/deployment.json")):
             raise ValueError("UBAI preparation identity differs")
         self.state["remote"]["prep"]["status"] = "complete"
         return True
@@ -643,10 +653,10 @@ class Controller:
     def update_summary(self) -> None:
         from scripts.experiments.run_vit_comparison import summarize
         files = sorted((self.root / "results").glob("*.json"))
-        identity = tuple((str(path), sha256_file(path)) for path in files)
-        if identity != self.last_summary:
+        summary_identity = tuple((str(path), identity.sha256_file(path)) for path in files)
+        if summary_identity != self.last_summary:
             summarize(self.root, self.experiment)
-            self.last_summary = identity
+            self.last_summary = summary_identity
 
     def step(self) -> bool:
         self.poll_local()

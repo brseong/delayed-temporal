@@ -19,19 +19,12 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 from scripts.experiments.calibrated_three_sweeps import (
     TAG, RangeInsufficient, confirm_selection, make_task, make_tasks, rt_grid,
-    select_theta, sha256_file, task_sha256, theta_grid, validate_experiment,
-    validate_result, validate_task, write_immutable_json,
+    select_theta, theta_grid, validate_experiment, validate_result, validate_task,
 )
-from scripts.runtime.files import atomic_json
-from scripts.runtime.local_gpu import (
-    DEFAULT_ADMISSION_POLICY as GPU_ADMISSION_POLICY,
-    gpu_activity,
-    gpu_available,
-    gpu_occupancy,
-    parse_gpu_activity,
-    parse_gpu_occupancy,
-)
-from scripts.runtime.slurm import parse_queue
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
+from scripts.runtime import local_gpu
+from scripts.runtime import slurm
 
 LOCAL_GPUS = (4, 5, 6, 7)
 SUPPORTED_LOCAL_GPUS = tuple(range(8))
@@ -58,8 +51,6 @@ def read_json(path: Path) -> dict:
 
 def initialize(root: Path, source: Path, python_bin: str) -> dict:
     """Freeze source and actual local artifact hashes before creating assignments."""
-    from scripts.setup.hash_artifact import artifact_identity
-    from scripts.experiments.ubai.prepare_calibrated_three_sweeps_ubai import package_source_identity
     from scripts.experiments.run_calibrated_three_sweep_task import check_source
     if socket.gethostname() != 'baekryun-cuda129':
         raise ValueError('Initialization must run on the local GPU host')
@@ -94,17 +85,17 @@ def initialize(root: Path, source: Path, python_bin: str) -> dict:
         ('dataset', 'datasets/imagenet_theta_selection_v1/validation_50000'),
     ):
         path = ASSETS / relative
-        identity = artifact_identity(path)
+        artifact = identity.artifact_identity(path)
         experiment[prefix + '_path'] = str(path)
-        experiment[prefix + '_sha256'] = identity['aggregate_sha256']
+        experiment[prefix + '_sha256'] = artifact['aggregate_sha256']
     for prefix, relative in (
         ('evaluator', 'scripts/evaluation/error_analysis_vit.py'),
         ('calibration_evaluator', 'scripts/analysis/evaluate_calibrated_vit.py'),
         ('gelu_evaluator', 'scripts/analysis/gelu_cubic_phi_nl_vit.py'),
     ):
         experiment[prefix + '_path'] = relative
-        experiment[prefix + '_sha256'] = sha256_file(source / relative)
-    experiment['runtime_sha256'] = {relative: sha256_file(source / relative) for relative in (
+        experiment[prefix + '_sha256'] = identity.sha256_file(source / relative)
+    experiment['runtime_sha256'] = {relative: identity.sha256_file(source / relative) for relative in (
         'scripts/experiments/run_calibrated_three_sweeps.py',
         'scripts/experiments/run_calibrated_three_sweep_task.py',
         'scripts/experiments/calibrated_three_sweeps.py',
@@ -114,16 +105,17 @@ def initialize(root: Path, source: Path, python_bin: str) -> dict:
         'scripts/experiments/ubai/calibrated_three_sweep_prep.sbatch',
         'scripts/experiments/ubai/calibrated_git.sh',
         'scripts/runtime/files.py',
+        'scripts/runtime/identity.py',
         'scripts/runtime/local_gpu.py',
         'scripts/runtime/slurm.py',
     )}
     experiment['dependency_sha256'] = {
-        package: package_source_identity(source / 'src' / package / subtree)[0]
+        package: identity.package_source_identity(source / 'src' / package / subtree)[0]
         for package, subtree in (('transformers', 'src'), ('spikingjelly', 'spikingjelly'))
     }
     validate_experiment(experiment)
     check_source(experiment)
-    write_immutable_json(root / 'experiment.json', experiment)
+    runtime_files.immutable_json(root / 'experiment.json', experiment)
     return experiment
 
 
@@ -138,27 +130,30 @@ def controller_identity(experiment: dict[str, Any]) -> dict[str, Any]:
                      'scripts/experiments/run_calibrated_three_sweep_task.py',
                      'scripts/analysis/summarize_calibrated_three_sweeps.py',
                      'scripts/experiments/ubai/prepare_calibrated_three_sweeps_ubai.py'):
-        if sha256_file(REPO / relative) != experiment['runtime_sha256'][relative]:
+        if identity.sha256_file(REPO / relative) != experiment['runtime_sha256'][relative]:
             raise ValueError(f'Controller import differs from the frozen experiment: {relative}')
-    shared_runtime = ('scripts/runtime/files.py', 'scripts/runtime/local_gpu.py',
-                      'scripts/runtime/slurm.py')
+    shared_runtime = (
+        'scripts/runtime/environment.py', 'scripts/runtime/files.py',
+        'scripts/runtime/identity.py', 'scripts/runtime/local_gpu.py',
+        'scripts/runtime/slurm.py',
+    )
     for relative in shared_runtime:
-        if relative in frozen_runtime and sha256_file(REPO / relative) != frozen_runtime[relative]:
+        if relative in frozen_runtime and identity.sha256_file(REPO / relative) != frozen_runtime[relative]:
             raise ValueError(f'Controller runtime differs from the frozen experiment: {relative}')
     return {'source_commit': head, 'source_root': str(REPO),
-            'controller_sha256': sha256_file(Path(__file__)),
+            'controller_sha256': identity.sha256_file(Path(__file__)),
             'evaluator_source_commit': experiment['source_commit'],
-            'gpu_admission_policy': GPU_ADMISSION_POLICY,
+            'gpu_admission_policy': local_gpu.DEFAULT_ADMISSION_POLICY,
             'local_gpu_ids': list(LOCAL_GPUS),
             'supported_local_gpu_ids': list(SUPPORTED_LOCAL_GPUS),
-            'shared_runtime_sha256': {relative: sha256_file(REPO / relative)
+            'shared_runtime_sha256': {relative: identity.sha256_file(REPO / relative)
                                       for relative in shared_runtime},
-            'local_worker_sha256': sha256_file(REPO / LOCAL_WORKER),
+            'local_worker_sha256': identity.sha256_file(REPO / LOCAL_WORKER),
             'rebalance_min_wait_seconds': REBALANCE_MIN_WAIT_SECONDS,
             'rebalance_account': 'uos',
-            'rebalance_sha256': sha256_file(REPO / 'scripts/experiments/calibrated_three_sweep_rebalance.py'),
+            'rebalance_sha256': identity.sha256_file(REPO / 'scripts/experiments/calibrated_three_sweep_rebalance.py'),
             'ubai_resource_policy': UBAI_RESOURCE_POLICY,
-            'pair_runtime_sha256': {relative: sha256_file(REPO / relative) for relative in PAIR_FILES}}
+            'pair_runtime_sha256': {relative: identity.sha256_file(REPO / relative) for relative in PAIR_FILES}}
 
 
 def default_host(task: dict, ordinal: int) -> str:
@@ -236,8 +231,8 @@ class Controller:
         self.rebalance_account = 'uos'
         self.state_path = root / 'assignments.json'
         self.state = read_json(self.state_path) if self.state_path.exists() else {
-            'experiment_sha256': task_sha256(self.experiment), 'tasks': {}, 'phase': 'prepared'}
-        if self.state['experiment_sha256'] != task_sha256(self.experiment):
+            'experiment_sha256': identity.json_sha256(self.experiment), 'tasks': {}, 'phase': 'prepared'}
+        if self.state['experiment_sha256'] != identity.json_sha256(self.experiment):
             raise ValueError('Assignment experiment identity mismatch')
         self.children: dict[str, subprocess.Popen] = {}
         self.gpu_locks: dict[str, Any] = {}
@@ -245,7 +240,9 @@ class Controller:
         self.pair_controller_verified = False
         self.root.joinpath('worker_logs').mkdir(parents=True, exist_ok=True)
         identity = controller_identity(self.experiment)
-        write_immutable_json(self.root / 'controllers' / (identity['source_commit'] + '.json'), identity)
+        runtime_files.immutable_json(
+            self.root / 'controllers' / (identity['source_commit'] + '.json'), identity
+        )
         self.state['controller_identity'] = identity
         self.state['active_local_gpu_ids'] = list(self.local_gpus)
         self.state['temporary_local_gpus'] = temporary_local_gpus
@@ -255,7 +252,7 @@ class Controller:
 
     def save(self) -> None:
         self.state['updated_at_utc'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-        atomic_json(self.state_path, self.state)
+        runtime_files.atomic_json(self.state_path, self.state)
 
     def event(self, kind: str, **fields: Any) -> None:
         event = {'time_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'event': kind, **fields}
@@ -289,7 +286,7 @@ class Controller:
         value = read_json(path)
         if (value.get('state') != 'verified' or value.get('python_version') != '3.12.13'
                 or value.get('source_commit') != self.experiment['source_commit']
-                or value.get('deployment_sha256') != sha256_file(self.root / 'ubai/deployment.json')):
+                or value.get('deployment_sha256') != identity.sha256_file(self.root / 'ubai/deployment.json')):
             raise NeedsAttention('Slurm preparation identity failed')
         self.prep_verified = True
         self.event('ubai_preparation_verified', job_id=value['job_id'])
@@ -313,11 +310,12 @@ class Controller:
 
     def prepare_task(self, task: dict, ordinal: int, force_host: str | None = None) -> None:
         validate_task(task, self.experiment)
-        write_immutable_json(self.root / 'tasks' / (task['run_id'] + '.json'), task)
+        runtime_files.immutable_json(self.root / 'tasks' / (task['run_id'] + '.json'), task)
         assignment = self.state['tasks'].setdefault(task['run_id'], {
             'status': 'pending', 'attempt': 0, 'preferred_host': force_host or default_host(task, ordinal),
-            'fixed_host': force_host or task.get('host_label'), 'task_sha256': task_sha256(task)})
-        if assignment['task_sha256'] != task_sha256(task):
+            'fixed_host': force_host or task.get('host_label'),
+            'task_sha256': identity.json_sha256(task)})
+        if assignment['task_sha256'] != identity.json_sha256(task):
             raise ValueError('Task assignment identity changed')
 
     def start_local(self, task: dict, gpu: int) -> bool:
@@ -335,12 +333,12 @@ class Controller:
             lock.close()
             return False
         try:
-            admission = gpu_activity(gpu_ids=self.local_gpus)[gpu]
+            admission = local_gpu.gpu_activity(gpu_ids=self.local_gpus)[gpu]
         except (subprocess.SubprocessError, OSError, ValueError) as exc:
             self.state['local_wait_reason'] = str(exc)
             lock.close()
             return False
-        if not gpu_available(admission):
+        if not local_gpu.gpu_available(admission):
             lock.close()
             return False
         available_cpus = sorted(os.sched_getaffinity(0))
@@ -417,25 +415,28 @@ class Controller:
             raise ValueError('Only pending cluster experiments can be paired')
         if quota_available(queue, self.prefix, 2) < 1:
             raise ValueError('The paired job exceeds the available Slurm allocation')
-        identity = self.state['controller_identity']
+        controller_record = self.state['controller_identity']
         if not self.pair_controller_verified:
             head = self.remote(['git', '-C', self.remote_controller, 'rev-parse', 'HEAD']).strip()
-            if head != identity['source_commit']:
+            if head != controller_record['source_commit']:
                 raise NeedsAttention('The remote paired controller checkout is not synchronized')
             self.pair_controller_verified = True
         entries = [{'run_id': task['run_id'],
-                    'task_sha256': sha256_file(self.root / 'tasks' / (task['run_id'] + '.json'))}
+                    'task_sha256': identity.sha256_file(self.root / 'tasks' / (task['run_id'] + '.json'))}
                    for task in tasks]
         attempts = [self.state['tasks'][task['run_id']]['attempt'] + 1 for task in tasks]
-        pair_id = 'pair-' + task_sha256({'tasks': entries, 'attempts': attempts,
-                                       'controller_commit': identity['source_commit']})[:24]
+        pair_id = 'pair-' + identity.json_sha256({
+            'tasks': entries,
+            'attempts': attempts,
+            'controller_commit': controller_record['source_commit'],
+        })[:24]
         pair = {'format_version': 1, 'pair_id': pair_id,
-                'experiment_sha256': sha256_file(self.root / 'experiment.json'),
-                'deployment_sha256': sha256_file(self.root / 'ubai/deployment.json'),
+                'experiment_sha256': identity.sha256_file(self.root / 'experiment.json'),
+                'deployment_sha256': identity.sha256_file(self.root / 'ubai/deployment.json'),
                 'source_commit': self.experiment['source_commit'],
-                'controller_commit': identity['source_commit'],
-                'controller_sha256': identity['pair_runtime_sha256'], 'tasks': entries}
-        write_immutable_json(self.root / 'pairs' / (pair_id + '.json'), pair)
+                'controller_commit': controller_record['source_commit'],
+                'controller_sha256': controller_record['pair_runtime_sha256'], 'tasks': entries}
+        runtime_files.immutable_json(self.root / 'pairs' / (pair_id + '.json'), pair)
         files = ['experiment.json', 'pairs/' + pair_id + '.json']
         for task in tasks:
             files.append('tasks/' + task['run_id'] + '.json')
@@ -452,7 +453,7 @@ class Controller:
         exports = ','.join(('ALL', 'EXPERIMENT_SOURCE=' + self.remote_source,
                             'EXPERIMENT_DEPLOYMENT=' + self.remote_root + '/ubai/deployment.json',
                             'CONTROLLER_SOURCE=' + self.remote_controller,
-                            'CONTROLLER_COMMIT=' + identity['source_commit'],
+                            'CONTROLLER_COMMIT=' + controller_record['source_commit'],
                             'PAIR_MANIFEST=' + self.remote_root + '/pairs/' + pair_id + '.json'))
         response = self.remote(['sbatch', '--parsable', '--job-name=' + name, '--export=' + exports,
                                 '--output=' + self.remote_root + '/slurm/%x-%j.out',
@@ -613,7 +614,7 @@ class Controller:
                     os.kill(row['pid'], signal.SIGTERM)
             elif row.get('host') == 'ubai' and row.get('job_id'):
                 try:
-                    current = parse_queue(self.remote(['squeue', '-h', '-r', '-j', row['job_id'], '-o', '%i|%T|%j|%b']))
+                    current = slurm.parse_queue(self.remote(['squeue', '-h', '-r', '-j', row['job_id'], '-o', '%i|%T|%j|%b']))
                     if any(q['name'] == row.get('slurm_name', self.prefix + run_id) for q in current):
                         self.remote(['scancel', row['job_id']])
                 except (subprocess.SubprocessError, OSError) as exc:
@@ -622,9 +623,13 @@ class Controller:
     def run_tasks(self, phase: str, tasks: list[dict], *, force_hosts: dict[str, str] | None = None) -> list[dict]:
         for ordinal, task in enumerate(tasks):
             self.prepare_task(task, ordinal, (force_hosts or {}).get(task['run_id']))
-        write_immutable_json(self.root / 'phases' / (phase + '.json'), {
-            'phase': phase, 'experiment_sha256': task_sha256(self.experiment),
-            'tasks': [{'run_id': task['run_id'], 'task_sha256': task_sha256(task)} for task in tasks]})
+        runtime_files.immutable_json(self.root / 'phases' / (phase + '.json'), {
+            'phase': phase, 'experiment_sha256': identity.json_sha256(self.experiment),
+            'tasks': [
+                {'run_id': task['run_id'], 'task_sha256': identity.json_sha256(task)}
+                for task in tasks
+            ],
+        })
         self.state['phase'] = phase
         self.state.pop('reason', None)
         self.save()
@@ -633,7 +638,7 @@ class Controller:
         while len(done) < len(tasks):
             queue, remote_slots = None, 0
             try:
-                queue = parse_queue(self.remote(['squeue', '-h', '-r', '-u', 'sizz1997', '-o', '%i|%T|%j|%b']))
+                queue = slurm.parse_queue(self.remote(['squeue', '-h', '-r', '-u', 'sizz1997', '-o', '%i|%T|%j|%b']))
                 if self.check_preparation():
                     remote_slots = quota_available(queue, self.prefix)
                     self.state.pop('remote_wait_reason', None)
@@ -653,7 +658,7 @@ class Controller:
                 self.report()
                 last_summary_count = len(done)
             try:
-                activity = gpu_activity(gpu_ids=self.local_gpus)
+                activity = local_gpu.gpu_activity(gpu_ids=self.local_gpus)
                 self.state['local_gpu_activity'] = activity
                 self.state.pop('local_wait_reason', None)
             except (subprocess.SubprocessError, OSError, ValueError) as exc:
@@ -662,7 +667,10 @@ class Controller:
                 self.state['local_wait_reason'] = str(exc)
             reserved = {r['gpu'] for r in self.state['tasks'].values()
                         if r['status'] in {'starting', 'running'} and r.get('host') == 'local'}
-            local_free = [g for g in self.local_gpus if g in activity and gpu_available(activity[g]) and g not in reserved]
+            local_free = [
+                gpu for gpu in self.local_gpus
+                if gpu in activity and local_gpu.gpu_available(activity[gpu]) and gpu not in reserved
+            ]
             if queue is not None and local_free:
                 try:
                     returned = sum(self.state['tasks'][task['run_id']]['status'] == 'pending'
@@ -715,7 +723,10 @@ class Controller:
     def run(self) -> None:
         collections = [make_task(self.experiment, 'collect', theta_index=i) for i in range(9)]
         self.run_tasks('calibration', collections)
-        table_hashes = {i: sha256_file(self.root / f'calibration/theta_{i:02d}.json') for i in range(9)}
+        table_hashes = {
+            i: identity.sha256_file(self.root / f'calibration/theta_{i:02d}.json')
+            for i in range(9)
+        }
         smokes = [make_task(self.experiment, kind, theta_index=4, host_label=host,
                            seed=0 if kind == 'smoke_noise' else None,
                            rt=1e-5 if kind == 'smoke_noise' else 0,
@@ -735,7 +746,7 @@ class Controller:
         training = [row for row in theta_results if row['kind'] == 'theta_train']
         validated = [row for row in theta_results if row['kind'] == 'theta_validation']
         selection = select_theta(training)
-        write_immutable_json(self.root / 'training-selection.json', selection)
+        runtime_files.immutable_json(self.root / 'training-selection.json', selection)
         index = selection['theta_index']
         original_host = next(r['host_label'] for r in training if r['theta_index'] == index)
         replay = make_task(self.experiment, 'theta_replay', theta_index=index, calibration_sha256=table_hashes[index])
@@ -743,7 +754,7 @@ class Controller:
             force_hosts={replay['run_id']: 'ubai' if original_host == 'local' else 'local'})
         replay_result = next(row for row in confirmation if row['kind'] == 'theta_replay')
         confirmed = confirm_selection(selection, validated, replay_result, training)
-        write_immutable_json(self.root / 'selection.json', confirmed)
+        runtime_files.immutable_json(self.root / 'selection.json', confirmed)
         self.event('theta_confirmed', theta=confirmed['theta'], correct=confirmed['validation_correct'])
         clean_accuracy = confirmed['validation_correct'] / 5000
         for seed in range(3):

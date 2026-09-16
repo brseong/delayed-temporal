@@ -3,20 +3,17 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open('rb') as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
-            digest.update(chunk)
-    return digest.hexdigest()
+from scripts.runtime import identity
 
 
 # @lat: [[evaluation#Evaluation and Verification#Hidden Activation Bounds Inspection]]
@@ -33,7 +30,7 @@ def main() -> None:
         raise ValueError('Source commit mismatch')
     if subprocess.check_output(['git', '-C', str(source), 'status', '--porcelain', '--untracked-files=no'], text=True).strip():
         raise ValueError('Frozen source has tracked modifications')
-    if sha256(source / experiment['evaluator_path']) != experiment['evaluator_sha256']:
+    if identity.sha256_file(source / experiment['evaluator_path']) != experiment['evaluator_sha256']:
         raise ValueError('Evaluator hash mismatch')
     if experiment['evaluator_args'] != ['--gelu-cubic-implementation', 'phi_nl_psi_ed', '--gelu-cubic-floor', '1e-5']:
         raise ValueError('Unsupported evaluator configuration')
@@ -41,7 +38,6 @@ def main() -> None:
     os.environ.update(CUDA_VISIBLE_DEVICES='', WANDB_MODE='disabled', HF_HUB_OFFLINE='1')
     sys.path[:0] = [str(source), str(source / 'src/transformers/src'), str(source / 'src/spikingjelly')]
     import torch
-    from scripts.setup.hash_artifact import artifact_identity
     from scripts.analysis.gelu_cubic_phi_nl_vit import install_phi_nl_psi_ed_cube
     from scripts.evaluation.error_analysis_vit import ViTConfig, ViTForImageClassification, ViTImageProcessor, image_processor_pixel_bounds
     from utils.transforms.noise import set_gaussian_time_noise
@@ -49,7 +45,7 @@ def main() -> None:
 
     torch.set_num_threads(2)
     checkpoint = Path(experiment['checkpoint_path'])
-    checkpoint_identity = artifact_identity(checkpoint)
+    checkpoint_identity = identity.artifact_identity(checkpoint)
     if checkpoint_identity['aggregate_sha256'] != experiment['checkpoint_sha256']:
         raise ValueError('Checkpoint hash mismatch')
     config = ViTConfig.from_pretrained(

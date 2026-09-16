@@ -16,6 +16,13 @@ import sys
 import time
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
+
 ARTIFACTS = Path("/data/delayed-temporal/artifacts")
 SAMPLES = 256
 BATCH_SIZE = 8
@@ -30,22 +37,6 @@ def validate_gpu_request(gpu: int, hostname: str) -> None:
 def validate_disk_filesystem(filesystem: str) -> None:
     if not filesystem or any(kind in {"tmpfs", "ramfs"} for kind in filesystem.splitlines()):
         raise RuntimeError("temporary files must use a disk filesystem")
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def write_new_json(path: Path, value: dict[str, Any]) -> None:
-    with path.open("x") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True, allow_nan=False)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
 
 
 def check_source(source: Path, expected_commit: str) -> str:
@@ -65,8 +56,12 @@ def source_hashes(source: Path, family: str) -> dict[str, str]:
     paths += [source / "scripts/evaluation" / f"error_analysis_{family}.py",
               source / "scripts/evaluation/text_calibration_runtime.py",
               source / "scripts/experiments/quick_calibrated_text_check.py",
-              source / "scripts/experiments/run_calibrated_three_sweeps.py"]
-    return {str(path.relative_to(source)): sha256_file(path) for path in sorted(set(paths))}
+              source / "scripts/runtime/files.py",
+              source / "scripts/runtime/identity.py"]
+    return {
+        str(path.relative_to(source)): identity.sha256_file(path)
+        for path in sorted(set(paths))
+    }
 
 
 def build_commands(args: argparse.Namespace, output: Path) -> dict[str, list[str]]:
@@ -228,9 +223,11 @@ def main() -> None:
                                                 args.source_root / "src/spikingjelly"))))
         commands = build_commands(args, output)
         hashes = source_hashes(args.source_root, args.family)
-        checkpoint_hashes = {str(path.relative_to(model)): sha256_file(path) for path in sorted(model.rglob("*"))
+        checkpoint_hashes = {
+            str(path.relative_to(model)): identity.sha256_file(path)
+            for path in sorted(model.rglob("*"))
                              if path.is_file()}
-        write_new_json(output / "manifest.json", {
+        runtime_files.new_json(output / "manifest.json", {
             "family": args.family, "model_id": args.model_id, "gpu": args.gpu, "gpu_admission": activity,
             "source_root": str(args.source_root), "source_commit": args.expected_commit, "source_hashes": hashes,
             "checkpoint_files_sha256": checkpoint_hashes, "commands": commands,
@@ -264,12 +261,14 @@ def main() -> None:
                 with log_path.open("x") as log:
                     child = subprocess.Popen(command, cwd=args.source_root, env=environment, stdout=log,
                         stderr=subprocess.STDOUT, start_new_session=True, pass_fds=(lock.fileno(),))
-                    write_new_json(output / f"{phase}-started.json", {"phase": phase, "pid": child.pid})
+                    runtime_files.new_json(
+                        output / f"{phase}-started.json", {"phase": phase, "pid": child.pid}
+                    )
                     returncode = child.wait()
                 phase_result = {"phase": phase, "returncode": returncode,
                                 "elapsed_seconds": time.monotonic() - phase_started,
-                                "log_sha256": sha256_file(log_path)}
-                write_new_json(output / f"{phase}-exit.json", phase_result)
+                                "log_sha256": identity.sha256_file(log_path)}
+                runtime_files.new_json(output / f"{phase}-exit.json", phase_result)
                 if returncode:
                     raise RuntimeError(f"{phase} exited with status {returncode}; logs preserved")
                 log_text = log_path.read_text()
@@ -279,11 +278,13 @@ def main() -> None:
                     metadata, sites = calibration_sites(output / "calibration.json")
                     result["calibration_metadata"] = metadata
                     result["calibration_site_count"] = len(sites)
-                    result["calibration_sha256"] = sha256_file(output / "calibration.json")
+                    result["calibration_sha256"] = identity.sha256_file(
+                        output / "calibration.json"
+                    )
                 else:
                     metrics = parse_evaluation(log_text, args.family, sites if phase == "snn" else None)
                     result["metrics"][phase] = metrics
-                    write_new_json(output / f"{phase}-metrics.json", metrics)
+                    runtime_files.new_json(output / f"{phase}-metrics.json", metrics)
                 result["completed_phases"].append(phase)
                 print(json.dumps(phase_result, sort_keys=True), flush=True)
             ann, snn = result["metrics"]["ann"], result["metrics"]["snn"]
@@ -304,7 +305,7 @@ def main() -> None:
             for sig, handler in handlers.items():
                 signal.signal(sig, handler)
             result["elapsed_seconds"] = time.monotonic() - started
-            write_new_json(output / "result.json", result)
+            runtime_files.new_json(output / "result.json", result)
             print(json.dumps(result, sort_keys=True, allow_nan=False), flush=True)
 
 

@@ -12,6 +12,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from scripts.experiments import quick_calibrated_text_check as runner
+from scripts.runtime import files as runtime_files
 
 
 def rejects(function, *args) -> None:
@@ -114,16 +115,16 @@ def verify_table_parsing() -> None:
     temporary_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="verify-text-pilot-", dir=temporary_root) as directory:
         path = Path(directory) / "table.json"
-        runner.write_new_json(path, table)
+        runtime_files.new_json(path, table)
         assert runner.calibration_sites(path)[1] == {"module/query"}
-        rejects(runner.write_new_json, path, table)
+        rejects(runtime_files.new_json, path, table)
         for index, bad in enumerate((copy.deepcopy(table), copy.deepcopy(table))):
             if index == 0:
                 bad["layers"] *= 2
             else:
                 bad["metadata"]["model_options"] = [["text_calibration_policy_version", 0]]
             bad_path = Path(directory) / f"bad-{index}.json"
-            runner.write_new_json(bad_path, bad)
+            runtime_files.new_json(bad_path, bad)
             rejects(runner.calibration_sites, bad_path)
 
 
