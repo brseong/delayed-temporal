@@ -1,0 +1,558 @@
+#!/usr/bin/env python3
+"""Evaluate calibrated ViT-B on validation 5k under one global discrete clock."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import io
+import json
+import math
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+from typing import Any
+
+
+SOURCE = Path(__file__).resolve().parents[2]
+if str(SOURCE) not in sys.path:
+    sys.path.insert(0, str(SOURCE))
+
+from scripts.runtime import files as runtime_files
+from scripts.runtime import identity
+
+
+TAG = "vit_base_clock_driven_imagenet5k_theta20_float64_v1"
+ALLOWED_GPUS = (4, 5, 6, 7)
+DEFAULT_TIME_STEPS = (1.0,)
+PYTHON = Path("/opt/conda/envs/dt/bin/python")
+CHECKPOINT = Path(
+    "/data/delayed-temporal/artifacts/assets/theta-selection-v1/checkpoints/"
+    "vit_base_patch16_224.augreg2_in21k_ft_in1k"
+)
+CHECKPOINT_SHA256 = "596ea1f22f56761c30661c87310c670e4ff296729bc5de349af41ac6ef6286ff"
+CALIBRATION_DATASET = Path(
+    "/data/delayed-temporal/artifacts/assets/theta-selection-v1/datasets/"
+    "imagenet_theta_selection_v1/train_seed0_5000"
+)
+CALIBRATION_FINGERPRINT = "cabf903d14d1b1ac"
+EVALUATION_DATASET = Path(
+    "/data/delayed-temporal/artifacts/assets/theta-selection-v1/datasets/"
+    "imagenet_theta_selection_v1/validation_50000"
+)
+PREPROCESSING = Path("scripts/configs/vit_timm_preprocessing.json")
+
+
+def source_commit(source: Path) -> str:
+    """Return the exact clean source revision used by every phase."""
+
+    commit = subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+    ).strip()
+    identity.verify_clean_checkout(source, commit)
+    return commit
+
+
+def tasks(time_steps: tuple[float, ...]) -> tuple[tuple[str, float | None], ...]:
+    """Return the continuous baseline followed by the requested time bins."""
+
+    return (("continuous", None),) + tuple(
+        (f"dt_{time_step:g}", time_step) for time_step in time_steps
+    )
+
+
+def common_arguments(
+    source: Path,
+    commit: str,
+    calibration_path: Path,
+) -> list[str]:
+    """Build the invariant noise-off calibrated ViT-B evaluation arguments."""
+
+    return [
+        "--device", "cuda",
+        "--model_backend", "spiking",
+        "--model_id", str(CHECKPOINT),
+        "--dataset_id", "imagenet-1k",
+        "--evaluation-dataset-path", str(EVALUATION_DATASET),
+        "--evaluation-split", "validation",
+        "--image-preprocessing-config", str(source / PREPROCESSING),
+        "--batch_size", "32",
+        "--theta", "20",
+        "--precision", "float64",
+        "--source-commit", commit,
+        "--checkpoint-sha256", CHECKPOINT_SHA256,
+        "--no-tensorboard",
+        "--report-clamp-stats",
+        "--spiking-layernorm",
+        "--spiking-ln-mul",
+        "--spiking-ln-log",
+        "--spiking-ln-expdiff",
+        "--spiking-attention",
+        "--spiking-mlp",
+        "--no-spiking-mlp-exact-gelu",
+        "--no-gaussian-time-noise",
+        "--time-noise-seed", "0",
+        "--time-noise-std-frac", "0",
+        "--time-noise-mean", "0",
+        "--time-noise-deadline-margin-std", "0",
+        "--no-mismatch-enabled",
+        "--mismatch-theta-std", "0",
+        "--mismatch-seed", "0",
+        "--weight-noise-std", "0",
+        "--bias-noise-std", "0",
+        "--calibration-path", str(calibration_path),
+        "--calibration-samples", "5000",
+        "--calibration-seed", "0",
+        "--calibration-bins", "2048",
+        "--calibration-lower-quantile", "0",
+        "--calibration-upper-quantile", "1",
+        "--calibration-margin-fraction", "0.05",
+    ]
+
+
+def calibrated_command(
+    source: Path,
+    commit: str,
+    calibration_path: Path,
+    *,
+    phase: str,
+    run_id: str,
+    time_step: float | None = None,
+) -> list[str]:
+    """Build one source-frozen calibration or validation command."""
+
+    if phase not in {"collect", "validate"}:
+        raise ValueError("clock-driven campaign phase must be collect or validate")
+    arguments = common_arguments(source, commit, calibration_path)
+    arguments += [
+        "--experiment_name", run_id,
+        "--calibration-mode", phase,
+    ]
+    if phase == "validate":
+        arguments.append("--quick-test")
+    if time_step is None:
+        arguments += ["--no-clock-driven", "--clock-time-step", "0"]
+    else:
+        arguments += [
+            "--clock-driven",
+            "--clock-time-step", format(time_step, ".17g"),
+        ]
+    return [
+        str(PYTHON),
+        "-u",
+        str(source / "scripts/analysis/evaluate_calibrated_vit.py"),
+        "--source-root", str(source),
+        "--calibration-dataset-path", str(CALIBRATION_DATASET),
+        "--calibration-dataset-fingerprint", CALIBRATION_FINGERPRINT,
+        "--gelu-cubic-implementation", "phi_nl_psi_ed",
+        "--gelu-cubic-floor", "1e-5",
+        *arguments,
+    ]
+
+
+def build_experiment(
+    source: Path,
+    commit: str,
+    time_steps: tuple[float, ...],
+) -> dict[str, Any]:
+    """Create the immutable campaign identity from source and local artifacts."""
+
+    return {
+        "tag": TAG,
+        "source_root": str(source),
+        "source_commit": commit,
+        "python_bin": str(PYTHON),
+        "checkpoint_path": str(CHECKPOINT),
+        "checkpoint_sha256": CHECKPOINT_SHA256,
+        "calibration_dataset_path": str(CALIBRATION_DATASET),
+        "calibration_dataset_fingerprint": CALIBRATION_FINGERPRINT,
+        "evaluation_dataset_path": str(EVALUATION_DATASET),
+        "evaluation_population": "fixed_validation_5000",
+        "preprocessing_path": str(source / PREPROCESSING),
+        "preprocessing_sha256": identity.sha256_file(source / PREPROCESSING),
+        "theta": 20.0,
+        "precision": "float64",
+        "batch_size": 32,
+        "time_steps": list(time_steps),
+        "simulation": "explicit_sequential_state_updates",
+        "clock_rounding": "first_non_earlier_edge",
+        "gaussian_time_noise": False,
+        "mismatch": False,
+        "parameter_noise": False,
+        "allowed_gpus": list(ALLOWED_GPUS),
+        "evaluator_sha256": identity.sha256_file(
+            source / "scripts/evaluation/error_analysis_vit.py"
+        ),
+        "calibration_wrapper_sha256": identity.sha256_file(
+            source / "scripts/analysis/evaluate_calibrated_vit.py"
+        ),
+        "clock_module_sha256": identity.sha256_file(
+            source / "utils/transforms/clock.py"
+        ),
+    }
+
+
+def gpu_snapshot() -> dict[int, tuple[int, int]]:
+    """Return GPU memory MiB and utilization without relying on foreign PIDs."""
+
+    output = subprocess.check_output(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,memory.used,utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ],
+        text=True,
+    )
+    snapshot: dict[int, tuple[int, int]] = {}
+    for line in output.splitlines():
+        index, memory, utilization = (int(field.strip()) for field in line.split(","))
+        snapshot[index] = (memory, utilization)
+    return snapshot
+
+
+def initially_idle_gpus(requested: tuple[int, ...]) -> tuple[int, ...]:
+    """Require two consecutive low-memory, low-utilization observations."""
+
+    if not requested or any(gpu not in ALLOWED_GPUS for gpu in requested):
+        raise ValueError("clock-driven campaign GPUs must be selected from 4,5,6,7")
+    first = gpu_snapshot()
+    time.sleep(10.0)
+    second = gpu_snapshot()
+    return tuple(
+        gpu
+        for gpu in requested
+        if all(
+            snapshot.get(gpu, (10**9, 100))[0] <= 1024
+            and snapshot.get(gpu, (10**9, 100))[1] <= 5
+            for snapshot in (first, second)
+        )
+    )
+
+
+def validate_calibration(path: Path, commit: str) -> str:
+    """Validate the newly collected source-matched ViT-B table."""
+
+    table = json.loads(path.read_text())
+    if len(table.get("layers", {})) != 109:
+        raise ValueError("clock-driven ViT-B calibration requires 109 active sites")
+    metadata = table["metadata"]
+    if metadata.get("theta") != 20.0 or metadata.get("dtype") != "float64":
+        raise ValueError("clock-driven calibration theta or dtype differs")
+    options = dict(metadata["model_options"])
+    if options.get("source_commit") != commit:
+        raise ValueError("clock-driven calibration source commit differs")
+    if options.get("calibration_dataset_fingerprint") != CALIBRATION_FINGERPRINT:
+        raise ValueError("clock-driven calibration population differs")
+    if options.get("checkpoint_sha256") != CHECKPOINT_SHA256:
+        raise ValueError("clock-driven calibration checkpoint differs")
+    return identity.sha256_file(path)
+
+
+def _single(pattern: str, text: str, name: str) -> str:
+    matches = re.findall(pattern, text, flags=re.MULTILINE)
+    if len(matches) != 1:
+        raise ValueError(f"expected one {name}, found {len(matches)}")
+    return matches[0]
+
+
+def parse_result(
+    log_path: Path,
+    *,
+    run_id: str,
+    time_step: float | None,
+    gpu: int,
+    commit: str,
+    calibration_sha256: str,
+    elapsed_seconds: float,
+) -> dict[str, Any]:
+    """Accept one complete evaluator log and extract its official result."""
+
+    text = log_path.read_text(errors="strict")
+    if "Traceback (most recent call last)" in text:
+        raise ValueError("clock-driven evaluator log contains a traceback")
+    correct = int(_single(r"^Correct: (\d+)$", text, "correct count"))
+    samples = int(_single(r"^Evaluated samples: (\d+)$", text, "sample count"))
+    if samples != 5000:
+        raise ValueError("clock-driven evaluation did not process exactly 5000 images")
+    accuracy = float(_single(r"^Accuracy: ([0-9.]+)$", text, "accuracy"))
+    if not math.isfinite(accuracy) or accuracy != correct / samples:
+        raise ValueError("clock-driven accuracy does not match correct/total")
+    prediction_sha256 = _single(
+        r"^Prediction SHA256: ([0-9a-f]{64})$", text, "prediction digest"
+    )
+    clock_sites: dict[str, dict[str, float | int]] = {}
+    for match in re.finditer(
+        r"^Clock\[(?P<site>[^]]+)\] events=(?P<events>\d+), "
+        r"rounded_events=(?P<rounded>\d+), "
+        r"mean_absolute_error=(?P<mean>[0-9.eE+-]+), "
+        r"maximum_absolute_error=(?P<maximum>[0-9.eE+-]+), "
+        r"windows=(?P<windows>\d+), "
+        r"minimum_window_steps=(?P<minimum_steps>\d+), "
+        r"maximum_window_steps=(?P<maximum_steps>\d+)$",
+        text,
+        flags=re.MULTILINE,
+    ):
+        clock_sites[match.group("site")] = {
+            "events": int(match.group("events")),
+            "rounded_events": int(match.group("rounded")),
+            "mean_absolute_error": float(match.group("mean")),
+            "maximum_absolute_error": float(match.group("maximum")),
+            "windows": int(match.group("windows")),
+            "minimum_window_steps": int(match.group("minimum_steps")),
+            "maximum_window_steps": int(match.group("maximum_steps")),
+        }
+    clock_updates: dict[str, dict[str, int]] = {}
+    for match in re.finditer(
+        r"^ClockUpdates\[(?P<kind>[^]]+)\] calls=(?P<calls>\d+), "
+        r"time_steps=(?P<steps>\d+), element_updates=(?P<elements>\d+)$",
+        text,
+        flags=re.MULTILINE,
+    ):
+        clock_updates[match.group("kind")] = {
+            "calls": int(match.group("calls")),
+            "time_steps": int(match.group("steps")),
+            "element_updates": int(match.group("elements")),
+        }
+    if time_step is None and clock_sites:
+        raise ValueError("continuous baseline unexpectedly emitted clock statistics")
+    if time_step is None and clock_updates:
+        raise ValueError("continuous baseline unexpectedly emitted clock updates")
+    if time_step is not None and set(clock_sites) != {
+        "neg_linear_transform", "neg_log_transform"
+    }:
+        raise ValueError("clock-driven evaluation has incomplete encoder statistics")
+    if time_step is not None and set(clock_updates) != {
+        "encoder", "exponential", "pwm"
+    }:
+        raise ValueError("clock-driven evaluation has incomplete state-update counters")
+    if time_step is not None and any(
+        counts["calls"] <= 0
+        or counts["time_steps"] <= 0
+        or counts["element_updates"] <= 0
+        for counts in clock_updates.values()
+    ):
+        raise ValueError("clock-driven evaluation did not execute every state loop")
+    return {
+        "run_id": run_id,
+        "time_step": time_step,
+        "clock_driven": time_step is not None,
+        "correct": correct,
+        "samples": samples,
+        "accuracy": accuracy,
+        "prediction_sha256": prediction_sha256,
+        "clock_sites": clock_sites,
+        "clock_updates": clock_updates,
+        "gpu": gpu,
+        "gpu_model": _single(r"^GPU model: (.+)$", text, "GPU model"),
+        "elapsed_seconds": elapsed_seconds,
+        "source_commit": commit,
+        "calibration_sha256": calibration_sha256,
+        "log_path": str(log_path),
+        "log_sha256": identity.sha256_file(log_path),
+        "success": True,
+    }
+
+
+def write_summary(root: Path, results: list[dict[str, Any]]) -> None:
+    """Write stable CSV and JSON summaries from accepted result records."""
+
+    ordered = sorted(
+        results,
+        key=lambda row: math.inf if row["time_step"] is None else -row["time_step"],
+    )
+    fields = (
+        "run_id", "clock_driven", "time_step", "correct", "samples", "accuracy",
+        "prediction_sha256", "gpu", "gpu_model", "elapsed_seconds",
+        "source_commit", "calibration_sha256", "log_sha256",
+    )
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fields)
+    writer.writeheader()
+    for row in ordered:
+        writer.writerow({field: row[field] for field in fields})
+    runtime_files.atomic_text(root / "summary.csv", buffer.getvalue())
+    runtime_files.atomic_json(root / "summary.json", {"tag": TAG, "runs": ordered})
+
+
+def run_command(
+    command: list[str],
+    log_path: Path,
+    *,
+    gpu: int,
+    source: Path,
+) -> subprocess.Popen[bytes]:
+    """Launch one evaluator with one physical GPU and durable ordinary logs."""
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = log_path.open("xb")
+    environment = {
+        **os.environ,
+        "CUDA_VISIBLE_DEVICES": str(gpu),
+        "WANDB_MODE": "disabled",
+        "PYTHONUNBUFFERED": "1",
+        "HF_HUB_OFFLINE": "1",
+        "HF_DATASETS_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+    }
+    process = subprocess.Popen(
+        command,
+        cwd=source,
+        env=environment,
+        stdout=handle,
+        stderr=subprocess.STDOUT,
+    )
+    handle.close()
+    return process
+
+
+# @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Evaluation Contract]]
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument("--source-root", type=Path, default=SOURCE)
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("/data/delayed-temporal/artifacts/logs/clock_driven") / TAG,
+    )
+    parser.add_argument("--gpus", type=int, nargs="+", default=list(ALLOWED_GPUS))
+    parser.add_argument(
+        "--time-steps",
+        "--time-bins",
+        dest="time_steps",
+        type=float,
+        nargs="+",
+        default=list(DEFAULT_TIME_STEPS),
+        help="Positive time-bin widths to evaluate after the continuous baseline.",
+    )
+    args = parser.parse_args()
+
+    source = args.source_root.resolve()
+    root = args.output_root.resolve()
+    time_steps = tuple(float(value) for value in args.time_steps)
+    if (
+        not time_steps
+        or len(set(time_steps)) != len(time_steps)
+        or any(not math.isfinite(value) or value <= 0.0 for value in time_steps)
+    ):
+        raise ValueError("time bins must be unique, finite, and strictly positive")
+    commit = source_commit(source)
+    experiment = build_experiment(source, commit, time_steps)
+    root.mkdir(parents=True, exist_ok=True)
+    for directory in ("logs", "results", "calibration"):
+        (root / directory).mkdir(exist_ok=True)
+    runtime_files.immutable_json(root / "experiment.json", experiment)
+
+    calibration_path = root / "calibration" / "vit_base_theta20.json"
+    available = initially_idle_gpus(tuple(args.gpus))
+    if not available:
+        raise RuntimeError("no allowed idle GPU is available for clock-driven evaluation")
+
+    if calibration_path.exists():
+        calibration_sha256 = validate_calibration(calibration_path, commit)
+    else:
+        calibration_log = root / "logs" / "calibration.log"
+        command = calibrated_command(
+            source,
+            commit,
+            calibration_path,
+            phase="collect",
+            run_id="clock_driven_calibration",
+        )
+        print(f"Launching calibration on GPU {available[0]}", flush=True)
+        process = run_command(
+            command,
+            calibration_log,
+            gpu=available[0],
+            source=source,
+        )
+        if process.wait() != 0:
+            raise RuntimeError(f"calibration failed; inspect {calibration_log}")
+        calibration_sha256 = validate_calibration(calibration_path, commit)
+
+    accepted: list[dict[str, Any]] = []
+    pending: list[tuple[str, float | None]] = []
+    for run_id, time_step in tasks(time_steps):
+        result_path = root / "results" / f"{run_id}.json"
+        if result_path.exists():
+            result = json.loads(result_path.read_text())
+            if (
+                result.get("success") is True
+                and result.get("source_commit") == commit
+                and result.get("calibration_sha256") == calibration_sha256
+                and result.get("time_step") == time_step
+            ):
+                accepted.append(result)
+                continue
+            raise ValueError(f"stored result identity differs: {result_path}")
+        pending.append((run_id, time_step))
+
+    running: dict[int, dict[str, Any]] = {}
+    free = list(available)
+    while pending or running:
+        while pending and free:
+            gpu = free.pop(0)
+            run_id, time_step = pending.pop(0)
+            log_path = root / "logs" / f"{run_id}.log"
+            command = calibrated_command(
+                source,
+                commit,
+                calibration_path,
+                phase="validate",
+                run_id=run_id,
+                time_step=time_step,
+            )
+            print(f"Launching {run_id} on GPU {gpu}", flush=True)
+            running[gpu] = {
+                "process": run_command(
+                    command,
+                    log_path,
+                    gpu=gpu,
+                    source=source,
+                ),
+                "run_id": run_id,
+                "time_step": time_step,
+                "log_path": log_path,
+                "started": time.monotonic(),
+            }
+        if not running:
+            continue
+        time.sleep(5.0)
+        for gpu, state in list(running.items()):
+            return_code = state["process"].poll()
+            if return_code is None:
+                continue
+            if return_code != 0:
+                raise RuntimeError(
+                    f"{state['run_id']} failed; inspect {state['log_path']}"
+                )
+            result = parse_result(
+                state["log_path"],
+                run_id=state["run_id"],
+                time_step=state["time_step"],
+                gpu=gpu,
+                commit=commit,
+                calibration_sha256=calibration_sha256,
+                elapsed_seconds=time.monotonic() - state["started"],
+            )
+            runtime_files.new_json(root / "results" / f"{state['run_id']}.json", result)
+            accepted.append(result)
+            free.append(gpu)
+            del running[gpu]
+            write_summary(root, accepted)
+            print(
+                f"Completed {state['run_id']}: {result['correct']}/5000 "
+                f"({result['accuracy']:.6f})",
+                flush=True,
+            )
+
+    if len(accepted) != len(tasks(time_steps)):
+        raise RuntimeError("clock-driven campaign ended without every condition")
+    write_summary(root, accepted)
+    print(f"Completed {TAG}: {root / 'summary.csv'}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

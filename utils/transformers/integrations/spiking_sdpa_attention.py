@@ -10,6 +10,7 @@ from transformers.utils.import_utils import is_torch_npu_available, is_torch_xpu
 from utils.transforms.functions import scaled_dot_product_function, softmin_function
 from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_noise
 from utils.transforms.potential_to_spike import neg_identity_transform
+from utils.transforms.primitive import signed_pulse_width_duration
 from utils.transforms.types import PotentialBounds, SpikeSample, TimeBounds
 from utils.transformers.calibration import (
     calibrated_potential,
@@ -227,18 +228,11 @@ def _gaussian_attention_value_readout(
     # Convert the two sampled events into causal pulse widths against their common
     # deadline. Each miss suppresses only its own rail, so a surviving value or
     # reference rail remains visible with the correct sign at observation time.
-    deadline = value_event.time.new_tensor(float(value_event.domain.max))
-    value_pulse_width = torch.where(
-        value_event.fired,
-        (deadline - value_event.time).clamp_min(0.0),
-        torch.zeros_like(value_event.time),
+    signed_pulse_width = signed_pulse_width_duration(
+        value_event,
+        reference_event,
+        observation_deadline=float(value_event.domain.max),
     )
-    reference_pulse_width = torch.where(
-        reference_event.fired,
-        (deadline - reference_event.time).clamp_min(0.0),
-        torch.zeros_like(reference_event.time),
-    )
-    signed_pulse_width = value_pulse_width - reference_pulse_width
 
     # Preserve the deterministic [0, 1] drive contract before the optimized PWM-MAC.
     # Conceptually, every unmaterialized query/source/value-feature synapse is:
@@ -346,10 +340,9 @@ def spiking_scaled_dot_product_attention(
         )
         output_domain = domain_v
         key_encoder_radius = float(domain_k.max)
-        value_reference_time = float(domain_v.max)
     else:
         domain_q = domain_k = domain_v = PotentialBounds(-theta, theta)
-        key_encoder_radius = value_reference_time = float(theta)
+        key_encoder_radius = float(theta)
     if int(value.size(-2)) != S:
         raise ValueError("attention key and value source lengths must match")
     if S > source_length_max:
@@ -478,12 +471,23 @@ def spiking_scaled_dot_product_attention(
 
     # Noise-free execution preserves temporal encoding and its training keyword,
     # then recovers the delivered signed pulse width without event metadata.
-    value_time, _ = neg_identity_transform(
+    value_time, value_time_domain = neg_identity_transform(
         value_clamped,
         domain_v,
         training=bool(training),
     )
-    signed_pulse_width = value_reference_time - value_time
+    value_reference_time, reference_time_domain = neg_identity_transform(
+        value_clamped.new_zeros(()),
+        domain_v,
+        training=bool(training),
+    )
+    if value_time_domain != reference_time_domain:
+        raise ValueError("attention value and reference events require one deadline")
+    signed_pulse_width = signed_pulse_width_duration(
+        value_time,
+        value_reference_time,
+        observation_deadline=float(value_time_domain.max),
+    )
 
     # The optimized matrix multiplication evaluates the complete deterministic
     # PWM reduction. Conceptually every source/value-feature term is:

@@ -24,6 +24,7 @@ from typing import Callable, TypedDict
 import torch
 from torch import Tensor
 
+from .clock import get_clock_driven, quantize_encoder_output
 from .types import ClosedBounds, Potential, SpikeSample, TimeBounds
 
 
@@ -577,6 +578,23 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
         # sample is needed. Gaussian error is defined in time space and therefore
         # acts on the bounded nominal timestamp, never on the source potential.
         output, out_domain = func(*args, **kwargs)
+
+        # A clock-driven encoder delivers each threshold crossing on the first
+        # non-earlier clock edge and places the observation deadline on the same
+        # global grid.  The user-approved clock-driven evaluation is a deterministic
+        # axis; combining it with continuous Gaussian timing error is intentionally
+        # rejected until that ordering is defined as a separate experiment.
+        clock_cfg = get_clock_driven()
+        if clock_cfg.enabled:
+            if gaussian_cfg.enabled or return_spike_sample:
+                raise RuntimeError(
+                    "clock-driven execution cannot be combined with Gaussian "
+                    "spike-time noise"
+                )
+            if not isinstance(out_domain, TimeBounds):
+                raise TypeError("clock-driven spike encoders must return TimeBounds")
+            site = kwargs.get("noise_site", func.__name__)
+            return quantize_encoder_output(output, out_domain, site=site)
 
         # Tensor-only consumers cannot represent a missed event, so they retain the
         # deterministic tuple even while a Gaussian replica is active. Production

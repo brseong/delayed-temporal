@@ -30,6 +30,11 @@ from utils.transformers.models.spiking_ops import (
     SpikingLinear,
 )
 from utils.transforms import types as transform_types
+from utils.transforms.clock import (
+    get_clock_driven_stats,
+    get_clock_update_stats,
+    set_clock_driven,
+)
 from utils.transforms.types import Potential
 from utils.transforms.calibration import (
     CalibrationMode,
@@ -100,6 +105,8 @@ class Arguments:
     spiking_mlp_exact_gelu_layers: tuple[int, ...]
     activation: Literal["relu", "gelu"]
     theta: float
+    clock_driven: bool
+    clock_time_step: float
 
     # Layer-wise calibration is an explicit artifact lifecycle. Collection uses a
     # deterministic subset of the training split; frozen phases only load and apply
@@ -236,6 +243,26 @@ def parse_arguments() -> Arguments:
                         help="Activation function to use when --no-spiking-mlp is set (default: gelu).")
     parser.add_argument("--theta", type=float, default=100.0,
                         help="Domain bound θ for SpikingLayerNorm clamping (default: 100.0).")
+    parser.add_argument(
+        "--clock-driven",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Execute TTFS events, PWM durations, and exponential readouts on one "
+            "global discrete clock."
+        ),
+    )
+    parser.add_argument(
+        "--clock-time-step",
+        "--clock-time-bin",
+        dest="clock_time_step",
+        type=float,
+        default=0.0,
+        help=(
+            "Global time-bin width for --clock-driven execution; disabled runs "
+            "require 0."
+        ),
+    )
 
     # Layer-wise calibration is intentionally separate from the old diagnostic
     # quantile hook. Collection writes one reusable artifact from a deterministic
@@ -397,6 +424,8 @@ def parse_arguments() -> Arguments:
         spiking_mlp_exact_gelu_layers=tuple(args.spiking_mlp_exact_gelu_layers),
         activation=args.activation,
         theta=args.theta,
+        clock_driven=args.clock_driven,
+        clock_time_step=args.clock_time_step,
         calibration_mode=args.calibration_mode,
         calibration_path=args.calibration_path,
         calibration_samples=args.calibration_samples,
@@ -504,14 +533,15 @@ def validate_vit_calibration_arguments(
     # has been established against the clean table.
     if mode is CalibrationMode.COLLECT and (
         args.gaussian_time_noise
+        or args.clock_driven
         or args.mismatch_enabled
         or args.mismatch_theta_std != 0.0
         or args.weight_noise_std != 0.0
         or args.bias_noise_std != 0.0
     ):
         raise ValueError(
-            "calibration collection requires timing noise, mismatch, and parameter "
-            "perturbations to be disabled"
+            "calibration collection requires clock-driven execution, timing noise, "
+            "mismatch, and parameter perturbations to be disabled"
         )
     return mode
 
@@ -546,6 +576,27 @@ def validate_vit_runtime_arguments(args: Arguments) -> None:
             raise ValueError(
                 f"image preprocessing config does not exist: {preprocessing_path}"
             )
+    if not isinstance(args.clock_driven, bool):
+        raise TypeError("clock_driven must be a bool")
+    clock_time_step = float(args.clock_time_step)
+    if args.clock_driven:
+        if args.model_backend != "spiking":
+            raise ValueError("clock-driven execution requires model_backend=spiking")
+        if not math.isfinite(clock_time_step) or clock_time_step <= 0.0:
+            raise ValueError(
+                "clock-driven execution requires a finite positive clock_time_step"
+            )
+        if (
+            args.gaussian_time_noise
+            or args.time_noise_std_frac != 0.0
+            or args.time_noise_mean != 0.0
+            or args.time_noise_deadline_margin_std != 0.0
+        ):
+            raise ValueError(
+                "clock-driven evaluation requires Gaussian timing noise to be disabled"
+            )
+    elif clock_time_step != 0.0:
+        raise ValueError("clock_time_step must be zero when clock-driven is disabled")
 
 
 def require_finite_logits(logits: torch.Tensor) -> None:
@@ -878,6 +929,9 @@ def evaluate_vit_model(args: Arguments) -> None:
     gaussian_enabled = bool(
         model_backend == "spiking" and args.gaussian_time_noise
     )
+    clock_driven_enabled = bool(
+        model_backend == "spiking" and args.clock_driven
+    )
     mismatch_enabled = bool(
         model_backend == "spiking"
         and args.mismatch_enabled
@@ -888,6 +942,14 @@ def evaluate_vit_model(args: Arguments) -> None:
         raise ValueError(
             "Gaussian timing noise and static threshold mismatch must be "
             "evaluated as separate experiment axes"
+        )
+    if clock_driven_enabled and (
+        mismatch_enabled
+        or args.weight_noise_std != 0.0
+        or args.bias_noise_std != 0.0
+    ):
+        raise ValueError(
+            "clock-driven evaluation requires mismatch and parameter noise to be disabled"
         )
     if args.mismatch_seed < 0:
         raise ValueError("mismatch seed must be non-negative")
@@ -937,6 +999,11 @@ def evaluate_vit_model(args: Arguments) -> None:
             "named clamp statistics do not support DataParallel; "
             "run one evaluation process per GPU"
         )
+    if clock_driven_enabled and use_data_parallel:
+        raise RuntimeError(
+            "clock-driven execution does not support DataParallel; "
+            "run one evaluation process per GPU"
+        )
 
     # Installing a configuration starts one seeded measurement replica and clears
     # prior Gaussian counters. HF evaluation installs the disabled state explicitly.
@@ -947,6 +1014,10 @@ def evaluate_vit_model(args: Arguments) -> None:
         deadline_margin=time_noise_deadline_margin,
         seed=args.time_noise_seed,
         device=device,
+    )
+    set_clock_driven(
+        enabled=clock_driven_enabled,
+        time_step=float(args.clock_time_step) if clock_driven_enabled else 0.0,
     )
 
     # Log both the dimensionless input and the derived absolute quantity so runs at
@@ -960,6 +1031,7 @@ def evaluate_vit_model(args: Arguments) -> None:
         "identity_deadline_ulp": identity_deadline_ulp,
         "time_noise_std_to_identity_ulp": time_noise_std_to_identity_ulp,
         "mismatch_effective": mismatch_enabled,
+        "clock_driven_effective": clock_driven_enabled,
     }
     effective_attn_impl = "eager"
     if model_backend == "spiking" and device.type != "cpu" and args.spiking_attention:
@@ -996,6 +1068,12 @@ def evaluate_vit_model(args: Arguments) -> None:
         f"enabled: {mismatch_enabled}, "
         f"theta_std: {args.mismatch_theta_std}, "
         f"seed: {args.mismatch_seed}"
+    )
+    print(
+        "Clock-driven execution — "
+        f"enabled: {clock_driven_enabled}, "
+        f"time_step: {args.clock_time_step}, "
+        "gaussian_time_noise: false"
     )
     
     if model_backend == "spiking":
@@ -1475,6 +1553,31 @@ def evaluate_vit_model(args: Arguments) -> None:
             f"seconds_per_image: {benchmark_seconds / benchmark_images:.9g}, "
             f"peak_memory_bytes: {peak_bytes}"
         )
+
+    if clock_driven_enabled:
+        for kind, counts in sorted(get_clock_update_stats().items()):
+            print(
+                f"ClockUpdates[{kind}] calls={counts['calls']}, "
+                f"time_steps={counts['time_steps']}, "
+                f"element_updates={counts['element_updates']}"
+            )
+        for site, counts in sorted(get_clock_driven_stats().items()):
+            events = counts["events"]
+            mean_absolute_error = (
+                counts["absolute_error_sum"] / events if events else 0.0
+            )
+            minimum_window_steps = counts["minimum_window_steps"]
+            if minimum_window_steps == 2**63 - 1:
+                minimum_window_steps = 0
+            print(
+                f"Clock[{site}] events={events}, "
+                f"rounded_events={counts['rounded_events']}, "
+                f"mean_absolute_error={mean_absolute_error:.9g}, "
+                f"maximum_absolute_error={counts['absolute_error_max']:.9g}, "
+                f"windows={counts['windows']}, "
+                f"minimum_window_steps={minimum_window_steps}, "
+                f"maximum_window_steps={counts['maximum_window_steps']}"
+            )
 
     # Report event delivery, nominal endpoint occupancy, numerical resolution, and
     # physical rail saturation with their own denominators.

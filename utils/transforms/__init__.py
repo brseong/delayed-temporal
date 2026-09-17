@@ -42,8 +42,17 @@ from .calibration import (
 )
 from .potential_to_spike import neg_identity_transform, neg_log_transform
 from .primitive import (
+    signed_pulse_width_duration,
     signed_pulse_width_modulation_operator,
     unsigned_pulse_width_modulation_operator,
+)
+from .clock import (
+    ClockDrivenConfig,
+    clear_clock_driven_stats,
+    get_clock_driven,
+    get_clock_driven_stats,
+    get_clock_update_stats,
+    set_clock_driven,
 )
 from .spike_to_potential import exp_operator, exponential_difference_operator
 from .functions import multiplication_operator, scaled_dot_product_function, exponential_function, softmin_function, division_function

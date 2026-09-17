@@ -3,6 +3,7 @@ from jaxtyping import Float, Int
 from math import exp, isclose, isfinite
 from numbers import Real
 
+from .clock import clocked_exponential
 from .noise import clamp_gaussian_output, get_gaussian_time_noise
 from .potential_to_spike import neg_identity_transform
 from .types import ClosedBounds, PotentialBounds, SpikeSample, TimeBounds, check_domain
@@ -49,13 +50,13 @@ def exp_operator(
     # Decode the earliest and deadline carriers in the payload dtype and device.
     # A very wide window or very small tau_m can underflow the earliest response to
     # zero even though Python's float would still conceal the target dtype limit.
-    endpoint_exponents = input_value.new_tensor(
+    endpoint_times = input_value.new_tensor(
         [
-            -float(domain.range) / tau_value,
+            -float(domain.range),
             0.0,
         ]
     )
-    decoded_endpoints = torch.exp(endpoint_exponents)
+    decoded_endpoints = clocked_exponential(endpoint_times, tau=tau_value)
 
     # For an ordered finite window this exponent is never positive and the deadline
     # endpoint is exactly one, so overflow is impossible. Only reject earliest-time
@@ -68,8 +69,9 @@ def exp_operator(
 
     # Evaluate the payload with the same deadline-relative exponent and return
     # concrete scalar rails for device-independent downstream interval arithmetic.
-    response = torch.exp(
-        -(float(domain.max) - input_value) / tau_value
+    response = clocked_exponential(
+        input_value - float(domain.max),
+        tau=tau_value,
     )
     return response, PotentialBounds(
         decoded_endpoints[0].item(),
@@ -114,10 +116,10 @@ def normalized_exp_operator(
     # Decode the declared endpoints in the payload's dtype and device first. This
     # detects float16/float32 overflow or underflow that Python's wider float could
     # otherwise hide while advertising unusable potential bounds.
-    scaled_endpoints = input_value.new_tensor(
-        [float(domain.min) / tau_value, float(domain.max) / tau_value]
+    endpoint_times = input_value.new_tensor(
+        [float(domain.min), float(domain.max)]
     )
-    decoded_endpoints = torch.exp(scaled_endpoints)
+    decoded_endpoints = clocked_exponential(endpoint_times, tau=tau_value)
 
     # Logarithmic consumers require strictly positive finite rails. Reject zero from
     # exponential underflow as well as infinities from overflow before evaluating the
@@ -135,7 +137,7 @@ def normalized_exp_operator(
 
     # Apply the same scaled exponential to every payload element and return concrete
     # scalar rails so downstream interval arithmetic remains device-independent.
-    result = torch.exp(input_value / tau_value)
+    result = clocked_exponential(input_value, tau=tau_value)
     return result, PotentialBounds(
         decoded_endpoints[0].item(),
         decoded_endpoints[1].item(),

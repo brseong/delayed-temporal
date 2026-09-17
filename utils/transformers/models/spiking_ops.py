@@ -11,6 +11,7 @@ from utils.transforms.calibration import CalibrationCollectorState
 from utils.transforms.functions import multiplication_operator, division_function
 from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_noise
 from utils.transforms.potential_to_spike import neg_log_transform
+from utils.transforms.primitive import signed_pulse_width_duration
 from utils.transforms.spike_to_potential import exponential_difference_operator
 from utils.transforms.types import Potential, PotentialBounds, SpikeSample, TimeBounds
 from utils.transformers.calibration import (
@@ -1025,18 +1026,11 @@ class SpikingLinear(nn.Linear):
         # Convert the two sampled events into causal pulse widths measured against
         # the same observation deadline. Each miss leaves only its own physical rail
         # at reset; no event ordering or additional sampling is introduced here.
-        deadline = data_event.time.new_tensor(float(data_event.domain.max))
-        data_pulse_width = torch.where(
-            data_event.fired,
-            (deadline - data_event.time).clamp_min(0.0),
-            torch.zeros_like(data_event.time),
+        signed_pulse_width = signed_pulse_width_duration(
+            data_event,
+            reference_event,
+            observation_deadline=float(data_event.domain.max),
         )
-        reference_pulse_width = torch.where(
-            reference_event.fired,
-            (deadline - reference_event.time).clamp_min(0.0),
-            torch.zeros_like(reference_event.time),
-        )
-        signed_pulse_width = data_pulse_width - reference_pulse_width
 
         # This optimized kernel evaluates the complete PWM-MAC directly:
         # y_j = sum_i W_ji * (d_Ai - d_B) + b_j. It replaces only the explicit
@@ -1107,9 +1101,17 @@ class SpikingLinear(nn.Linear):
         # Encode delivered data and one scalar zero codeword on the same fixed window.
         # Their time difference recovers the clamped activation for symmetric and
         # one-sided domains alike without materializing per-synapse reference tensors.
-        data_time, _ = neg_identity_transform(encoded_x, domain_x)
-        reference_time, _ = neg_identity_transform(x.new_zeros(()), domain_x)
-        signed_pulse_width = reference_time - data_time
+        data_time, time_domain = neg_identity_transform(encoded_x, domain_x)
+        reference_time, reference_domain = neg_identity_transform(
+            x.new_zeros(()), domain_x
+        )
+        if time_domain != reference_domain:
+            raise ValueError("linear data and reference events require one deadline")
+        signed_pulse_width = signed_pulse_width_duration(
+            data_time,
+            reference_time,
+            observation_deadline=float(time_domain.max),
+        )
 
         # The optimized kernel is algebraically identical to summing one explicit
         # signed PWM call per synapse:
@@ -1305,18 +1307,11 @@ class SpikingConv2d(nn.Conv2d):
         # Convert both sampled events into causal pulse widths against one deadline.
         # Missing data or reference events independently leave their own rail at reset,
         # so the surviving rail retains its signed observation-time contribution.
-        deadline = data_event.time.new_tensor(float(data_event.domain.max))
-        data_pulse_width = torch.where(
-            data_event.fired,
-            (deadline - data_event.time).clamp_min(0.0),
-            torch.zeros_like(data_event.time),
+        signed_pulse_width = signed_pulse_width_duration(
+            data_event,
+            reference_event,
+            observation_deadline=float(data_event.domain.max),
         )
-        reference_pulse_width = torch.where(
-            reference_event.fired,
-            (deadline - reference_event.time).clamp_min(0.0),
-            torch.zeros_like(reference_event.time),
-        )
-        signed_pulse_width = data_pulse_width - reference_pulse_width
 
         # The optimized convolution evaluates the complete per-receptive-field PWM
         # reduction. Conceptually, each unmaterialized synapse is equivalent to:
@@ -1391,9 +1386,17 @@ class SpikingConv2d(nn.Conv2d):
         # Encode one scalar zero codeword on the same window as every data value.
         # Subtracting times recovers the clamped potential for arbitrary zero-
         # containing intervals, while ordinary convolution padding remains zero.
-        data_time, _ = neg_identity_transform(encoded_x, domain_x)
-        reference_time, _ = neg_identity_transform(x.new_zeros(()), domain_x)
-        signed_pulse_width = reference_time - data_time
+        data_time, time_domain = neg_identity_transform(encoded_x, domain_x)
+        reference_time, reference_domain = neg_identity_transform(
+            x.new_zeros(()), domain_x
+        )
+        if time_domain != reference_domain:
+            raise ValueError("convolution data and reference events require one deadline")
+        signed_pulse_width = signed_pulse_width_duration(
+            data_time,
+            reference_time,
+            observation_deadline=float(time_domain.max),
+        )
 
         # The optimized grouped convolution evaluates the sum of the conceptually
         # equivalent signed PWM call at every receptive-field synapse:

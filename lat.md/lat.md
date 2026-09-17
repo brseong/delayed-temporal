@@ -7,6 +7,7 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[models]] — Hugging Face model-family adapters, checkpoint compatibility, and ablation controls.
 - [[decisions]] — Rationale and trade-offs behind the project’s major architectural choices.
 - [[noise]] — Gaussian event timing, fixed-deadline potential readout, static non-idealities, and verification.
+- [[clock-driven]] — Explicit time-step TTFS simulation and fixed ImageNet-1k validation contract.
 - [[calibration]] — Deterministic layer-wise collection, immutable ranges, clipping accounting, and strict persistence.
 - [[vit-calibration-policy2]] — ViT 범위 전달, LayerNorm 내부 calibration, 구버전 결과 보존과 짧은 실행 검증.
 - [[text-calibration]] — Complete BERT, RoBERTa and GPT-2 range collection, execution and evaluator lifecycle.

@@ -2,7 +2,167 @@ import torch
 from jaxtyping import Float, Int
 from math import log, exp, isfinite
 from numbers import Real
+from .clock import (
+    causal_clock_time,
+    clock_step_indices,
+    get_clock_driven,
+    record_clock_updates,
+)
 from .types import ClosedBounds, PotentialBounds, SpikeSample, TimeBounds, check_domain
+
+
+def signed_pulse_width_duration(
+    t_A: torch.Tensor | float | SpikeSample,
+    t_B: torch.Tensor | float | SpikeSample,
+    *,
+    observation_deadline: float,
+) -> torch.Tensor | float:
+    """Return two causal event-to-deadline accumulators after recombination.
+
+    Continuous execution uses the algebraic duration. Clock-driven execution
+    advances both rail accumulators once per clock step and therefore retains an
+    explicit sequential simulation even in optimized affine and attention kernels.
+    """
+
+    config = get_clock_driven()
+    if not config.enabled:
+        deadline = observation_deadline
+        time_A = t_A.time if isinstance(t_A, SpikeSample) else t_A
+        time_B = t_B.time if isinstance(t_B, SpikeSample) else t_B
+        raw_duration_A = deadline - time_A
+        raw_duration_B = deadline - time_B
+        if isinstance(raw_duration_A, torch.Tensor):
+            duration_A = raw_duration_A.clamp_min(0.0)
+            if isinstance(t_A, SpikeSample):
+                duration_A = torch.where(
+                    t_A.fired, duration_A, torch.zeros_like(duration_A)
+                )
+        else:
+            duration_A = max(raw_duration_A, 0.0)
+        if isinstance(raw_duration_B, torch.Tensor):
+            duration_B = raw_duration_B.clamp_min(0.0)
+            if isinstance(t_B, SpikeSample):
+                duration_B = torch.where(
+                    t_B.fired, duration_B, torch.zeros_like(duration_B)
+                )
+        else:
+            duration_B = max(raw_duration_B, 0.0)
+        return duration_A - duration_B
+
+    deadline = float(causal_clock_time(observation_deadline))
+    time_A = t_A.time if isinstance(t_A, SpikeSample) else t_A
+    time_B = t_B.time if isinstance(t_B, SpikeSample) else t_B
+    time_A = causal_clock_time(time_A)
+    time_B = causal_clock_time(time_B)
+    if not isinstance(time_A, torch.Tensor) and not isinstance(time_B, torch.Tensor):
+        deadline_step = round(deadline / config.time_step)
+        event_a_step = round(float(time_A) / config.time_step)
+        event_b_step = round(float(time_B) / config.time_step)
+        first_step = min(0, event_a_step, event_b_step)
+        accumulator_a = 0.0
+        accumulator_b = 0.0
+        for step_index in range(first_step, deadline_step):
+            if step_index >= event_a_step:
+                accumulator_a += config.time_step
+            if step_index >= event_b_step:
+                accumulator_b += config.time_step
+        loop_steps = max(deadline_step - first_step, 0)
+        record_clock_updates("pwm", time_steps=loop_steps, elements=2)
+        return accumulator_a - accumulator_b
+
+    reference = time_A if isinstance(time_A, torch.Tensor) else time_B
+    if not isinstance(reference, torch.Tensor):
+        raise TypeError("clock-driven PWM requires a tensor or scalar event")
+    tensor_A = time_A if isinstance(time_A, torch.Tensor) else reference.new_tensor(time_A)
+    tensor_B = time_B if isinstance(time_B, torch.Tensor) else reference.new_tensor(time_B)
+    tensor_A, tensor_B = torch.broadcast_tensors(tensor_A, tensor_B)
+    steps_A = clock_step_indices(tensor_A).to(dtype=torch.int64)
+    steps_B = clock_step_indices(tensor_B).to(dtype=torch.int64)
+    fired_A = (
+        torch.broadcast_to(t_A.fired, tensor_A.shape)
+        if isinstance(t_A, SpikeSample)
+        else torch.ones_like(tensor_A, dtype=torch.bool)
+    )
+    fired_B = (
+        torch.broadcast_to(t_B.fired, tensor_B.shape)
+        if isinstance(t_B, SpikeSample)
+        else torch.ones_like(tensor_B, dtype=torch.bool)
+    )
+    deadline_step = round(deadline / config.time_step)
+    first_step = min(
+        0,
+        int(steps_A.min().item()) if steps_A.numel() else 0,
+        int(steps_B.min().item()) if steps_B.numel() else 0,
+    )
+    accumulator_A = torch.zeros_like(tensor_A)
+    accumulator_B = torch.zeros_like(tensor_B)
+    step_value = tensor_A.new_tensor(config.time_step)
+    for step_index in range(first_step, deadline_step):
+        accumulator_A = accumulator_A + ((steps_A <= step_index) & fired_A).to(
+            tensor_A.dtype
+        ) * step_value
+        accumulator_B = accumulator_B + ((steps_B <= step_index) & fired_B).to(
+            tensor_B.dtype
+        ) * step_value
+    loop_steps = max(deadline_step - first_step, 0)
+    record_clock_updates(
+        "pwm",
+        time_steps=loop_steps,
+        elements=2 * tensor_A.numel(),
+    )
+    return accumulator_A - accumulator_B
+
+
+def pulse_width_duration(
+    t_event: torch.Tensor | float,
+    *,
+    observation_deadline: float,
+) -> torch.Tensor | float:
+    """Return one event-to-deadline duration under the active execution mode."""
+
+    config = get_clock_driven()
+    if not config.enabled:
+        raw_duration = observation_deadline - t_event
+        return (
+            raw_duration.clamp_min(0.0)
+            if isinstance(raw_duration, torch.Tensor)
+            else max(raw_duration, 0.0)
+        )
+    deadline = float(causal_clock_time(observation_deadline))
+    aligned_event = causal_clock_time(t_event)
+    deadline_step = round(deadline / config.time_step)
+    if isinstance(aligned_event, torch.Tensor):
+        event_steps = clock_step_indices(aligned_event).to(dtype=torch.int64)
+        first_step = min(
+            0,
+            int(event_steps.min().item()) if event_steps.numel() else 0,
+        )
+        accumulator = torch.zeros_like(aligned_event)
+        step_value = accumulator.new_tensor(config.time_step)
+        for step_index in range(first_step, deadline_step):
+            accumulator = accumulator + (event_steps <= step_index).to(
+                accumulator.dtype
+            ) * step_value
+        loop_steps = max(deadline_step - first_step, 0)
+        record_clock_updates(
+            "pwm",
+            time_steps=loop_steps,
+            elements=aligned_event.numel(),
+        )
+        return accumulator
+
+    event_step = round(float(aligned_event) / config.time_step)
+    first_step = min(0, event_step)
+    accumulator = 0.0
+    for step_index in range(first_step, deadline_step):
+        if step_index >= event_step:
+            accumulator += config.time_step
+    record_clock_updates(
+        "pwm",
+        time_steps=max(deadline_step - first_step, 0),
+        elements=1,
+    )
+    return accumulator
 
 
 @check_domain
@@ -51,18 +211,18 @@ def unsigned_pulse_width_modulation_operator(
         Real,
     ):
         raise TypeError("observation_deadline must be a real scalar")
-    deadline = float(observation_deadline)
+    deadline = float(causal_clock_time(float(observation_deadline)))
     if not isfinite(deadline):
         raise ValueError("observation_deadline must be finite")
 
     # Normalize an exact event time or a declared event interval to scalar endpoints.
     # These configuration values define the rail independently of the current batch.
-    event_min = (
+    event_min = causal_clock_time(
         domain_t_event
         if isinstance(domain_t_event, (int, float))
         else domain_t_event.min
     )
-    event_max = (
+    event_max = causal_clock_time(
         domain_t_event
         if isinstance(domain_t_event, (int, float))
         else domain_t_event.max
@@ -75,11 +235,9 @@ def unsigned_pulse_width_modulation_operator(
     # Every declared event occurs no later than the common deadline. Clamp tiny
     # negative roundoff only at zero; physical event ordering is not inspected or
     # used to select a branch anywhere in this unsigned primitive.
-    raw_duration = deadline - t_event
-    duration = (
-        raw_duration.clamp_min(0.0)
-        if isinstance(raw_duration, torch.Tensor)
-        else max(raw_duration, 0.0)
+    duration = pulse_width_duration(
+        t_event,
+        observation_deadline=deadline,
     )
     result = V * duration
 
@@ -165,10 +323,18 @@ def signed_pulse_width_modulation_operator(
 
     # Normalize declared endpoints without reading extrema from event tensors. The
     # full declared intervals must precede the common physical observation time.
-    a_min = domain_t_A if isinstance(domain_t_A, (int, float)) else domain_t_A.min
-    a_max = domain_t_A if isinstance(domain_t_A, (int, float)) else domain_t_A.max
-    b_min = domain_t_B if isinstance(domain_t_B, (int, float)) else domain_t_B.min
-    b_max = domain_t_B if isinstance(domain_t_B, (int, float)) else domain_t_B.max
+    a_min = causal_clock_time(
+        domain_t_A if isinstance(domain_t_A, (int, float)) else domain_t_A.min
+    )
+    a_max = causal_clock_time(
+        domain_t_A if isinstance(domain_t_A, (int, float)) else domain_t_A.max
+    )
+    b_min = causal_clock_time(
+        domain_t_B if isinstance(domain_t_B, (int, float)) else domain_t_B.min
+    )
+    b_max = causal_clock_time(
+        domain_t_B if isinstance(domain_t_B, (int, float)) else domain_t_B.max
+    )
     if deadline < float(a_max) or deadline < float(b_max):
         raise ValueError(
             "observation_deadline must not precede either event-domain maximum"
@@ -195,43 +361,12 @@ def signed_pulse_width_modulation_operator(
     # Ordinary tensors already represent delivered events. Evaluate the cancelled
     # expression directly, avoiding deadline-sized intermediates and their redundant
     # subtraction in the common deterministic path.
-    if not isinstance(t_A, SpikeSample) and not isinstance(t_B, SpikeSample):
-        result = V * (t_B - t_A)
-    else:
-        # Event-aware execution exposes each causal rail. A delivered event supplies
-        # its non-negative time-to-deadline duration; a missed event never opens that
-        # rail and therefore leaves its contribution at reset zero.
-        time_A = t_A.time if isinstance(t_A, SpikeSample) else t_A
-        time_B = t_B.time if isinstance(t_B, SpikeSample) else t_B
-        raw_duration_A = deadline - time_A
-        raw_duration_B = deadline - time_B
-        duration_A = (
-            torch.where(
-                t_A.fired,
-                raw_duration_A.clamp_min(0.0),
-                torch.zeros_like(raw_duration_A),
-            )
-            if isinstance(t_A, SpikeSample)
-            else raw_duration_A.clamp_min(0.0)
-            if isinstance(raw_duration_A, torch.Tensor)
-            else max(raw_duration_A, 0.0)
-        )
-        duration_B = (
-            torch.where(
-                t_B.fired,
-                raw_duration_B.clamp_min(0.0),
-                torch.zeros_like(raw_duration_B),
-            )
-            if isinstance(t_B, SpikeSample)
-            else raw_duration_B.clamp_min(0.0)
-            if isinstance(raw_duration_B, torch.Tensor)
-            else max(raw_duration_B, 0.0)
-        )
-
-        # Subtract the B rail from the A rail. Both delivered events recover the
-        # cancelled expression, one-sided misses retain the other rail with its
-        # proper sign, and two misses return reset zero.
-        result = V * (duration_A - duration_B)
+    signed_duration = signed_pulse_width_duration(
+        t_A,
+        t_B,
+        observation_deadline=deadline,
+    )
+    result = V * signed_duration
 
     # Derive the ideal both-event range directly from the signed time difference.
     # Treating the two physical rails as independent intervals would lose their
