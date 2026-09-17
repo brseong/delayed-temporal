@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +21,11 @@ from scripts.evaluation.error_analysis_vit import (
     evaluation_shard_bounds,
     validate_vit_runtime_arguments,
 )
-from scripts.experiments.run_clock_driven_vit import parse_result
+from scripts.experiments.run_clock_driven_vit import (
+    parse_result,
+    prepare_evaluation_subset,
+    write_summary,
+)
 from utils.transforms.clock import (
     get_clock_driven_stats,
     get_clock_update_stats,
@@ -255,20 +260,76 @@ def verify_vit_runtime_isolation() -> None:
 
 # @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Contiguous Evaluation Shards]]
 def verify_contiguous_evaluation_shards() -> None:
-    ranges = [evaluation_shard_bounds(5000, 4, index) for index in range(4)]
-    assert ranges == [(0, 1250), (1250, 2500), (2500, 3750), (3750, 5000)]
+    ranges = [evaluation_shard_bounds(500, 4, index) for index in range(4)]
+    assert ranges == [(0, 125), (125, 250), (250, 375), (375, 500)]
     uneven = [evaluation_shard_bounds(10, 3, index) for index in range(3)]
     assert uneven == [(0, 4), (4, 7), (7, 10)]
+
+    rows = []
+    for index, (start, stop) in enumerate(ranges):
+        samples = stop - start
+        rows.append({
+            "run_id": f"continuous_shard_{index:02d}",
+            "clock_driven": False,
+            "time_step": None,
+            "shard_index": index,
+            "shard_count": 4,
+            "shard_start": start,
+            "shard_stop": stop,
+            "correct": 100,
+            "samples": samples,
+            "accuracy": 100 / samples,
+            "prediction_sha256": f"{index:064x}",
+            "gpu": index + 4,
+            "gpu_model": "NVIDIA RTX A6000",
+            "elapsed_seconds": 1.0,
+            "source_commit": "a" * 40,
+            "calibration_sha256": "b" * 64,
+            "log_sha256": f"{index + 4:064x}",
+        })
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        write_summary(
+            root,
+            rows,
+            tag="test_population_500",
+            time_steps=(),
+            shard_count=4,
+            expected_population=500,
+        )
+        summary = json.loads((root / "summary.json").read_text())
+    assert summary["tag"] == "test_population_500"
+    assert summary["conditions"][0]["samples"] == 500
+    assert summary["conditions"][0]["correct"] == 400
+
+    from datasets import Dataset
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source_path = root / "source"
+        subset_path = root / "subset"
+        metadata_path = root / "subset.json"
+        Dataset.from_dict({"value": list(range(10))}).save_to_disk(str(source_path))
+        metadata = prepare_evaluation_subset(
+            source_path, subset_path, metadata_path, sample_count=5
+        )
+        replay = prepare_evaluation_subset(
+            source_path, subset_path, metadata_path, sample_count=5
+        )
+        assert metadata == replay
+        assert metadata["sample_count"] == 5
+        assert Dataset.load_from_disk(str(subset_path))["value"] == list(range(5))
 
 
 # @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Composed Encoder Statistics]]
 def verify_composed_encoder_statistics() -> None:
     log = """GPU model: NVIDIA RTX A6000
-Evaluation shard — index: 0, count: 4, start: 0, stop: 1250, population: 5000
+Evaluation metadata — model: checkpoint, dataset: imagenet-1k, split: validation, samples: 125, theta: 20.0, precision: float64, source: disk:/tmp/validation_first_500, fingerprint: abcdef
+Evaluation shard — index: 0, count: 4, start: 0, stop: 125, population: 500
 Correct: 3
-Evaluated samples: 1250
+Evaluated samples: 125
 Prediction SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-Accuracy: 0.0024
+Accuracy: 0.024
 ClockUpdates[encoder] calls=1, time_steps=1, element_updates=1
 ClockUpdates[exponential] calls=1, time_steps=1, element_updates=1
 ClockUpdates[pwm] calls=1, time_steps=1, element_updates=1
@@ -285,6 +346,8 @@ Clock[gelu.cubic.log_positive] events=1, rounded_events=1, mean_absolute_error=0
             time_step=1.0,
             shard_index=0,
             shard_count=4,
+            expected_population=500,
+            evaluation_dataset_path=Path("/tmp/validation_first_500"),
             gpu=4,
             commit="a" * 40,
             calibration_sha256="b" * 64,

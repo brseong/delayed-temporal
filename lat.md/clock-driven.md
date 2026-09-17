@@ -28,6 +28,8 @@ Completed tag `vit_base_clock_driven_imagenet5k_theta20_float64_v2` used executi
 
 This result measures one coarse time bin and does not establish behavior at finer time bins. `verification.json` preserves the complete shard coverage, identities, hashes, and positive encoder, PWM, and exponential update counts.
 
+The additional sweep tagged `vit_base_clock_driven_imagenet500_theta20_float64_v1` uses the first 500 images of the same fixed validation ordering. Four contiguous shards cover 125 images each. It reuses the verified calibration table and execution source while evaluating one continuous reference and global time bins 0.1, 0.2, ..., 1.0. Each aggregate is accepted only after exact 500-image coverage and identity validation.
+
 ## Verification
 
 The verification cases distinguish clock semantics from ordinary floating-point evaluation.
@@ -58,7 +60,7 @@ The ViT evaluator accepts a positive global time step only for a spiking backend
 
 ### Contiguous Evaluation Shards
 
-The evaluation population is divided into balanced contiguous half-open ranges with no overlap or omission, and aggregation requires complete ordered coverage of all 5,000 images.
+The configured evaluation population is divided into balanced contiguous half-open ranges with no overlap or omission, and aggregation requires complete ordered coverage of that population.
 
 ### Composed Encoder Statistics
 

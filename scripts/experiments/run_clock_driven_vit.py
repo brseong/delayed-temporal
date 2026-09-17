@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate calibrated ViT-B on validation 5k under one global discrete clock."""
+"""Sweep one global clock time bin on a fixed calibrated ViT-B subset."""
 
 from __future__ import annotations
 
@@ -26,9 +26,9 @@ from scripts.runtime import files as runtime_files
 from scripts.runtime import identity
 
 
-TAG = "vit_base_clock_driven_imagenet5k_theta20_float64_v2"
+DEFAULT_TAG = "vit_base_clock_driven_imagenet500_theta20_float64_v1"
 ALLOWED_GPUS = (4, 5, 6, 7)
-DEFAULT_TIME_STEPS = (1.0,)
+DEFAULT_TIME_STEPS = tuple(index / 10.0 for index in range(1, 11))
 PYTHON = Path("/opt/conda/envs/dt/bin/python")
 CHECKPOINT = Path(
     "/data/delayed-temporal/artifacts/assets/theta-selection-v1/checkpoints/"
@@ -45,6 +45,63 @@ EVALUATION_DATASET = Path(
     "imagenet_theta_selection_v1/validation_50000"
 )
 PREPROCESSING = Path("scripts/configs/vit_timm_preprocessing.json")
+
+
+def prepare_evaluation_subset(
+    source_path: Path,
+    subset_path: Path,
+    metadata_path: Path,
+    *,
+    sample_count: int,
+) -> dict[str, Any]:
+    """Materialize and identify the first N examples of a saved validation set."""
+
+    from datasets import Dataset, DatasetDict, load_from_disk
+
+    if sample_count <= 0:
+        raise ValueError("evaluation sample count must be positive")
+    if subset_path.exists() or metadata_path.exists():
+        if not subset_path.is_dir() or not metadata_path.is_file():
+            raise ValueError("evaluation subset and metadata must either both exist or not")
+        metadata = json.loads(metadata_path.read_text())
+        expected = {
+            "source_path": str(source_path.resolve()),
+            "sample_count": sample_count,
+            "selection": f"validation[0:{sample_count}]",
+        }
+        if any(metadata.get(key) != value for key, value in expected.items()):
+            raise ValueError("stored evaluation subset identity differs")
+        saved = load_from_disk(str(subset_path))
+        if isinstance(saved, DatasetDict):
+            saved = saved["validation"]
+        if not isinstance(saved, Dataset) or len(saved) != sample_count:
+            raise ValueError("stored evaluation subset population differs")
+        if metadata.get("fingerprint") != saved._fingerprint:
+            raise ValueError("stored evaluation subset fingerprint differs")
+        return metadata
+
+    source = load_from_disk(str(source_path))
+    if isinstance(source, DatasetDict):
+        source = source["validation"]
+    if not isinstance(source, Dataset):
+        raise TypeError("evaluation source must contain a Dataset validation split")
+    if sample_count > len(source):
+        raise ValueError("evaluation sample count exceeds the saved validation set")
+    subset = source.select(range(sample_count))
+    subset_path.parent.mkdir(parents=True, exist_ok=True)
+    staging_path = subset_path.with_name(f".{subset_path.name}.staging-{os.getpid()}")
+    subset.save_to_disk(str(staging_path))
+    staging_path.replace(subset_path)
+    saved = load_from_disk(str(subset_path))
+    metadata = {
+        "source_path": str(source_path.resolve()),
+        "source_fingerprint": source._fingerprint,
+        "sample_count": sample_count,
+        "selection": f"validation[0:{sample_count}]",
+        "fingerprint": saved._fingerprint,
+    }
+    runtime_files.new_json(metadata_path, metadata)
+    return metadata
 
 
 def source_commit(source: Path) -> str:
@@ -77,6 +134,7 @@ def common_arguments(
     source: Path,
     commit: str,
     calibration_path: Path,
+    evaluation_dataset_path: Path,
 ) -> list[str]:
     """Build the invariant noise-off calibrated ViT-B evaluation arguments."""
 
@@ -85,7 +143,7 @@ def common_arguments(
         "--model_backend", "spiking",
         "--model_id", str(CHECKPOINT),
         "--dataset_id", "imagenet-1k",
-        "--evaluation-dataset-path", str(EVALUATION_DATASET),
+        "--evaluation-dataset-path", str(evaluation_dataset_path),
         "--evaluation-split", "validation",
         "--image-preprocessing-config", str(source / PREPROCESSING),
         "--batch_size", "32",
@@ -126,6 +184,7 @@ def calibrated_command(
     source: Path,
     commit: str,
     calibration_path: Path,
+    evaluation_dataset_path: Path,
     *,
     phase: str,
     run_id: str,
@@ -137,7 +196,9 @@ def calibrated_command(
 
     if phase not in {"collect", "validate"}:
         raise ValueError("clock-driven campaign phase must be collect or validate")
-    arguments = common_arguments(source, commit, calibration_path)
+    arguments = common_arguments(
+        source, commit, calibration_path, evaluation_dataset_path
+    )
     arguments += [
         "--experiment_name", run_id,
         "--calibration-mode", phase,
@@ -173,11 +234,20 @@ def build_experiment(
     commit: str,
     time_steps: tuple[float, ...],
     shard_count: int,
+    *,
+    tag: str,
+    evaluation_dataset_path: Path,
+    evaluation_metadata: dict[str, Any],
+    calibration_sha256: str,
+    controller_commit: str,
 ) -> dict[str, Any]:
     """Create the immutable campaign identity from source and local artifacts."""
 
     return {
-        "tag": TAG,
+        "tag": tag,
+        "controller_source_root": str(SOURCE),
+        "controller_source_commit": controller_commit,
+        "controller_sha256": identity.sha256_file(Path(__file__)),
         "source_root": str(source),
         "source_commit": commit,
         "python_bin": str(PYTHON),
@@ -185,8 +255,12 @@ def build_experiment(
         "checkpoint_sha256": CHECKPOINT_SHA256,
         "calibration_dataset_path": str(CALIBRATION_DATASET),
         "calibration_dataset_fingerprint": CALIBRATION_FINGERPRINT,
-        "evaluation_dataset_path": str(EVALUATION_DATASET),
-        "evaluation_population": "fixed_validation_5000",
+        "calibration_sha256": calibration_sha256,
+        "evaluation_dataset_path": str(evaluation_dataset_path),
+        "evaluation_dataset_fingerprint": evaluation_metadata["fingerprint"],
+        "evaluation_source_fingerprint": evaluation_metadata["source_fingerprint"],
+        "evaluation_population": evaluation_metadata["sample_count"],
+        "evaluation_selection": evaluation_metadata["selection"],
         "preprocessing_path": str(source / PREPROCESSING),
         "preprocessing_sha256": identity.sha256_file(source / PREPROCESSING),
         "theta": 20.0,
@@ -282,6 +356,8 @@ def parse_result(
     time_step: float | None,
     shard_index: int,
     shard_count: int,
+    expected_population: int,
+    evaluation_dataset_path: Path,
     gpu: int,
     commit: str,
     calibration_sha256: str,
@@ -292,6 +368,8 @@ def parse_result(
     text = log_path.read_text(errors="strict")
     if "Traceback (most recent call last)" in text:
         raise ValueError("clock-driven evaluator log contains a traceback")
+    if f"source: disk:{evaluation_dataset_path}," not in text:
+        raise ValueError("clock-driven evaluation dataset path differs")
     correct = int(_single(r"^Correct: (\d+)$", text, "correct count"))
     samples = int(_single(r"^Evaluated samples: (\d+)$", text, "sample count"))
     shard_match = re.search(
@@ -306,7 +384,7 @@ def parse_result(
     if (
         logged_shard["index"] != shard_index
         or logged_shard["count"] != shard_count
-        or logged_shard["population"] != 5000
+        or logged_shard["population"] != expected_population
         or logged_shard["stop"] - logged_shard["start"] != samples
     ):
         raise ValueError("clock-driven evaluation shard identity differs")
@@ -372,6 +450,8 @@ def parse_result(
         "time_step": time_step,
         "shard_index": shard_index,
         "shard_count": shard_count,
+        "evaluation_population": expected_population,
+        "evaluation_dataset_path": str(evaluation_dataset_path),
         "shard_start": logged_shard["start"],
         "shard_stop": logged_shard["stop"],
         "clock_driven": time_step is not None,
@@ -396,10 +476,12 @@ def write_summary(
     root: Path,
     results: list[dict[str, Any]],
     *,
+    tag: str,
     time_steps: tuple[float, ...],
     shard_count: int,
+    expected_population: int,
 ) -> None:
-    """Write shard evidence and any complete 5,000-image condition summaries."""
+    """Write shard evidence and summaries for every complete condition."""
 
     ordered = sorted(
         results,
@@ -433,7 +515,10 @@ def write_summary(
             continue
         if [row["shard_index"] for row in shards] != list(range(shard_count)):
             raise ValueError(f"duplicate or missing shard for {condition}")
-        if shards[0]["shard_start"] != 0 or shards[-1]["shard_stop"] != 5000:
+        if (
+            shards[0]["shard_start"] != 0
+            or shards[-1]["shard_stop"] != expected_population
+        ):
             raise ValueError(f"incomplete population coverage for {condition}")
         if any(
             left["shard_stop"] != right["shard_start"]
@@ -442,8 +527,10 @@ def write_summary(
             raise ValueError(f"non-contiguous shard coverage for {condition}")
         correct = sum(row["correct"] for row in shards)
         samples = sum(row["samples"] for row in shards)
-        if samples != 5000:
-            raise ValueError(f"condition {condition} did not cover 5000 images")
+        if samples != expected_population:
+            raise ValueError(
+                f"condition {condition} did not cover {expected_population} images"
+            )
         digest_payload = "\n".join(row["prediction_sha256"] for row in shards)
         complete_conditions.append({
             "condition": condition,
@@ -471,8 +558,56 @@ def write_summary(
     runtime_files.atomic_text(root / "summary.csv", buffer.getvalue())
     runtime_files.atomic_json(
         root / "summary.json",
-        {"tag": TAG, "conditions": complete_conditions, "shard_runs": ordered},
+        {"tag": tag, "conditions": complete_conditions, "shard_runs": ordered},
     )
+
+
+def next_attempt_log(root: Path, run_id: str) -> Path:
+    """Return a new append-only log path without replacing prior attempts."""
+
+    attempts = sorted((root / "logs").glob(f"{run_id}.attempt-*.log"))
+    return root / "logs" / f"{run_id}.attempt-{len(attempts):02d}.log"
+
+
+def recover_result_from_logs(
+    root: Path,
+    *,
+    run_id: str,
+    time_step: float | None,
+    shard_index: int,
+    shard_count: int,
+    expected_population: int,
+    evaluation_dataset_path: Path,
+    commit: str,
+    calibration_sha256: str,
+) -> dict[str, Any] | None:
+    """Recover a completed evaluator whose controller stopped before acceptance."""
+
+    for log_path in reversed(
+        sorted((root / "logs").glob(f"{run_id}.attempt-*.log"))
+    ):
+        text = log_path.read_text(errors="strict")
+        if not re.search(r"^Correct: \d+$", text, flags=re.MULTILINE):
+            continue
+        gpu = int(_single(r"^Controller GPU: (\d+)$", text, "controller GPU"))
+        progress = re.findall(r"^Evaluation progress — (\{.+\})$", text, re.MULTILINE)
+        elapsed_seconds = (
+            float(json.loads(progress[-1])["elapsed_seconds"]) if progress else 0.0
+        )
+        return parse_result(
+            log_path,
+            run_id=run_id,
+            time_step=time_step,
+            shard_index=shard_index,
+            shard_count=shard_count,
+            expected_population=expected_population,
+            evaluation_dataset_path=evaluation_dataset_path,
+            gpu=gpu,
+            commit=commit,
+            calibration_sha256=calibration_sha256,
+            elapsed_seconds=elapsed_seconds,
+        )
+    return None
 
 
 def run_command(
@@ -486,6 +621,8 @@ def run_command(
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     handle = log_path.open("xb")
+    handle.write(f"Controller GPU: {gpu}\n".encode("utf-8"))
+    handle.flush()
     environment = {
         **os.environ,
         "CUDA_VISIBLE_DEVICES": str(gpu),
@@ -510,11 +647,15 @@ def run_command(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--source-root", type=Path, default=SOURCE)
+    parser.add_argument("--tag", default=DEFAULT_TAG)
+    parser.add_argument("--output-root", type=Path)
+    parser.add_argument("--calibration-path", type=Path)
     parser.add_argument(
-        "--output-root",
+        "--evaluation-source-path",
         type=Path,
-        default=Path("/data/delayed-temporal/artifacts/logs/clock_driven") / TAG,
+        default=EVALUATION_DATASET,
     )
+    parser.add_argument("--evaluation-samples", type=int, default=500)
     parser.add_argument("--gpus", type=int, nargs="+", default=list(ALLOWED_GPUS))
     parser.add_argument(
         "--time-steps",
@@ -534,7 +675,10 @@ def main() -> None:
     args = parser.parse_args()
 
     source = args.source_root.resolve()
-    root = args.output_root.resolve()
+    root = (
+        args.output_root
+        or Path("/data/delayed-temporal/artifacts/logs/clock_driven") / args.tag
+    ).resolve()
     time_steps = tuple(float(value) for value in args.time_steps)
     if (
         not time_steps
@@ -544,26 +688,43 @@ def main() -> None:
         raise ValueError("time bins must be unique, finite, and strictly positive")
     if args.shards <= 0 or args.shards > len(args.gpus):
         raise ValueError("shards must be positive and no larger than the GPU pool")
-    commit = source_commit(source)
-    experiment = build_experiment(source, commit, time_steps, args.shards)
-    root.mkdir(parents=True, exist_ok=True)
-    for directory in ("logs", "results", "calibration"):
-        (root / directory).mkdir(exist_ok=True)
-    runtime_files.immutable_json(root / "experiment.json", experiment)
+    if args.evaluation_samples < args.shards:
+        raise ValueError("evaluation samples must be no smaller than shard count")
 
-    calibration_path = root / "calibration" / "vit_base_theta20.json"
+    controller_commit = source_commit(SOURCE)
+    commit = source_commit(source)
+    root.mkdir(parents=True, exist_ok=True)
+    for directory in ("logs", "results", "calibration", "assets"):
+        (root / directory).mkdir(exist_ok=True)
+    evaluation_dataset_path = (
+        root / "assets" / f"validation_first_{args.evaluation_samples}"
+    )
+    evaluation_metadata = prepare_evaluation_subset(
+        args.evaluation_source_path.resolve(),
+        evaluation_dataset_path,
+        root / "evaluation_subset.json",
+        sample_count=args.evaluation_samples,
+    )
+
+    calibration_path = (
+        args.calibration_path.resolve()
+        if args.calibration_path is not None
+        else root / "calibration" / "vit_base_theta20.json"
+    )
     available = initially_idle_gpus(tuple(args.gpus))
     if not available:
         raise RuntimeError("no allowed idle GPU is available for clock-driven evaluation")
-
     if calibration_path.exists():
         calibration_sha256 = validate_calibration(calibration_path, commit)
+    elif args.calibration_path is not None:
+        raise FileNotFoundError(f"calibration table does not exist: {calibration_path}")
     else:
-        calibration_log = root / "logs" / "calibration.log"
+        calibration_log = root / "logs" / "calibration.attempt-00.log"
         command = calibrated_command(
             source,
             commit,
             calibration_path,
+            evaluation_dataset_path,
             phase="collect",
             run_id="clock_driven_calibration",
         )
@@ -578,6 +739,19 @@ def main() -> None:
             raise RuntimeError(f"calibration failed; inspect {calibration_log}")
         calibration_sha256 = validate_calibration(calibration_path, commit)
 
+    experiment = build_experiment(
+        source,
+        commit,
+        time_steps,
+        args.shards,
+        tag=args.tag,
+        evaluation_dataset_path=evaluation_dataset_path,
+        evaluation_metadata=evaluation_metadata,
+        calibration_sha256=calibration_sha256,
+        controller_commit=controller_commit,
+    )
+    runtime_files.immutable_json(root / "experiment.json", experiment)
+
     accepted: list[dict[str, Any]] = []
     pending: list[tuple[str, float | None, int]] = []
     for run_id, time_step, shard_index in tasks(time_steps, args.shards):
@@ -591,23 +765,51 @@ def main() -> None:
                 and result.get("time_step") == time_step
                 and result.get("shard_index") == shard_index
                 and result.get("shard_count") == args.shards
+                and result.get("evaluation_population") == args.evaluation_samples
+                and result.get("evaluation_dataset_path")
+                == str(evaluation_dataset_path)
             ):
                 accepted.append(result)
                 continue
             raise ValueError(f"stored result identity differs: {result_path}")
+        recovered = recover_result_from_logs(
+            root,
+            run_id=run_id,
+            time_step=time_step,
+            shard_index=shard_index,
+            shard_count=args.shards,
+            expected_population=args.evaluation_samples,
+            evaluation_dataset_path=evaluation_dataset_path,
+            commit=commit,
+            calibration_sha256=calibration_sha256,
+        )
+        if recovered is not None:
+            runtime_files.new_json(result_path, recovered)
+            accepted.append(recovered)
+            print(f"Recovered completed {run_id}", flush=True)
+            continue
         pending.append((run_id, time_step, shard_index))
 
+    write_summary(
+        root,
+        accepted,
+        tag=args.tag,
+        time_steps=time_steps,
+        shard_count=args.shards,
+        expected_population=args.evaluation_samples,
+    )
     running: dict[int, dict[str, Any]] = {}
     free = list(available)
     while pending or running:
         while pending and free:
             gpu = free.pop(0)
             run_id, time_step, shard_index = pending.pop(0)
-            log_path = root / "logs" / f"{run_id}.log"
+            log_path = next_attempt_log(root, run_id)
             command = calibrated_command(
                 source,
                 commit,
                 calibration_path,
+                evaluation_dataset_path,
                 phase="validate",
                 run_id=run_id,
                 time_step=time_step,
@@ -645,6 +847,8 @@ def main() -> None:
                 time_step=state["time_step"],
                 shard_index=state["shard_index"],
                 shard_count=args.shards,
+                expected_population=args.evaluation_samples,
+                evaluation_dataset_path=evaluation_dataset_path,
                 gpu=gpu,
                 commit=commit,
                 calibration_sha256=calibration_sha256,
@@ -657,8 +861,10 @@ def main() -> None:
             write_summary(
                 root,
                 accepted,
+                tag=args.tag,
                 time_steps=time_steps,
                 shard_count=args.shards,
+                expected_population=args.evaluation_samples,
             )
             print(
                 f"Completed {state['run_id']}: {result['correct']}/{result['samples']} "
@@ -671,10 +877,12 @@ def main() -> None:
     write_summary(
         root,
         accepted,
+        tag=args.tag,
         time_steps=time_steps,
         shard_count=args.shards,
+        expected_population=args.evaluation_samples,
     )
-    print(f"Completed {TAG}: {root / 'summary.csv'}", flush=True)
+    print(f"Completed {args.tag}: {root / 'summary.csv'}", flush=True)
 
 
 if __name__ == "__main__":
