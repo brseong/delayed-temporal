@@ -28,6 +28,7 @@ from scripts.runtime import identity
 
 DEFAULT_TAG = "vit_base_clock_driven_imagenet500_theta20_float64_v2"
 ALLOWED_GPUS = (4, 5, 6, 7)
+EXTENDED_GPUS = tuple(range(8))
 DEFAULT_TIME_STEPS = tuple(index / 10.0 for index in range(1, 11))
 PYTHON = Path("/opt/conda/envs/dt/bin/python")
 CHECKPOINT = Path(
@@ -239,9 +240,9 @@ def build_experiment(
     evaluation_dataset_path: Path,
     evaluation_metadata: dict[str, Any],
     calibration_sha256: str,
-    calibration_source_commit: str,
-    calibration_compatibility_paths: list[str],
     controller_commit: str,
+    requested_gpus: tuple[int, ...],
+    extended_gpu_pool: bool,
 ) -> dict[str, Any]:
     """Create the immutable campaign identity from source and local artifacts."""
 
@@ -258,8 +259,6 @@ def build_experiment(
         "calibration_dataset_path": str(CALIBRATION_DATASET),
         "calibration_dataset_fingerprint": CALIBRATION_FINGERPRINT,
         "calibration_sha256": calibration_sha256,
-        "calibration_source_commit": calibration_source_commit,
-        "calibration_compatibility_paths": calibration_compatibility_paths,
         "evaluation_dataset_path": str(evaluation_dataset_path),
         "evaluation_dataset_fingerprint": evaluation_metadata["fingerprint"],
         "evaluation_source_fingerprint": evaluation_metadata["source_fingerprint"],
@@ -277,7 +276,8 @@ def build_experiment(
         "gaussian_time_noise": False,
         "mismatch": False,
         "parameter_noise": False,
-        "allowed_gpus": list(ALLOWED_GPUS),
+        "requested_gpus": list(requested_gpus),
+        "extended_gpu_pool": extended_gpu_pool,
         "evaluator_sha256": identity.sha256_file(
             source / "scripts/evaluation/error_analysis_vit.py"
         ),
@@ -308,11 +308,17 @@ def gpu_snapshot() -> dict[int, tuple[int, int]]:
     return snapshot
 
 
-def initially_idle_gpus(requested: tuple[int, ...]) -> tuple[int, ...]:
+def initially_idle_gpus(
+    requested: tuple[int, ...],
+    *,
+    allowed: tuple[int, ...],
+) -> tuple[int, ...]:
     """Require two consecutive low-memory, low-utilization observations."""
 
-    if not requested or any(gpu not in ALLOWED_GPUS for gpu in requested):
-        raise ValueError("clock-driven campaign GPUs must be selected from 4,5,6,7")
+    if not requested or any(gpu not in allowed for gpu in requested):
+        raise ValueError(
+            "clock-driven campaign GPUs must belong to the active GPU policy"
+        )
     first = gpu_snapshot()
     time.sleep(10.0)
     second = gpu_snapshot()
@@ -327,54 +333,11 @@ def initially_idle_gpus(requested: tuple[int, ...]) -> tuple[int, ...]:
     )
 
 
-def calibration_compatibility_paths(
-    source: Path,
-    calibration_commit: str,
-    execution_commit: str,
-) -> list[str]:
-    """Accept reuse only when intervening changes cannot affect calibration."""
-
-    if calibration_commit == execution_commit:
-        return []
-    ancestor = subprocess.run(
-        [
-            "git", "-C", str(source), "merge-base", "--is-ancestor",
-            calibration_commit, execution_commit,
-        ],
-        check=False,
-    )
-    if ancestor.returncode != 0:
-        raise ValueError("calibration source is not an ancestor of execution source")
-    changed = subprocess.check_output(
-        [
-            "git", "-C", str(source), "diff", "--name-only",
-            calibration_commit, execution_commit,
-        ],
-        text=True,
-    ).splitlines()
-    allowed = {
-        "lat.md/clock-driven.md",
-        "scripts/experiments/run_clock_driven_vit.py",
-        "scripts/verification/verify_clock_driven.py",
-        "utils/transforms/clock.py",
-    }
-    disallowed = sorted(set(changed) - allowed)
-    if disallowed:
-        raise ValueError(
-            "calibration reuse crosses calibration-relevant changes: "
-            + ", ".join(disallowed)
-        )
-    return sorted(changed)
-
-
 def validate_calibration(
     path: Path,
     commit: str,
-    *,
-    source: Path,
-    calibration_source_commit: str | None = None,
-) -> tuple[str, str, list[str]]:
-    """Validate an exact or explicitly calibration-compatible ViT-B table."""
+) -> str:
+    """Validate an exact-source ViT-B calibration table."""
 
     table = json.loads(path.read_text())
     if len(table.get("layers", {})) != 109:
@@ -383,18 +346,13 @@ def validate_calibration(
     if metadata.get("theta") != 20.0 or metadata.get("dtype") != "float64":
         raise ValueError("clock-driven calibration theta or dtype differs")
     options = dict(metadata["model_options"])
-    table_commit = options.get("source_commit")
-    expected_table_commit = calibration_source_commit or commit
-    if table_commit != expected_table_commit:
+    if options.get("source_commit") != commit:
         raise ValueError("clock-driven calibration source commit differs")
-    compatibility_paths = calibration_compatibility_paths(
-        source, expected_table_commit, commit
-    )
     if options.get("calibration_dataset_fingerprint") != CALIBRATION_FINGERPRINT:
         raise ValueError("clock-driven calibration population differs")
     if options.get("checkpoint_sha256") != CHECKPOINT_SHA256:
         raise ValueError("clock-driven calibration checkpoint differs")
-    return identity.sha256_file(path), expected_table_commit, compatibility_paths
+    return identity.sha256_file(path)
 
 
 def _single(pattern: str, text: str, name: str) -> str:
@@ -705,7 +663,6 @@ def main() -> None:
     parser.add_argument("--tag", default=DEFAULT_TAG)
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--calibration-path", type=Path)
-    parser.add_argument("--calibration-source-commit")
     parser.add_argument(
         "--evaluation-source-path",
         type=Path,
@@ -713,6 +670,11 @@ def main() -> None:
     )
     parser.add_argument("--evaluation-samples", type=int, default=500)
     parser.add_argument("--gpus", type=int, nargs="+", default=list(ALLOWED_GPUS))
+    parser.add_argument(
+        "--allow-gpus-0-3",
+        action="store_true",
+        help="Campaign-only override that permits physical GPUs 0 through 3.",
+    )
     parser.add_argument(
         "--time-steps",
         "--time-bins",
@@ -767,28 +729,17 @@ def main() -> None:
         if args.calibration_path is not None
         else root / "calibration" / "vit_base_theta20.json"
     )
-    available = initially_idle_gpus(tuple(args.gpus))
+    requested_gpus = tuple(args.gpus)
+    allowed_gpus = EXTENDED_GPUS if args.allow_gpus_0_3 else ALLOWED_GPUS
+    available = initially_idle_gpus(requested_gpus, allowed=allowed_gpus)
     if not available:
         raise RuntimeError("no allowed idle GPU is available for clock-driven evaluation")
     if calibration_path.exists():
-        (
-            calibration_sha256,
-            calibration_source_commit,
-            calibration_compatibility,
-        ) = validate_calibration(
-            calibration_path,
-            commit,
-            source=source,
-            calibration_source_commit=args.calibration_source_commit,
-        )
+        calibration_sha256 = validate_calibration(calibration_path, commit)
     elif args.calibration_path is not None:
         raise FileNotFoundError(f"calibration table does not exist: {calibration_path}")
     else:
-        if args.calibration_source_commit is not None:
-            raise ValueError(
-                "calibration-source-commit requires an existing calibration path"
-            )
-        calibration_log = root / "logs" / "calibration.attempt-00.log"
+        calibration_log = next_attempt_log(root, "calibration")
         command = calibrated_command(
             source,
             commit,
@@ -806,11 +757,7 @@ def main() -> None:
         )
         if process.wait() != 0:
             raise RuntimeError(f"calibration failed; inspect {calibration_log}")
-        (
-            calibration_sha256,
-            calibration_source_commit,
-            calibration_compatibility,
-        ) = validate_calibration(calibration_path, commit, source=source)
+        calibration_sha256 = validate_calibration(calibration_path, commit)
 
     experiment = build_experiment(
         source,
@@ -821,9 +768,9 @@ def main() -> None:
         evaluation_dataset_path=evaluation_dataset_path,
         evaluation_metadata=evaluation_metadata,
         calibration_sha256=calibration_sha256,
-        calibration_source_commit=calibration_source_commit,
-        calibration_compatibility_paths=calibration_compatibility,
         controller_commit=controller_commit,
+        requested_gpus=requested_gpus,
+        extended_gpu_pool=args.allow_gpus_0_3,
     )
     runtime_files.immutable_json(root / "experiment.json", experiment)
 

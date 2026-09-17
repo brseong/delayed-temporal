@@ -22,7 +22,7 @@ from scripts.evaluation.error_analysis_vit import (
     validate_vit_runtime_arguments,
 )
 from scripts.experiments.run_clock_driven_vit import (
-    calibration_compatibility_paths,
+    initially_idle_gpus,
     parse_result,
     prepare_evaluation_subset,
     write_summary,
@@ -271,29 +271,24 @@ def verify_vit_runtime_isolation() -> None:
         else:
             raise AssertionError(f"invalid clock-driven configuration accepted: {args}")
 
-    run_target = "scripts.experiments.run_clock_driven_vit.subprocess.run"
-    output_target = (
-        "scripts.experiments.run_clock_driven_vit.subprocess.check_output"
-    )
+    snapshot_target = "scripts.experiments.run_clock_driven_vit.gpu_snapshot"
+    sleep_target = "scripts.experiments.run_clock_driven_vit.time.sleep"
+    snapshot = {gpu: (0, 0) for gpu in range(8)}
     with (
-        patch(run_target, return_value=SimpleNamespace(returncode=0)),
-        patch(output_target, return_value="utils/transforms/clock.py\n"),
+        patch(snapshot_target, return_value=snapshot),
+        patch(sleep_target),
     ):
-        assert calibration_compatibility_paths(
-            REPOSITORY_ROOT, "a" * 40, "b" * 40
-        ) == ["utils/transforms/clock.py"]
+        assert initially_idle_gpus((0, 4, 7), allowed=tuple(range(8))) == (0, 4, 7)
     with (
-        patch(run_target, return_value=SimpleNamespace(returncode=0)),
-        patch(output_target, return_value="utils/transforms/functions.py\n"),
+        patch(snapshot_target, return_value=snapshot),
+        patch(sleep_target),
     ):
         try:
-            calibration_compatibility_paths(
-                REPOSITORY_ROOT, "a" * 40, "b" * 40
-            )
+            initially_idle_gpus((0, 4), allowed=(4, 5, 6, 7))
         except ValueError:
             pass
         else:
-            raise AssertionError("calibration-relevant source change was accepted")
+            raise AssertionError("default GPU policy accepted GPU 0")
 
 
 # @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Contiguous Evaluation Shards]]
