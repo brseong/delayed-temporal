@@ -32,7 +32,7 @@ This result measures one coarse time bin and does not establish behavior at fine
 
 The additional sweep tagged `vit_base_clock_driven_imagenet500_theta20_float64_v2` uses the first 500 images of the same fixed validation ordering. Four contiguous shards cover 125 images each. It reuses the verified calibration table while evaluating one continuous reference and global time bins 0.1, 0.2, ..., 1.0. Each aggregate is accepted only after exact 500-image coverage and identity validation.
 
-The v1 attempt was rejected before producing a time bin result because repeated 0.1 step accumulation caused an aligned duration to fail the strict numerical alignment check. The v2 execution admits only bounded arithmetic drift accumulated by explicit state updates and still rejects a displacement of one quarter of a bin. It may reuse a calibration table from an ancestor commit only when every intervening path is explicitly classified as unable to affect calibration and recorded in the experiment manifest.
+The v1 attempt was rejected before producing a time bin result because repeated 0.1 step accumulation caused an aligned duration to fail the strict numerical alignment check. The v2 execution admits only bounded arithmetic drift accumulated by explicit state updates and still rejects a displacement of one quarter of a bin. The final source collects a new calibration table before evaluation, so calibration and execution share one exact source revision.
 
 ## Verification
 
