@@ -16,6 +16,8 @@ Potential-to-spike encoders test threshold delivery at every clock edge and plac
 
 Affine and attention kernels retain their tensor reductions, but their temporal inputs come from the same explicit PWM loop as the scalar primitive. The implementation keeps one current-state tensor and does not allocate a time-leading history tensor or skip steps with a closed-form expression.
 
+Clock index recovery admits bounded arithmetic drift accumulated by repeated explicit state updates. The tolerance remains below one quarter of a bin, so a materially unaligned duration is rejected.
+
 ## Evaluation Contract
 
 The first maintained evaluation uses calibrated ViT-B/16 on the fixed ImageNet-1k validation subset of 5,000 images.
@@ -28,7 +30,9 @@ Completed tag `vit_base_clock_driven_imagenet5k_theta20_float64_v2` used executi
 
 This result measures one coarse time bin and does not establish behavior at finer time bins. `verification.json` preserves the complete shard coverage, identities, hashes, and positive encoder, PWM, and exponential update counts.
 
-The additional sweep tagged `vit_base_clock_driven_imagenet500_theta20_float64_v1` uses the first 500 images of the same fixed validation ordering. Four contiguous shards cover 125 images each. It reuses the verified calibration table and execution source while evaluating one continuous reference and global time bins 0.1, 0.2, ..., 1.0. Each aggregate is accepted only after exact 500-image coverage and identity validation.
+The additional sweep tagged `vit_base_clock_driven_imagenet500_theta20_float64_v2` uses the first 500 images of the same fixed validation ordering. Four contiguous shards cover 125 images each. It reuses the verified calibration table while evaluating one continuous reference and global time bins 0.1, 0.2, ..., 1.0. Each aggregate is accepted only after exact 500-image coverage and identity validation.
+
+The v1 attempt was rejected before producing a time bin result because repeated 0.1 step accumulation caused an aligned duration to fail the strict numerical alignment check. The v2 execution admits only bounded arithmetic drift accumulated by explicit state updates and still rejects a displacement of one quarter of a bin. It may reuse a calibration table from an ancestor commit only when every intervening path is explicitly classified as unable to affect calibration and recorded in the experiment manifest.
 
 ## Verification
 

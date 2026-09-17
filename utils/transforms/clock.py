@@ -294,8 +294,16 @@ def clock_step_indices(value: Tensor) -> Tensor:
         raise RuntimeError("clock_step_indices requires clock-driven execution")
     quotient = value / value.new_tensor(config.time_step)
     nearest = torch.round(quotient)
-    tolerance = 16.0 * torch.finfo(value.dtype).eps * torch.maximum(
-        quotient.abs(), torch.ones_like(quotient)
+    # An explicit PWM accumulator adds the same floating-point step once per
+    # edge, so its roundoff can grow quadratically in normalized step count.
+    # Admit that bounded arithmetic drift but never a quarter-step displacement.
+    magnitude = torch.maximum(quotient.abs(), torch.ones_like(quotient))
+    accumulated_roundoff = (
+        64.0 * torch.finfo(value.dtype).eps * magnitude.square()
+    )
+    tolerance = torch.minimum(
+        accumulated_roundoff,
+        quotient.new_full((), 0.25),
     )
     if not bool(((quotient - nearest).abs() <= tolerance).all()):
         raise ValueError("clock-driven duration is not aligned to the global time step")

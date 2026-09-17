@@ -22,11 +22,13 @@ from scripts.evaluation.error_analysis_vit import (
     validate_vit_runtime_arguments,
 )
 from scripts.experiments.run_clock_driven_vit import (
+    calibration_compatibility_paths,
     parse_result,
     prepare_evaluation_subset,
     write_summary,
 )
 from utils.transforms.clock import (
+    clock_step_indices,
     get_clock_driven_stats,
     get_clock_update_stats,
     set_clock_driven,
@@ -101,6 +103,18 @@ def verify_pwm_state_updates() -> None:
     torch.testing.assert_close(result, expected, atol=0.0, rtol=0.0)
     updates = get_clock_update_stats()["pwm"]
     assert updates == {"calls": 1, "time_steps": 8, "element_updates": 32}
+
+    set_clock_driven(enabled=True, time_step=0.1)
+    accumulated = torch.zeros((), dtype=torch.float64)
+    for _ in range(400):
+        accumulated = accumulated + accumulated.new_tensor(0.1)
+    assert clock_step_indices(accumulated).item() == 400
+    try:
+        clock_step_indices(torch.tensor(40.05, dtype=torch.float64))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("quarter-step misalignment was accepted")
     set_clock_driven(enabled=False)
 
 
@@ -256,6 +270,30 @@ def verify_vit_runtime_isolation() -> None:
             pass
         else:
             raise AssertionError(f"invalid clock-driven configuration accepted: {args}")
+
+    run_target = "scripts.experiments.run_clock_driven_vit.subprocess.run"
+    output_target = (
+        "scripts.experiments.run_clock_driven_vit.subprocess.check_output"
+    )
+    with (
+        patch(run_target, return_value=SimpleNamespace(returncode=0)),
+        patch(output_target, return_value="utils/transforms/clock.py\n"),
+    ):
+        assert calibration_compatibility_paths(
+            REPOSITORY_ROOT, "a" * 40, "b" * 40
+        ) == ["utils/transforms/clock.py"]
+    with (
+        patch(run_target, return_value=SimpleNamespace(returncode=0)),
+        patch(output_target, return_value="utils/transforms/functions.py\n"),
+    ):
+        try:
+            calibration_compatibility_paths(
+                REPOSITORY_ROOT, "a" * 40, "b" * 40
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("calibration-relevant source change was accepted")
 
 
 # @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Contiguous Evaluation Shards]]
