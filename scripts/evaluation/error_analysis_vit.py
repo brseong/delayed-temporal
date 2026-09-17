@@ -88,6 +88,8 @@ class Arguments:
     dataset_id: str
     evaluation_dataset_path: str
     evaluation_split: str
+    evaluation_shard_count: int
+    evaluation_shard_index: int
     image_preprocessing_config: str
     batch_size: int
     device: Literal["cuda", "cpu"]
@@ -263,6 +265,18 @@ def parse_arguments() -> Arguments:
             "require 0."
         ),
     )
+    parser.add_argument(
+        "--evaluation-shard-count",
+        type=int,
+        default=1,
+        help="Number of contiguous evaluation shards (default: 1).",
+    )
+    parser.add_argument(
+        "--evaluation-shard-index",
+        type=int,
+        default=0,
+        help="Zero-based contiguous evaluation shard index (default: 0).",
+    )
 
     # Layer-wise calibration is intentionally separate from the old diagnostic
     # quantile hook. Collection writes one reusable artifact from a deterministic
@@ -407,6 +421,8 @@ def parse_arguments() -> Arguments:
         dataset_id=args.dataset_id,
         evaluation_dataset_path=args.evaluation_dataset_path,
         evaluation_split=args.evaluation_split,
+        evaluation_shard_count=args.evaluation_shard_count,
+        evaluation_shard_index=args.evaluation_shard_index,
         image_preprocessing_config=args.image_preprocessing_config,
         batch_size=args.batch_size,
         device=args.device,
@@ -576,6 +592,12 @@ def validate_vit_runtime_arguments(args: Arguments) -> None:
             raise ValueError(
                 f"image preprocessing config does not exist: {preprocessing_path}"
             )
+    if args.evaluation_shard_count <= 0:
+        raise ValueError("evaluation_shard_count must be positive")
+    if not 0 <= args.evaluation_shard_index < args.evaluation_shard_count:
+        raise ValueError(
+            "evaluation_shard_index must be inside evaluation_shard_count"
+        )
     if not isinstance(args.clock_driven, bool):
         raise TypeError("clock_driven must be a bool")
     clock_time_step = float(args.clock_time_step)
@@ -670,6 +692,23 @@ def load_evaluation_dataset(
             "evaluation dataset path must contain a saved Dataset or DatasetDict"
         )
     return dataset, split, f"disk:{dataset_path}"
+
+
+def evaluation_shard_bounds(
+    population: int,
+    shard_count: int,
+    shard_index: int,
+) -> tuple[int, int]:
+    """Return one contiguous, balanced half-open range over an evaluation set."""
+
+    if population < 0 or shard_count <= 0:
+        raise ValueError("population must be non-negative and shard_count positive")
+    if not 0 <= shard_index < shard_count:
+        raise ValueError("shard_index must be inside shard_count")
+    shard_base, shard_remainder = divmod(population, shard_count)
+    shard_start = shard_index * shard_base + min(shard_index, shard_remainder)
+    shard_size = shard_base + int(shard_index < shard_remainder)
+    return shard_start, shard_start + shard_size
 
 DATASET_CONFIGS = {
     "cifar10": {
@@ -1102,6 +1141,22 @@ def evaluate_vit_model(args: Arguments) -> None:
         )
         if args.quick_test:
             dataset = dataset.select(range(min(5000, len(dataset))))
+        evaluation_population = len(dataset)
+        shard_start, shard_stop = evaluation_shard_bounds(
+            evaluation_population,
+            args.evaluation_shard_count,
+            args.evaluation_shard_index,
+        )
+        if args.evaluation_shard_count > 1:
+            dataset = dataset.select(range(shard_start, shard_stop))
+        print(
+            "Evaluation shard — "
+            f"index: {args.evaluation_shard_index}, "
+            f"count: {args.evaluation_shard_count}, "
+            f"start: {shard_start}, stop: {shard_stop}, "
+            f"population: {evaluation_population}",
+            flush=True,
+        )
         print(
             "Evaluation metadata — "
             f"model: {model_id}, dataset: {dataset_id}, split: {split}, "

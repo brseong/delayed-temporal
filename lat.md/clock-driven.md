@@ -20,7 +20,9 @@ Affine and attention kernels retain their tensor reductions, but their temporal 
 
 The first maintained evaluation uses calibrated ViT-B/16 on the fixed ImageNet-1k validation subset of 5,000 images.
 
-A source-matched frozen calibration table and the selected threshold remain unchanged across the continuous and clock-driven runs. Each run records the time bin, task counts, prediction digest, encoder rounding, code-window lengths, and executed state-update counts.
+A source-matched frozen calibration table and the selected threshold remain unchanged across the continuous and clock-driven runs. Four contiguous shards cover the fixed 5,000 images exactly once and run on GPUs 4–7; correct and total counts are summed only after coverage validation.
+
+Each shard records the time bin, task counts, prediction digest, encoder rounding, code-window lengths, and executed state-update counts. The aggregate preserves all shard records and reports one accuracy over exactly 5,000 images.
 
 ## Verification
 
@@ -49,3 +51,7 @@ Disabling clock-driven execution preserves the continuous-time encoder, PWM, and
 ### ViT Runtime Isolation
 
 The ViT evaluator accepts a positive global time step only for a spiking backend and rejects simultaneous timing noise or a multi-GPU process.
+
+### Contiguous Evaluation Shards
+
+The evaluation population is divided into balanced contiguous half-open ranges with no overlap or omission, and aggregation requires complete ordered coverage of all 5,000 images.

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import io
 import json
 import math
@@ -25,7 +26,7 @@ from scripts.runtime import files as runtime_files
 from scripts.runtime import identity
 
 
-TAG = "vit_base_clock_driven_imagenet5k_theta20_float64_v1"
+TAG = "vit_base_clock_driven_imagenet5k_theta20_float64_v2"
 ALLOWED_GPUS = (4, 5, 6, 7)
 DEFAULT_TIME_STEPS = (1.0,)
 PYTHON = Path("/opt/conda/envs/dt/bin/python")
@@ -56,11 +57,19 @@ def source_commit(source: Path) -> str:
     return commit
 
 
-def tasks(time_steps: tuple[float, ...]) -> tuple[tuple[str, float | None], ...]:
-    """Return the continuous baseline followed by the requested time bins."""
+def tasks(
+    time_steps: tuple[float, ...],
+    shard_count: int,
+) -> tuple[tuple[str, float | None, int], ...]:
+    """Return every contiguous shard of the baseline and requested time bins."""
 
-    return (("continuous", None),) + tuple(
+    conditions = (("continuous", None),) + tuple(
         (f"dt_{time_step:g}", time_step) for time_step in time_steps
+    )
+    return tuple(
+        (f"{condition}_shard_{shard_index:02d}", time_step, shard_index)
+        for condition, time_step in conditions
+        for shard_index in range(shard_count)
     )
 
 
@@ -121,6 +130,8 @@ def calibrated_command(
     phase: str,
     run_id: str,
     time_step: float | None = None,
+    shard_index: int = 0,
+    shard_count: int = 1,
 ) -> list[str]:
     """Build one source-frozen calibration or validation command."""
 
@@ -132,7 +143,11 @@ def calibrated_command(
         "--calibration-mode", phase,
     ]
     if phase == "validate":
-        arguments.append("--quick-test")
+        arguments += [
+            "--quick-test",
+            "--evaluation-shard-index", str(shard_index),
+            "--evaluation-shard-count", str(shard_count),
+        ]
     if time_step is None:
         arguments += ["--no-clock-driven", "--clock-time-step", "0"]
     else:
@@ -157,6 +172,7 @@ def build_experiment(
     source: Path,
     commit: str,
     time_steps: tuple[float, ...],
+    shard_count: int,
 ) -> dict[str, Any]:
     """Create the immutable campaign identity from source and local artifacts."""
 
@@ -177,6 +193,7 @@ def build_experiment(
         "precision": "float64",
         "batch_size": 32,
         "time_steps": list(time_steps),
+        "evaluation_shards": shard_count,
         "simulation": "explicit_sequential_state_updates",
         "clock_rounding": "first_non_earlier_edge",
         "gaussian_time_noise": False,
@@ -263,6 +280,8 @@ def parse_result(
     *,
     run_id: str,
     time_step: float | None,
+    shard_index: int,
+    shard_count: int,
     gpu: int,
     commit: str,
     calibration_sha256: str,
@@ -275,8 +294,22 @@ def parse_result(
         raise ValueError("clock-driven evaluator log contains a traceback")
     correct = int(_single(r"^Correct: (\d+)$", text, "correct count"))
     samples = int(_single(r"^Evaluated samples: (\d+)$", text, "sample count"))
-    if samples != 5000:
-        raise ValueError("clock-driven evaluation did not process exactly 5000 images")
+    shard_match = re.search(
+        r"^Evaluation shard — index: (?P<index>\d+), count: (?P<count>\d+), "
+        r"start: (?P<start>\d+), stop: (?P<stop>\d+), population: (?P<population>\d+)$",
+        text,
+        flags=re.MULTILINE,
+    )
+    if shard_match is None:
+        raise ValueError("clock-driven evaluation omitted shard identity")
+    logged_shard = {name: int(value) for name, value in shard_match.groupdict().items()}
+    if (
+        logged_shard["index"] != shard_index
+        or logged_shard["count"] != shard_count
+        or logged_shard["population"] != 5000
+        or logged_shard["stop"] - logged_shard["start"] != samples
+    ):
+        raise ValueError("clock-driven evaluation shard identity differs")
     accuracy = float(_single(r"^Accuracy: ([0-9.]+)$", text, "accuracy"))
     if not math.isfinite(accuracy) or accuracy != correct / samples:
         raise ValueError("clock-driven accuracy does not match correct/total")
@@ -338,6 +371,10 @@ def parse_result(
     return {
         "run_id": run_id,
         "time_step": time_step,
+        "shard_index": shard_index,
+        "shard_count": shard_count,
+        "shard_start": logged_shard["start"],
+        "shard_stop": logged_shard["stop"],
         "clock_driven": time_step is not None,
         "correct": correct,
         "samples": samples,
@@ -356,25 +393,87 @@ def parse_result(
     }
 
 
-def write_summary(root: Path, results: list[dict[str, Any]]) -> None:
-    """Write stable CSV and JSON summaries from accepted result records."""
+def write_summary(
+    root: Path,
+    results: list[dict[str, Any]],
+    *,
+    time_steps: tuple[float, ...],
+    shard_count: int,
+) -> None:
+    """Write shard evidence and any complete 5,000-image condition summaries."""
 
     ordered = sorted(
         results,
-        key=lambda row: math.inf if row["time_step"] is None else -row["time_step"],
+        key=lambda row: (
+            math.inf if row["time_step"] is None else -row["time_step"],
+            row["shard_index"],
+        ),
     )
-    fields = (
-        "run_id", "clock_driven", "time_step", "correct", "samples", "accuracy",
+    shard_fields = (
+        "run_id", "clock_driven", "time_step", "shard_index", "shard_count",
+        "shard_start", "shard_stop", "correct", "samples", "accuracy",
         "prediction_sha256", "gpu", "gpu_model", "elapsed_seconds",
         "source_commit", "calibration_sha256", "log_sha256",
     )
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=fields)
+    writer = csv.DictWriter(buffer, fieldnames=shard_fields)
     writer.writeheader()
     for row in ordered:
-        writer.writerow({field: row[field] for field in fields})
+        writer.writerow({field: row[field] for field in shard_fields})
+    runtime_files.atomic_text(root / "raw_shards.csv", buffer.getvalue())
+
+    complete_conditions: list[dict[str, Any]] = []
+    for condition, time_step in (("continuous", None),) + tuple(
+        (f"dt_{value:g}", value) for value in time_steps
+    ):
+        shards = sorted(
+            (row for row in results if row["time_step"] == time_step),
+            key=lambda row: row["shard_index"],
+        )
+        if len(shards) != shard_count:
+            continue
+        if [row["shard_index"] for row in shards] != list(range(shard_count)):
+            raise ValueError(f"duplicate or missing shard for {condition}")
+        if shards[0]["shard_start"] != 0 or shards[-1]["shard_stop"] != 5000:
+            raise ValueError(f"incomplete population coverage for {condition}")
+        if any(
+            left["shard_stop"] != right["shard_start"]
+            for left, right in zip(shards, shards[1:])
+        ):
+            raise ValueError(f"non-contiguous shard coverage for {condition}")
+        correct = sum(row["correct"] for row in shards)
+        samples = sum(row["samples"] for row in shards)
+        if samples != 5000:
+            raise ValueError(f"condition {condition} did not cover 5000 images")
+        digest_payload = "\n".join(row["prediction_sha256"] for row in shards)
+        complete_conditions.append({
+            "condition": condition,
+            "clock_driven": time_step is not None,
+            "time_step": time_step,
+            "correct": correct,
+            "samples": samples,
+            "accuracy": correct / samples,
+            "ordered_shard_digest_sha256": hashlib.sha256(
+                digest_payload.encode("ascii")
+            ).hexdigest(),
+            "elapsed_seconds_max": max(row["elapsed_seconds"] for row in shards),
+            "shards": shard_count,
+        })
+
+    summary_fields = (
+        "condition", "clock_driven", "time_step", "correct", "samples", "accuracy",
+        "ordered_shard_digest_sha256", "elapsed_seconds_max", "shards",
+    )
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=summary_fields)
+    writer.writeheader()
+    for row in complete_conditions:
+        writer.writerow(row)
     runtime_files.atomic_text(root / "summary.csv", buffer.getvalue())
-    runtime_files.atomic_json(root / "summary.json", {"tag": TAG, "runs": ordered})
+    runtime_files.atomic_json(
+        root / "summary.json",
+        {"tag": TAG, "conditions": complete_conditions, "shard_runs": ordered},
+    )
 
 
 def run_command(
@@ -427,6 +526,12 @@ def main() -> None:
         default=list(DEFAULT_TIME_STEPS),
         help="Positive time-bin widths to evaluate after the continuous baseline.",
     )
+    parser.add_argument(
+        "--shards",
+        type=int,
+        default=4,
+        help="Contiguous validation shards per condition (default: 4).",
+    )
     args = parser.parse_args()
 
     source = args.source_root.resolve()
@@ -438,8 +543,10 @@ def main() -> None:
         or any(not math.isfinite(value) or value <= 0.0 for value in time_steps)
     ):
         raise ValueError("time bins must be unique, finite, and strictly positive")
+    if args.shards <= 0 or args.shards > len(args.gpus):
+        raise ValueError("shards must be positive and no larger than the GPU pool")
     commit = source_commit(source)
-    experiment = build_experiment(source, commit, time_steps)
+    experiment = build_experiment(source, commit, time_steps, args.shards)
     root.mkdir(parents=True, exist_ok=True)
     for directory in ("logs", "results", "calibration"):
         (root / directory).mkdir(exist_ok=True)
@@ -473,8 +580,8 @@ def main() -> None:
         calibration_sha256 = validate_calibration(calibration_path, commit)
 
     accepted: list[dict[str, Any]] = []
-    pending: list[tuple[str, float | None]] = []
-    for run_id, time_step in tasks(time_steps):
+    pending: list[tuple[str, float | None, int]] = []
+    for run_id, time_step, shard_index in tasks(time_steps, args.shards):
         result_path = root / "results" / f"{run_id}.json"
         if result_path.exists():
             result = json.loads(result_path.read_text())
@@ -483,18 +590,20 @@ def main() -> None:
                 and result.get("source_commit") == commit
                 and result.get("calibration_sha256") == calibration_sha256
                 and result.get("time_step") == time_step
+                and result.get("shard_index") == shard_index
+                and result.get("shard_count") == args.shards
             ):
                 accepted.append(result)
                 continue
             raise ValueError(f"stored result identity differs: {result_path}")
-        pending.append((run_id, time_step))
+        pending.append((run_id, time_step, shard_index))
 
     running: dict[int, dict[str, Any]] = {}
     free = list(available)
     while pending or running:
         while pending and free:
             gpu = free.pop(0)
-            run_id, time_step = pending.pop(0)
+            run_id, time_step, shard_index = pending.pop(0)
             log_path = root / "logs" / f"{run_id}.log"
             command = calibrated_command(
                 source,
@@ -503,6 +612,8 @@ def main() -> None:
                 phase="validate",
                 run_id=run_id,
                 time_step=time_step,
+                shard_index=shard_index,
+                shard_count=args.shards,
             )
             print(f"Launching {run_id} on GPU {gpu}", flush=True)
             running[gpu] = {
@@ -514,6 +625,7 @@ def main() -> None:
                 ),
                 "run_id": run_id,
                 "time_step": time_step,
+                "shard_index": shard_index,
                 "log_path": log_path,
                 "started": time.monotonic(),
             }
@@ -532,6 +644,8 @@ def main() -> None:
                 state["log_path"],
                 run_id=state["run_id"],
                 time_step=state["time_step"],
+                shard_index=state["shard_index"],
+                shard_count=args.shards,
                 gpu=gpu,
                 commit=commit,
                 calibration_sha256=calibration_sha256,
@@ -541,16 +655,26 @@ def main() -> None:
             accepted.append(result)
             free.append(gpu)
             del running[gpu]
-            write_summary(root, accepted)
+            write_summary(
+                root,
+                accepted,
+                time_steps=time_steps,
+                shard_count=args.shards,
+            )
             print(
-                f"Completed {state['run_id']}: {result['correct']}/5000 "
+                f"Completed {state['run_id']}: {result['correct']}/{result['samples']} "
                 f"({result['accuracy']:.6f})",
                 flush=True,
             )
 
-    if len(accepted) != len(tasks(time_steps)):
+    if len(accepted) != len(tasks(time_steps, args.shards)):
         raise RuntimeError("clock-driven campaign ended without every condition")
-    write_summary(root, accepted)
+    write_summary(
+        root,
+        accepted,
+        time_steps=time_steps,
+        shard_count=args.shards,
+    )
     print(f"Completed {TAG}: {root / 'summary.csv'}", flush=True)
 
 

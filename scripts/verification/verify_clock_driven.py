@@ -15,7 +15,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from scripts.evaluation.error_analysis_vit import validate_vit_runtime_arguments
+from scripts.evaluation.error_analysis_vit import (
+    evaluation_shard_bounds,
+    validate_vit_runtime_arguments,
+)
 from utils.transforms.clock import (
     get_clock_driven_stats,
     get_clock_update_stats,
@@ -212,6 +215,8 @@ def _runtime_args(**overrides: object) -> SimpleNamespace:
         "benchmark_warmup_batches": 0,
         "benchmark_measure_batches": 0,
         "evaluation_dataset_path": "",
+        "evaluation_shard_count": 1,
+        "evaluation_shard_index": 0,
         "image_preprocessing_config": "",
         "clock_driven": True,
         "clock_time_step": 0.25,
@@ -234,6 +239,8 @@ def verify_vit_runtime_isolation() -> None:
         _runtime_args(gaussian_time_noise=True),
         _runtime_args(time_noise_std_frac=1.0e-5),
         _runtime_args(clock_driven=False, clock_time_step=0.25),
+        _runtime_args(evaluation_shard_count=0),
+        _runtime_args(evaluation_shard_count=4, evaluation_shard_index=4),
     )
     for args in invalid:
         try:
@@ -244,6 +251,14 @@ def verify_vit_runtime_isolation() -> None:
             raise AssertionError(f"invalid clock-driven configuration accepted: {args}")
 
 
+# @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Contiguous Evaluation Shards]]
+def verify_contiguous_evaluation_shards() -> None:
+    ranges = [evaluation_shard_bounds(5000, 4, index) for index in range(4)]
+    assert ranges == [(0, 1250), (1250, 2500), (2500, 3750), (3750, 5000)]
+    uneven = [evaluation_shard_bounds(10, 3, index) for index in range(3)]
+    assert uneven == [(0, 4), (4, 7), (7, 10)]
+
+
 if __name__ == "__main__":
     checks = (
         verify_causal_encoder_clocking,
@@ -252,6 +267,7 @@ if __name__ == "__main__":
         verify_optimized_model_kernels,
         verify_disabled_mode_parity,
         verify_vit_runtime_isolation,
+        verify_contiguous_evaluation_shards,
     )
     try:
         for check in checks:
