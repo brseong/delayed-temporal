@@ -186,7 +186,6 @@ def calibrated_command(
     calibration_path: Path,
     evaluation_dataset_path: Path,
     *,
-    calibration_source_commit: str | None = None,
     phase: str,
     run_id: str,
     time_step: float | None = None,
@@ -200,8 +199,6 @@ def calibrated_command(
     arguments = common_arguments(
         source, commit, calibration_path, evaluation_dataset_path
     )
-    if calibration_source_commit is not None:
-        arguments += ["--calibration-source-commit", calibration_source_commit]
     arguments += [
         "--experiment_name", run_id,
         "--calibration-mode", phase,
@@ -888,7 +885,6 @@ def main() -> None:
                 commit,
                 calibration_path,
                 evaluation_dataset_path,
-                calibration_source_commit=calibration_source_commit,
                 phase="validate",
                 run_id=run_id,
                 time_step=time_step,
