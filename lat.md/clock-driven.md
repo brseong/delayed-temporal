@@ -55,3 +55,7 @@ The ViT evaluator accepts a positive global time step only for a spiking backend
 ### Contiguous Evaluation Shards
 
 The evaluation population is divided into balanced contiguous half-open ranges with no overlap or omission, and aggregation requires complete ordered coverage of all 5,000 images.
+
+### Composed Encoder Statistics
+
+Result validation requires the identity and logarithmic encoder statistics while preserving additional named encoder sites emitted by composed operators such as GELU.

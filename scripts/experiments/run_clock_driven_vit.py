@@ -353,9 +353,8 @@ def parse_result(
         raise ValueError("continuous baseline unexpectedly emitted clock statistics")
     if time_step is None and clock_updates:
         raise ValueError("continuous baseline unexpectedly emitted clock updates")
-    if time_step is not None and set(clock_sites) != {
-        "neg_linear_transform", "neg_log_transform"
-    }:
+    required_clock_sites = {"neg_linear_transform", "neg_log_transform"}
+    if time_step is not None and not required_clock_sites.issubset(clock_sites):
         raise ValueError("clock-driven evaluation has incomplete encoder statistics")
     if time_step is not None and set(clock_updates) != {
         "encoder", "exponential", "pwm"

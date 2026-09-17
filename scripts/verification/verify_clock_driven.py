@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 import sys
+import tempfile
 from unittest.mock import patch
 
 import torch
@@ -19,6 +20,7 @@ from scripts.evaluation.error_analysis_vit import (
     evaluation_shard_bounds,
     validate_vit_runtime_arguments,
 )
+from scripts.experiments.run_clock_driven_vit import parse_result
 from utils.transforms.clock import (
     get_clock_driven_stats,
     get_clock_update_stats,
@@ -259,6 +261,42 @@ def verify_contiguous_evaluation_shards() -> None:
     assert uneven == [(0, 4), (4, 7), (7, 10)]
 
 
+# @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Composed Encoder Statistics]]
+def verify_composed_encoder_statistics() -> None:
+    log = """GPU model: NVIDIA RTX A6000
+Evaluation shard — index: 0, count: 4, start: 0, stop: 1250, population: 5000
+Correct: 3
+Evaluated samples: 1250
+Prediction SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+Accuracy: 0.0024
+ClockUpdates[encoder] calls=1, time_steps=1, element_updates=1
+ClockUpdates[exponential] calls=1, time_steps=1, element_updates=1
+ClockUpdates[pwm] calls=1, time_steps=1, element_updates=1
+Clock[neg_linear_transform] events=1, rounded_events=1, mean_absolute_error=0.1, maximum_absolute_error=0.1, windows=1, minimum_window_steps=1, maximum_window_steps=1
+Clock[neg_log_transform] events=1, rounded_events=1, mean_absolute_error=0.1, maximum_absolute_error=0.1, windows=1, minimum_window_steps=1, maximum_window_steps=1
+Clock[gelu.cubic.log_positive] events=1, rounded_events=1, mean_absolute_error=0.1, maximum_absolute_error=0.1, windows=1, minimum_window_steps=1, maximum_window_steps=1
+"""
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "clock.log"
+        path.write_text(log)
+        result = parse_result(
+            path,
+            run_id="dt_1_shard_00",
+            time_step=1.0,
+            shard_index=0,
+            shard_count=4,
+            gpu=4,
+            commit="a" * 40,
+            calibration_sha256="b" * 64,
+            elapsed_seconds=1.0,
+        )
+    assert set(result["clock_sites"]) == {
+        "neg_linear_transform",
+        "neg_log_transform",
+        "gelu.cubic.log_positive",
+    }
+
+
 if __name__ == "__main__":
     checks = (
         verify_causal_encoder_clocking,
@@ -268,6 +306,7 @@ if __name__ == "__main__":
         verify_disabled_mode_parity,
         verify_vit_runtime_isolation,
         verify_contiguous_evaluation_shards,
+        verify_composed_encoder_statistics,
     )
     try:
         for check in checks:
