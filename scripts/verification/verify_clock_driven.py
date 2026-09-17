@@ -22,6 +22,7 @@ from scripts.evaluation.error_analysis_vit import (
     validate_vit_runtime_arguments,
 )
 from scripts.experiments.run_clock_driven_vit import (
+    calibrated_command,
     calibration_compatibility_paths,
     parse_result,
     prepare_evaluation_subset,
@@ -294,6 +295,19 @@ def verify_vit_runtime_isolation() -> None:
             pass
         else:
             raise AssertionError("calibration-relevant source change was accepted")
+
+    calibration_commit = "a" * 40
+    command = calibrated_command(
+        REPOSITORY_ROOT,
+        "b" * 40,
+        Path("/tmp/calibration.json"),
+        Path("/tmp/evaluation"),
+        calibration_source_commit=calibration_commit,
+        phase="validate",
+        run_id="compatibility_test",
+    )
+    option_index = command.index("--calibration-source-commit")
+    assert command[option_index + 1] == calibration_commit
 
 
 # @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Contiguous Evaluation Shards]]

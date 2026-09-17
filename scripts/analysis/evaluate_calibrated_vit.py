@@ -162,6 +162,13 @@ def main() -> None:
     parser.add_argument("--calibration-dataset-path", type=Path, required=True)
     parser.add_argument("--calibration-dataset-fingerprint", required=True)
     parser.add_argument(
+        "--calibration-source-commit",
+        help=(
+            "Calibration metadata source revision when an explicitly verified "
+            "calibration-compatible descendant performs evaluation."
+        ),
+    )
+    parser.add_argument(
         "--calibration-smoke-samples", type=int, default=0,
         help="Explicitly use a prefix for memory checks; its table is invalid for final runs.",
     )
@@ -207,7 +214,9 @@ def main() -> None:
         )
         original_metadata = evaluator.build_vit_calibration_metadata
         bound_identity = {
-            "source_commit": vit_args.source_commit,
+            "source_commit": (
+                own.calibration_source_commit or vit_args.source_commit
+            ),
             "checkpoint_sha256": vit_args.checkpoint_sha256,
             "gelu_cubic_implementation": implementation,
             "gelu_cubic_floor": floor,
