@@ -1869,7 +1869,8 @@ def verify_gpt2_fixed_range_flow() -> None:
         return config
 
     # Every maintained activation maps the same declared input range identically
-    # across different tensor values, for both dense and spiking Conv1D execution.
+    # across different tensor values. The spiking GPT-2 paper path composes gelu_new;
+    # other activations remain direct compatibility paths outside that experiment.
     set_gaussian_time_noise(enabled=False)
     input_domain = PotentialBounds(-2.0, 2.0)
     first_value = torch.tensor(

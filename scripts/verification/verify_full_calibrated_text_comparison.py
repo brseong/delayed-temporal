@@ -98,6 +98,7 @@ def verify_commands(root: Path) -> None:
     assert commands["collect"][2].endswith("error_analysis_roberta.py")
     assert runner.MODEL_CONFIG["roberta_large"]["sites"] == 218
     assert runner.MODEL_CONFIG["roberta_large"]["tag"] == runner.ROBERTA_LARGE_TAG
+    assert runner.MODEL_CONFIG["gpt2"]["tag"] == runner.GPT2_COMPOSED_GELU_TAG
     assert set(runner.FAMILY_CONFIG) == {"bert", "roberta", "gpt2"}
 
 
@@ -164,7 +165,8 @@ def verify_summarizer(root: Path) -> None:
                              "log_sha256": identity.sha256_file(log)}
         calibration_sha = identity.sha256_file(output / "calibration.json")
         output.joinpath("manifest.json").write_text(json.dumps({
-            "tag": runner.TAG, "family": family, "source_commit": "a" * 40,
+            "tag": runner.MODEL_CONFIG[family]["tag"],
+            "family": family, "source_commit": "a" * 40,
             "checkpoint_files_sha256": {"model": "b" * 64},
             "calibration_dataset": {"fingerprint": "training"},
             "evaluation_dataset": {"fingerprint": "evaluation"},

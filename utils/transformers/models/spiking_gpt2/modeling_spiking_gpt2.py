@@ -71,6 +71,27 @@ from utils.transformers.models.spiking_ops import (
 logger = logging.get_logger(__name__)
 
 
+GPT2_COMPOSED_GELU_IMPLEMENTATION = "composed_gelu_new_v1"
+
+
+def resolve_gpt2_mlp_activation_implementation(config) -> str:
+    """Identify the numerical activation path used by one GPT-2 MLP.
+
+    The pretrained checkpoint evaluated by the paper uses Hugging Face's
+    ``gelu_new`` cubic-tanh formula.  When its affine projections are temporal,
+    execute that same formula through the maintained composed GELU operators.
+    Explicit dense-MLP ablations and other configured activations retain their
+    direct PyTorch implementation and receive a distinct persisted identity.
+    """
+    activation_name = str(getattr(config, "activation_function", ""))
+    if (
+        bool(getattr(config, "use_spiking_mlp", True))
+        and activation_name == "gelu_new"
+    ):
+        return GPT2_COMPOSED_GELU_IMPLEMENTATION
+    return f"dense_{activation_name}"
+
+
 def resolve_gpt2_attention_theta(config) -> float:
     """Resolve GPT-2's operator-local attention threshold.
 
@@ -630,6 +651,9 @@ class GPT2MLP(nn.Module):
         embed_dim = config.hidden_size
         self.use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
         _theta = getattr(config, "theta", 400.0)
+        self.theta = float(_theta)
+        self.tau_s = float(getattr(config, "tau_s", 1.0))
+        self.activation_implementation = resolve_gpt2_mlp_activation_implementation(config)
         # SpikingConv1D preserves the Hugging Face Conv1D parameter layout. Dense
         # ablation calls its inherited tensor forward directly, while both paths can
         # reuse the same transposed-weight interval cache.
@@ -672,38 +696,47 @@ class GPT2MLP(nn.Module):
                 collection_bounds=projected.domain,
             )
 
-        # Every maintained GPT-2 activation has a standard envelope derived from the
-        # affine endpoints. Unknown custom functions must provide an explicit rule
-        # instead of restoring output-tensor extrema.
-        activated_value = self.act(projected.value)
-        if self._activation_name == "relu":
-            activated_domain = PotentialBounds(
-                max(0.0, float(projected.domain.min)),
-                max(0.0, float(projected.domain.max)),
-            )
-        elif self._activation_name == "tanh":
-            activated_domain = PotentialBounds(
-                math.tanh(float(projected.domain.min)),
-                math.tanh(float(projected.domain.max)),
-            )
-        elif self._activation_name in {
-            "gelu",
-            "gelu_fast",
-            "gelu_new",
-            "gelu_pytorch_tanh",
-            "quick_gelu",
-        }:
-            activated_value, activated_domain = clamp_gelu_output(
-                activated_value, projected.domain
-            )
-        elif self._activation_name in {"silu", "swish"}:
-            activated_value, activated_domain = clamp_swish_output(
-                activated_value, projected.domain
+        # The paper's default gelu_new path is the same cubic-tanh formula implemented
+        # by the shared TTFS composition.  Dense MLP ablations and explicitly selected
+        # alternative activations retain direct PyTorch evaluation with fixed bounds.
+        if self.activation_implementation == GPT2_COMPOSED_GELU_IMPLEMENTATION:
+            activated_value, activated_domain = gelu_approximation(
+                projected.value,
+                projected.domain,
+                theta=self.theta,
+                tau_s=self.tau_s,
             )
         else:
-            raise ValueError(
-                "GPT-2 MLP activation requires a maintained analytic range rule"
-            )
+            activated_value = self.act(projected.value)
+
+            if self._activation_name == "relu":
+                activated_domain = PotentialBounds(
+                    max(0.0, float(projected.domain.min)),
+                    max(0.0, float(projected.domain.max)),
+                )
+            elif self._activation_name == "tanh":
+                activated_domain = PotentialBounds(
+                    math.tanh(float(projected.domain.min)),
+                    math.tanh(float(projected.domain.max)),
+                )
+            elif self._activation_name in {
+                "gelu",
+                "gelu_fast",
+                "gelu_new",
+                "gelu_pytorch_tanh",
+                "quick_gelu",
+            }:
+                activated_value, activated_domain = clamp_gelu_output(
+                    activated_value, projected.domain
+                )
+            elif self._activation_name in {"silu", "swish"}:
+                activated_value, activated_domain = clamp_swish_output(
+                    activated_value, projected.domain
+                )
+            else:
+                raise ValueError(
+                    "GPT-2 MLP activation requires a maintained analytic range rule"
+                )
         activated = Potential(activated_value, activated_domain)
 
         # The output projection follows the same dense/spiking split as c_fc while

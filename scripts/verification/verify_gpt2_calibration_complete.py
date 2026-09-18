@@ -44,6 +44,10 @@ from utils.transformers.models.spiking_gpt2.calibration import (
 )
 from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
 from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import GPT2LMHeadModel
+from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import (
+    GPT2_COMPOSED_GELU_IMPLEMENTATION,
+    GPT2MLP,
+)
 
 AttentionInterface.register("spiking_sdpa", spiking_sdpa_attention_forward)
 
@@ -138,6 +142,7 @@ def verify_topology_and_metadata():
     assert options["layer_norm_eps"] == cfg.layer_norm_epsilon
     assert options["layer_norm_clip_margin"] == cfg.clip_margin
     assert options["output_bounds_version"] == 3
+    assert options["mlp_activation_implementation"] == GPT2_COMPOSED_GELU_IMPLEMENTATION
     assert identity.dtype == "float64"
     changed = metadata(cfg, dtype="float32")
     expect_error(ValueError, lambda: validate_calibration_metadata(identity, changed))
@@ -150,6 +155,35 @@ def verify_topology_and_metadata():
     expect_error(ValueError, lambda: validate_calibration_metadata(
         identity, replace(identity, model_options=tuple(sorted(changed_options.items()))),
     ))
+    old_options = tuple(
+        pair for pair in identity.model_options if pair[0] != "mlp_activation_implementation"
+    )
+    expect_error(ValueError, lambda: validate_calibration_metadata(
+        identity, replace(identity, model_options=old_options),
+    ))
+
+
+def verify_composed_gelu_execution():
+    """Use the composed GELU only for the paper GPT-2 spiking-MLP configuration."""
+    from utils.transformers.models.spiking_gpt2 import modeling_spiking_gpt2 as gpt2
+
+    values = Potential(
+        torch.linspace(-1.0, 1.0, 8, dtype=torch.float64).reshape(1, 1, 8),
+        PotentialBounds(-2.0, 2.0),
+    )
+    for use_spiking_mlp, expected_calls in ((True, 1), (False, 0)):
+        torch.manual_seed(1771)
+        module = GPT2MLP(
+            16, config(use_spiking_mlp=use_spiking_mlp, activation_function="gelu_new")
+        ).double().eval()
+        with patch.object(gpt2, "gelu_approximation", wraps=gpt2.gelu_approximation) as composed:
+            output = module(values)
+        assert composed.call_count == expected_calls
+        assert torch.isfinite(output.value).all()
+        assert output.domain.min < 0.0 < output.domain.max
+
+    dense_identity = metadata(config(use_spiking_mlp=False))
+    assert dict(dense_identity.model_options)["mlp_activation_implementation"] == "dense_gelu_new"
 
 
 def verify_collection_and_replay():
@@ -392,7 +426,8 @@ def verify_strict_collection_and_outputs():
 def main():
     torch.set_num_threads(1)
     for verify in (
-        verify_topology_and_metadata, verify_collection_and_replay,
+        verify_topology_and_metadata, verify_composed_gelu_execution,
+        verify_collection_and_replay,
         verify_selected_ranges_and_cache, verify_progress_and_optional_tensorboard,
         verify_strict_collection_and_outputs,
     ):

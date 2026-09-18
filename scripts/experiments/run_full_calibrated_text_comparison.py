@@ -28,16 +28,25 @@ from scripts.runtime import local_gpu
 
 ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", "/data/delayed-temporal/artifacts"))
 TAG = "conversion_comparison_theta40_calibrated_float64_bounds3_v3"
+GPT2_COMPOSED_GELU_TAG = "gpt2_theta40_calibrated_float64_bounds3_composed_gelu_v1"
 FAMILY_CONFIG = {
     "bert": {"task": "sst2", "evaluation_samples": 872, "sites": 110, "activation": "gelu"},
     "roberta": {"task": "sst2", "evaluation_samples": 872, "sites": 110, "activation": "gelu"},
-    "gpt2": {"task": "wikitext2", "evaluation_samples": 2891, "sites": 109, "activation": "gelu_new"},
+    "gpt2": {
+        "task": "wikitext2", "evaluation_samples": 2891, "sites": 109,
+        "activation": "gelu_new",
+        "activation_implementation": "composed_gelu_new_v1",
+    },
 }
 ROBERTA_LARGE_TAG = "roberta_large_theta40_calibrated_float64_bounds3_v1"
 MODEL_CONFIG = {
     **{
         name: {**config, "evaluator_family": name, "tag": TAG}
         for name, config in FAMILY_CONFIG.items()
+    },
+    "gpt2": {
+        **FAMILY_CONFIG["gpt2"], "evaluator_family": "gpt2",
+        "tag": GPT2_COMPOSED_GELU_TAG,
     },
     "roberta_large": {
         "task": "sst2", "evaluation_samples": 872, "sites": 218,
@@ -382,6 +391,8 @@ def main() -> None:
         "calibration_margin_fraction": 0.05, "text_calibration_policy_version": 1,
         "output_bounds_version": 3, "noise": False, "wandb": False,
         "tensorboard": False, "host_label": args.host_label, "physical_gpu": args.gpu,
+        "activation": config["activation"],
+        "activation_implementation": config.get("activation_implementation", "model_default"),
         "campaign_extra_local_gpus": bool(args.campaign_extra_local_gpus),
         "commands": commands, "runtime_dir": str(runtime),
     }
