@@ -421,12 +421,12 @@ def verify_vit_runtime_isolation() -> None:
         patch(run_target, return_value=SimpleNamespace(returncode=0)),
         patch(
             output_target,
-            return_value="utils/transforms/calibration.py\nutils/transforms/clock.py\n",
+            return_value="utils/transforms/calibration.py\n",
         ),
     ):
         assert calibration_compatibility_paths(
             REPOSITORY_ROOT, "a" * 40, "b" * 40
-        ) == ["utils/transforms/calibration.py", "utils/transforms/clock.py"]
+        ) == ["utils/transforms/calibration.py"]
     with (
         patch(run_target, return_value=SimpleNamespace(returncode=0)),
         patch(output_target, return_value="utils/transforms/functions.py\n"),

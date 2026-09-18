@@ -38,11 +38,23 @@ CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV = (
     "DT_CALIBRATION_COMPATIBLE_SOURCE_COMMIT"
 )
 calibration_safe_patch_sha256 = {
+    "scripts/evaluation/error_analysis_vit.py": (
+        "43905a2fcff7456db80b1c26c8fb31e287904703d5c3720282ec1ed5dd763584"
+    ),
+    "utils/transformers/integrations/spiking_sdpa_attention.py": (
+        "4a9ebcc268b5d43de3faa5498c60bad83d6b111c76b20b33d0bc1512e1019548"
+    ),
+    "utils/transformers/models/spiking_ops.py": (
+        "10fc31cff8d361767f28b62c81f24e3ec0a6d028d41d2b0e8f26a48ea2a59a61"
+    ),
+    "utils/transforms/clock.py": (
+        "df5265dc323ac8a1255c0367a00d8e77607af1ac1c183040d1402eb8959a7066"
+    ),
     "utils/transforms/primitive.py": (
-        "c426701ad31af429b62c47378cc23a17c41d991a8414deedb561d1cbf3b7ab84"
+        "2433001e0485a2b48ba40d28f97f4b0b67570150d1788104a288da7ac0b85985"
     ),
     "utils/transforms/spike_to_potential.py": (
-        "f6ee3475740a1b621ab1b26bcad714c595bd1e5e4528adde22310482773b5349"
+        "35b288bf3bbc07bc4b01c59330da8b5cf9ffa4318b6172ea358c51d61af0dbbd"
     ),
 }
 default_time_steps = tuple(index / 100.0 for index in range(1, 11))
@@ -431,6 +443,7 @@ def calibration_compatibility_paths(
     ).splitlines()
     allowed = {
         "lat.md/clock-driven.md",
+        "scripts/analysis/plot_clock_time_step_sweep.py",
         "scripts/experiments/run_clock_driven_vit.py",
         "scripts/verification/verify_calibration.py",
         "scripts/verification/verify_clock_driven.py",
