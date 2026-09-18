@@ -306,8 +306,9 @@ def clock_step_indices(value: Tensor) -> Tensor:
         quotient.new_full((), 0.25),
     )
     error = (quotient - nearest).abs()
-    if not bool((error <= tolerance).all()):
-        flat_index = int(error.argmax().item())
+    violations = error > tolerance
+    if bool(violations.any()):
+        flat_index = int(violations.reshape(-1).nonzero()[0].item())
         flat_value = value.reshape(-1)[flat_index].item()
         flat_quotient = quotient.reshape(-1)[flat_index].item()
         flat_error = error.reshape(-1)[flat_index].item()
