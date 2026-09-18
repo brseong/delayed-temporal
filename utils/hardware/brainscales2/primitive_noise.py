@@ -113,7 +113,7 @@ class PrimitiveNoiseConfig:
     pynn_worker_timeout_s: float = 300.0
     pynn_worker_cache_dir: Path | None = None
     psi_ne_input_fan_in: int = 2
-    psi_ne_chunk_repeats: int = 16
+    psi_ne_chunk_repeats: int = 4
     psi_ed_delta_min_s: float = -10.0e-6
     psi_ed_delta_max_s: float = 10.0e-6
     psi_ed_delta_points: int = 11
@@ -123,7 +123,7 @@ class PrimitiveNoiseConfig:
     psi_ed_trial_guard_s: float = 1.0e-3
     psi_ed_trigger_fan_in: int = 8
     psi_ed_trigger_weight: int = 63
-    psi_ed_plastic_weight: int = 63
+    psi_ed_plastic_weight: int = 0
     psi_ed_chunk_repeats: int = 32
     tau_mem_s: float = 100.0e-6
     tau_syn_s: float = 1.0e-6

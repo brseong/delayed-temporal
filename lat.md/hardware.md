@@ -428,7 +428,7 @@ The collector reads the membrane at $40\,\mu\mathrm{s}$ because the measured res
 
 The $\psi_{\mathrm{NE}}$ operating point uses two coincident input channels. Paired quiet observations are subtracted before fitting, while their raw values remain stored so saturation and baseline variation stay observable.
 
-Formal $\psi_{\mathrm{NE}}$ collection partitions repetitions into bounded chunks while preserving one hardware session. The result tensors are concatenated in trial order, and every chunk boundary is recorded.
+Formal $\psi_{\mathrm{NE}}$ collection partitions repetitions into disposable child processes because repeated hxtorch graphs exceed the notebook memory limit. Each child initializes and releases hardware, writes a fingerprinted retry cache, and returns at most four repetitions. The parent concatenates result tensors in trial order and records every chunk boundary.
 
 The $\psi_{\mathrm{ED}}$ acquisition measures the exponential-difference response with the BrainScaleS-2 causal correlation sensor. It does not substitute a composed host calculation for the physical sensor response.
 
@@ -436,7 +436,11 @@ For each time difference $\delta\in[-10,10]$ microseconds, the pre-event separat
 
 Alternating quiet and stimulated periods measure the difference between paired correlation codes. A one-millisecond guard lets the plasticity processor read and reset the sensor between periods without changing the event deadline.
 
+The plastic synapse keeps weight zero so its routed pre-event reaches the correlation sensor without independently firing the target neuron. Eight weight-63 trigger channels produce the target event used by the sensor.
+
 The $\psi_{\mathrm{ED}}$ worker preserves the target neuron's first-spike timestamp and total spike count. It applies the explicit correlation calibration, records one warmup period, and splits formal collection into bounded child processes with fingerprinted retry caches.
+
+Each trial uses a seeded permutation of the time-difference inputs, then restores the canonical input order before analysis. This prevents a fixed input schedule from being confounded with correlation-sensor drift across acquisition time.
 
 The installed `pynn_brainscales.brainscales2` timed constant-current playback owns the NP ramp. If that capability is unavailable, the runner stops instead of replacing the ramp with a spike train or a host-mediated Hagen transform.
 
@@ -471,6 +475,16 @@ An observation with too few usable samples for one physical circuit remains writ
 [[scripts/evaluation/brainscales2_primitive_noise.py#run]] writes checksum-indexed raw split chunks, per-stage transfer, moments, and device statistics, figures, and one `primitive_noise_calibration.json`. Each `moments.csv` records calibration and validation sample count, mean, variance, miss rate, rate of trials containing more than one spike, and saturation rate for every input and circuit. The combined record validates only when NP passes both stages and the other four primitives pass held-out validation.
 
 The resulting distributions are independent primitive marginals for later sensitivity analysis. They do not represent the joint error distribution of a composed BSS-2 circuit and do not include Transformer forward evaluation.
+
+### Formal physical result for five primitives
+
+The formal run stores 128 calibration and 128 validation repetitions for each primitive without pooling outputs across physical circuits.
+
+The consolidated result is `artifacts/brainscales2-primitives/20260918T020500Z_five_primitive_moments`. Its `moments.csv` contains 7,136 split, input, and circuit rows. The source raw files remain on the hardware server and their checksums are fixed in the manifest.
+
+The aggregate deadline miss rates were 0.0046% for $\phi_{\mathrm{NP}}$, 0.0299% for $\phi_{\mathrm{NL}}$, and 0.0089% for $\psi_{\mathrm{ED}}$. Their rates of trials containing more than one spike were 0%, 0%, and 0.03995%, respectively, so first spike readout satisfied the 1% miss and 0.1% multiple spike operating limits. $\psi_{\mathrm{Int}}$ had no Int8 saturation, while $\psi_{\mathrm{NE}}$ had complete membrane readout delivery and no membrane readout saturation.
+
+Distribution acquisition passed for all five primitives. This is separate from transfer function validation: $\phi_{\mathrm{NP}}$ and $\psi_{\mathrm{Int}}$ passed their validation gates, while $\phi_{\mathrm{NL}}$, $\psi_{\mathrm{NE}}$, and $\psi_{\mathrm{ED}}$ retain physical marginal distributions but are not promoted as validated transfer implementations.
 
 ## Independent Primitive Noise Verification
 

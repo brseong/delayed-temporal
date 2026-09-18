@@ -1,0 +1,6 @@
+primitive,shape,delivery_rate,miss_rate,deadline_applies,deadline_miss_rate_limit,deadline_gate,multiple_spike_rate,multiple_spike_rate_limit,multiple_spike_gate,maximum_spike_count,saturation_rate,source_validated,source
+phi-np,"[256, 32, 16]",0.9999542236328125,4.57763671875e-05,True,0.01,True,0.0,0.001,True,1,0.0,True,/mnt/user/shared/AnalogAttention/artifacts/brainscales2-primitives/20260917T222232Z_phi_np_formal
+phi-nl,"[256, 31, 16]",0.9997007308467742,0.00029926915322580646,True,0.01,True,0.0,0.001,True,1,0.0,False,/mnt/user/shared/AnalogAttention/artifacts/brainscales2-primitives/20260917T225000Z_phi_nl_formal
+psi-int,"[256, 128, 16]",1.0,0.0,False,,,0.0,,,0,0.0,True,/mnt/user/shared/AnalogAttention/artifacts/brainscales2-primitives/20260917T140119Z_psi_int_formal
+psi-ne,"[256, 21, 16]",1.0,0.0,False,,,0.0,,,0,0.0,False,/mnt/user/shared/AnalogAttention/artifacts/brainscales2-primitives/20260918T014621Z_psi_ne_formal_isolated
+psi-ed,"[256, 11, 16]",0.9999112215909091,8.87784090909091e-05,True,0.01,True,0.00039950284090909093,0.001,True,3,0.0,False,/mnt/user/shared/AnalogAttention/artifacts/brainscales2-primitives/20260918T013148Z_psi_ed_formal_randomized

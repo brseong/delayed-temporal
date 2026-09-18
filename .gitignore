@@ -258,6 +258,12 @@ __marimo__/
 !/artifacts/brainscales2-toy/20260901T095827Z/yinyang_full/metrics.csv
 !/artifacts/brainscales2-toy/20260901T095827Z/yinyang_full/predictions.csv
 !/artifacts/brainscales2-toy/20260901T095827Z/yinyang_full/runtime.json
+!/artifacts/brainscales2-primitives/
+/artifacts/brainscales2-primitives/*
+!/artifacts/brainscales2-primitives/20260918T020500Z_five_primitive_moments/
+!/artifacts/brainscales2-primitives/20260918T020500Z_five_primitive_moments/manifest.json
+!/artifacts/brainscales2-primitives/20260918T020500Z_five_primitive_moments/moments.csv
+!/artifacts/brainscales2-primitives/20260918T020500Z_five_primitive_moments/quality_summary.csv
 !/artifacts/brainscales2-toy/20260901T095827Z/yinyang_full/variance_vs_inverse_pool.png
 /*_logs/
 /beta_pool_logs.txt

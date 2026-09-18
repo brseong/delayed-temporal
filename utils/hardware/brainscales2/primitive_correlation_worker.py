@@ -126,12 +126,43 @@ def _decode_correlation(recording, *, periods: int, devices: int) -> torch.Tenso
     return decoded
 
 
+def _point_orders(
+    *, repeats: int, point_count: int, seed: int, trial_start: int
+) -> list[list[int]]:
+    """Return deterministic per-trial acquisition permutations."""
+    orders: list[list[int]] = []
+    for trial in range(repeats):
+        generator = torch.Generator().manual_seed(
+            seed + 104729 * (trial_start + trial + 1)
+        )
+        orders.append(
+            torch.randperm(point_count, generator=generator).tolist()
+        )
+    return orders
+
+
+def _restore_point_order(
+    scheduled: torch.Tensor, point_orders: list[list[int]]
+) -> torch.Tensor:
+    """Restore canonical point indices after scheduled acquisition."""
+    if scheduled.ndim != 3 or scheduled.shape[0] != len(point_orders):
+        raise ValueError("scheduled correlation tensor has incompatible shape")
+    restored = torch.empty_like(scheduled)
+    for trial, point_order in enumerate(point_orders):
+        if sorted(point_order) != list(range(scheduled.shape[1])):
+            raise ValueError("correlation point order is not a permutation")
+        for acquisition_point, point in enumerate(point_order):
+            restored[trial, point] = scheduled[trial, acquisition_point]
+    return restored
+
+
 def _run(request: dict) -> dict:
     import pynn_brainscales.brainscales2 as pynn
 
     config = request["config"]
     differences = request["differences"].to(torch.float64)
     repeats = int(request["repeats"])
+    trial_start = int(request["trial_start"])
     point_count = int(differences.numel())
     guard_ms = config.psi_ed_trial_guard_s * 1.0e3
     post_ms = config.psi_ed_post_time_s * 1.0e3
@@ -139,9 +170,17 @@ def _run(request: dict) -> dict:
     periods = 1 + 2 * repeats * point_count
     pre_times: list[float] = []
     post_times: list[float] = [post_ms]
+    point_orders = _point_orders(
+        repeats=repeats,
+        point_count=point_count,
+        seed=config.seed,
+        trial_start=trial_start,
+    )
     for trial in range(repeats):
-        for point, difference in enumerate(differences.tolist()):
-            pair = trial * point_count + point
+        point_order = point_orders[trial]
+        for acquisition_point, point in enumerate(point_order):
+            difference = float(differences[point])
+            pair = trial * point_count + acquisition_point
             quiet_period = 1 + 2 * pair
             stimulated_period = quiet_period + 1
             post_times.extend(
@@ -151,7 +190,7 @@ def _run(request: dict) -> dict:
                 ]
             )
             separation_ms = (
-                config.psi_ed_separation_center_s - float(difference)
+                config.psi_ed_separation_center_s - difference
             ) * 1.0e3
             pre_times.append(
                 stimulated_period * guard_ms + post_ms - separation_ms
@@ -235,10 +274,14 @@ def _run(request: dict) -> dict:
             quiet_indices.append(1 + 2 * pair)
             stimulated_indices.append(2 + 2 * pair)
         shape = (repeats, point_count, config.device_count)
-        quiet = raw[quiet_indices].reshape(shape)
-        stimulated = raw[stimulated_indices].reshape(shape)
-        first = first[stimulated_indices].reshape(shape)
-        count = count[stimulated_indices].reshape(shape)
+        quiet_scheduled = raw[quiet_indices].reshape(shape)
+        stimulated_scheduled = raw[stimulated_indices].reshape(shape)
+        first_scheduled = first[stimulated_indices].reshape(shape)
+        count_scheduled = count[stimulated_indices].reshape(shape)
+        quiet = _restore_point_order(quiet_scheduled, point_orders)
+        stimulated = _restore_point_order(stimulated_scheduled, point_orders)
+        first = _restore_point_order(first_scheduled, point_orders)
+        count = _restore_point_order(count_scheduled, point_orders)
         identifier = pynn.helper.get_unique_identifier()
         chip_identifier = (
             [str(item) for item in identifier]
@@ -255,6 +298,7 @@ def _run(request: dict) -> dict:
                 "periods": periods,
                 "discarded_warmup_periods": 1,
                 "raw_correlation_range": [0, 255],
+                "point_orders": point_orders,
             },
         }
     finally:

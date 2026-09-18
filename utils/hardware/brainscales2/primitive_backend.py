@@ -356,13 +356,11 @@ class PrimitiveHardwareBackend:
     ) -> PrimitiveObservation:
         if config.spiking_calibration_path is None and not config.allow_environment_calibration:
             raise ValueError("psi-ne hardware collection requires a spiking calibration")
-        try:
-            hxtorch = import_module("hxtorch")
-            hxsnn = import_module("hxtorch.spiking")
-        except ImportError as error:
+        capabilities = probe_primitive_capabilities()
+        if not capabilities["psi-ne"]:
             raise PrimitiveCapabilityError(
                 "psi-ne requires hxtorch.spiking in the EBRAINS environment"
-            ) from error
+            )
         input_times = (
             torch.tensor(
                 [config.input_early_s, 15.0e-6, config.input_late_s],
@@ -379,97 +377,187 @@ class PrimitiveHardwareBackend:
         runtime_steps = int(math.ceil(config.deadline_s / config.dt_s)) + 1
         observation_step = int(round(config.observation_time_s / config.dt_s))
 
-        initialized = False
-        try:
-            hxtorch.init_hardware()
-            initialized = True
-            calibration_loader = None
-            baseline_chunks: list[torch.Tensor] = []
-            observed_chunks: list[torch.Tensor] = []
-            spike_count_chunks: list[torch.Tensor] = []
-            saturated_chunks: list[torch.Tensor] = []
-            chunk_metadata: list[dict[str, int]] = []
-            for start in range(0, config.repeats, config.psi_ne_chunk_repeats):
-                stop = min(start + config.psi_ne_chunk_repeats, config.repeats)
-                (
-                    baseline_chunk,
-                    observed_chunk,
-                    spike_count_chunk,
-                    saturated_chunk,
-                    chunk_calibration_loader,
-                    batch_count,
-                ) = self._run_psi_ne_chunk(
-                    hxsnn,
-                    config,
-                    input_times=input_times,
-                    runtime_steps=runtime_steps,
-                    observation_step=observation_step,
-                    repeats=stop - start,
-                )
-                if calibration_loader is None:
-                    calibration_loader = chunk_calibration_loader
-                elif calibration_loader != chunk_calibration_loader:
-                    raise RuntimeError("psi-ne calibration loader changed between chunks")
-                baseline_chunks.append(baseline_chunk)
-                observed_chunks.append(observed_chunk)
-                spike_count_chunks.append(spike_count_chunk)
-                saturated_chunks.append(saturated_chunk)
-                chunk_metadata.append(
-                    {
-                        "trial_start": start,
-                        "trial_stop": stop,
-                        "batch_count": batch_count,
-                    }
-                )
-            baseline = torch.cat(baseline_chunks, dim=0)
-            observed = torch.cat(observed_chunks, dim=0)
-            spike_count = torch.cat(spike_count_chunks, dim=0)
-            saturated = torch.cat(saturated_chunks, dim=0)
-            delivered = torch.isfinite(observed)
-            return PrimitiveObservation(
-                primitive="psi-ne",
-                stage="transfer",
-                output_kind="cadc-potential",
-                input_code=input_times / config.dt_s,
-                ideal_variable=input_times,
-                observed=torch.where(
-                    delivered, observed, torch.full_like(observed, torch.nan)
-                ),
-                delivered=delivered,
-                spike_count=spike_count,
-                saturated=saturated,
-                baseline=baseline,
-                physical_coordinates=config.physical_coordinates,
-                fit_point_mask=torch.ones_like(input_times, dtype=torch.bool),
-                metadata={
-                    "backend": "hxtorch-spiking-hardware",
-                    "hxtorch_version": _module_version(hxtorch),
-                    "chip_identifier": _chip_identifier(hxtorch),
-                    "calibration_loader": calibration_loader,
-                    "calibration_sha256": calibration_sha256(
-                        config.spiking_calibration_path
-                    ),
-                    "observation_step": observation_step,
-                    "chunks": chunk_metadata,
-                    "resolved_parameters": {
-                        "tau_mem_s": config.tau_mem_s,
-                        "tau_syn_s": config.tau_syn_s,
-                        "synaptic_weight": config.exponential_input_weight,
-                        "input_fan_in": config.psi_ne_input_fan_in,
-                        "leak": 80,
-                        "reset": 80,
-                        "threshold": 125,
-                    },
-                    "requested_threshold_enable": False,
-                    "threshold_validation": "reject-if-any-spike",
-                    "observation_value": "stimulated-minus-paired-quiet",
-                    "raw_spike_handle_required": False,
-                    "replicas_are_pooled": False,
-                },
+        calibration_loader = None
+        baseline_chunks: list[torch.Tensor] = []
+        observed_chunks: list[torch.Tensor] = []
+        spike_count_chunks: list[torch.Tensor] = []
+        saturated_chunks: list[torch.Tensor] = []
+        chunk_metadata: list[dict[str, Any]] = []
+        for start in range(0, config.repeats, config.psi_ne_chunk_repeats):
+            stop = min(start + config.psi_ne_chunk_repeats, config.repeats)
+            response = self._run_psi_ne_process(
+                config,
+                input_times=input_times,
+                runtime_steps=runtime_steps,
+                observation_step=observation_step,
+                repeats=stop - start,
+                trial_start=start,
             )
-        finally:
-            if initialized:
-                hxtorch.release_hardware()
+            chunk_calibration_loader = response["calibration_loader"]
+            if calibration_loader is None:
+                calibration_loader = chunk_calibration_loader
+            elif calibration_loader != chunk_calibration_loader:
+                raise RuntimeError("psi-ne calibration loader changed between chunks")
+            baseline_chunks.append(response["baseline"])
+            observed_chunks.append(response["observed"])
+            spike_count_chunks.append(response["spike_count"])
+            saturated_chunks.append(response["saturated"])
+            chunk_metadata.append(
+                {
+                    **response["metadata"],
+                    "trial_start": start,
+                    "trial_stop": stop,
+                    "batch_count": response["batch_count"],
+                }
+            )
+            print(f"psi-ne acquisition trials={start}:{stop} complete", flush=True)
+        identifiers = {
+            json.dumps(item.get("chip_identifier"), sort_keys=True)
+            for item in chunk_metadata
+        }
+        if len(identifiers) != 1:
+            raise RuntimeError("psi-ne chip identifier changed between chunks")
+        baseline = torch.cat(baseline_chunks, dim=0)
+        observed = torch.cat(observed_chunks, dim=0)
+        spike_count = torch.cat(spike_count_chunks, dim=0)
+        saturated = torch.cat(saturated_chunks, dim=0)
+        delivered = torch.isfinite(observed)
+        return PrimitiveObservation(
+            primitive="psi-ne",
+            stage="transfer",
+            output_kind="cadc-potential",
+            input_code=input_times / config.dt_s,
+            ideal_variable=input_times,
+            observed=torch.where(
+                delivered, observed, torch.full_like(observed, torch.nan)
+            ),
+            delivered=delivered,
+            spike_count=spike_count,
+            saturated=saturated,
+            baseline=baseline,
+            physical_coordinates=config.physical_coordinates,
+            fit_point_mask=torch.ones_like(input_times, dtype=torch.bool),
+            metadata={
+                "backend": "hxtorch-spiking-hardware",
+                "hxtorch_version": capabilities.get("hxtorch_version"),
+                "chip_identifier": chunk_metadata[0].get("chip_identifier"),
+                "calibration_loader": calibration_loader,
+                "calibration_sha256": calibration_sha256(
+                    config.spiking_calibration_path
+                ),
+                "observation_step": observation_step,
+                "chunks": chunk_metadata,
+                "resolved_parameters": {
+                    "tau_mem_s": config.tau_mem_s,
+                    "tau_syn_s": config.tau_syn_s,
+                    "synaptic_weight": config.exponential_input_weight,
+                    "input_fan_in": config.psi_ne_input_fan_in,
+                    "leak": 80,
+                    "reset": 80,
+                    "threshold": 125,
+                },
+                "requested_threshold_enable": False,
+                "threshold_validation": "reject-if-any-spike",
+                "observation_value": "stimulated-minus-paired-quiet",
+                "raw_spike_handle_required": False,
+                "replicas_are_pooled": False,
+            },
+        )
+
+    def _run_psi_ne_process(
+        self,
+        config: PrimitiveNoiseConfig,
+        *,
+        input_times: torch.Tensor,
+        runtime_steps: int,
+        observation_step: int,
+        repeats: int,
+        trial_start: int,
+    ) -> dict[str, Any]:
+        """Run one membrane-readout shard in a disposable child process."""
+        fingerprint_payload = {
+            "primitive": "psi-ne",
+            "stage": "transfer",
+            "trial_start": trial_start,
+            "trial_stop": trial_start + repeats,
+            "input_times": input_times.tolist(),
+            "runtime_steps": runtime_steps,
+            "observation_step": observation_step,
+            "config": config.to_manifest_dict(),
+        }
+        fingerprint = sha256(
+            json.dumps(
+                fingerprint_payload,
+                default=str,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        cache_path: Path | None = None
+        if config.pynn_worker_cache_dir is not None:
+            config.pynn_worker_cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_path = config.pynn_worker_cache_dir / (
+                "psi-ne_transfer_trials"
+                f"{trial_start}-{trial_start + repeats}_{fingerprint[:16]}.pt"
+            )
+            if cache_path.is_file():
+                cached = torch.load(
+                    cache_path, map_location="cpu", weights_only=False
+                )
+                if cached.get("fingerprint") != fingerprint:
+                    raise RuntimeError(f"spiking worker cache mismatch: {cache_path}")
+                response = dict(cached["response"])
+                response["metadata"] = {
+                    **response["metadata"],
+                    "worker_cache_hit": True,
+                }
+                return response
+        worker = Path(__file__).with_name("primitive_spiking_worker.py")
+        with tempfile.TemporaryDirectory(prefix="bss2-spiking-worker-") as directory:
+            root = Path(directory)
+            request_path = root / "request.pt"
+            response_path = root / "response.pt"
+            torch.save(
+                {
+                    "config": config,
+                    "input_times": input_times,
+                    "runtime_steps": runtime_steps,
+                    "observation_step": observation_step,
+                    "repeats": repeats,
+                },
+                request_path,
+            )
+            try:
+                completed = subprocess.run(
+                    [sys.executable, str(worker), str(request_path), str(response_path)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=config.pynn_worker_timeout_s,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError("spiking worker timed out") from error
+            except subprocess.CalledProcessError as error:
+                detail = (error.stderr or error.stdout or "").strip()
+                raise RuntimeError(f"spiking worker failed: {detail}") from error
+            if not response_path.is_file():
+                raise RuntimeError("spiking worker did not write its response")
+            response = torch.load(
+                response_path, map_location="cpu", weights_only=False
+            )
+        response["metadata"] = {
+            **response["metadata"],
+            "worker_stdout": completed.stdout.strip(),
+            "worker_cache_hit": False,
+        }
+        if cache_path is not None:
+            temporary_cache = cache_path.with_suffix(".tmp")
+            torch.save(
+                {"fingerprint": fingerprint, "response": response},
+                temporary_cache,
+            )
+            temporary_cache.replace(cache_path)
+        return response
 
     def _run_psi_ne_chunk(
         self,
@@ -799,6 +887,7 @@ class PrimitiveHardwareBackend:
                     "config": config,
                     "differences": differences,
                     "repeats": repeats,
+                    "trial_start": trial_start,
                 },
                 request_path,
             )

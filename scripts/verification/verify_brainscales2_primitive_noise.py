@@ -24,6 +24,8 @@ from utils.hardware.brainscales2.backend import calibration_sha256
 from utils.hardware.brainscales2.primitive_backend import PrimitiveHardwareBackend
 from utils.hardware.brainscales2.primitive_correlation_worker import (
     _decode_correlation,
+    _point_orders,
+    _restore_point_order,
 )
 import utils.hardware.brainscales2.primitive_backend as primitive_backend_module
 import utils.hardware.brainscales2.primitive_noise as primitive_noise_module
@@ -535,6 +537,25 @@ def verify_correlation_recording_decode() -> None:
 
 # @lat: [[hardware#Independent Primitive Noise Verification#Correlation worker boundary]]
 def verify_correlation_worker_boundary() -> None:
+    orders = _point_orders(repeats=3, point_count=5, seed=7, trial_start=11)
+    assert orders == _point_orders(
+        repeats=3, point_count=5, seed=7, trial_start=11
+    )
+    assert orders != _point_orders(
+        repeats=3, point_count=5, seed=7, trial_start=12
+    )
+    canonical = torch.arange(30, dtype=torch.float64).reshape(3, 5, 2)
+    scheduled = torch.empty_like(canonical)
+    for trial, order in enumerate(orders):
+        for acquisition_point, point in enumerate(order):
+            scheduled[trial, acquisition_point] = canonical[trial, point]
+    torch.testing.assert_close(
+        _restore_point_order(scheduled, orders), canonical
+    )
+    rejects(
+        lambda: _restore_point_order(scheduled, [[0, 1, 2, 3, 3]] * 3)
+    )
+
     calls: list[tuple[int, int]] = []
 
     def fake_process(config, *, differences, repeats, trial_start):
@@ -890,7 +911,7 @@ def verify_exponential_response_observation_time() -> None:
     default_config = make_config(default_args)
     assert default_config.observation_time_s == 40.0e-6
     assert default_config.psi_ne_input_fan_in == 2
-    assert default_config.psi_ne_chunk_repeats == 16
+    assert default_config.psi_ne_chunk_repeats == 4
     input_times = torch.tensor([5.0e-6, 25.0e-6], dtype=torch.float64)
     events = PrimitiveHardwareBackend._psi_ne_input_events(
         input_times,
@@ -925,6 +946,60 @@ def verify_exponential_response_observation_time() -> None:
     assert explicit_config.psi_ne_chunk_repeats == 7
     rejects(lambda: PrimitiveNoiseConfig(psi_ne_input_fan_in=0))
     rejects(lambda: PrimitiveNoiseConfig(psi_ne_chunk_repeats=0))
+
+    calls: list[tuple[int, int]] = []
+
+    def fake_process(
+        config,
+        *,
+        input_times,
+        runtime_steps,
+        observation_step,
+        repeats,
+        trial_start,
+    ):
+        calls.append((trial_start, repeats))
+        shape = (repeats, input_times.numel(), config.device_count)
+        mean = 5.0 + 30.0 * torch.exp(
+            -(config.observation_time_s - input_times) / 10.0e-6
+        )
+        observed = mean.reshape(1, -1, 1).expand(shape).clone()
+        return {
+            "baseline": torch.full(shape, -40.0, dtype=torch.float64),
+            "observed": observed,
+            "spike_count": torch.zeros(shape, dtype=torch.int64),
+            "saturated": torch.zeros(shape, dtype=torch.bool),
+            "calibration_loader": "synthetic-loader",
+            "batch_count": 2 * repeats * input_times.numel(),
+            "metadata": {"chip_identifier": ["synthetic-chip"]},
+        }
+
+    process_config = PrimitiveNoiseConfig(
+        repeats=5,
+        calibration_repeats=2,
+        device_count=2,
+        physical_coordinates=(0, 1),
+        allow_environment_calibration=True,
+        psi_ne_chunk_repeats=2,
+    )
+    original_probe = primitive_backend_module.probe_primitive_capabilities
+    backend = PrimitiveHardwareBackend()
+    backend._run_psi_ne_process = fake_process  # type: ignore[method-assign]
+    primitive_backend_module.probe_primitive_capabilities = lambda: {
+        "psi-ne": True,
+        "hxtorch_version": "synthetic",
+    }
+    try:
+        observation = backend.collect("psi-ne", process_config, quick=True)
+    finally:
+        primitive_backend_module.probe_primitive_capabilities = original_probe
+    assert calls == [(0, 2), (2, 2), (4, 1)]
+    assert tuple(observation.observed.shape) == (5, 3, 2)
+    assert observation.metadata["chip_identifier"] == ["synthetic-chip"]
+    assert [
+        (chunk["trial_start"], chunk["trial_stop"])
+        for chunk in observation.metadata["chunks"]
+    ] == [(0, 2), (2, 4), (4, 5)]
 
 
 # @lat: [[hardware#Independent Primitive Noise Verification#Insufficient fit preservation]]
