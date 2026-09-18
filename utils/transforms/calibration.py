@@ -3,9 +3,10 @@
 import json
 import math
 import os
+import re
 import tempfile
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -15,6 +16,9 @@ from torch import Tensor
 
 
 CALIBRATION_FORMAT_VERSION = 1
+CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV = (
+    "DT_CALIBRATION_COMPATIBLE_SOURCE_COMMIT"
+)
 
 
 class CalibrationMode(StrEnum):
@@ -1656,6 +1660,24 @@ def validate_calibration_metadata(
     # ordinary configuration mismatch.
     _validate_calibration_metadata(actual)
     _validate_calibration_metadata(expected)
+
+    compatible_source_commit = os.environ.get(
+        CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV
+    )
+    if compatible_source_commit is not None:
+        if re.fullmatch(r"[0-9a-f]{40}", compatible_source_commit) is None:
+            raise ValueError("compatible calibration source commit must be 40 hex digits")
+        actual_options = dict(actual.model_options)
+        expected_options = dict(expected.model_options)
+        if actual_options.get("source_commit") != compatible_source_commit:
+            raise ValueError(
+                "calibration table source commit does not match the compatibility gate"
+            )
+        expected_options["source_commit"] = compatible_source_commit
+        expected = replace(
+            expected,
+            model_options=tuple(sorted(expected_options.items())),
+        )
 
     # Dataclass field order supplies a stable diagnostic while repr preserves enough
     # detail to distinguish paths, numerical values, shapes, and model options.

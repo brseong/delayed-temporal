@@ -6,12 +6,14 @@ from __future__ import annotations
 import ast
 import copy
 import math
+import os
 import sys
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable
+from unittest.mock import patch
 
 import torch
 from torch import nn
@@ -23,6 +25,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from utils.transforms.calibration import (  # noqa: E402
     CALIBRATION_FORMAT_VERSION,
+    CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV,
     CalibrationClippingCounts,
     CalibrationHistogram,
     CalibrationMetadata,
@@ -2186,6 +2189,35 @@ def verify_canonical_table_round_trip() -> None:
         ),
         "theta",
     )
+
+    old_commit = "a" * 40
+    new_commit = "b" * 40
+    actual_options = tuple(sorted((*metadata.model_options, ("source_commit", old_commit))))
+    expected_options = tuple(
+        sorted((*metadata.model_options, ("source_commit", new_commit)))
+    )
+    compatible_actual = replace(metadata, model_options=actual_options)
+    compatible_expected = replace(metadata, model_options=expected_options)
+    _expect_raises(
+        ValueError,
+        lambda: validate_calibration_metadata(
+            compatible_actual, compatible_expected
+        ),
+        "model_options",
+    )
+    with patch.dict(
+        os.environ,
+        {CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV: old_commit},
+    ):
+        validate_calibration_metadata(compatible_actual, compatible_expected)
+        _expect_raises(
+            ValueError,
+            lambda: validate_calibration_metadata(
+                compatible_actual,
+                replace(compatible_expected, theta=1000.0),
+            ),
+            "theta",
+        )
 
     # In-memory schema round-trip returns independent immutable data and catches both
     # unknown fields and bounds that no longer match histogram policy.

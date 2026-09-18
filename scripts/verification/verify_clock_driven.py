@@ -22,6 +22,7 @@ from scripts.evaluation.error_analysis_vit import (
     validate_vit_runtime_arguments,
 )
 from scripts.experiments.run_clock_driven_vit import (
+    calibration_compatibility_paths,
     initially_idle_gpus,
     parse_result,
     prepare_evaluation_subset,
@@ -289,6 +290,33 @@ def verify_vit_runtime_isolation() -> None:
             pass
         else:
             raise AssertionError("default GPU policy accepted GPU 0")
+
+    run_target = "scripts.experiments.run_clock_driven_vit.subprocess.run"
+    output_target = (
+        "scripts.experiments.run_clock_driven_vit.subprocess.check_output"
+    )
+    with (
+        patch(run_target, return_value=SimpleNamespace(returncode=0)),
+        patch(
+            output_target,
+            return_value="utils/transforms/calibration.py\nutils/transforms/clock.py\n",
+        ),
+    ):
+        assert calibration_compatibility_paths(
+            REPOSITORY_ROOT, "a" * 40, "b" * 40
+        ) == ["utils/transforms/calibration.py", "utils/transforms/clock.py"]
+    with (
+        patch(run_target, return_value=SimpleNamespace(returncode=0)),
+        patch(output_target, return_value="utils/transforms/functions.py\n"),
+    ):
+        try:
+            calibration_compatibility_paths(
+                REPOSITORY_ROOT, "a" * 40, "b" * 40
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("calibration-relevant source change was accepted")
 
 
 # @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Contiguous Evaluation Shards]]
