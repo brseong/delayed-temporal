@@ -124,7 +124,7 @@ The model sensitivity experiment is anchored only to spike-time variation across
 
 For each physical circuit and input code, the calibration split fixes the mean transfer. The validation residual is the observed spike time minus that fixed mean. Its standard deviation measures temporal variation; circuit offsets and differences between code means remain outside the dynamic noise channel.
 
-For $\phi_{\mathrm{NP}}$, fit an affine time response per circuit and normalize the validation residual scale by the absolute fitted slope times the 31-code span. The primary dimensionless input $r_t$ is the median circuit ratio, and the circuit interquartile range defines a sensitivity bracket. The current formal artifact gives a median $r_t=0.03699$ and an interquartile range $[0.03013,0.03983]$; its observed miss rate is $4.58\times10^{-5}$.
+For $\phi_{\mathrm{NP}}$, fit an affine time response per circuit on the calibration split and normalize the validation residual scale by the absolute fitted slope times the 31-code span. The primary dimensionless input $r_t$ is the median circuit ratio, and the circuit interquartile range defines a sensitivity bracket. The current formal artifact gives a median $r_t=0.03690$ and an interquartile range $[0.03017,0.03977]$; its observed miss rate is $4.58\times10^{-5}$.
 
 The existing evaluator applies each selected $r_t$ as one Gaussian spike-time standard deviation with mean zero at every maintained encoder output. This sensitivity experiment is anchored to $\phi_{\mathrm{NP}}$; it is not a calibrated BrainScaleS-2 system prediction. The run must report the physical artifact, normalization rule, seeds, observed simulated miss rates, and output saturation.
 
