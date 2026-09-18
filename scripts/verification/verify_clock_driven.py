@@ -26,6 +26,7 @@ from scripts.experiments.run_clock_driven_vit import (
     calibration_compatibility_paths,
     default_time_steps,
     initially_idle_gpus,
+    newly_idle_gpus,
     parse_result,
     prepare_evaluation_subset,
     write_summary,
@@ -301,6 +302,13 @@ def verify_vit_runtime_isolation() -> None:
         patch(sleep_target),
     ):
         assert initially_idle_gpus((0, 4, 7), allowed=tuple(range(8))) == (0, 4, 7)
+    with (
+        patch(snapshot_target, return_value=snapshot),
+        patch(sleep_target),
+    ):
+        assert newly_idle_gpus(
+            (0, 1, 4, 7), {0, 4}, allowed=tuple(range(8))
+        ) == (1, 7)
     with (
         patch(snapshot_target, return_value=snapshot),
         patch(sleep_target),

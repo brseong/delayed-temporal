@@ -348,6 +348,20 @@ def initially_idle_gpus(
     )
 
 
+def newly_idle_gpus(
+    requested: tuple[int, ...],
+    worker_pool: set[int],
+    *,
+    allowed: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Return requested devices not yet in the pool that are now stably idle."""
+
+    candidates = tuple(gpu for gpu in requested if gpu not in worker_pool)
+    if not candidates:
+        return ()
+    return initially_idle_gpus(candidates, allowed=allowed)
+
+
 def calibration_compatibility_paths(
     source: Path,
     calibration_commit: str,
@@ -929,8 +943,21 @@ def main() -> None:
         expected_population=args.evaluation_samples,
     )
     running: dict[int, dict[str, Any]] = {}
+    worker_pool = set(available)
     free = list(available)
+    next_gpu_refresh = time.monotonic() + 60.0
     while pending or running:
+        if pending and time.monotonic() >= next_gpu_refresh:
+            additions = newly_idle_gpus(
+                requested_gpus,
+                worker_pool,
+                allowed=allowed_gpus,
+            )
+            for gpu in additions:
+                worker_pool.add(gpu)
+                free.append(gpu)
+                print(f"Added newly idle device {gpu}", flush=True)
+            next_gpu_refresh = time.monotonic() + 60.0
         while pending and free:
             gpu = free.pop(0)
             run_id, time_step, shard_index = pending.pop(0)
