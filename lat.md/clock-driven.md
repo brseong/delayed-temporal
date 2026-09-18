@@ -20,6 +20,8 @@ Clock index recovery admits bounded arithmetic drift accumulated by repeated exp
 
 Durations relative to a deadline or offset are formed by subtracting their integer clock indices and converting the resulting index once. This preserves alignment when two large aligned times cancel to a small duration.
 
+Each completed pulse width accumulation loop converts its accumulated states back to integer clock indices before recombination. This removes only roundoff from repeated addition and does not skip any step.
+
 ## Evaluation Contract
 
 The first maintained evaluation uses calibrated ViT-B/16 on the fixed ImageNet-1k validation subset of 5,000 images.

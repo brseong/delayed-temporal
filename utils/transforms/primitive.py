@@ -4,6 +4,7 @@ from math import log, exp, isfinite
 from numbers import Real
 from .clock import (
     causal_clock_time,
+    clocked_difference,
     clock_step_indices,
     get_clock_driven,
     record_clock_updates,
@@ -68,7 +69,10 @@ def signed_pulse_width_duration(
                 accumulator_b += config.time_step
         loop_steps = max(deadline_step - first_step, 0)
         record_clock_updates("pwm", time_steps=loop_steps, elements=2)
-        return accumulator_a - accumulator_b
+        return (
+            round(accumulator_a / config.time_step)
+            - round(accumulator_b / config.time_step)
+        ) * config.time_step
 
     reference = time_A if isinstance(time_A, torch.Tensor) else time_B
     if not isinstance(reference, torch.Tensor):
@@ -110,7 +114,7 @@ def signed_pulse_width_duration(
         time_steps=loop_steps,
         elements=2 * tensor_A.numel(),
     )
-    return accumulator_A - accumulator_B
+    return clocked_difference(accumulator_A, accumulator_B)
 
 
 def pulse_width_duration(
@@ -149,7 +153,7 @@ def pulse_width_duration(
             time_steps=loop_steps,
             elements=aligned_event.numel(),
         )
-        return accumulator
+        return clocked_difference(accumulator, 0.0)
 
     event_step = round(float(aligned_event) / config.time_step)
     first_step = min(0, event_step)
@@ -162,7 +166,7 @@ def pulse_width_duration(
         time_steps=max(deadline_step - first_step, 0),
         elements=1,
     )
-    return accumulator
+    return round(accumulator / config.time_step) * config.time_step
 
 
 @check_domain

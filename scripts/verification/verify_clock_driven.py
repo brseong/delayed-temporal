@@ -107,6 +107,13 @@ def verify_pwm_state_updates() -> None:
     assert updates == {"calls": 1, "time_steps": 8, "element_updates": 32}
 
     set_clock_driven(enabled=True, time_step=0.1)
+    long_duration = signed_pulse_width_duration(
+        torch.tensor(0.0, dtype=torch.float64),
+        torch.tensor(43.6, dtype=torch.float64),
+        observation_deadline=43.6,
+    )
+    assert long_duration.item() == torch.tensor(43.6, dtype=torch.float64).item()
+    assert clock_step_indices(long_duration).item() == 436
     accumulated = torch.zeros((), dtype=torch.float64)
     for _ in range(400):
         accumulated = accumulated + accumulated.new_tensor(0.1)
