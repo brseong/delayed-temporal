@@ -78,6 +78,10 @@ The ViT evaluator accepts a positive global time step only for a spiking backend
 
 The configured evaluation population is divided into balanced contiguous half-open ranges with no overlap or omission, and aggregation requires complete ordered coverage of that population.
 
+### Completed Sweep Reporting
+
+Final reporting accepts only all 11 conditions, 21 contiguous shards per condition, exact 500 image coverage, matching identities, positive state update counts, and matching generated summaries.
+
 ### Composed Encoder Statistics
 
 Result validation requires the identity and logarithmic encoder statistics while preserving additional named encoder sites emitted by composed operators such as GELU.

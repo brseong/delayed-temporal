@@ -27,6 +27,8 @@ from scripts.runtime import identity
 
 
 default_tag = "vit_base_clock_driven_imagenet500_theta20_float64_fine_v1"
+default_evaluation_samples = 500
+default_shards = 21
 ALLOWED_GPUS = (4, 5, 6, 7)
 EXTENDED_GPUS = tuple(range(8))
 CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV = (
@@ -771,7 +773,9 @@ def main() -> None:
         type=Path,
         default=EVALUATION_DATASET,
     )
-    parser.add_argument("--evaluation-samples", type=int, default=500)
+    parser.add_argument(
+        "--evaluation-samples", type=int, default=default_evaluation_samples
+    )
     parser.add_argument("--gpus", type=int, nargs="+", default=list(ALLOWED_GPUS))
     parser.add_argument(
         "--allow-gpus-0-3",
@@ -790,7 +794,7 @@ def main() -> None:
     parser.add_argument(
         "--shards",
         type=int,
-        default=21,
+        default=default_shards,
         help="Contiguous validation shards per condition (default: 21).",
     )
     args = parser.parse_args()

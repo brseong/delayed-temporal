@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
-import json
+import csv
 import hashlib
+import json
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,12 @@ from scripts.experiments.run_clock_driven_vit import (
     parse_result,
     prepare_evaluation_subset,
     write_summary,
+)
+from scripts.analysis.plot_clock_time_step_sweep import (
+    expected_shards,
+    expected_tag,
+    expected_time_steps,
+    load_verified_results,
 )
 from utils.transforms.clock import (
     clocked_difference,
@@ -439,6 +446,108 @@ def verify_contiguous_evaluation_shards() -> None:
         assert Dataset.load_from_disk(str(subset_path))["value"] == list(range(5))
 
 
+# @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Completed Sweep Reporting]]
+def verify_completed_sweep_reporting() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        logs = root / "logs"
+        logs.mkdir()
+        source_commit = "a" * 40
+        calibration_sha256 = "b" * 64
+        dataset_path = str(root / "validation_first_500")
+        experiment = {
+            "tag": expected_tag,
+            "evaluation_population": 500,
+            "evaluation_shards": expected_shards,
+            "evaluation_dataset_path": dataset_path,
+            "time_steps": list(expected_time_steps),
+            "simulation": "explicit_sequential_state_updates",
+            "source_commit": source_commit,
+            "calibration_sha256": calibration_sha256,
+        }
+        (root / "experiment.json").write_text(json.dumps(experiment))
+        shard_runs = []
+        conditions = []
+        for condition_index, time_step in enumerate((None,) + expected_time_steps):
+            rows = []
+            for shard_index in range(expected_shards):
+                start, stop = evaluation_shard_bounds(500, expected_shards, shard_index)
+                samples = stop - start
+                correct = max(0, samples - condition_index)
+                log_path = logs / f"condition_{condition_index}_shard_{shard_index}.log"
+                log_content = f"condition={condition_index} shard={shard_index}\n"
+                log_path.write_text(log_content)
+                row = {
+                    "run_id": f"condition_{condition_index}_shard_{shard_index}",
+                    "time_step": time_step,
+                    "shard_index": shard_index,
+                    "shard_count": expected_shards,
+                    "evaluation_population": 500,
+                    "evaluation_dataset_path": dataset_path,
+                    "shard_start": start,
+                    "shard_stop": stop,
+                    "clock_driven": time_step is not None,
+                    "correct": correct,
+                    "samples": samples,
+                    "accuracy": correct / samples,
+                    "prediction_sha256": f"{condition_index * expected_shards + shard_index:064x}",
+                    "clock_sites": (
+                        {}
+                        if time_step is None
+                        else {"neg_linear_transform": {}, "neg_log_transform": {}}
+                    ),
+                    "clock_updates": (
+                        {}
+                        if time_step is None
+                        else {
+                            name: {"calls": 1, "time_steps": 1, "element_updates": 1}
+                            for name in ("encoder", "exponential", "pwm")
+                        }
+                    ),
+                    "source_commit": source_commit,
+                    "calibration_sha256": calibration_sha256,
+                    "log_path": str(log_path),
+                    "log_sha256": hashlib.sha256(log_content.encode()).hexdigest(),
+                    "success": True,
+                }
+                rows.append(row)
+                shard_runs.append(row)
+            correct = sum(row["correct"] for row in rows)
+            prediction_payload = "\n".join(row["prediction_sha256"] for row in rows)
+            conditions.append({
+                "condition": "continuous" if time_step is None else f"dt_{time_step:g}",
+                "clock_driven": time_step is not None,
+                "time_step": time_step,
+                "correct": correct,
+                "samples": 500,
+                "accuracy": correct / 500,
+                "ordered_shard_digest_sha256": hashlib.sha256(
+                    prediction_payload.encode("ascii")
+                ).hexdigest(),
+                "elapsed_seconds_max": 1.0,
+                "shards": expected_shards,
+            })
+        summary = {"tag": expected_tag, "conditions": conditions, "shard_runs": shard_runs}
+        (root / "summary.json").write_text(json.dumps(summary))
+        with (root / "summary.csv").open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=conditions[0].keys())
+            writer.writeheader()
+            writer.writerows(conditions)
+        loaded_experiment, loaded = load_verified_results(root)
+        assert loaded_experiment == experiment
+        assert len(loaded) == 11
+        assert loaded[0]["samples"] == 500
+
+        summary["shard_runs"][-1]["clock_updates"]["pwm"]["calls"] = 0
+        (root / "summary.json").write_text(json.dumps(summary))
+        try:
+            load_verified_results(root)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("clock update count at or below zero was accepted")
+
+
 # @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Composed Encoder Statistics]]
 def verify_composed_encoder_statistics() -> None:
     log = """GPU model: NVIDIA RTX A6000
@@ -488,6 +597,7 @@ if __name__ == "__main__":
         verify_disabled_mode_parity,
         verify_vit_runtime_isolation,
         verify_contiguous_evaluation_shards,
+        verify_completed_sweep_reporting,
         verify_composed_encoder_statistics,
     )
     try:
