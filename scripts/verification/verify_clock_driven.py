@@ -24,6 +24,7 @@ from scripts.evaluation.error_analysis_vit import (
 )
 from scripts.experiments.run_clock_driven_vit import (
     calibration_compatibility_paths,
+    default_time_steps,
     initially_idle_gpus,
     parse_result,
     prepare_evaluation_subset,
@@ -363,10 +364,16 @@ def verify_vit_runtime_isolation() -> None:
 
 # @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Contiguous Evaluation Shards]]
 def verify_contiguous_evaluation_shards() -> None:
+    assert default_time_steps == tuple(index / 100.0 for index in range(1, 11))
     ranges = [evaluation_shard_bounds(500, 4, index) for index in range(4)]
     assert ranges == [(0, 125), (125, 250), (250, 375), (375, 500)]
     uneven = [evaluation_shard_bounds(10, 3, index) for index in range(3)]
     assert uneven == [(0, 4), (4, 7), (7, 10)]
+    fine_ranges = [evaluation_shard_bounds(500, 21, index) for index in range(21)]
+    assert fine_ranges[0] == (0, 24)
+    assert fine_ranges[-1] == (477, 500)
+    assert sum(stop - start for start, stop in fine_ranges) == 500
+    assert max(stop - start for start, stop in fine_ranges) == 24
 
     rows = []
     for index, (start, stop) in enumerate(ranges):

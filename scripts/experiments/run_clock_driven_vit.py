@@ -26,7 +26,7 @@ from scripts.runtime import files as runtime_files
 from scripts.runtime import identity
 
 
-DEFAULT_TAG = "vit_base_clock_driven_imagenet500_theta20_float64_v2"
+default_tag = "vit_base_clock_driven_imagenet500_theta20_float64_fine_v1"
 ALLOWED_GPUS = (4, 5, 6, 7)
 EXTENDED_GPUS = tuple(range(8))
 CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV = (
@@ -40,7 +40,7 @@ calibration_safe_patch_sha256 = {
         "f6ee3475740a1b621ab1b26bcad714c595bd1e5e4528adde22310482773b5349"
     ),
 }
-DEFAULT_TIME_STEPS = tuple(index / 10.0 for index in range(1, 11))
+default_time_steps = tuple(index / 100.0 for index in range(1, 11))
 PYTHON = Path("/opt/conda/envs/dt/bin/python")
 CHECKPOINT = Path(
     "/data/delayed-temporal/artifacts/assets/theta-selection-v1/checkpoints/"
@@ -748,7 +748,7 @@ def run_command(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--source-root", type=Path, default=SOURCE)
-    parser.add_argument("--tag", default=DEFAULT_TAG)
+    parser.add_argument("--tag", default=default_tag)
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--calibration-path", type=Path)
     parser.add_argument("--calibration-source-commit")
@@ -770,14 +770,14 @@ def main() -> None:
         dest="time_steps",
         type=float,
         nargs="+",
-        default=list(DEFAULT_TIME_STEPS),
+        default=list(default_time_steps),
         help="Positive time-bin widths to evaluate after the continuous baseline.",
     )
     parser.add_argument(
         "--shards",
         type=int,
-        default=4,
-        help="Contiguous validation shards per condition (default: 4).",
+        default=21,
+        help="Contiguous validation shards per condition (default: 21).",
     )
     args = parser.parse_args()
 
@@ -793,8 +793,8 @@ def main() -> None:
         or any(not math.isfinite(value) or value <= 0.0 for value in time_steps)
     ):
         raise ValueError("time bins must be unique, finite, and strictly positive")
-    if args.shards <= 0 or args.shards > len(args.gpus):
-        raise ValueError("shards must be positive and no larger than the GPU pool")
+    if args.shards <= 0:
+        raise ValueError("shards must be positive")
     if args.evaluation_samples < args.shards:
         raise ValueError("evaluation samples must be no smaller than shard count")
 
