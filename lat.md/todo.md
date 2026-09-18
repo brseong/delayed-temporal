@@ -4,7 +4,17 @@ This file tracks work required for the current manuscript and maintained impleme
 
 ## Active Experiment Work
 
-Only unchecked boxes in this section authorize their explicitly described work. Conditional compute is authorized only after its stated gate passes; other observations do not add runs.
+Only the explicitly listed evaluations are authorized. Unchecked items elsewhere are manuscript or packaging work unless they define a separate approved run.
+
+### GPT-2 Composed GELU Rerun
+
+The user authorized a fresh calibrated WikiText-2 evaluation after replacing the direct GPT-2 block activation with the maintained composed GELU.
+
+- [x] Connect `gelu_new` selected by the checkpoint to the composed operator path and distinguish it in calibration metadata.
+- [x] Preserve the earlier direct activation logs and assign the rerun a separate tag.
+- [x] Collect fresh ranges from the fixed training 5,000 artifact.
+- [x] Evaluate the dense reference and converted model on all 2,891 nonempty fixed test texts.
+- [x] Validate and summarize the new artifact before changing the ICLR GPT-2 row or prose.
 
 ### ViT-B Timing Robustness
 

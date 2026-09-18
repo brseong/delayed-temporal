@@ -30,7 +30,7 @@ BERT and RoBERTa cast the attention mask to the embedding dtype before construct
 
 GPT-2 discovers independent Q/K/V, scores, two residuals, the first MLP affine output and active centered LayerNorm inputs. Twelve fully spiking blocks contain 109 selected sites, including the final normalization.
 
-[[utils/transformers/models/spiking_gpt2/calibration.py#gpt2_calibration_specs]] separates the fused projection's three outputs before reshaping. The existing dense `gelu_new` activation remains dense, but its affine input still consumes the selected range. Token and position embeddings retain parameter derived ranges; output logits are not independently calibrated.
+[[utils/transformers/models/spiking_gpt2/calibration.py#gpt2_calibration_specs]] separates the fused projection's three outputs before reshaping. The paper configuration's `gelu_new` activation consumes the selected affine input range and executes [[utils/transforms/functions.py#gelu_approximation]]. A dense MLP ablation remains direct. Token and position embeddings retain parameter derived ranges; output logits are not independently calibrated.
 
 Cached attention tensors may only be reused with the same selected range identity. A changed range is rejected before combining cached and new tensors. Collection disables caching. Both float32 and float64 are supported, with actual execution dtype and checkpoint epsilon persisted in metadata.
 
@@ -69,6 +69,16 @@ RoBERTa-L runs under the separate `roberta_large_theta40_calibrated_float64_boun
 GPT-2 records token-weighted corpus perplexity as the primary complete-run metric and retains the historical mean of batch losses as a compatibility metric. Both values come from the same model forwards; padding positions are excluded from the token count.
 
 The pinned WikiText-2 raw test revision contains 4,358 rows and 2,891 rows after excluding empty text. The complete campaign evaluates those 2,891 rows rather than padding the dataset to an assumed count.
+
+## GPT-2 Composed GELU Rerun
+
+The rerun replaces the direct GPT-2 block activation with the maintained composed GELU while preserving the checkpoint, data, calibration population and numerical settings.
+
+[[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2MLP]] selects `composed_gelu_new_v1` only when the spiking MLP and `gelu_new` selected by the checkpoint are active. Calibration metadata persists this identity, so the earlier direct activation table is incompatible even though both configurations use the same activation name and selected sites.
+
+The dedicated tag is `gpt2_theta40_calibrated_float64_bounds3_composed_gelu_v1`. It collected 109 ranges from the fixed training 5,000 artifact and evaluated all 2,891 nonempty fixed WikiText-2 test texts. No completed phase was imported from the earlier conversion tag.
+
+The generated summary records corpus perplexity, computed from total negative log likelihood and valid token count, as 21.9841797962 for the ANN and 21.9843868967 for the converted model over 204,257 valid tokens. Compatibility perplexity is 23.2531494262 and 23.2534667831. These values equal the archived direct activation run at recorded precision, but the new artifact independently executes the composed activation and carries its own source and calibration hashes.
 
 The comparison manifest may admit local GPUs 0 through 3 without changing the repository-wide default GPU set. This permission is confined to the versioned campaign and each evaluator retains one visible RTX A6000.
 
