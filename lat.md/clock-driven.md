@@ -38,6 +38,16 @@ This result measures one coarse time bin and does not establish behavior at fine
 
 The maintained fine sweep evaluates one continuous reference and time bins 0.01, 0.02, ..., 0.10 on the first 500 images of the fixed validation ordering. The population is divided into 21 balanced contiguous shards, and every shard contains at most 24 images. Each aggregate is accepted only after exact 500-image coverage and identity validation.
 
+Completed tag `vit_base_clock_driven_imagenet500_theta20_float64_fine_v1` used execution source `ec058e5` and the same frozen calibration table as the continuous reference.
+
+The continuous reference obtained 432/500 (86.4%). Clock time steps 0.01 through 0.10 obtained 85.6%, 86.0%, 84.8%, 84.6%, 81.6%, 84.8%, 81.0%, 76.2%, 76.8%, and 60.4%, respectively.
+
+The observed sequence is not monotone: 0.06 exceeds 0.05 and 0.09 exceeds 0.08. These measurements are retained without filtering.
+
+The authoritative outputs are `summary.csv`, `summary.json`, `raw_shards.csv`, and `verification.json` under `artifacts/logs/clock_driven/vit_base_clock_driven_imagenet500_theta20_float64_fine_v1/`. The generated figure files are under its `figures/` directory.
+
+The verification record confirms 11 conditions, 231 shard runs, exact 500 image coverage per condition, disabled timing noise, one shared calibration identity, and positive explicit state update counts.
+
 For this sweep schedule, the local worker owns 0.01 shards 0 through 17 and shard 19 on devices 3 through 7, while cluster workers own shards 18 and 20. The cluster also owns time bins 0.02 through 0.10. The supervisor stops the local controller after every local shard is complete and imports the two cluster shards only after identity, log, and coverage validation.
 
 The superseded coarse campaign completed its continuous reference and six of eight 0.1 shards before the requested range changed. Its partial records remain preserved and are not combined with the fine sweep.
