@@ -229,6 +229,9 @@ def verify_summarizer(root: Path) -> None:
     for family in ("roberta", "gpt2"):
         source = campaign / family
         source_manifest = json.loads((source / "manifest.json").read_text())
+        if family == "roberta":
+            source_manifest.pop("evaluator_family")
+            (source / "manifest.json").write_text(json.dumps(source_manifest))
         evidence, sites = runner.reused_calibration_evidence(
             source,
             family=family,

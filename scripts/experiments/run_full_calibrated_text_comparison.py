@@ -228,7 +228,8 @@ def reused_calibration_evidence(
     if (
         source_result.get("state") != "complete"
         or source_manifest.get("family") != family
-        or source_manifest.get("evaluator_family") != evaluator_family
+        or source_manifest.get("evaluator_family", source_manifest.get("family"))
+        != evaluator_family
         or source_manifest.get("checkpoint_files_sha256") != checkpoint_files_sha256
         or {
             key: value for key, value in source_manifest.get("calibration_dataset", {}).items()
