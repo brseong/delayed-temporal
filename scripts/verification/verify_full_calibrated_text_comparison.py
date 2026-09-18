@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from datasets import Dataset, load_from_disk
 
@@ -101,6 +104,33 @@ def verify_commands(root: Path) -> None:
     assert runner.MODEL_CONFIG["roberta_large"]["tag"] == runner.ROBERTA_LARGE_TAG
     assert runner.MODEL_CONFIG["gpt2"]["tag"] == runner.GPT2_COMPOSED_GELU_TAG
     assert set(runner.FAMILY_CONFIG) == {"bert", "roberta", "gpt2"}
+
+
+def verify_frozen_source_identity(root: Path) -> None:
+    source = Path(__file__).resolve().parents[2]
+    commit = subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", "HEAD"], text=True,
+    ).strip()
+    with patch.object(
+        runner.subprocess,
+        "check_output",
+        side_effect=[commit + "\n", ""],
+    ):
+        hashes = runner.source_identity(source, commit, "gpt2")
+    frozen = root / "source-identity.json"
+    frozen.write_text(json.dumps({
+        "source_commit": commit,
+        "families": {"gpt2": hashes},
+    }))
+    with patch.object(runner.shutil, "which", return_value=None), patch.dict(
+        os.environ,
+        {"FROZEN_SOURCE_IDENTITY_PATH": str(frozen)},
+    ):
+        assert runner.source_identity(source, commit, "gpt2") == hashes
+        changed = json.loads(frozen.read_text())
+        changed["families"]["gpt2"][next(iter(hashes))] = "0" * 64
+        frozen.write_text(json.dumps(changed))
+        reject(lambda: runner.source_identity(source, commit, "gpt2"), ValueError)
 
 
 def verify_collection_progress(root: Path) -> None:
@@ -237,6 +267,7 @@ def main() -> None:
         verify_classification_parser()
         verify_gpt2_parser()
         verify_commands(root)
+        verify_frozen_source_identity(root)
         verify_collection_progress(root)
         verify_summarizer(root)
     print("Full calibrated text comparison checks passed")

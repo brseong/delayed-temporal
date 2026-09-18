@@ -65,12 +65,6 @@ def canonical(value: Any) -> str:
 
 
 def source_identity(source: Path, expected_commit: str, family: str) -> dict[str, str]:
-    head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
-    dirty = subprocess.check_output(
-        ["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"], text=True,
-    ).strip()
-    if head != expected_commit or dirty or not re.fullmatch(r"[0-9a-f]{40}", expected_commit):
-        raise ValueError("text comparison requires the clean frozen source commit")
     paths = sorted(source.joinpath("utils").rglob("*.py"))
     paths += [
         source / "scripts/evaluation" / "text_calibration_runtime.py",
@@ -80,10 +74,35 @@ def source_identity(source: Path, expected_commit: str, family: str) -> dict[str
         source / "scripts/runtime" / "local_gpu.py",
         Path(__file__).resolve(),
     ]
-    return {
+    hashes = {
         str(path.relative_to(source)): identity.sha256_file(path)
         for path in sorted(set(paths))
     }
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_commit):
+        raise ValueError("text comparison requires a full source commit")
+    git_path = shutil.which("git")
+    if git_path is not None:
+        head = subprocess.check_output(
+            [git_path, "-C", str(source), "rev-parse", "HEAD"], text=True,
+        ).strip()
+        dirty = subprocess.check_output(
+            [git_path, "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
+            text=True,
+        ).strip()
+        if head != expected_commit or dirty:
+            raise ValueError("text comparison requires the clean frozen source commit")
+        return hashes
+
+    frozen_path = os.environ.get("FROZEN_SOURCE_IDENTITY_PATH")
+    if not frozen_path:
+        raise RuntimeError("git or a frozen source identity is required")
+    frozen = json.loads(Path(frozen_path).read_text())
+    if (
+        frozen.get("source_commit") != expected_commit
+        or frozen.get("families", {}).get(family) != hashes
+    ):
+        raise ValueError("frozen source identity differs from the mounted source")
+    return hashes
 
 
 def checkpoint_identity(path: Path) -> dict[str, str]:
