@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify and plot the completed 500 image clock time step sweep."""
+"""Verify and plot a completed 500 image clock resolution sweep."""
 
 from __future__ import annotations
 
@@ -22,6 +22,8 @@ from scripts.experiments.run_clock_driven_vit import (
     default_shards as expected_shards,
     default_tag as expected_tag,
     default_time_steps as expected_time_steps,
+    default_time_steps_per_window as expected_time_steps_per_window,
+    default_window_steps_tag as expected_window_steps_tag,
 )
 
 
@@ -42,8 +44,17 @@ def _same_float(left: float | None, right: float | None) -> bool:
     return math.isclose(left, right, rel_tol=0.0, abs_tol=1.0e-15)
 
 
-def _condition_key(time_step: float | None) -> str:
-    return "continuous" if time_step is None else f"dt_{time_step:g}"
+def _condition_key(
+    time_step: float | None,
+    time_steps_per_window: int | None,
+) -> str:
+    if time_step is not None and time_steps_per_window is not None:
+        raise ValueError("clock condition mixes two resolution modes")
+    if time_step is not None:
+        return f"dt_{time_step:g}"
+    if time_steps_per_window is not None:
+        return f"steps_{time_steps_per_window}"
+    return "continuous"
 
 
 def load_verified_results(root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -57,26 +68,42 @@ def load_verified_results(root: Path) -> tuple[dict[str, Any], list[dict[str, An
             raise FileNotFoundError(f"required sweep artifact is missing: {path}")
 
     experiment = json.loads(experiment_path.read_text(encoding="utf-8"))
-    if experiment.get("tag") != expected_tag:
-        raise ValueError("sweep tag differs")
     if experiment.get("evaluation_population") != expected_population:
         raise ValueError("evaluation population differs")
     if experiment.get("evaluation_shards") != expected_shards:
         raise ValueError("evaluation shard count differs")
     time_steps = tuple(float(value) for value in experiment.get("time_steps", ()))
-    if time_steps != expected_time_steps:
-        raise ValueError("clock time step grid differs")
+    window_steps = tuple(
+        int(value) for value in experiment.get("time_steps_per_window", ())
+    )
+    if time_steps and window_steps:
+        raise ValueError("sweep mixes two clock resolution modes")
+    if window_steps:
+        if experiment.get("tag") != expected_window_steps_tag:
+            raise ValueError("steps-per-window sweep tag differs")
+        if window_steps != expected_time_steps_per_window:
+            raise ValueError("time steps per window grid differs")
+        expected_conditions = ((None, None),) + tuple(
+            (None, value) for value in expected_time_steps_per_window
+        )
+    else:
+        if experiment.get("tag") != expected_tag:
+            raise ValueError("time-step sweep tag differs")
+        if time_steps != expected_time_steps:
+            raise ValueError("clock time step grid differs")
+        expected_conditions = ((None, None),) + tuple(
+            (value, None) for value in expected_time_steps
+        )
     if experiment.get("simulation") != "explicit_sequential_state_updates":
         raise ValueError("execution is not the explicit sequential simulation")
 
     payload = json.loads(summary_json_path.read_text(encoding="utf-8"))
-    if payload.get("tag") != expected_tag:
+    if payload.get("tag") != experiment.get("tag"):
         raise ValueError("summary tag differs")
     conditions = payload.get("conditions")
     shard_runs = payload.get("shard_runs")
     if not isinstance(conditions, list) or not isinstance(shard_runs, list):
         raise ValueError("summary structure is incomplete")
-    expected_conditions = (None,) + expected_time_steps
     if len(conditions) != len(expected_conditions):
         raise ValueError("summary does not contain every requested condition")
     if len(shard_runs) != len(expected_conditions) * expected_shards:
@@ -86,13 +113,22 @@ def load_verified_results(root: Path) -> tuple[dict[str, Any], list[dict[str, An
     calibration_sha256 = experiment["calibration_sha256"]
     dataset_path = experiment["evaluation_dataset_path"]
     verified: list[dict[str, Any]] = []
-    for expected_step, condition in zip(expected_conditions, conditions):
+    for (expected_step, expected_window_steps), condition in zip(
+        expected_conditions, conditions
+    ):
         actual_step = condition.get("time_step")
         if actual_step is not None:
             actual_step = float(actual_step)
+        actual_window_steps = condition.get("time_steps_per_window")
+        if actual_window_steps is not None:
+            actual_window_steps = int(actual_window_steps)
         if not _same_float(actual_step, expected_step):
             raise ValueError("summary condition order or clock time step differs")
-        if condition.get("condition") != _condition_key(expected_step):
+        if actual_window_steps != expected_window_steps:
+            raise ValueError("summary time steps per window differs")
+        if condition.get("condition") != _condition_key(
+            expected_step, expected_window_steps
+        ):
             raise ValueError("summary condition name differs")
         rows = [
             row for row in shard_runs
@@ -100,6 +136,11 @@ def load_verified_results(root: Path) -> tuple[dict[str, Any], list[dict[str, An
                 None if row.get("time_step") is None else float(row["time_step"]),
                 expected_step,
             )
+            and (
+                None
+                if row.get("time_steps_per_window") is None
+                else int(row["time_steps_per_window"])
+            ) == expected_window_steps
         ]
         rows.sort(key=lambda row: int(row["shard_index"]))
         if [int(row["shard_index"]) for row in rows] != list(range(expected_shards)):
@@ -135,7 +176,10 @@ def load_verified_results(root: Path) -> tuple[dict[str, Any], list[dict[str, An
             log_path = Path(row["log_path"])
             if not log_path.is_file() or _sha256(log_path) != row["log_sha256"]:
                 raise ValueError("shard log identity differs")
-            if expected_step is None:
+            clock_enabled = (
+                expected_step is not None or expected_window_steps is not None
+            )
+            if not clock_enabled:
                 if row.get("clock_sites") or row.get("clock_updates"):
                     raise ValueError("continuous reference contains clock statistics")
             else:
@@ -152,6 +196,30 @@ def load_verified_results(root: Path) -> tuple[dict[str, Any], list[dict[str, An
                     for field in ("calls", "time_steps", "element_updates")
                 ):
                     raise ValueError("clock state update count is not positive")
+                if expected_window_steps is not None:
+                    if any(
+                        int(counts["minimum_window_steps"])
+                        != expected_window_steps
+                        or int(counts["maximum_window_steps"])
+                        != expected_window_steps
+                        for counts in row["clock_sites"].values()
+                    ):
+                        raise ValueError(
+                            "encoder time window did not use the fixed step count"
+                        )
+                    expected_steps_per_call = {
+                        "encoder": expected_window_steps + 1,
+                        "exponential": expected_window_steps,
+                        "pwm": expected_window_steps,
+                    }
+                    if any(
+                        int(updates[kind]["time_steps"])
+                        != int(updates[kind]["calls"]) * steps_per_call
+                        for kind, steps_per_call in expected_steps_per_call.items()
+                    ):
+                        raise ValueError(
+                            "state update loop did not use the fixed step count"
+                        )
             cursor = stop
             correct += row_correct
             samples += row_samples
@@ -171,6 +239,7 @@ def load_verified_results(root: Path) -> tuple[dict[str, Any], list[dict[str, An
         verified.append({
             "condition": condition["condition"],
             "time_step": expected_step,
+            "time_steps_per_window": expected_window_steps,
             "correct": correct,
             "samples": samples,
             "accuracy": accuracy,
@@ -204,7 +273,15 @@ def plot_results(results: list[dict[str, Any]], output_prefix: Path) -> None:
 
     continuous = results[0]["accuracy"] * 100.0
     clock_rows = results[1:]
-    steps = [float(row["time_step"]) for row in clock_rows]
+    window_mode = clock_rows[0]["time_steps_per_window"] is not None
+    steps = [
+        float(
+            row["time_steps_per_window"]
+            if window_mode
+            else row["time_step"]
+        )
+        for row in clock_rows
+    ]
     accuracy = [row["accuracy"] * 100.0 for row in clock_rows]
     plt.rcParams.update({
         "font.family": "DejaVu Sans",
@@ -219,7 +296,13 @@ def plot_results(results: list[dict[str, Any]], output_prefix: Path) -> None:
         "ps.fonttype": 42,
     })
     figure, axis = plt.subplots(figsize=(3.35, 2.35), constrained_layout=True)
-    axis.plot(steps, accuracy, marker="o", color="#2166AC", label="Clock time step")
+    axis.plot(
+        steps,
+        accuracy,
+        marker="o",
+        color="#2166AC",
+        label=("Discrete time" if window_mode else "Clock time step"),
+    )
     axis.axhline(
         continuous,
         color="#4D4D4D",
@@ -227,10 +310,16 @@ def plot_results(results: list[dict[str, Any]], output_prefix: Path) -> None:
         linewidth=1.0,
         label="Continuous time",
     )
-    axis.set_xlabel("Clock time step")
+    axis.set_xlabel(
+        "Time steps per time window" if window_mode else "Clock time step"
+    )
     axis.set_ylabel("Top-1 accuracy (%)")
     axis.set_xticks(steps)
-    axis.set_xlim(min(steps) - 0.003, max(steps) + 0.003)
+    if window_mode:
+        axis.set_xscale("log", base=2)
+        axis.set_xlim(min(steps) / math.sqrt(2.0), max(steps) * math.sqrt(2.0))
+    else:
+        axis.set_xlim(min(steps) - 0.003, max(steps) + 0.003)
     axis.set_ylim(0.0, 100.0)
     axis.grid(axis="y", color="#D9D9D9", linewidth=0.6)
     axis.legend(frameon=False, loc="best")
@@ -249,7 +338,7 @@ def write_verification(
 
     payload = {
         "status": "complete",
-        "tag": expected_tag,
+        "tag": experiment["tag"],
         "source_commit": experiment["source_commit"],
         "calibration_sha256": experiment["calibration_sha256"],
         "evaluation_population": expected_population,
@@ -276,12 +365,17 @@ def main() -> None:
     parser.add_argument("--output-prefix", type=Path)
     args = parser.parse_args()
     root = args.root.resolve()
+    experiment, results = load_verified_results(root)
+    window_mode = bool(experiment.get("time_steps_per_window"))
     output_prefix = (
         args.output_prefix.resolve()
         if args.output_prefix is not None
-        else root / "figures" / "clock_time_step_sweep"
+        else root / "figures" / (
+            "clock_steps_per_window_sweep"
+            if window_mode
+            else "clock_time_step_sweep"
+        )
     )
-    experiment, results = load_verified_results(root)
     plot_results(results, output_prefix)
     write_verification(root, experiment, results)
     print(f"Verified {len(results)} conditions over 500 images")

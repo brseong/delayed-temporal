@@ -4,17 +4,21 @@ lat:
 ---
 # Clock-Driven TTFS Evaluation
 
-Clock-driven evaluation executes the maintained TTFS operator graph on one global discrete clock while preserving the frozen potential ranges used by the continuous-time baseline.
+Clock-driven evaluation executes the maintained TTFS operator graph with one configured discrete-time resolution policy while preserving the frozen potential ranges used by the continuous-time baseline.
 
 This path is a deterministic evaluation mode. Gaussian spike-time noise, static mismatch, and learned-parameter perturbations remain disabled so a task-metric change is attributable to the clock alone. It does not claim execution on Loihi hardware.
 
 ## Execution Contract
 
-The central temporal primitives own the global clock rather than individual model adapters.
+The central temporal primitives own the clock policy rather than individual model adapters. The absolute step width configuration uses one global width; the equal interval count configuration derives a local width from each declared time window.
 
 Potential-to-spike encoders test threshold delivery at every clock edge and place crossings on the first non-earlier edge. PWM readout updates active accumulators once per step, and exponential readout applies one decay or growth update per step.
 
 Affine and attention kernels retain their tensor reductions, but their temporal inputs come from the same explicit PWM loop as the scalar primitive. The implementation keeps one current-state tensor and does not allocate a time-leading history tensor or skip steps with a closed-form expression.
+
+A second clock configuration divides every declared time window into the same requested number of equal time steps. The step width is derived independently from each fixed window.
+
+The encoder observes both endpoints, while PWM and exponential readout execute one state update for every interval. The iteration count therefore remains independent of the physical time-window length.
 
 Clock index recovery admits bounded arithmetic drift accumulated by repeated explicit state updates. The tolerance remains below one quarter of a bin, so a materially unaligned duration is rejected.
 
@@ -48,6 +52,10 @@ The authoritative outputs are `summary.csv`, `summary.json`, `raw_shards.csv`, a
 
 The verification record confirms 11 conditions, 231 shard runs, exact 500 image coverage per condition, disabled timing noise, one shared calibration identity, and positive explicit state update counts.
 
+The equal step benchmark uses the first 500 images of the fixed validation ordering and evaluates 64, 128, 256, 512, 1024, and 2048 time steps per time window together with one continuous reference.
+
+Every condition uses 21 contiguous shards and the same frozen calibration table, checkpoint, preprocessing, threshold, and disabled noise settings as the completed fine time-step sweep.
+
 For this sweep schedule, the local worker owns 0.01 shards 0 through 17 and shard 19 on devices 3 through 7, while cluster workers own shards 18 and 20. The cluster also owns time bins 0.02 through 0.10. The supervisor stops the local controller after every local shard is complete and imports the two cluster shards only after identity, log, and coverage validation.
 
 The superseded coarse campaign completed its continuous reference and six of eight 0.1 shards before the requested range changed. Its partial records remain preserved and are not combined with the fine sweep.
@@ -65,6 +73,14 @@ The verification cases distinguish clock semantics from ordinary floating-point 
 ### Causal Encoder Clocking
 
 An encoded threshold crossing is observed by a sequential edge loop at the first clock edge at or after its continuous time, and its declared deadline is aligned by the same rule.
+
+### Equal Steps in Each Time Window
+
+This verification checks that different physical time-window lengths use the same configured interval count.
+
+Every encoder site must report the requested minimum and maximum window count. Encoder observation executes one more edge than the interval count, while PWM and exponential loops execute exactly the interval count per call.
+
+The evaluator rejects simultaneous absolute and window-relative resolution settings, and final reporting rejects any shard whose encoder or state update counts disagree with its declared setting.
 
 ### PWM State Updates
 

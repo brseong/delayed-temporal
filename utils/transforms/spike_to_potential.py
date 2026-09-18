@@ -54,11 +54,17 @@ def exp_operator(
         clocked_difference(
             input_value.new_tensor([float(domain.min), float(domain.max)]),
             float(domain.max),
+            time_bounds=domain,
         )
         if get_clock_driven().enabled
         else input_value.new_tensor([-float(domain.range), 0.0])
     )
-    decoded_endpoints = clocked_exponential(endpoint_times, tau=tau_value)
+    relative_time_bounds = TimeBounds(-float(domain.range), 0.0)
+    decoded_endpoints = clocked_exponential(
+        endpoint_times,
+        tau=tau_value,
+        time_bounds=relative_time_bounds,
+    )
 
     # For an ordered finite window this exponent is never positive and the deadline
     # endpoint is exactly one, so overflow is impossible. Only reject earliest-time
@@ -72,11 +78,19 @@ def exp_operator(
     # Evaluate the payload with the same deadline-relative exponent and return
     # concrete scalar rails for device-independent downstream interval arithmetic.
     relative_input = (
-        clocked_difference(input_value, float(domain.max))
+        clocked_difference(
+            input_value,
+            float(domain.max),
+            time_bounds=domain,
+        )
         if get_clock_driven().enabled
         else input_value - float(domain.max)
     )
-    response = clocked_exponential(relative_input, tau=tau_value)
+    response = clocked_exponential(
+        relative_input,
+        tau=tau_value,
+        time_bounds=relative_time_bounds,
+    )
     return response, PotentialBounds(
         decoded_endpoints[0].item(),
         decoded_endpoints[1].item(),
@@ -123,7 +137,11 @@ def normalized_exp_operator(
     endpoint_times = input_value.new_tensor(
         [float(domain.min), float(domain.max)]
     )
-    decoded_endpoints = clocked_exponential(endpoint_times, tau=tau_value)
+    decoded_endpoints = clocked_exponential(
+        endpoint_times,
+        tau=tau_value,
+        time_bounds=domain,
+    )
 
     # Logarithmic consumers require strictly positive finite rails. Reject zero from
     # exponential underflow as well as infinities from overflow before evaluating the
@@ -141,7 +159,11 @@ def normalized_exp_operator(
 
     # Apply the same scaled exponential to every payload element and return concrete
     # scalar rails so downstream interval arithmetic remains device-independent.
-    result = clocked_exponential(input_value, tau=tau_value)
+    result = clocked_exponential(
+        input_value,
+        tau=tau_value,
+        time_bounds=domain,
+    )
     return result, PotentialBounds(
         decoded_endpoints[0].item(),
         decoded_endpoints[1].item(),
@@ -407,12 +429,17 @@ def exponential_difference_operator(
         scaled_endpoints = clocked_difference(
             s.new_tensor([float(domain_s.min), float(domain_s.max)]),
             float(domain_p.max),
+            time_bounds=domain_s,
         )
         domain_s_scaled = PotentialBounds(
             scaled_endpoints[0].item(),
             scaled_endpoints[1].item(),
         )
-        scaled_s = clocked_difference(s, float(domain_p.max))
+        scaled_s = clocked_difference(
+            s,
+            float(domain_p.max),
+            time_bounds=domain_s,
+        )
     else:
         domain_s_scaled = PotentialBounds(
             domain_s.min - domain_p.max,

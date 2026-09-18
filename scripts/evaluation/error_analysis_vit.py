@@ -109,6 +109,7 @@ class Arguments:
     theta: float
     clock_driven: bool
     clock_time_step: float
+    clock_time_steps_per_window: int
 
     # Layer-wise calibration is an explicit artifact lifecycle. Collection uses a
     # deterministic subset of the training split; frozen phases only load and apply
@@ -250,8 +251,8 @@ def parse_arguments() -> Arguments:
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
-            "Execute TTFS events, PWM durations, and exponential readouts on one "
-            "global discrete clock."
+            "Execute TTFS events, PWM durations, and exponential readouts with "
+            "explicit sequential discrete-time updates."
         ),
     )
     parser.add_argument(
@@ -263,6 +264,15 @@ def parse_arguments() -> Arguments:
         help=(
             "Global time-bin width for --clock-driven execution; disabled runs "
             "require 0."
+        ),
+    )
+    parser.add_argument(
+        "--clock-time-steps-per-window",
+        type=int,
+        default=0,
+        help=(
+            "Number of equal time steps in every declared time window for "
+            "--clock-driven execution; mutually exclusive with --clock-time-step."
         ),
     )
     parser.add_argument(
@@ -442,6 +452,7 @@ def parse_arguments() -> Arguments:
         theta=args.theta,
         clock_driven=args.clock_driven,
         clock_time_step=args.clock_time_step,
+        clock_time_steps_per_window=args.clock_time_steps_per_window,
         calibration_mode=args.calibration_mode,
         calibration_path=args.calibration_path,
         calibration_samples=args.calibration_samples,
@@ -601,12 +612,20 @@ def validate_vit_runtime_arguments(args: Arguments) -> None:
     if not isinstance(args.clock_driven, bool):
         raise TypeError("clock_driven must be a bool")
     clock_time_step = float(args.clock_time_step)
+    clock_time_steps_per_window = args.clock_time_steps_per_window
+    if isinstance(clock_time_steps_per_window, bool) or not isinstance(
+        clock_time_steps_per_window, int
+    ):
+        raise TypeError("clock_time_steps_per_window must be an integer")
     if args.clock_driven:
         if args.model_backend != "spiking":
             raise ValueError("clock-driven execution requires model_backend=spiking")
-        if not math.isfinite(clock_time_step) or clock_time_step <= 0.0:
+        fixed_step = math.isfinite(clock_time_step) and clock_time_step > 0.0
+        fixed_window = clock_time_steps_per_window > 0
+        if fixed_step == fixed_window:
             raise ValueError(
-                "clock-driven execution requires a finite positive clock_time_step"
+                "clock-driven execution requires exactly one positive clock time "
+                "step or time steps per window"
             )
         if (
             args.gaussian_time_noise
@@ -617,8 +636,10 @@ def validate_vit_runtime_arguments(args: Arguments) -> None:
             raise ValueError(
                 "clock-driven evaluation requires Gaussian timing noise to be disabled"
             )
-    elif clock_time_step != 0.0:
-        raise ValueError("clock_time_step must be zero when clock-driven is disabled")
+    elif clock_time_step != 0.0 or clock_time_steps_per_window != 0:
+        raise ValueError(
+            "clock parameters must be zero when clock-driven is disabled"
+        )
 
 
 def require_finite_logits(logits: torch.Tensor) -> None:
@@ -1057,6 +1078,9 @@ def evaluate_vit_model(args: Arguments) -> None:
     set_clock_driven(
         enabled=clock_driven_enabled,
         time_step=float(args.clock_time_step) if clock_driven_enabled else 0.0,
+        time_steps_per_window=(
+            int(args.clock_time_steps_per_window) if clock_driven_enabled else 0
+        ),
     )
 
     # Log both the dimensionless input and the derived absolute quantity so runs at
@@ -1112,6 +1136,7 @@ def evaluate_vit_model(args: Arguments) -> None:
         "Clock-driven execution — "
         f"enabled: {clock_driven_enabled}, "
         f"time_step: {args.clock_time_step}, "
+        f"time_steps_per_window: {args.clock_time_steps_per_window}, "
         "gaussian_time_noise: false"
     )
     

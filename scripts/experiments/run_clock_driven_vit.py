@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sweep one global clock time bin on a fixed calibrated ViT-B subset."""
+"""Sweep clock resolution on a fixed calibrated ViT-B subset."""
 
 from __future__ import annotations
 
@@ -27,6 +27,9 @@ from scripts.runtime import identity
 
 
 default_tag = "vit_base_clock_driven_imagenet500_theta20_float64_fine_v1"
+default_window_steps_tag = (
+    "vit_base_clock_driven_window_steps_imagenet500_theta20_float64_v1"
+)
 default_evaluation_samples = 500
 default_shards = 21
 ALLOWED_GPUS = (4, 5, 6, 7)
@@ -43,6 +46,7 @@ calibration_safe_patch_sha256 = {
     ),
 }
 default_time_steps = tuple(index / 100.0 for index in range(1, 11))
+default_time_steps_per_window = (64, 128, 256, 512, 1024, 2048)
 PYTHON = Path("/opt/conda/envs/dt/bin/python")
 CHECKPOINT = Path(
     "/data/delayed-temporal/artifacts/assets/theta-selection-v1/checkpoints/"
@@ -132,16 +136,27 @@ def tasks(
     time_steps: tuple[float, ...],
     shard_count: int,
     shard_indices: tuple[int, ...] | None = None,
-) -> tuple[tuple[str, float | None, int], ...]:
-    """Return selected contiguous shards of the baseline and requested time bins."""
+    *,
+    time_steps_per_window: tuple[int, ...] = (),
+) -> tuple[tuple[str, float | None, int | None, int], ...]:
+    """Return selected shards of the baseline and one clock resolution axis."""
 
-    conditions = (("continuous", None),) + tuple(
-        (f"dt_{time_step:g}", time_step) for time_step in time_steps
+    if time_steps and time_steps_per_window:
+        raise ValueError("clock sweep axes are mutually exclusive")
+    conditions = (("continuous", None, None),) + tuple(
+        (f"dt_{time_step:g}", time_step, None) for time_step in time_steps
+    ) + tuple(
+        (f"steps_{steps}", None, steps) for steps in time_steps_per_window
     )
     selected = normalize_shard_indices(shard_count, shard_indices)
     return tuple(
-        (f"{condition}_shard_{shard_index:02d}", time_step, shard_index)
-        for condition, time_step in conditions
+        (
+            f"{condition}_shard_{shard_index:02d}",
+            time_step,
+            steps,
+            shard_index,
+        )
+        for condition, time_step, steps in conditions
         for shard_index in selected
     )
 
@@ -222,6 +237,7 @@ def calibrated_command(
     phase: str,
     run_id: str,
     time_step: float | None = None,
+    time_steps_per_window: int | None = None,
     shard_index: int = 0,
     shard_count: int = 1,
 ) -> list[str]:
@@ -242,12 +258,25 @@ def calibrated_command(
             "--evaluation-shard-index", str(shard_index),
             "--evaluation-shard-count", str(shard_count),
         ]
-    if time_step is None:
-        arguments += ["--no-clock-driven", "--clock-time-step", "0"]
+    if time_step is not None and time_steps_per_window is not None:
+        raise ValueError("clock execution modes are mutually exclusive")
+    if time_step is None and time_steps_per_window is None:
+        arguments += [
+            "--no-clock-driven",
+            "--clock-time-step", "0",
+            "--clock-time-steps-per-window", "0",
+        ]
     else:
         arguments += [
             "--clock-driven",
-            "--clock-time-step", format(time_step, ".17g"),
+            "--clock-time-step", (
+                format(time_step, ".17g") if time_step is not None else "0"
+            ),
+            "--clock-time-steps-per-window", (
+                str(time_steps_per_window)
+                if time_steps_per_window is not None
+                else "0"
+            ),
         ]
     return [
         str(PYTHON),
@@ -266,6 +295,7 @@ def build_experiment(
     source: Path,
     commit: str,
     time_steps: tuple[float, ...],
+    time_steps_per_window: tuple[int, ...],
     shard_count: int,
     *,
     tag: str,
@@ -307,6 +337,7 @@ def build_experiment(
         "precision": "float64",
         "batch_size": 32,
         "time_steps": list(time_steps),
+        "time_steps_per_window": list(time_steps_per_window),
         "evaluation_shards": shard_count,
         "simulation": "explicit_sequential_state_updates",
         "clock_rounding": "first_non_earlier_edge",
@@ -471,6 +502,7 @@ def parse_result(
     *,
     run_id: str,
     time_step: float | None,
+    time_steps_per_window: int | None,
     shard_index: int,
     shard_count: int,
     expected_population: int,
@@ -515,6 +547,28 @@ def parse_result(
     prediction_sha256 = _single(
         r"^Prediction SHA256: ([0-9a-f]{64})$", text, "prediction digest"
     )
+    clock_config = re.search(
+        r"^Clock-driven execution — enabled: (?P<enabled>True|False), "
+        r"time_step: (?P<time_step>[0-9.eE+-]+), "
+        r"time_steps_per_window: (?P<window_steps>\d+), "
+        r"gaussian_time_noise: false$",
+        text,
+        flags=re.MULTILINE,
+    )
+    if clock_config is None:
+        raise ValueError("clock-driven evaluation omitted its execution mode")
+    expected_clock_enabled = (
+        time_step is not None or time_steps_per_window is not None
+    )
+    if (clock_config.group("enabled") == "True") != expected_clock_enabled:
+        raise ValueError("clock-driven enabled state differs")
+    if (
+        float(clock_config.group("time_step"))
+        != (0.0 if time_step is None else time_step)
+        or int(clock_config.group("window_steps"))
+        != (0 if time_steps_per_window is None else time_steps_per_window)
+    ):
+        raise ValueError("clock-driven resolution differs")
     clock_sites: dict[str, dict[str, float | int]] = {}
     for match in re.finditer(
         r"^Clock\[(?P<site>[^]]+)\] events=(?P<events>\d+), "
@@ -548,34 +602,53 @@ def parse_result(
             "time_steps": int(match.group("steps")),
             "element_updates": int(match.group("elements")),
         }
-    if time_step is None and clock_sites:
+    if not expected_clock_enabled and clock_sites:
         raise ValueError("continuous baseline unexpectedly emitted clock statistics")
-    if time_step is None and clock_updates:
+    if not expected_clock_enabled and clock_updates:
         raise ValueError("continuous baseline unexpectedly emitted clock updates")
     required_clock_sites = {"neg_linear_transform", "neg_log_transform"}
-    if time_step is not None and not required_clock_sites.issubset(clock_sites):
+    if expected_clock_enabled and not required_clock_sites.issubset(clock_sites):
         raise ValueError("clock-driven evaluation has incomplete encoder statistics")
-    if time_step is not None and set(clock_updates) != {
+    if expected_clock_enabled and set(clock_updates) != {
         "encoder", "exponential", "pwm"
     }:
         raise ValueError("clock-driven evaluation has incomplete state-update counters")
-    if time_step is not None and any(
+    if expected_clock_enabled and any(
         counts["calls"] <= 0
         or counts["time_steps"] <= 0
         or counts["element_updates"] <= 0
         for counts in clock_updates.values()
     ):
         raise ValueError("clock-driven evaluation did not execute every state loop")
+    if time_steps_per_window is not None:
+        if any(
+            counts["minimum_window_steps"] != time_steps_per_window
+            or counts["maximum_window_steps"] != time_steps_per_window
+            for counts in clock_sites.values()
+        ):
+            raise ValueError("encoder time window did not use the fixed step count")
+        expected_steps_per_call = {
+            "encoder": time_steps_per_window + 1,
+            "exponential": time_steps_per_window,
+            "pwm": time_steps_per_window,
+        }
+        if any(
+            clock_updates[kind]["time_steps"]
+            != clock_updates[kind]["calls"] * steps_per_call
+            for kind, steps_per_call in expected_steps_per_call.items()
+        ):
+            raise ValueError("state update loop did not use the fixed step count")
     return {
         "run_id": run_id,
         "time_step": time_step,
+        "time_steps_per_window": time_steps_per_window,
         "shard_index": shard_index,
         "shard_count": shard_count,
         "evaluation_population": expected_population,
         "evaluation_dataset_path": str(evaluation_dataset_path),
         "shard_start": logged_shard["start"],
         "shard_stop": logged_shard["stop"],
-        "clock_driven": time_step is not None,
+        "clock_driven": expected_clock_enabled,
         "correct": correct,
         "samples": samples,
         "accuracy": accuracy,
@@ -599,6 +672,7 @@ def write_summary(
     *,
     tag: str,
     time_steps: tuple[float, ...],
+    time_steps_per_window: tuple[int, ...] = (),
     shard_count: int,
     expected_population: int,
 ) -> None:
@@ -607,12 +681,19 @@ def write_summary(
     ordered = sorted(
         results,
         key=lambda row: (
-            math.inf if row["time_step"] is None else -row["time_step"],
+            0 if not row["clock_driven"] else 1,
+            row["time_step"] if row["time_step"] is not None else math.inf,
+            (
+                row.get("time_steps_per_window")
+                if row.get("time_steps_per_window") is not None
+                else math.inf
+            ),
             row["shard_index"],
         ),
     )
     shard_fields = (
-        "run_id", "clock_driven", "time_step", "shard_index", "shard_count",
+        "run_id", "clock_driven", "time_step", "time_steps_per_window",
+        "shard_index", "shard_count",
         "shard_start", "shard_stop", "correct", "samples", "accuracy",
         "prediction_sha256", "gpu", "gpu_model", "elapsed_seconds",
         "source_commit", "calibration_sha256", "log_sha256",
@@ -621,15 +702,23 @@ def write_summary(
     writer = csv.DictWriter(buffer, fieldnames=shard_fields)
     writer.writeheader()
     for row in ordered:
-        writer.writerow({field: row[field] for field in shard_fields})
+        writer.writerow({field: row.get(field) for field in shard_fields})
     runtime_files.atomic_text(root / "raw_shards.csv", buffer.getvalue())
 
     complete_conditions: list[dict[str, Any]] = []
-    for condition, time_step in (("continuous", None),) + tuple(
-        (f"dt_{value:g}", value) for value in time_steps
-    ):
+    conditions = (("continuous", None, None),) + tuple(
+        (f"dt_{value:g}", value, None) for value in time_steps
+    ) + tuple(
+        (f"steps_{value}", None, value) for value in time_steps_per_window
+    )
+    for condition, time_step, window_steps in conditions:
         shards = sorted(
-            (row for row in results if row["time_step"] == time_step),
+            (
+                row
+                for row in results
+                if row["time_step"] == time_step
+                and row.get("time_steps_per_window") == window_steps
+            ),
             key=lambda row: row["shard_index"],
         )
         if len(shards) != shard_count:
@@ -655,8 +744,9 @@ def write_summary(
         digest_payload = "\n".join(row["prediction_sha256"] for row in shards)
         complete_conditions.append({
             "condition": condition,
-            "clock_driven": time_step is not None,
+            "clock_driven": time_step is not None or window_steps is not None,
             "time_step": time_step,
+            "time_steps_per_window": window_steps,
             "correct": correct,
             "samples": samples,
             "accuracy": correct / samples,
@@ -668,7 +758,8 @@ def write_summary(
         })
 
     summary_fields = (
-        "condition", "clock_driven", "time_step", "correct", "samples", "accuracy",
+        "condition", "clock_driven", "time_step", "time_steps_per_window",
+        "correct", "samples", "accuracy",
         "ordered_shard_digest_sha256", "elapsed_seconds_max", "shards",
     )
     buffer = io.StringIO()
@@ -695,6 +786,7 @@ def recover_result_from_logs(
     *,
     run_id: str,
     time_step: float | None,
+    time_steps_per_window: int | None,
     shard_index: int,
     shard_count: int,
     expected_population: int,
@@ -719,6 +811,7 @@ def recover_result_from_logs(
             log_path,
             run_id=run_id,
             time_step=time_step,
+            time_steps_per_window=time_steps_per_window,
             shard_index=shard_index,
             shard_count=shard_count,
             expected_population=expected_population,
@@ -773,7 +866,7 @@ def run_command(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--source-root", type=Path, default=SOURCE)
-    parser.add_argument("--tag", default=default_tag)
+    parser.add_argument("--tag")
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--calibration-path", type=Path)
     parser.add_argument("--calibration-source-commit")
@@ -797,8 +890,18 @@ def main() -> None:
         dest="time_steps",
         type=float,
         nargs="+",
-        default=list(default_time_steps),
+        default=None,
         help="Positive time-bin widths to evaluate after the continuous baseline.",
+    )
+    parser.add_argument(
+        "--time-steps-per-window",
+        type=int,
+        nargs="+",
+        default=None,
+        help=(
+            "Positive counts of equal time steps applied independently to every "
+            "declared time window."
+        ),
     )
     parser.add_argument(
         "--shards",
@@ -819,17 +922,33 @@ def main() -> None:
     args = parser.parse_args()
 
     source = args.source_root.resolve()
-    root = (
-        args.output_root
-        or Path("/data/delayed-temporal/artifacts/logs/clock_driven") / args.tag
-    ).resolve()
-    time_steps = tuple(float(value) for value in args.time_steps)
+    if args.time_steps is not None and args.time_steps_per_window is not None:
+        raise ValueError("time-bin and steps-per-window sweeps are mutually exclusive")
+    time_steps = tuple(
+        float(value)
+        for value in (
+            default_time_steps if args.time_steps is None
+            and args.time_steps_per_window is None else (args.time_steps or ())
+        )
+    )
+    window_steps = tuple(int(value) for value in (args.time_steps_per_window or ()))
     if (
-        not time_steps
-        or len(set(time_steps)) != len(time_steps)
+        time_steps
+        and (len(set(time_steps)) != len(time_steps)
         or any(not math.isfinite(value) or value <= 0.0 for value in time_steps)
+        )
     ):
         raise ValueError("time bins must be unique, finite, and strictly positive")
+    if window_steps and (
+        len(set(window_steps)) != len(window_steps)
+        or any(value <= 0 for value in window_steps)
+    ):
+        raise ValueError("time steps per window must be unique and strictly positive")
+    tag = args.tag or (default_window_steps_tag if window_steps else default_tag)
+    root = (
+        args.output_root
+        or Path("/data/delayed-temporal/artifacts/logs/clock_driven") / tag
+    ).resolve()
     if args.shards <= 0:
         raise ValueError("shards must be positive")
     if args.evaluation_samples < args.shards:
@@ -913,8 +1032,9 @@ def main() -> None:
         source,
         commit,
         time_steps,
+        window_steps,
         args.shards,
-        tag=args.tag,
+        tag=tag,
         evaluation_dataset_path=evaluation_dataset_path,
         evaluation_metadata=evaluation_metadata,
         calibration_sha256=calibration_sha256,
@@ -928,9 +1048,14 @@ def main() -> None:
     runtime_files.immutable_json(root / "experiment.json", experiment)
 
     accepted: list[dict[str, Any]] = []
-    pending: list[tuple[str, float | None, int]] = []
-    selected_tasks = tasks(time_steps, args.shards, selected_shards)
-    for run_id, time_step, shard_index in selected_tasks:
+    pending: list[tuple[str, float | None, int | None, int]] = []
+    selected_tasks = tasks(
+        time_steps,
+        args.shards,
+        selected_shards,
+        time_steps_per_window=window_steps,
+    )
+    for run_id, time_step, steps_per_window, shard_index in selected_tasks:
         result_path = root / "results" / f"{run_id}.json"
         if result_path.exists():
             result = json.loads(result_path.read_text())
@@ -939,6 +1064,7 @@ def main() -> None:
                 and result.get("source_commit") == commit
                 and result.get("calibration_sha256") == calibration_sha256
                 and result.get("time_step") == time_step
+                and result.get("time_steps_per_window") == steps_per_window
                 and result.get("shard_index") == shard_index
                 and result.get("shard_count") == args.shards
                 and result.get("evaluation_population") == args.evaluation_samples
@@ -952,6 +1078,7 @@ def main() -> None:
             root,
             run_id=run_id,
             time_step=time_step,
+            time_steps_per_window=steps_per_window,
             shard_index=shard_index,
             shard_count=args.shards,
             expected_population=args.evaluation_samples,
@@ -964,13 +1091,14 @@ def main() -> None:
             accepted.append(recovered)
             print(f"Recovered completed {run_id}", flush=True)
             continue
-        pending.append((run_id, time_step, shard_index))
+        pending.append((run_id, time_step, steps_per_window, shard_index))
 
     write_summary(
         root,
         accepted,
-        tag=args.tag,
+        tag=tag,
         time_steps=time_steps,
+        time_steps_per_window=window_steps,
         shard_count=args.shards,
         expected_population=args.evaluation_samples,
     )
@@ -979,7 +1107,7 @@ def main() -> None:
     while pending or running:
         while pending and free:
             gpu = free.pop(0)
-            run_id, time_step, shard_index = pending.pop(0)
+            run_id, time_step, steps_per_window, shard_index = pending.pop(0)
             log_path = next_attempt_log(root, run_id)
             command = calibrated_command(
                 source,
@@ -989,6 +1117,7 @@ def main() -> None:
                 phase="validate",
                 run_id=run_id,
                 time_step=time_step,
+                time_steps_per_window=steps_per_window,
                 shard_index=shard_index,
                 shard_count=args.shards,
             )
@@ -1007,6 +1136,7 @@ def main() -> None:
                 ),
                 "run_id": run_id,
                 "time_step": time_step,
+                "time_steps_per_window": steps_per_window,
                 "shard_index": shard_index,
                 "log_path": log_path,
                 "started": time.monotonic(),
@@ -1026,6 +1156,7 @@ def main() -> None:
                 state["log_path"],
                 run_id=state["run_id"],
                 time_step=state["time_step"],
+                time_steps_per_window=state["time_steps_per_window"],
                 shard_index=state["shard_index"],
                 shard_count=args.shards,
                 expected_population=args.evaluation_samples,
@@ -1042,8 +1173,9 @@ def main() -> None:
             write_summary(
                 root,
                 accepted,
-                tag=args.tag,
+                tag=tag,
                 time_steps=time_steps,
+                time_steps_per_window=window_steps,
                 shard_count=args.shards,
                 expected_population=args.evaluation_samples,
             )
@@ -1058,12 +1190,13 @@ def main() -> None:
     write_summary(
         root,
         accepted,
-        tag=args.tag,
+        tag=tag,
         time_steps=time_steps,
+        time_steps_per_window=window_steps,
         shard_count=args.shards,
         expected_population=args.evaluation_samples,
     )
-    print(f"Completed {args.tag}: {root / 'summary.csv'}", flush=True)
+    print(f"Completed {tag}: {root / 'summary.csv'}", flush=True)
 
 
 if __name__ == "__main__":

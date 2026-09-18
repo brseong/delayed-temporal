@@ -26,6 +26,7 @@ from scripts.evaluation.error_analysis_vit import (
 from scripts.experiments.run_clock_driven_vit import (
     calibration_compatibility_paths,
     default_time_steps,
+    default_time_steps_per_window,
     normalize_shard_indices,
     parse_result,
     prepare_evaluation_subset,
@@ -37,6 +38,8 @@ from scripts.analysis.plot_clock_time_step_sweep import (
     expected_shards,
     expected_tag,
     expected_time_steps,
+    expected_time_steps_per_window,
+    expected_window_steps_tag,
     load_verified_results,
 )
 from utils.transforms.clock import (
@@ -92,6 +95,75 @@ def verify_causal_encoder_clocking() -> None:
     assert stats["maximum_window_steps"] == 8
     updates = get_clock_update_stats()["encoder"]
     assert updates == {"calls": 1, "time_steps": 9, "element_updates": 45}
+    set_clock_driven(enabled=False)
+
+
+# @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Equal Steps in Each Time Window]]
+def verify_fixed_steps_per_time_window() -> None:
+    requested = (64, 128, 256, 512, 1024, 2048)
+    assert default_time_steps_per_window == requested
+    assert expected_time_steps_per_window == requested
+    for steps in requested:
+        set_clock_driven(enabled=True, time_steps_per_window=steps)
+        values = torch.tensor([4.0, 0.0, -4.0], dtype=torch.float64)
+        times, domain = neg_identity_transform(
+            values,
+            PotentialBounds(-4.0, 4.0),
+        )
+        torch.testing.assert_close(
+            times,
+            torch.tensor([0.0, 4.0, 8.0], dtype=torch.float64),
+            atol=0.0,
+            rtol=0.0,
+        )
+        assert domain == TimeBounds(0.0, 8.0)
+        stats = get_clock_driven_stats()["neg_linear_transform"]
+        assert stats["minimum_window_steps"] == steps
+        assert stats["maximum_window_steps"] == steps
+        assert get_clock_update_stats()["encoder"]["time_steps"] == steps + 1
+
+    set_clock_driven(enabled=True, time_steps_per_window=4)
+    bounds = TimeBounds(0.0, 8.0)
+    duration = signed_pulse_width_duration(
+        torch.tensor([2.0, 6.0], dtype=torch.float64),
+        torch.tensor(4.0, dtype=torch.float64),
+        observation_deadline=8.0,
+        time_bounds=bounds,
+    )
+    torch.testing.assert_close(
+        duration,
+        torch.tensor([2.0, -2.0], dtype=torch.float64),
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert get_clock_update_stats()["pwm"]["time_steps"] == 4
+    linear = SpikingLinear(2, 1, bias=False, dtype=torch.float64)
+    with torch.no_grad():
+        linear.weight.copy_(torch.tensor([[2.0, -1.0]], dtype=torch.float64))
+    linear_output = linear(
+        Potential(
+            torch.tensor([[0.6, -0.6]], dtype=torch.float64),
+            PotentialBounds(-1.0, 1.0),
+        )
+    )
+    torch.testing.assert_close(
+        linear_output.value,
+        torch.tensor([[2.0]], dtype=torch.float64),
+        atol=0.0,
+        rtol=0.0,
+    )
+    decoded, _ = normalized_exp_operator(
+        torch.tensor([-4.0, -2.0, 0.0], dtype=torch.float64),
+        TimeBounds(-4.0, 0.0),
+        tau_m=1.0,
+    )
+    torch.testing.assert_close(
+        decoded,
+        torch.exp(torch.tensor([-4.0, -2.0, 0.0], dtype=torch.float64)),
+        atol=1.0e-15,
+        rtol=1.0e-15,
+    )
+    assert get_clock_update_stats()["exponential"]["time_steps"] == 8
     set_clock_driven(enabled=False)
 
 
@@ -272,6 +344,7 @@ def _runtime_args(**overrides: object) -> SimpleNamespace:
         "image_preprocessing_config": "",
         "clock_driven": True,
         "clock_time_step": 0.25,
+        "clock_time_steps_per_window": 0,
         "model_backend": "spiking",
         "gaussian_time_noise": False,
         "time_noise_std_frac": 0.0,
@@ -285,12 +358,21 @@ def _runtime_args(**overrides: object) -> SimpleNamespace:
 # @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#ViT Runtime Isolation]]
 def verify_vit_runtime_isolation() -> None:
     validate_vit_runtime_arguments(_runtime_args())
+    validate_vit_runtime_arguments(
+        _runtime_args(clock_time_step=0.0, clock_time_steps_per_window=64)
+    )
     invalid = (
         _runtime_args(clock_time_step=0.0),
+        _runtime_args(clock_time_steps_per_window=64),
         _runtime_args(model_backend="hf"),
         _runtime_args(gaussian_time_noise=True),
         _runtime_args(time_noise_std_frac=1.0e-5),
         _runtime_args(clock_driven=False, clock_time_step=0.25),
+        _runtime_args(
+            clock_driven=False,
+            clock_time_step=0.0,
+            clock_time_steps_per_window=64,
+        ),
         _runtime_args(evaluation_shard_count=0),
         _runtime_args(evaluation_shard_count=4, evaluation_shard_index=4),
     )
@@ -401,6 +483,7 @@ def verify_contiguous_evaluation_shards() -> None:
             "run_id": f"continuous_shard_{index:02d}",
             "clock_driven": False,
             "time_step": None,
+            "time_steps_per_window": None,
             "shard_index": index,
             "shard_count": 4,
             "shard_start": start,
@@ -455,10 +538,20 @@ def verify_selected_evaluation_shards() -> None:
     assert normalize_shard_indices(4, None) == (0, 1, 2, 3)
     assert normalize_shard_indices(4, (3, 1)) == (1, 3)
     assert tasks((0.01,), 4, (1, 3)) == (
-        ("continuous_shard_01", None, 1),
-        ("continuous_shard_03", None, 3),
-        ("dt_0.01_shard_01", 0.01, 1),
-        ("dt_0.01_shard_03", 0.01, 3),
+        ("continuous_shard_01", None, None, 1),
+        ("continuous_shard_03", None, None, 3),
+        ("dt_0.01_shard_01", 0.01, None, 1),
+        ("dt_0.01_shard_03", 0.01, None, 3),
+    )
+    assert tasks(
+        (), 2, time_steps_per_window=(64, 128)
+    ) == (
+        ("continuous_shard_00", None, None, 0),
+        ("continuous_shard_01", None, None, 1),
+        ("steps_64_shard_00", None, 64, 0),
+        ("steps_64_shard_01", None, 64, 1),
+        ("steps_128_shard_00", None, 128, 0),
+        ("steps_128_shard_01", None, 128, 1),
     )
     for invalid in ((), (1, 1), (-1,), (4,)):
         try:
@@ -503,6 +596,7 @@ def verify_completed_sweep_reporting() -> None:
                 row = {
                     "run_id": f"condition_{condition_index}_shard_{shard_index}",
                     "time_step": time_step,
+                    "time_steps_per_window": None,
                     "shard_index": shard_index,
                     "shard_count": expected_shards,
                     "evaluation_population": 500,
@@ -541,6 +635,7 @@ def verify_completed_sweep_reporting() -> None:
                 "condition": "continuous" if time_step is None else f"dt_{time_step:g}",
                 "clock_driven": time_step is not None,
                 "time_step": time_step,
+                "time_steps_per_window": None,
                 "correct": correct,
                 "samples": 500,
                 "accuracy": correct / 500,
@@ -570,6 +665,146 @@ def verify_completed_sweep_reporting() -> None:
         else:
             raise AssertionError("clock update count at or below zero was accepted")
 
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        logs = root / "logs"
+        logs.mkdir()
+        source_commit = "c" * 40
+        calibration_sha256 = "d" * 64
+        dataset_path = str(root / "validation_first_500")
+        experiment = {
+            "tag": expected_window_steps_tag,
+            "evaluation_population": 500,
+            "evaluation_shards": expected_shards,
+            "evaluation_dataset_path": dataset_path,
+            "time_steps": [],
+            "time_steps_per_window": list(expected_time_steps_per_window),
+            "simulation": "explicit_sequential_state_updates",
+            "source_commit": source_commit,
+            "calibration_sha256": calibration_sha256,
+        }
+        (root / "experiment.json").write_text(json.dumps(experiment))
+        shard_runs = []
+        conditions = []
+        grid = ((None, None),) + tuple(
+            (None, steps) for steps in expected_time_steps_per_window
+        )
+        for condition_index, (time_step, window_steps) in enumerate(grid):
+            rows = []
+            for shard_index in range(expected_shards):
+                start, stop = evaluation_shard_bounds(
+                    500, expected_shards, shard_index
+                )
+                samples = stop - start
+                correct = max(0, samples - condition_index)
+                log_path = logs / f"fixed_{condition_index}_{shard_index}.log"
+                log_content = f"fixed={condition_index} shard={shard_index}\n"
+                log_path.write_text(log_content)
+                clock_enabled = window_steps is not None
+                row = {
+                    "run_id": f"fixed_{condition_index}_{shard_index}",
+                    "time_step": time_step,
+                    "time_steps_per_window": window_steps,
+                    "shard_index": shard_index,
+                    "shard_count": expected_shards,
+                    "evaluation_population": 500,
+                    "evaluation_dataset_path": dataset_path,
+                    "shard_start": start,
+                    "shard_stop": stop,
+                    "clock_driven": clock_enabled,
+                    "correct": correct,
+                    "samples": samples,
+                    "accuracy": correct / samples,
+                    "prediction_sha256": (
+                        f"{condition_index * expected_shards + shard_index:064x}"
+                    ),
+                    "clock_sites": (
+                        {}
+                        if not clock_enabled
+                        else {
+                            name: {
+                                "minimum_window_steps": window_steps,
+                                "maximum_window_steps": window_steps,
+                            }
+                            for name in (
+                                "neg_linear_transform",
+                                "neg_log_transform",
+                            )
+                        }
+                    ),
+                    "clock_updates": (
+                        {}
+                        if not clock_enabled
+                        else {
+                            "encoder": {
+                                "calls": 1,
+                                "time_steps": window_steps + 1,
+                                "element_updates": window_steps + 1,
+                            },
+                            "exponential": {
+                                "calls": 1,
+                                "time_steps": window_steps,
+                                "element_updates": window_steps,
+                            },
+                            "pwm": {
+                                "calls": 1,
+                                "time_steps": window_steps,
+                                "element_updates": window_steps,
+                            },
+                        }
+                    ),
+                    "source_commit": source_commit,
+                    "calibration_sha256": calibration_sha256,
+                    "log_path": str(log_path),
+                    "log_sha256": hashlib.sha256(log_content.encode()).hexdigest(),
+                    "success": True,
+                }
+                rows.append(row)
+                shard_runs.append(row)
+            correct = sum(row["correct"] for row in rows)
+            prediction_payload = "\n".join(
+                row["prediction_sha256"] for row in rows
+            )
+            conditions.append({
+                "condition": (
+                    "continuous" if window_steps is None else f"steps_{window_steps}"
+                ),
+                "clock_driven": window_steps is not None,
+                "time_step": None,
+                "time_steps_per_window": window_steps,
+                "correct": correct,
+                "samples": 500,
+                "accuracy": correct / 500,
+                "ordered_shard_digest_sha256": hashlib.sha256(
+                    prediction_payload.encode("ascii")
+                ).hexdigest(),
+                "elapsed_seconds_max": 1.0,
+                "shards": expected_shards,
+            })
+        summary = {
+            "tag": expected_window_steps_tag,
+            "conditions": conditions,
+            "shard_runs": shard_runs,
+        }
+        (root / "summary.json").write_text(json.dumps(summary))
+        with (root / "summary.csv").open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=conditions[0].keys())
+            writer.writeheader()
+            writer.writerows(conditions)
+        _, loaded = load_verified_results(root)
+        assert len(loaded) == 7
+        assert loaded[-1]["time_steps_per_window"] == 2048
+        summary["shard_runs"][-1]["clock_sites"][
+            "neg_linear_transform"
+        ]["maximum_window_steps"] = 2049
+        (root / "summary.json").write_text(json.dumps(summary))
+        try:
+            load_verified_results(root)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("variable encoder window step count was accepted")
+
 
 # @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Composed Encoder Statistics]]
 def verify_composed_encoder_statistics() -> None:
@@ -580,6 +815,7 @@ Correct: 52
 Evaluated samples: 62
 Prediction SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 Accuracy: 0.83870968
+Clock-driven execution — enabled: True, time_step: 1.0, time_steps_per_window: 0, gaussian_time_noise: false
 ClockUpdates[encoder] calls=1, time_steps=1, element_updates=1
 ClockUpdates[exponential] calls=1, time_steps=1, element_updates=1
 ClockUpdates[pwm] calls=1, time_steps=1, element_updates=1
@@ -594,6 +830,7 @@ Clock[gelu.cubic.log_positive] events=1, rounded_events=1, mean_absolute_error=0
             path,
             run_id="dt_1_shard_04",
             time_step=1.0,
+            time_steps_per_window=None,
             shard_index=4,
             shard_count=8,
             expected_population=500,
@@ -610,10 +847,51 @@ Clock[gelu.cubic.log_positive] events=1, rounded_events=1, mean_absolute_error=0
     }
     assert result["accuracy"] == 52 / 62
 
+    fixed_log = (
+        log.replace(
+            "enabled: True, time_step: 1.0, time_steps_per_window: 0",
+            "enabled: True, time_step: 0.0, time_steps_per_window: 64",
+        )
+        .replace(
+            "ClockUpdates[encoder] calls=1, time_steps=1, element_updates=1",
+            "ClockUpdates[encoder] calls=1, time_steps=65, element_updates=65",
+        )
+        .replace(
+            "ClockUpdates[exponential] calls=1, time_steps=1, element_updates=1",
+            "ClockUpdates[exponential] calls=1, time_steps=64, element_updates=64",
+        )
+        .replace(
+            "ClockUpdates[pwm] calls=1, time_steps=1, element_updates=1",
+            "ClockUpdates[pwm] calls=1, time_steps=64, element_updates=64",
+        )
+        .replace("minimum_window_steps=1, maximum_window_steps=1", (
+            "minimum_window_steps=64, maximum_window_steps=64"
+        ))
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "clock.log"
+        path.write_text(fixed_log)
+        fixed_result = parse_result(
+            path,
+            run_id="steps_64_shard_04",
+            time_step=None,
+            time_steps_per_window=64,
+            shard_index=4,
+            shard_count=8,
+            expected_population=500,
+            evaluation_dataset_path=Path("/tmp/validation_first_500"),
+            gpu=4,
+            commit="a" * 40,
+            calibration_sha256="b" * 64,
+            elapsed_seconds=1.0,
+        )
+    assert fixed_result["time_steps_per_window"] == 64
+
 
 if __name__ == "__main__":
     checks = (
         verify_causal_encoder_clocking,
+        verify_fixed_steps_per_time_window,
         verify_pwm_state_updates,
         verify_exponential_state_updates,
         verify_optimized_model_kernels,

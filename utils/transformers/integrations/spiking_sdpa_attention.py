@@ -232,6 +232,7 @@ def _gaussian_attention_value_readout(
         value_event,
         reference_event,
         observation_deadline=float(value_event.domain.max),
+        time_bounds=value_event.domain,
     )
 
     # Preserve the deterministic [0, 1] drive contract before the optimized PWM-MAC.
@@ -487,6 +488,7 @@ def spiking_scaled_dot_product_attention(
         value_time,
         value_reference_time,
         observation_deadline=float(value_time_domain.max),
+        time_bounds=value_time_domain,
     )
 
     # The optimized matrix multiplication evaluates the complete deterministic

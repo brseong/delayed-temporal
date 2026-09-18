@@ -1030,6 +1030,7 @@ class SpikingLinear(nn.Linear):
             data_event,
             reference_event,
             observation_deadline=float(data_event.domain.max),
+            time_bounds=data_event.domain,
         )
 
         # This optimized kernel evaluates the complete PWM-MAC directly:
@@ -1111,6 +1112,7 @@ class SpikingLinear(nn.Linear):
             data_time,
             reference_time,
             observation_deadline=float(time_domain.max),
+            time_bounds=time_domain,
         )
 
         # The optimized kernel is algebraically identical to summing one explicit
@@ -1311,6 +1313,7 @@ class SpikingConv2d(nn.Conv2d):
             data_event,
             reference_event,
             observation_deadline=float(data_event.domain.max),
+            time_bounds=data_event.domain,
         )
 
         # The optimized convolution evaluates the complete per-receptive-field PWM
@@ -1396,6 +1399,7 @@ class SpikingConv2d(nn.Conv2d):
             data_time,
             reference_time,
             observation_deadline=float(time_domain.max),
+            time_bounds=time_domain,
         )
 
         # The optimized grouped convolution evaluates the sum of the conceptually

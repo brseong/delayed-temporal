@@ -1,9 +1,11 @@
 import torch
 from jaxtyping import Float, Int
+import math
 from math import log, exp, isfinite
 from numbers import Real
 from .clock import (
     causal_clock_time,
+    clock_time_step,
     clocked_difference,
     clock_step_indices,
     get_clock_driven,
@@ -12,11 +14,41 @@ from .clock import (
 from .types import ClosedBounds, PotentialBounds, SpikeSample, TimeBounds, check_domain
 
 
+def _clock_time_bounds(
+    observation_deadline: float,
+    *events: torch.Tensor | float | SpikeSample,
+    time_bounds: TimeBounds | None,
+) -> TimeBounds:
+    """Resolve the one declared code window shared by a clocked readout."""
+
+    if time_bounds is not None and not isinstance(time_bounds, TimeBounds):
+        raise TypeError("time_bounds must be TimeBounds")
+    sample_domains = {
+        event.domain for event in events if isinstance(event, SpikeSample)
+    }
+    if len(sample_domains) > 1:
+        raise ValueError("clocked readout events require one shared time window")
+    if time_bounds is None and sample_domains:
+        time_bounds = next(iter(sample_domains))
+    if time_bounds is None:
+        time_bounds = TimeBounds(0.0, observation_deadline)
+    config = get_clock_driven()
+    if config.enabled and config.time_steps_per_window and not math.isclose(
+        float(time_bounds.max),
+        observation_deadline,
+        rel_tol=0.0,
+        abs_tol=8.0 * math.ulp(max(abs(observation_deadline), 1.0)),
+    ):
+        raise ValueError("time window maximum must equal observation_deadline")
+    return time_bounds
+
+
 def signed_pulse_width_duration(
     t_A: torch.Tensor | float | SpikeSample,
     t_B: torch.Tensor | float | SpikeSample,
     *,
     observation_deadline: float,
+    time_bounds: TimeBounds | None = None,
 ) -> torch.Tensor | float:
     """Return two causal event-to-deadline accumulators after recombination.
 
@@ -50,29 +82,39 @@ def signed_pulse_width_duration(
             duration_B = max(raw_duration_B, 0.0)
         return duration_A - duration_B
 
-    deadline = float(causal_clock_time(observation_deadline))
+    resolved_bounds = _clock_time_bounds(
+        observation_deadline,
+        t_A,
+        t_B,
+        time_bounds=time_bounds,
+    )
+    step = clock_time_step(resolved_bounds)
+    origin = float(resolved_bounds.min) if config.time_steps_per_window else 0.0
+    deadline = float(
+        causal_clock_time(observation_deadline, time_bounds=resolved_bounds)
+    )
     time_A = t_A.time if isinstance(t_A, SpikeSample) else t_A
     time_B = t_B.time if isinstance(t_B, SpikeSample) else t_B
-    time_A = causal_clock_time(time_A)
-    time_B = causal_clock_time(time_B)
+    time_A = causal_clock_time(time_A, time_bounds=resolved_bounds)
+    time_B = causal_clock_time(time_B, time_bounds=resolved_bounds)
     if not isinstance(time_A, torch.Tensor) and not isinstance(time_B, torch.Tensor):
-        deadline_step = round(deadline / config.time_step)
-        event_a_step = round(float(time_A) / config.time_step)
-        event_b_step = round(float(time_B) / config.time_step)
+        deadline_step = round((deadline - origin) / step)
+        event_a_step = round((float(time_A) - origin) / step)
+        event_b_step = round((float(time_B) - origin) / step)
         first_step = min(0, event_a_step, event_b_step)
         accumulator_a = 0.0
         accumulator_b = 0.0
         for step_index in range(first_step, deadline_step):
             if step_index >= event_a_step:
-                accumulator_a += config.time_step
+                accumulator_a += step
             if step_index >= event_b_step:
-                accumulator_b += config.time_step
+                accumulator_b += step
         loop_steps = max(deadline_step - first_step, 0)
         record_clock_updates("pwm", time_steps=loop_steps, elements=2)
         return (
-            round(accumulator_a / config.time_step)
-            - round(accumulator_b / config.time_step)
-        ) * config.time_step
+            round(accumulator_a / step)
+            - round(accumulator_b / step)
+        ) * step
 
     reference = time_A if isinstance(time_A, torch.Tensor) else time_B
     if not isinstance(reference, torch.Tensor):
@@ -80,8 +122,12 @@ def signed_pulse_width_duration(
     tensor_A = time_A if isinstance(time_A, torch.Tensor) else reference.new_tensor(time_A)
     tensor_B = time_B if isinstance(time_B, torch.Tensor) else reference.new_tensor(time_B)
     tensor_A, tensor_B = torch.broadcast_tensors(tensor_A, tensor_B)
-    steps_A = clock_step_indices(tensor_A).to(dtype=torch.int64)
-    steps_B = clock_step_indices(tensor_B).to(dtype=torch.int64)
+    steps_A = clock_step_indices(
+        tensor_A, time_step=step, origin=origin
+    ).to(dtype=torch.int64)
+    steps_B = clock_step_indices(
+        tensor_B, time_step=step, origin=origin
+    ).to(dtype=torch.int64)
     fired_A = (
         torch.broadcast_to(t_A.fired, tensor_A.shape)
         if isinstance(t_A, SpikeSample)
@@ -92,7 +138,7 @@ def signed_pulse_width_duration(
         if isinstance(t_B, SpikeSample)
         else torch.ones_like(tensor_B, dtype=torch.bool)
     )
-    deadline_step = round(deadline / config.time_step)
+    deadline_step = round((deadline - origin) / step)
     first_step = min(
         0,
         int(steps_A.min().item()) if steps_A.numel() else 0,
@@ -100,7 +146,7 @@ def signed_pulse_width_duration(
     )
     accumulator_A = torch.zeros_like(tensor_A)
     accumulator_B = torch.zeros_like(tensor_B)
-    step_value = tensor_A.new_tensor(config.time_step)
+    step_value = tensor_A.new_tensor(step)
     for step_index in range(first_step, deadline_step):
         accumulator_A = accumulator_A + ((steps_A <= step_index) & fired_A).to(
             tensor_A.dtype
@@ -114,13 +160,19 @@ def signed_pulse_width_duration(
         time_steps=loop_steps,
         elements=2 * tensor_A.numel(),
     )
-    return clocked_difference(accumulator_A, accumulator_B)
+    duration_bounds = TimeBounds(0.0, float(resolved_bounds.range))
+    return clocked_difference(
+        accumulator_A,
+        accumulator_B,
+        time_bounds=duration_bounds,
+    )
 
 
 def pulse_width_duration(
     t_event: torch.Tensor | float,
     *,
     observation_deadline: float,
+    time_bounds: TimeBounds | None = None,
 ) -> torch.Tensor | float:
     """Return one event-to-deadline duration under the active execution mode."""
 
@@ -132,17 +184,30 @@ def pulse_width_duration(
             if isinstance(raw_duration, torch.Tensor)
             else max(raw_duration, 0.0)
         )
-    deadline = float(causal_clock_time(observation_deadline))
-    aligned_event = causal_clock_time(t_event)
-    deadline_step = round(deadline / config.time_step)
+    resolved_bounds = _clock_time_bounds(
+        observation_deadline,
+        t_event,
+        time_bounds=time_bounds,
+    )
+    step = clock_time_step(resolved_bounds)
+    origin = float(resolved_bounds.min) if config.time_steps_per_window else 0.0
+    deadline = float(
+        causal_clock_time(observation_deadline, time_bounds=resolved_bounds)
+    )
+    aligned_event = causal_clock_time(t_event, time_bounds=resolved_bounds)
+    deadline_step = round((deadline - origin) / step)
     if isinstance(aligned_event, torch.Tensor):
-        event_steps = clock_step_indices(aligned_event).to(dtype=torch.int64)
+        event_steps = clock_step_indices(
+            aligned_event,
+            time_step=step,
+            origin=origin,
+        ).to(dtype=torch.int64)
         first_step = min(
             0,
             int(event_steps.min().item()) if event_steps.numel() else 0,
         )
         accumulator = torch.zeros_like(aligned_event)
-        step_value = accumulator.new_tensor(config.time_step)
+        step_value = accumulator.new_tensor(step)
         for step_index in range(first_step, deadline_step):
             accumulator = accumulator + (event_steps <= step_index).to(
                 accumulator.dtype
@@ -153,20 +218,24 @@ def pulse_width_duration(
             time_steps=loop_steps,
             elements=aligned_event.numel(),
         )
-        return clocked_difference(accumulator, 0.0)
+        return clocked_difference(
+            accumulator,
+            0.0,
+            time_bounds=TimeBounds(0.0, float(resolved_bounds.range)),
+        )
 
-    event_step = round(float(aligned_event) / config.time_step)
+    event_step = round((float(aligned_event) - origin) / step)
     first_step = min(0, event_step)
     accumulator = 0.0
     for step_index in range(first_step, deadline_step):
         if step_index >= event_step:
-            accumulator += config.time_step
+            accumulator += step
     record_clock_updates(
         "pwm",
         time_steps=max(deadline_step - first_step, 0),
         elements=1,
     )
-    return round(accumulator / config.time_step) * config.time_step
+    return round(accumulator / step) * step
 
 
 @check_domain
@@ -215,7 +284,16 @@ def unsigned_pulse_width_modulation_operator(
         Real,
     ):
         raise TypeError("observation_deadline must be a real scalar")
-    deadline = float(causal_clock_time(float(observation_deadline)))
+    raw_deadline = float(observation_deadline)
+    readout_bounds = _clock_time_bounds(
+        raw_deadline,
+        time_bounds=(
+            domain_t_event if isinstance(domain_t_event, TimeBounds) else None
+        ),
+    )
+    deadline = float(
+        causal_clock_time(raw_deadline, time_bounds=readout_bounds)
+    )
     if not isfinite(deadline):
         raise ValueError("observation_deadline must be finite")
 
@@ -224,12 +302,14 @@ def unsigned_pulse_width_modulation_operator(
     event_min = causal_clock_time(
         domain_t_event
         if isinstance(domain_t_event, (int, float))
-        else domain_t_event.min
+        else domain_t_event.min,
+        time_bounds=readout_bounds,
     )
     event_max = causal_clock_time(
         domain_t_event
         if isinstance(domain_t_event, (int, float))
-        else domain_t_event.max
+        else domain_t_event.max,
+        time_bounds=readout_bounds,
     )
     if deadline < float(event_max):
         raise ValueError(
@@ -242,6 +322,7 @@ def unsigned_pulse_width_modulation_operator(
     duration = pulse_width_duration(
         t_event,
         observation_deadline=deadline,
+        time_bounds=readout_bounds,
     )
     result = V * duration
 
@@ -325,19 +406,45 @@ def signed_pulse_width_modulation_operator(
     if not isfinite(deadline):
         raise ValueError("observation_deadline must be finite")
 
+    declared_time_bounds = [
+        domain
+        for domain in (domain_t_A, domain_t_B)
+        if isinstance(domain, TimeBounds)
+    ]
+    if (
+        get_clock_driven().enabled
+        and get_clock_driven().time_steps_per_window
+        and len(declared_time_bounds) == 2
+        and declared_time_bounds[0] != declared_time_bounds[1]
+    ):
+        raise ValueError(
+            "fixed steps per time window require both PWM events to share one window"
+        )
+    readout_bounds = _clock_time_bounds(
+        deadline,
+        t_A,
+        t_B,
+        time_bounds=(declared_time_bounds[0] if declared_time_bounds else None),
+    )
+    deadline = float(causal_clock_time(deadline, time_bounds=readout_bounds))
+
     # Normalize declared endpoints without reading extrema from event tensors. The
     # full declared intervals must precede the common physical observation time.
     a_min = causal_clock_time(
-        domain_t_A if isinstance(domain_t_A, (int, float)) else domain_t_A.min
+        domain_t_A if isinstance(domain_t_A, (int, float)) else domain_t_A.min,
+        time_bounds=readout_bounds,
     )
     a_max = causal_clock_time(
-        domain_t_A if isinstance(domain_t_A, (int, float)) else domain_t_A.max
+        domain_t_A if isinstance(domain_t_A, (int, float)) else domain_t_A.max,
+        time_bounds=readout_bounds,
     )
     b_min = causal_clock_time(
-        domain_t_B if isinstance(domain_t_B, (int, float)) else domain_t_B.min
+        domain_t_B if isinstance(domain_t_B, (int, float)) else domain_t_B.min,
+        time_bounds=readout_bounds,
     )
     b_max = causal_clock_time(
-        domain_t_B if isinstance(domain_t_B, (int, float)) else domain_t_B.max
+        domain_t_B if isinstance(domain_t_B, (int, float)) else domain_t_B.max,
+        time_bounds=readout_bounds,
     )
     if deadline < float(a_max) or deadline < float(b_max):
         raise ValueError(
@@ -369,6 +476,7 @@ def signed_pulse_width_modulation_operator(
         t_A,
         t_B,
         observation_deadline=deadline,
+        time_bounds=readout_bounds,
     )
     result = V * signed_duration
 
