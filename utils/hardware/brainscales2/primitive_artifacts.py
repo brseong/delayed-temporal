@@ -106,6 +106,11 @@ def _raw_payload(
             if observation.precharge_cadc is not None
             else None
         ),
+        "first_spike_time_s": (
+            observation.first_spike_time_s[trial_slice].detach().cpu()
+            if observation.first_spike_time_s is not None
+            else None
+        ),
         "metadata": observation.metadata,
     }
     return payload
@@ -212,11 +217,12 @@ def _validate_hardware_provenance(
                 f"hardware observation has no chip identifier: {observation.primitive}"
             )
         chip_identifiers.add(json.dumps(identifier, sort_keys=True))
-        expected_path = (
-            config.hagen_calibration_path
-            if observation.primitive == "psi-int"
-            else config.spiking_calibration_path
-        )
+        if observation.primitive == "psi-int":
+            expected_path = config.hagen_calibration_path
+        elif observation.primitive == "psi-ed":
+            expected_path = config.correlation_calibration_path
+        else:
+            expected_path = config.spiking_calibration_path
         expected_checksum = (
             _file_sha256(expected_path) if expected_path is not None else None
         )
@@ -280,7 +286,17 @@ def _plot_validation(
         elif observation.primitive == "phi-nl":
             prediction = parameters["offset_s"] + parameters[
                 "log_slope_s"
-            ] * observation.ideal_variable
+            ] * torch.log(
+                observation.input_code.to(torch.float64)
+                - parameters["lower_bound_code"]
+            )
+        elif observation.primitive == "psi-ed":
+            prediction = parameters["baseline_code"] + parameters[
+                "response_scale_code"
+            ] * torch.exp(
+                observation.ideal_variable.to(torch.float64)
+                / parameters["tau_effective_s"]
+            )
         else:
             prediction = parameters["offset_code"] + parameters[
                 "gain"
@@ -302,7 +318,18 @@ def _plot_validation(
     axis.set_title("held-out transfer")
 
     residual = torch.cat(residuals) if residuals else torch.empty(0)
-    axes[0, 1].hist(residual.numpy(), bins=40)
+    residual = residual[torch.isfinite(residual)]
+    if residual.numel():
+        axes[0, 1].hist(residual.numpy(), bins=40)
+    else:
+        axes[0, 1].text(
+            0.5,
+            0.5,
+            "no usable validation residuals",
+            ha="center",
+            va="center",
+            transform=axes[0, 1].transAxes,
+        )
     axes[0, 1].set_title("held-out residual histogram")
     axes[0, 1].set_xlabel(observation.output_kind)
 
@@ -328,6 +355,7 @@ def _plot_validation(
 
     failure = (~observation.delivered).to(torch.float64).mean(dim=(0, 2))
     saturation = observation.saturated.to(torch.float64).mean(dim=(0, 2))
+    multiple = (observation.spike_count > 1).to(torch.float64).mean(dim=(0, 2))
     figure, axis = plt.subplots(figsize=(7.0, 4.5))
     axis.plot(observation.input_code, failure, marker="o", label="miss rate")
     axis.plot(
@@ -336,6 +364,16 @@ def _plot_validation(
         marker="o",
         label="saturation rate",
     )
+    if (
+        observation.output_kind == "spike-time-s"
+        or observation.first_spike_time_s is not None
+    ):
+        axis.plot(
+            observation.input_code,
+            multiple,
+            marker="o",
+            label="multiple spike rate",
+        )
     axis.set_xlabel("input code")
     axis.set_ylabel("rate")
     axis.set_ylim(-0.02, 1.02)
@@ -369,6 +407,7 @@ def write_primitive_noise_artifacts(
         stage_dir = output_dir / key
         stage_dir.mkdir(parents=True, exist_ok=True)
         _write_rows(stage_dir / "transfer.csv", validation.transfer_rows)
+        _write_rows(stage_dir / "moments.csv", validation.moment_rows)
         _write_rows(stage_dir / "device_stats.csv", validation.device_statistics)
         _write_json(stage_dir / "noise.json", validation.noise)
         _write_json(stage_dir / "validation.json", _validation_summary(validation))
@@ -382,6 +421,7 @@ def write_primitive_noise_artifacts(
         "interpretation": "independent-marginal",
         "replicas_are_pooled": False,
         "transformer_forward_included": False,
+        "multiple_spike_handling": "first-spike-time",
         "config": config.to_manifest_dict(),
         "environment": environment or {},
         "raw_index": raw_index,
@@ -425,11 +465,24 @@ def load_primitive_observations(
             raise ValueError(f"primitive split is incomplete: {primitive}/{stage}")
         calibration = splits["calibration"]
         validation = splits["validation"]
-        expected_coordinates = (
-            tuple(range(config.device_count))
-            if primitive == "psi-int"
-            else config.physical_coordinates
-        )
+        if primitive == "psi-int":
+            selected = tuple(
+                calibration.get("metadata", {}).get(
+                    "selected_output_indices", range(config.device_count)
+                )
+            )
+            if (
+                len(selected) != config.device_count
+                or len(set(selected)) != config.device_count
+                or any(
+                    index < 0 or index >= config.hagen_candidate_count
+                    for index in selected
+                )
+            ):
+                raise ValueError("raw Hagen output selection is invalid")
+            expected_coordinates = selected
+        else:
+            expected_coordinates = config.physical_coordinates
         if tuple(calibration["physical_coordinates"]) != expected_coordinates:
             raise ValueError("raw primitive coordinates differ from configuration")
         if calibration["input_code"].tolist() != validation["input_code"].tolist():
@@ -463,6 +516,9 @@ def load_primitive_observations(
                 auxiliary_input=calibration.get("auxiliary_input"),
                 baseline=optional_concatenate("baseline"),
                 precharge_cadc=optional_concatenate("precharge_cadc"),
+                first_spike_time_s=optional_concatenate(
+                    "first_spike_time_s"
+                ),
                 metadata=calibration.get("metadata", {}),
             )
         )

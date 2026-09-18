@@ -386,23 +386,71 @@ Before either hardware path, the shared-client handshake has bounded retries, wh
 
 ## Independent Primitive Noise Characterization
 
-The hardware characterization measures four primitive transfer functions independently and does not use logical neuron pooling.
+The hardware characterization measures five primitive transfer functions independently and does not use logical neuron pooling.
 
 ### Physical acquisition boundary
 
 Sixteen quadrant-balanced physical circuits expose repeated-trial variation within each circuit and fixed-pattern parameter differences between circuits.
 
+The formal 16-circuit placement uses coordinates selected by qualification on the recorded chip: `(3, 11, 13, 1, 134, 141, 128, 130, 273, 261, 262, 274, 390, 386, 388, 392)`. The list is valid only with the recorded chip and calibration provenance; other chips require a new coordinate qualification.
+
+Coordinate qualification permits missed spikes because they are part of the measured noise distribution. Every fitted code must retain calibration and validation observations. First spike fitting uses the first recorded spike whenever at least one spike is present, while the operating point requires a rate of trials with multiple spikes no greater than 0.1%. The hardware sweep preserves four selected circuits per quadrant.
+
 The $\phi_{\mathrm{NP}}$ acquisition first measures configured initial membrane states under a synchronized constant-current ramp. Only a passing static stage enables synaptic precharge, CADC confirmation, and a second ramp acquisition. A static-only result is diagnostic and cannot validate the primitive.
+
+The static ramp acquisition may use either one shared 32-entry reset lookup or one 32-entry lookup for each physical neuron. Every lookup is fitted only from calibration data; validation data cannot influence it. The selected reset codes and source artifact are recorded.
+
+Dynamic precharge records spikes through the event channel and membrane potential through the dense recorder. It avoids the default analog recorder because the installed PyNN backend limits that recorder to two locations.
+
+The dynamic operating point records the number of coincident precharge input channels. Increasing this multiplicity enlarges the measured potential span without changing the UInt5 code or synaptic weight range.
+
+Every input code and physical neuron must retain a CADC precharge observation. Its rank statistic remains diagnostic because sparse absolute CADC samples can cross the signed readout boundary; dynamic acceptance uses the independently recorded first-spike transfer.
+
+The hardware adapter resolves input spike sources and static synapses from the namespaces exported by the installed backend instead of assuming that every component is also exported at module level.
+
+Each input point and physical circuit retains one measured precharge diagnostic from the first acquisition window. Unmeasured trial entries remain nonfinite and are never copied from the recorded diagnostic.
 
 The $\phi_{\mathrm{NL}}$ acquisition reuses the validated synaptic precharge path and measures first-spike time after a fixed exponential synaptic input. The zero code is outside its positive fit domain.
 
+The nonlinear primitive realizes its fixed exponential drive with eight coincident physical input channels at weight 63. The input multiplicity is recorded and remains constant across potential codes.
+
 The $\psi_{\mathrm{Int}}$ acquisition measures bias-free Hagen PWM integration over every UInt5 duration and signed drives $\{-2,-1,1,2\}$. `Linear.avg` remains one, so hardware neurons are not averaged.
+
+The Hagen operating point uses 1024 sends and maps 128 candidate outputs. Calibration residual normalized by fitted span selects 16 output indices; validation observations are not used for selection, and selected outputs are not averaged.
+
+Formal Hagen collection partitions repetitions into bounded input chunks inside one hardware session. Candidate observations are concatenated in trial order before calibration selects output indices, and chunk boundaries are recorded.
 
 The public Hagen `Linear` API does not expose an atomic neuron placement constraint. Integration artifacts therefore identify each circuit by its stable output index within the mapped layer and label that coordinate meaning explicitly; they do not reuse spiking neuron coordinates.
 
 The $\psi_{\mathrm{NE}}$ acquisition records a non-spiking membrane CADC value at a fixed observation time after sweeping the input-spike time. Paired quiet trials provide the baseline; any output spike rejects the operating point.
 
+The collector reads the membrane at $40\,\mu\mathrm{s}$ because the measured response peaked about $10\,\mu\mathrm{s}$ after the input event. This keeps every $5$--$25\,\mu\mathrm{s}$ input on the decay branch before the $60\,\mu\mathrm{s}$ deadline. The runner exposes this observation time so the operating point remains explicit.
+
+The $\psi_{\mathrm{NE}}$ operating point uses two coincident input channels. Paired quiet observations are subtracted before fitting, while their raw values remain stored so saturation and baseline variation stay observable.
+
+Formal $\psi_{\mathrm{NE}}$ collection partitions repetitions into bounded chunks while preserving one hardware session. The result tensors are concatenated in trial order, and every chunk boundary is recorded.
+
+The $\psi_{\mathrm{ED}}$ acquisition measures the exponential-difference response with the BrainScaleS-2 causal correlation sensor. It does not substitute a composed host calculation for the physical sensor response.
+
+For each time difference $\delta\in[-10,10]$ microseconds, the pre-event separation is $15\,\mu\mathrm{s}-\delta$. The target event is scheduled at $30\,\mu\mathrm{s}$, the causal correlation code is read at $58\,\mu\mathrm{s}$, and target events after the $60\,\mu\mathrm{s}$ deadline are misses.
+
+Alternating quiet and stimulated periods measure the difference between paired correlation codes. A one-millisecond guard lets the plasticity processor read and reset the sensor between periods without changing the event deadline.
+
+The $\psi_{\mathrm{ED}}$ worker preserves the target neuron's first-spike timestamp and total spike count. It applies the explicit correlation calibration, records one warmup period, and splits formal collection into bounded child processes with fingerprinted retry caches.
+
 The installed `pynn_brainscales.brainscales2` timed constant-current playback owns the NP ramp. If that capability is unavailable, the runner stops instead of replacing the ramp with a spike train or a host-mediated Hagen transform.
+
+PyNN schedules and reports wall-clock milliseconds. The acquisition converts the 5--25 us physical input window to milliseconds before playback and converts recorded timestamps back to seconds exactly once.
+
+Each measured PyNN trial is preceded by a hardware reset pulse. One warmup trial is discarded so startup state does not enter the transfer fit, while low-level writes remain limited to backend reset control and preserve PyNN spike routing.
+
+Formal PyNN collection partitions repeated trials for each input code into bounded acquisitions. Every acquisition discards its own warmup trial, and results are concatenated in trial order with recorded chunk boundaries.
+
+Formal PyNN collection isolates at most 32 repetitions of one input code in a child process. Each child retains hardware acquisitions of eight repetitions and returns raw timestamps and spike counts. Process exit bounds native memory use within the notebook memory limit.
+
+Each completed child process result is written to a fingerprinted cache before the next hardware call. A retry reuses only entries whose configuration, input code, and trial bounds match exactly.
+
+PyNN acquisition uses a deterministic seeded trial assignment that distributes calibration and validation observations across acquisition time. Raw tensors still store the complete calibration split before the validation split, and metadata records the original acquisition indices.
 
 ### Fit and result boundary
 
@@ -410,11 +458,17 @@ Each circuit is fitted on 128 calibration repetitions and evaluated with fixed p
 
 Per-circuit temporal sigma comes from residuals around that circuit's calibration transfer. Circuit offset, gain, slope, and effective time-constant differences remain separate fixed-pattern statistics. No circuit outputs are averaged.
 
-The NP fit is linear in potential code, the NL fit is linear in log potential, the integration fit is linear in signed duration, and the exponential-response fit searches the effective time constant while fitting baseline and response scale.
+Normalized root mean square error evaluates the mean at each validation input against the transfer fitted on the calibration split. Temporal sigma remains the standard deviation of individual calibration residuals, so variation across repeated trials is reported without being counted twice as transfer error.
 
-Missed spikes remain missing values and are not replaced by the deadline. CADC and Int8 saturation are separate flags. Exactly-one-spike, premature-spike, monotonicity, normalized-RMSE, saturation, and parameter-drift gates determine validation.
+The NP fit is linear in potential code. The NL calibration jointly searches $V_{\mathrm{lb}}$ and fits time linearly against $\log(V-V_{\mathrm{lb}})$, then holds both fixed for validation. The integration fit is linear in signed duration. The NE and ED fits search their effective time constants while fitting baseline and response scale.
 
-[[scripts/evaluation/brainscales2_primitive_noise.py#run]] writes checksum-indexed raw split chunks, per-stage transfer and device statistics, figures, and one `primitive_noise_calibration.json`. The combined record validates only when NP passes both stages and the other three primitives pass held-out validation.
+The $\phi_{\mathrm{NP}}$ monotonicity gate uses Spearman rank correlation between input code and decreasing validation mean first spike time. The adjacent pair ordering fraction remains a diagnostic because temporal jitter can reverse neighboring measured means without breaking the global transfer order.
+
+Missed spikes remain missing values and are not replaced by the deadline. Every fitted input and circuit must retain calibration and validation observations, and the aggregate deadline-miss rate must not exceed 1%. First spike fitting retains trials with additional spikes, reports their rate separately, and requires that rate to be no greater than 0.1%. CADC and Int8 saturation are separate flags. Monotonicity is an acceptance gate only for $\phi_{\mathrm{NP}}$, whose contract requires ordered conversion from potential to time. Other primitives report monotonicity as a diagnostic and apply their declared transfer, saturation, parameter drift, observation-availability, and output spike gates.
+
+An observation with too few usable samples for one physical circuit remains writable as raw data. Its fit is marked unavailable and validation fails instead of aborting artifact creation.
+
+[[scripts/evaluation/brainscales2_primitive_noise.py#run]] writes checksum-indexed raw split chunks, per-stage transfer, moments, and device statistics, figures, and one `primitive_noise_calibration.json`. Each `moments.csv` records calibration and validation sample count, mean, variance, miss rate, rate of trials containing more than one spike, and saturation rate for every input and circuit. The combined record validates only when NP passes both stages and the other four primitives pass held-out validation.
 
 The resulting distributions are independent primitive marginals for later sensitivity analysis. They do not represent the joint error distribution of a composed BSS-2 circuit and do not include Transformer forward evaluation.
 
@@ -424,7 +478,7 @@ These tests protect calibration isolation, event semantics, artifact integrity, 
 
 ### Synthetic transfer recovery
 
-Synthetic observations must recover the four transfer parameters and nonzero within-device noise scales within declared tolerances.
+Synthetic observations must recover the five transfer parameters and nonzero within-device noise scales within declared tolerances.
 
 ### Held-out validation isolation
 
@@ -436,12 +490,74 @@ Device offsets with no repeated-trial noise must produce fixed-pattern spread wi
 
 ### Miss and saturation semantics
 
-Missing spikes remain non-finite, multiple spikes and premature membrane-output spikes fail their gates, and saturation remains distinct from missing delivery.
+Missing spikes remain non-finite, while first spike values remain usable when additional spikes occur.
+
+Both data splits must retain observations at every fitted point, and the aggregate rate of trials with additional spikes must not exceed 0.1%. Any premature membrane-output spike fails its gate, while saturation remains distinct from missing delivery.
+
+### Rank monotonicity gate
+
+Global rank order determines whether the validation transfer retains the declared direction.
+
+The adjacent pair ordering fraction remains diagnostic and may fall below the gate when temporal jitter reverses only neighboring measured means.
+
+### Segmented PyNN recording decode
+
+Segmented PyNN playback can return one spike train per physical neuron for each segment. The decoder groups timestamps by `source_index` before computing each trial's first spike time and count.
+
+### Dynamic recording selection
+
+The recording setup must keep spike recording independent from dense membrane recording and must select the dense recording device explicitly for every dynamic precharge acquisition.
+
+### Segmented dense recording decode
+
+Dense recording chunks must be grouped by source identifier before the sample nearest the requested diagnostic time is selected for each physical circuit.
+
+### Sparse precharge evidence
+
+Validation requires at least one finite precharge diagnostic for every input point and physical circuit. The precharge rank statistic remains a reported diagnostic rather than a transfer gate.
+
+### Installed component resolution
+
+Component resolution must accept the installed nested namespaces and fail clearly when either the spike source or static synapse type is absent.
+
+### Correlation recording decode
+
+The correlation decoder must preserve one causal sensor code per recorded period and physical circuit.
+
+It rejects missing periods, unexpected plastic rows, and a circuit dimension that differs from the fixed placement.
+
+### Correlation worker boundary
+
+The correlation backend must concatenate bounded child-process results before applying the seeded calibration and validation split.
+
+It preserves first-spike timestamps beyond the deadline as raw evidence, masks their primitive outputs as misses, and retains total spike counts without averaging circuits.
+
+### Nonlinear drive configuration
+
+The nonlinear drive configuration must reject a nonpositive input multiplicity and preserve its resolved value in the hardware metadata.
+
+Verification also checks positive PyNN acquisition and process sizes, manifest preservation, deterministic trial assignment, and child process dispatch.
+
+### Exponential response observation time
+
+The runner must expose and preserve the $\psi_{\mathrm{NE}}$ membrane observation time, input multiplicity, and positive chunk size. Verification checks event construction with two input channels and paired baseline subtraction.
+
+### Hagen output qualification
+
+Verification checks that Hagen output selection uses only calibration, returns unique indices within the candidate range, and records candidate scores. It also checks that the Hagen chunk size is positive and preserved in the manifest.
+
+### Insufficient fit preservation
+
+An observation with too few usable samples for one physical circuit remains writable as raw data. Its fit is marked unavailable and validation fails instead of aborting artifact creation.
 
 ### NP stage gate
 
-A static-only NP artifact is diagnostic-only and cannot enter the validated four-primitive calibration.
+A static-only NP artifact is diagnostic-only and cannot enter the validated five-primitive calibration.
 
 ### Artifact integrity
 
 Raw chunks must round-trip with their shapes and masks, reject checksum changes, and reject duplicate or out-of-range physical coordinates.
+
+### Validated NP placement
+
+The default 16-circuit placement must retain the coordinate order that passed the full-code hardware sweep and must allocate four unique circuits to each quadrant.

@@ -534,6 +534,7 @@ class HagenPWMBackend:
                     ),
                     "calibration_sha256": file_sha256(self.config.calibration_path),
                     "avg": avg,
+                    "num_sends": int(layer.num_sends),
                     "bias": False,
                     "input_shape": list(value.shape),
                     "weight_shape": list(weight.shape),
