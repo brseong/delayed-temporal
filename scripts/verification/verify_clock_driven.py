@@ -385,12 +385,12 @@ def verify_contiguous_evaluation_shards() -> None:
 # @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Composed Encoder Statistics]]
 def verify_composed_encoder_statistics() -> None:
     log = """GPU model: NVIDIA RTX A6000
-Evaluation metadata — model: checkpoint, dataset: imagenet-1k, split: validation, samples: 125, theta: 20.0, precision: float64, source: disk:/tmp/validation_first_500, fingerprint: abcdef
-Evaluation shard — index: 0, count: 4, start: 0, stop: 125, population: 500
-Correct: 3
-Evaluated samples: 125
+Evaluation metadata — model: checkpoint, dataset: imagenet-1k, split: validation, samples: 62, theta: 20.0, precision: float64, source: disk:/tmp/validation_first_500, fingerprint: abcdef
+Evaluation shard — index: 4, count: 8, start: 252, stop: 314, population: 500
+Correct: 52
+Evaluated samples: 62
 Prediction SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-Accuracy: 0.024
+Accuracy: 0.83870968
 ClockUpdates[encoder] calls=1, time_steps=1, element_updates=1
 ClockUpdates[exponential] calls=1, time_steps=1, element_updates=1
 ClockUpdates[pwm] calls=1, time_steps=1, element_updates=1
@@ -403,10 +403,10 @@ Clock[gelu.cubic.log_positive] events=1, rounded_events=1, mean_absolute_error=0
         path.write_text(log)
         result = parse_result(
             path,
-            run_id="dt_1_shard_00",
+            run_id="dt_1_shard_04",
             time_step=1.0,
-            shard_index=0,
-            shard_count=4,
+            shard_index=4,
+            shard_count=8,
             expected_population=500,
             evaluation_dataset_path=Path("/tmp/validation_first_500"),
             gpu=4,
@@ -419,6 +419,7 @@ Clock[gelu.cubic.log_positive] events=1, rounded_events=1, mean_absolute_error=0
         "neg_log_transform",
         "gelu.cubic.log_positive",
     }
+    assert result["accuracy"] == 52 / 62
 
 
 if __name__ == "__main__":

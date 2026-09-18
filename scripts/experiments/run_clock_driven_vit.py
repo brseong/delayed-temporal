@@ -458,8 +458,12 @@ def parse_result(
         or logged_shard["stop"] - logged_shard["start"] != samples
     ):
         raise ValueError("clock-driven evaluation shard identity differs")
-    accuracy = float(_single(r"^Accuracy: ([0-9.]+)$", text, "accuracy"))
-    if not math.isfinite(accuracy) or accuracy != correct / samples:
+    logged_accuracy = float(_single(r"^Accuracy: ([0-9.]+)$", text, "accuracy"))
+    accuracy = correct / samples
+    if (
+        not math.isfinite(logged_accuracy)
+        or logged_accuracy != float(f"{accuracy:.8f}")
+    ):
         raise ValueError("clock-driven accuracy does not match correct/total")
     prediction_sha256 = _single(
         r"^Prediction SHA256: ([0-9a-f]{64})$", text, "prediction digest"

@@ -26,6 +26,8 @@ A source-matched frozen calibration table and the selected threshold remain unch
 
 Each shard records the time bin, task counts, prediction digest, encoder rounding, code-window lengths, and executed state-update counts. The aggregate preserves all shard records and reports one accuracy over exactly 5,000 images.
 
+The evaluator prints accuracy to eight decimal places. Result validation compares the serialized value at that precision and stores the exact ratio of correct predictions to evaluated samples.
+
 Completed tag `vit_base_clock_driven_imagenet5k_theta20_float64_v2` used execution source `0c5c394`. The continuous evaluation obtained 4,300/5,000 (86.00%), while clock-driven execution with time bin 1.0 obtained 3/5,000 (0.06%).
 
 This result measures one coarse time bin and does not establish behavior at finer time bins. `verification.json` preserves the complete shard coverage, identities, hashes, and positive encoder, PWM, and exponential update counts.
