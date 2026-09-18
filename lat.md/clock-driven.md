@@ -54,15 +54,21 @@ The verification record confirms 11 conditions, 231 shard runs, exact 500 image 
 
 The equal step benchmark uses the first 500 images of the fixed validation ordering and evaluates 64, 128, 256, 512, 1024, and 2048 time steps per time window together with one continuous reference.
 
-Every condition uses 21 contiguous shards and the same frozen calibration table, checkpoint, preprocessing, threshold, and disabled noise settings as the completed fine time-step sweep.
+Completed tag `vit_base_clock_driven_window_steps_imagenet500_theta20_float64_v1` used execution source `2869ef4`, the frozen threshold 20 calibration table, float64 arithmetic, and the first 500 images of the fixed validation ordering. Gaussian timing noise and other perturbations were disabled.
 
-For this sweep schedule, the local worker owns 0.01 shards 0 through 17 and shard 19 on devices 3 through 7, while cluster workers own shards 18 and 20. The cluster also owns time bins 0.02 through 0.10. The supervisor stops the local controller after every local shard is complete and imports the two cluster shards only after identity, log, and coverage validation.
+All six discrete-time conditions ran on the same accelerator model recorded in every shard. Each condition used 21 balanced contiguous shards, and every time window at every recorded site used the requested interval count. No result from another accelerator family was mixed into this campaign.
 
-The superseded coarse campaign completed its continuous reference and six of eight 0.1 shards before the requested range changed. Its partial records remain preserved and are not combined with the fine sweep.
+The continuous reference obtained 432/500 (86.4%). The 64, 128, 256, 512, 1024, and 2048 time-step conditions obtained 1/500 (0.2%), 0/500 (0.0%), 0/500 (0.0%), 321/500 (64.2%), 421/500 (84.2%), and 422/500 (84.4%), respectively.
 
-The default local device policy remains devices 4 through 7. This campaign uses an explicit override that permits devices 0 through 7, while two consecutive idle observations exclude occupied devices before launch. The worker pool is then fixed: devices that become idle later are not admitted because unscheduled external work can reclaim them between polling and launch. Restarting from complete logs is the supported way to change the pool.
+Accuracy collapsed at 64 through 256 time steps, recovered partially at 512, and reached within 2.2 and 2.0 percentage points of the continuous reference at 1024 and 2048 time steps. The 2048 result exceeds the 1024 result by 0.2 percentage points; both observations are retained without monotonicity assumptions.
 
-The v1 attempt was rejected before producing a time bin result because repeated 0.1 step accumulation caused an aligned duration to fail the strict numerical alignment check. The v2 execution admits only bounded arithmetic drift accumulated by explicit state updates and still rejects a displacement of one quarter of a bin. It shares the earlier calibration table only after confirming that every changed path is unable to affect calibration. Runtime validation substitutes the recorded source revision and the calibration table's recorded ViT evaluator digest, while requiring every other metadata field to match exactly.
+The verification record confirms seven conditions, 147 shard runs, exact 500-image coverage per condition, one source and calibration identity, disabled timing noise, and the requested minimum and maximum interval count at every recorded site. Encoder observation uses one more clock edge than the interval count, while pulse-width modulation and exponential readout execute exactly the requested count per call.
+
+The authoritative outputs are `summary.csv`, `summary.json`, `raw_shards.csv`, and `verification.json` under `artifacts/logs/clock_driven/vit_base_clock_driven_window_steps_imagenet500_theta20_float64_v1/`. The generated figure files are under its `figures/` directory.
+
+The first attempt for this sweep was rejected because subtracting a large nonzero time-window origin exposed floating-point cancellation in an otherwise aligned duration. The completed execution admits only bounded arithmetic drift accumulated by explicit state updates and origin subtraction, while still rejecting a displacement of one quarter of a time step.
+
+It shares the earlier calibration table only after confirming that every changed path is unable to affect calibration. Runtime validation substitutes the recorded source revision and the calibration table's recorded ViT evaluator digest, while requiring every other metadata field to match exactly.
 
 Changes inside a shared temporal operator are accepted for calibration reuse only when the complete file patch matches its approved digest and the continuous execution branch remains unchanged. The execution runner also verifies the table's ViT evaluator digest before it enables either compatibility value.
 
