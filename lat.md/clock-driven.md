@@ -38,7 +38,7 @@ This result measures one coarse time bin and does not establish behavior at fine
 
 The maintained fine sweep evaluates one continuous reference and time bins 0.01, 0.02, ..., 0.10 on the first 500 images of the fixed validation ordering. The population is divided into 21 balanced contiguous shards, and every shard contains at most 24 images. Each aggregate is accepted only after exact 500-image coverage and identity validation.
 
-For this sweep schedule, the local worker owns 0.01 shards 0 through 19 on devices 3 through 7, and one cluster worker owns shard 20. The cluster also owns time bins 0.02 through 0.10. The supervisor stops the local controller after its prefix is complete and imports shard 20 only after identity, log, and coverage validation.
+For this sweep schedule, the local worker owns 0.01 shards 0 through 17 and shard 19 on devices 3 through 7, while cluster workers own shards 18 and 20. The cluster also owns time bins 0.02 through 0.10. The supervisor stops the local controller after every local shard is complete and imports the two cluster shards only after identity, log, and coverage validation.
 
 The superseded coarse campaign completed its continuous reference and six of eight 0.1 shards before the requested range changed. Its partial records remain preserved and are not combined with the fine sweep.
 
