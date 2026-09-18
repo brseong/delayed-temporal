@@ -20,7 +20,7 @@ A second clock configuration divides every declared time window into the same re
 
 The encoder observes both endpoints, while PWM and exponential readout execute one state update for every interval. The iteration count therefore remains independent of the physical time-window length.
 
-Clock index recovery admits bounded arithmetic drift accumulated by repeated explicit state updates. The tolerance remains below one quarter of a bin, so a materially unaligned duration is rejected.
+Clock index recovery accounts for dtype roundoff from both repeated state updates and subtracting a nonzero time window origin. The allowance scales with the represented coordinate magnitude and remains capped at one quarter of a time step, so a materially unaligned duration is rejected.
 
 Durations relative to a deadline or offset are formed by subtracting their integer clock indices and converting the resulting index once. This preserves alignment when two large aligned times cancel to a small duration.
 

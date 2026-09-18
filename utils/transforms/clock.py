@@ -369,13 +369,24 @@ def clock_step_indices(
     nearest = torch.round(quotient)
     # An explicit PWM accumulator adds the same floating-point step once per
     # edge, so its roundoff can grow quadratically in normalized step count.
-    # Admit that bounded arithmetic drift but never a quarter-step displacement.
+    # A duration reconstructed after subtracting a nonzero window origin also
+    # carries cancellation error proportional to the absolute clock coordinate.
+    # Admit both bounded effects but never more than a quarter-step displacement.
     magnitude = torch.maximum(quotient.abs(), torch.ones_like(quotient))
+    dtype_epsilon = torch.finfo(value.dtype).eps
     accumulated_roundoff = (
-        64.0 * torch.finfo(value.dtype).eps * magnitude.square()
+        64.0 * dtype_epsilon * magnitude.square()
+    )
+    coordinate_magnitude = torch.maximum(
+        torch.maximum(value.abs(), value.new_tensor(abs(origin)))
+        / value.new_tensor(time_step),
+        torch.ones_like(value),
+    )
+    coordinate_roundoff = (
+        8.0 * dtype_epsilon * coordinate_magnitude
     )
     tolerance = torch.minimum(
-        accumulated_roundoff,
+        torch.maximum(accumulated_roundoff, coordinate_roundoff),
         quotient.new_full((), 0.25),
     )
     error = (quotient - nearest).abs()

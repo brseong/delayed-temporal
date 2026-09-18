@@ -126,6 +126,28 @@ def verify_fixed_steps_per_time_window() -> None:
         assert stats["maximum_window_steps"] == steps
         assert get_clock_update_stats()["encoder"]["time_steps"] == steps + 1
 
+    for origin, steps in (
+        (-43.44096154913599, 512),
+        (-43.48346738235432, 2048),
+    ):
+        step = -origin / steps
+        aligned = torch.tensor(origin + step, dtype=torch.float64)
+        assert clock_step_indices(
+            aligned,
+            time_step=step,
+            origin=origin,
+        ).item() == 1
+        try:
+            clock_step_indices(
+                torch.tensor(origin + 1.01 * step, dtype=torch.float64),
+                time_step=step,
+                origin=origin,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("material fixed-window misalignment was accepted")
+
     set_clock_driven(enabled=True, time_steps_per_window=4)
     bounds = TimeBounds(0.0, 8.0)
     duration = signed_pulse_width_duration(
