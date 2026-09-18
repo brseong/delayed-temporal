@@ -113,7 +113,7 @@ def verify_dynamic_products() -> None:
     values = torch.linspace(-3.0, 3.0, 53, dtype=torch.float64)
     domain = PotentialBounds(-3.0, 3.0)
     variants = (
-        (functions, functions.gelu_approximation, 3),
+        (functions, functions.gelu_approximation, 1),
         (functions, functions.gelu_approximation_sigmoid, 1),
         (cubic, cubic.gelu_with_phi_nl_psi_ed_cube, 1),
     )

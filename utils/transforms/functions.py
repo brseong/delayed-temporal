@@ -879,6 +879,8 @@ def _tanh_sigmoid_gate(
 # Rounded below the tanh approximation's minimum (-0.170040750571254...).
 # This is an enforced output limit, including when timing noise is enabled.
 GELU_OUTPUT_MIN = -0.170041
+GELU_CUBIC_MAGNITUDE_FLOOR = 1.0e-5
+GELU_CUBIC_IMPLEMENTATION = "phi_nl_psi_ed_v1"
 
 # Version 3 retains theta as the LayerNorm logarithmic input upper endpoint.
 # Reject calibration collected with the previous theta - clip_margin maximum.
@@ -961,6 +963,127 @@ def clamp_gelu_output(
     )
 
 
+def gelu_cubic_power_operator(
+    input_value: torch.Tensor,
+    domain: PotentialBounds,
+    *,
+    tau_s: float,
+    theta: float,
+    magnitude_floor: float = GELU_CUBIC_MAGNITUDE_FLOOR,
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Construct the signed GELU cubic with logarithmic encoding and decoding.
+
+    Positive and negative magnitudes use ``neg_log_transform`` at ``3 * tau_s``.
+    Exponential-difference decoding at ``tau_s`` therefore returns each magnitude
+    cubed relative to one shared upper-endpoint reference. A fixed receiving gain
+    restores the potential scale before the two signed branches are subtracted.
+    """
+    tau_value = float(tau_s)
+    theta_value = float(theta)
+    floor_value = float(magnitude_floor)
+    if not isfinite(tau_value) or tau_value <= 0.0:
+        raise ValueError("tau_s must be finite and positive")
+    if not isfinite(theta_value) or theta_value <= 0.0:
+        raise ValueError("theta must be finite and positive")
+    if not isfinite(floor_value) or floor_value <= 0.0:
+        raise ValueError("magnitude_floor must be finite and positive")
+
+    magnitude_upper = min(
+        max(abs(float(domain.min)), abs(float(domain.max))),
+        theta_value,
+    )
+    if magnitude_upper <= floor_value:
+        raise ValueError("GELU magnitude domain must exceed magnitude_floor")
+
+    input_clamped = domain.clamp(input_value, name="gelu_phi_nl_x")
+    magnitude_domain = PotentialBounds(floor_value, magnitude_upper)
+    positive_magnitude = input_clamped.clamp(min=0.0, max=magnitude_upper)
+    negative_magnitude = (-input_clamped).clamp(min=0.0, max=magnitude_upper)
+    positive_active = positive_magnitude >= floor_value
+    negative_active = negative_magnitude >= floor_value
+    positive_carrier = magnitude_domain.clamp(
+        positive_magnitude,
+        name="gelu_phi_nl_positive_carrier",
+    )
+    negative_carrier = magnitude_domain.clamp(
+        negative_magnitude,
+        name="gelu_phi_nl_negative_carrier",
+    )
+
+    encoder_tau = 3.0 * tau_value
+    gaussian_enabled = get_gaussian_time_noise().enabled
+    encoder_kwargs: dict[str, object] = {}
+    if gaussian_enabled:
+        encoder_kwargs["return_spike_sample"] = True
+
+    positive_time = neg_log_transform(
+        positive_carrier,
+        magnitude_domain,
+        tau_s=encoder_tau,
+        noise_site="gelu.cubic.log_positive",
+        **encoder_kwargs,
+    )
+    negative_time = neg_log_transform(
+        negative_carrier,
+        magnitude_domain,
+        tau_s=encoder_tau,
+        noise_site="gelu.cubic.log_negative",
+        **encoder_kwargs,
+    )
+    reference_time = neg_log_transform(
+        input_value.new_tensor(magnitude_upper),
+        magnitude_domain,
+        tau_s=encoder_tau,
+        noise_site="gelu.cubic.log_reference",
+        **encoder_kwargs,
+    )
+    if gaussian_enabled:
+        if not all(
+            isinstance(event, SpikeSample)
+            for event in (positive_time, negative_time, reference_time)
+        ):
+            raise RuntimeError("Gaussian GELU cubic encoders must return SpikeSample")
+        time_domain = positive_time.domain
+        negative_time_domain = negative_time.domain
+        reference_time_domain = reference_time.domain
+    else:
+        positive_time, time_domain = positive_time
+        negative_time, negative_time_domain = negative_time
+        reference_time, reference_time_domain = reference_time
+    if negative_time_domain != time_domain or reference_time_domain != time_domain:
+        raise RuntimeError("GELU cubic log encoders require one shared time domain")
+
+    positive_normalized, _ = exponential_difference_operator(
+        positive_time,
+        time_domain,
+        reference_time,
+        reference_time_domain,
+        tau_s=tau_value,
+    )
+    negative_normalized, _ = exponential_difference_operator(
+        negative_time,
+        negative_time_domain,
+        reference_time,
+        reference_time_domain,
+        tau_s=tau_value,
+    )
+    unit_domain = PotentialBounds(0.0, 1.0)
+    positive_normalized = torch.where(
+        positive_active,
+        unit_domain.clamp(positive_normalized, name="gelu_phi_nl_positive_cube"),
+        torch.zeros_like(positive_normalized),
+    )
+    negative_normalized = torch.where(
+        negative_active,
+        unit_domain.clamp(negative_normalized, name="gelu_phi_nl_negative_cube"),
+        torch.zeros_like(negative_normalized),
+    )
+
+    cube_domain = PotentialBounds(-(magnitude_upper ** 3), magnitude_upper ** 3)
+    cube = magnitude_upper ** 3 * (positive_normalized - negative_normalized)
+    return cube_domain.clamp(cube, name="gelu_phi_nl_cube"), cube_domain
+
+
 @check_domain
 def gelu_approximation(
     input_value: Float[torch.Tensor, "*batch dims"],
@@ -968,6 +1091,7 @@ def gelu_approximation(
     *,
     tau_s: float = 1.0,
     theta: float = 400.0,
+    magnitude_floor: float = GELU_CUBIC_MAGNITUDE_FLOOR,
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Approximate GELU with the reduced cubic-tanh TTFS composition.
@@ -983,17 +1107,24 @@ def gelu_approximation(
         domain: Fixed signed input interval, optionally supplied by layer-wise
             calibration before this function is called.
         tau_s: Positive physical time scale; matched input scaling preserves tanh.
-        theta: Symmetric identity-code rail used by multiplication.
+        theta: Upper magnitude supported by the cubic logarithmic encoder and
+            symmetric identity-code interval used by the final multiplication.
+        magnitude_floor: Positive carrier floor for the signed cubic branches.
 
     Returns:
         The composed GELU approximation clamped to its fixed output domain.
     """
     input_clamped = domain.clamp(input_value, name="gelu_x")
 
-    # x^2 and x^3 via f_M
-    x2, domain_x2 = multiplication_operator(input_clamped, domain, input_clamped, domain, theta)
-    x2, domain_x2 = clamp_gelu_square_output(x2, domain, theta=theta)
-    x3, domain_x3 = multiplication_operator(x2, domain_x2, input_clamped, domain, theta)
+    # The shared production path realizes x^3 through the logarithmic power
+    # composition. Repeated multiplication remains only as an analysis baseline.
+    x3, domain_x3 = gelu_cubic_power_operator(
+        input_clamped,
+        domain,
+        tau_s=tau_s,
+        theta=theta,
+        magnitude_floor=magnitude_floor,
+    )
 
     # Fixed coefficients use synaptic scaling without another encoded operand.
     x3_scaled, domain_x3_scaled = _constant_synaptic_scale(

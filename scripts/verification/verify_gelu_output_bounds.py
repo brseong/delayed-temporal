@@ -36,7 +36,7 @@ def _variants():
     return (
         (functions, functions.gelu_approximation, {}, "tanh"),
         (functions, functions.gelu_approximation_sigmoid, {}, "sigmoid"),
-        (cubic_module, cubic_module.gelu_with_phi_nl_psi_ed_cube, {}, "tanh"),
+        (cubic_module, cubic_module.gelu_with_multiplication_cube, {}, "tanh"),
         (
             ablation_module,
             ablation_module.gelu_operator_ablation,
