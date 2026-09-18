@@ -118,6 +118,90 @@ It models independent Gaussian event-time errors, deadline misses, layer- or ope
 
 Experiments must report $\mu_t$, $\sigma_t$, seed or repeats, injection coverage, and observed miss rate. Deterministic conversion accuracy and static parameter perturbation remain separate evidence axes.
 
+## Equivalent Timing Reduction for Measured Primitive Noise
+
+A measured potential residual can be represented at the next $\Phi$ boundary without adding a second production noise channel.
+
+Let a $\Psi$ primitive have ideal potential output $v$ and measured output $\tilde v$, and let the following encoder produce $t=f_\phi(v)$. Define the equivalent timing error by
+
+$$
+\epsilon=f_\phi(\tilde v)-f_\phi(v).
+$$
+
+Adding the independently measured intrinsic timing error of the encoder to $\epsilon$ preserves the local $\Psi\to\Phi$ composition while keeping the production injection boundary at $\Phi$. It does not claim that $\Psi$ physically emitted a spike.
+
+### Calibration before reduction
+
+Only variation across repeated trials is moved into dynamic timing noise; fitted transfer bias and differences between physical circuits remain deterministic calibration error and static mismatch.
+
+The hardware output must first be converted back to the logical potential through the inverse of the calibration transfer. For every validation sample, apply the calibrated inverse $\Psi$ transfer, pass the resulting potential through the calibrated $\Phi$ transfer, and subtract the nominal encoded time. This empirical procedure is preferred over a linear approximation and preserves dependence on the input value.
+
+The reduction requires a validated, locally monotone $\Psi$ transfer whose slope remains separated from zero. A weak or nonmonotone transfer has no stable equivalent timing error because its calibrated inverse is undefined or ill conditioned.
+
+### Negative potential encoder
+
+The negative potential encoder is affine, so the moment conversion is exact for finite second moments.
+
+For $f_{\mathrm{NP}}(v)=a - b v$,
+
+$$
+\mathbb E[\epsilon]=-b\,\mathbb E[\tilde v - v],
+\qquad
+\operatorname{Var}(\epsilon)=b^2\operatorname{Var}(\tilde v - v).
+$$
+
+The project identity encoder has $b=1$ in project units. A physical affine rescaling contributes its measured temporal slope. Under independence, the intrinsic $\phi_{\mathrm{NP}}$ timing variance is added to the converted variance.
+
+### Negative log encoder
+
+The negative log encoder produces an input dependent timing distribution that need not remain Gaussian.
+
+For $v>V_{\mathrm{lb}}$,
+
+$$
+\epsilon
+=-\tau_s\log\left(
+\frac{\tilde v-V_{\mathrm{lb}}}{v-V_{\mathrm{lb}}}
+\right).
+$$
+
+The preferred calculation applies this expression to every validation residual and estimates $\mathbb E[\epsilon]$ and $\operatorname{Var}(\epsilon)$ empirically. If only the potential mean and variance remain, a local approximation gives
+
+$$
+\mathbb E[\epsilon]
+\simeq
+-\frac{\tau_s}{v-V_{\mathrm{lb}}}\mathbb E[\tilde v - v]
++\frac{\tau_s}{2(v-V_{\mathrm{lb}})^2}
+\mathbb E[(\tilde v - v)^2],
+$$
+
+$$
+\operatorname{Var}(\epsilon)
+\simeq
+\frac{\tau_s^2}{(v-V_{\mathrm{lb}})^2}
+\operatorname{Var}(\tilde v - v).
+$$
+
+Samples with $\tilde v\le V_{\mathrm{lb}}$ are clamp events and must not be hidden inside a Gaussian timing fit.
+
+### Reduction to the paper noise model
+
+The current zero mean Gaussian model can absorb calibrated temporal variance, but it cannot faithfully absorb deterministic transfer bias, circuit differences, saturation, or missing event point masses.
+
+For a conditional Gaussian approximation at one encoder location, subtract the calibration transfer so $\mathbb E[\tilde v - v]=0$, convert the $\Psi$ variance with the equations above, and add the intrinsic $\Phi$ timing variance under the explicit independence assumption.
+
+If one global standard deviation is required, weight encoder locations and potential values by the noise free calibration activation distribution. The law of total variance is
+
+$$
+\operatorname{Var}(\epsilon)
+=\mathbb E[\operatorname{Var}(\epsilon\mid s,v)]
++\operatorname{Var}(\mathbb E[\epsilon\mid s,v]),
+$$
+
+where $s$ identifies the encoder location. For the maintained zero mean model, calibrated conditional means remain outside the stochastic channel and the final variance term is omitted. Uniform weighting over primitive input codes is only a diagnostic; model evaluation requires activation weighting.
+
+The measured $\psi_{\mathrm{Int}}$ transfer is suitable for this reduction. The measured $\psi_{\mathrm{NE}}$ distribution can support sensitivity analysis, but its failed parameter drift gate prevents calling the result calibrated. The current $\psi_{\mathrm{ED}}$ transfer is too weak and nonmonotone to invert, so its raw output variance must not be relabeled as timing variance.
+
 ## Current Coverage and Resume Order
 
 The event-aware migration proceeds from the shared sampler and encoder boundary through composed operators, model adapters, evaluation entry points, and seeded verification.
