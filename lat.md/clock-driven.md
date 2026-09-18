@@ -40,7 +40,7 @@ The maintained fine sweep evaluates one continuous reference and time bins 0.01,
 
 The superseded coarse campaign completed its continuous reference and six of eight 0.1 shards before the requested range changed. Its partial records remain preserved and are not combined with the fine sweep.
 
-The default local device policy remains devices 4 through 7. This campaign uses an explicit override that permits devices 0 through 7, while two consecutive idle observations exclude occupied devices before launch. A requested device that becomes idle later is admitted only after the same two observations.
+The default local device policy remains devices 4 through 7. This campaign uses an explicit override that permits devices 0 through 7, while two consecutive idle observations exclude occupied devices before launch. The worker pool is then fixed: devices that become idle later are not admitted because unscheduled external work can reclaim them between polling and launch. Restarting from complete logs is the supported way to change the pool.
 
 The v1 attempt was rejected before producing a time bin result because repeated 0.1 step accumulation caused an aligned duration to fail the strict numerical alignment check. The v2 execution admits only bounded arithmetic drift accumulated by explicit state updates and still rejects a displacement of one quarter of a bin. It shares the earlier calibration table only after confirming that every changed path is unable to affect calibration. Runtime validation substitutes only the recorded source revision and requires all other metadata to match exactly.
 

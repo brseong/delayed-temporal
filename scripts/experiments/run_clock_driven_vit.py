@@ -325,12 +325,12 @@ def gpu_snapshot() -> dict[int, tuple[int, int]]:
     return snapshot
 
 
-def initially_idle_gpus(
+def select_fixed_gpu_pool(
     requested: tuple[int, ...],
     *,
     allowed: tuple[int, ...],
 ) -> tuple[int, ...]:
-    """Require two consecutive low-memory, low-utilization observations."""
+    """Freeze the worker pool after two low-memory, low-utilization observations."""
 
     if not requested or any(gpu not in allowed for gpu in requested):
         raise ValueError(
@@ -348,20 +348,6 @@ def initially_idle_gpus(
             for snapshot in (first, second)
         )
     )
-
-
-def newly_idle_gpus(
-    requested: tuple[int, ...],
-    worker_pool: set[int],
-    *,
-    allowed: tuple[int, ...],
-) -> tuple[int, ...]:
-    """Return requested devices not yet in the pool that are now stably idle."""
-
-    candidates = tuple(gpu for gpu in requested if gpu not in worker_pool)
-    if not candidates:
-        return ()
-    return initially_idle_gpus(candidates, allowed=allowed)
 
 
 def calibration_compatibility_paths(
@@ -838,7 +824,7 @@ def main() -> None:
     )
     requested_gpus = tuple(args.gpus)
     allowed_gpus = EXTENDED_GPUS if args.allow_gpus_0_3 else ALLOWED_GPUS
-    available = initially_idle_gpus(requested_gpus, allowed=allowed_gpus)
+    available = select_fixed_gpu_pool(requested_gpus, allowed=allowed_gpus)
     if not available:
         raise RuntimeError("no allowed idle GPU is available for clock-driven evaluation")
     if calibration_path.exists():
@@ -947,21 +933,8 @@ def main() -> None:
         expected_population=args.evaluation_samples,
     )
     running: dict[int, dict[str, Any]] = {}
-    worker_pool = set(available)
     free = list(available)
-    next_gpu_refresh = time.monotonic() + 60.0
     while pending or running:
-        if pending and time.monotonic() >= next_gpu_refresh:
-            additions = newly_idle_gpus(
-                requested_gpus,
-                worker_pool,
-                allowed=allowed_gpus,
-            )
-            for gpu in additions:
-                worker_pool.add(gpu)
-                free.append(gpu)
-                print(f"Added newly idle device {gpu}", flush=True)
-            next_gpu_refresh = time.monotonic() + 60.0
         while pending and free:
             gpu = free.pop(0)
             run_id, time_step, shard_index = pending.pop(0)

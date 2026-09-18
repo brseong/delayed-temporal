@@ -26,10 +26,9 @@ from scripts.evaluation.error_analysis_vit import (
 from scripts.experiments.run_clock_driven_vit import (
     calibration_compatibility_paths,
     default_time_steps,
-    initially_idle_gpus,
-    newly_idle_gpus,
     parse_result,
     prepare_evaluation_subset,
+    select_fixed_gpu_pool,
     write_summary,
 )
 from scripts.analysis.plot_clock_time_step_sweep import (
@@ -308,20 +307,23 @@ def verify_vit_runtime_isolation() -> None:
         patch(snapshot_target, return_value=snapshot),
         patch(sleep_target),
     ):
-        assert initially_idle_gpus((0, 4, 7), allowed=tuple(range(8))) == (0, 4, 7)
+        assert select_fixed_gpu_pool(
+            (0, 4, 7), allowed=tuple(range(8))
+        ) == (0, 4, 7)
+    occupied_snapshot = {**snapshot, 0: (48_000, 0)}
     with (
-        patch(snapshot_target, return_value=snapshot),
+        patch(snapshot_target, return_value=occupied_snapshot),
         patch(sleep_target),
     ):
-        assert newly_idle_gpus(
-            (0, 1, 4, 7), {0, 4}, allowed=tuple(range(8))
-        ) == (1, 7)
+        assert select_fixed_gpu_pool(
+            (0, 4, 7), allowed=tuple(range(8))
+        ) == (4, 7)
     with (
         patch(snapshot_target, return_value=snapshot),
         patch(sleep_target),
     ):
         try:
-            initially_idle_gpus((0, 4), allowed=(4, 5, 6, 7))
+            select_fixed_gpu_pool((0, 4), allowed=(4, 5, 6, 7))
         except ValueError:
             pass
         else:
