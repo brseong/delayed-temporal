@@ -58,6 +58,7 @@ def experiment_fixture(root: Path) -> dict:
             "checkpoint_id": key, "checkpoint_path": str(root / "assets" / key),
             "checkpoint_sha256": str(index + 1) * 64,
             "preprocessing_sha256": "a" * 64,
+            "image_preprocessing_config": "" if cifar else str(root / "source/scripts/configs/vit_timm_preprocessing.json"),
             "checkpoint_config": {
                 "id2label": {str(i): str(i) for i in range(10 if cifar else 1000)},
                 "num_hidden_layers": 24 if large else 12,
@@ -77,11 +78,16 @@ def experiment_fixture(root: Path) -> dict:
             "evaluation_split": "test" if cifar else "validation", "evaluation_quick_test": not cifar,
         })
     experiment = {
-        "tag": contract.TAG, "theta": 40.0, "precision": "float64", "output_bounds_version": 3,
+        "tag": contract.TAG, "theta_candidates": list(contract.theta_grid()),
+        "precision": "float64", "output_bounds_version": 3,
         "vit_calibration_policy_version": 2,
-        "tau_s": 1.0, "tracking": "disabled", "local_gpu_ids": list(range(8)),
-        "campaign_extra_local_gpus": [0, 1, 2, 3],
-        "evaluation_count": 8, "calibration_count": 4, "models": models,
+        "tau_s": 1.0, "tracking": "disabled", "local_gpu_ids": [4, 5, 6, 7],
+        "campaign_extra_local_gpus": [],
+        "evaluation_count": 4 * (len(contract.theta_grid()) + 2),
+        "calibration_count": 4 * len(contract.theta_grid()),
+        "selection_tolerance_correct": 25,
+        "selection_population": "training_seed0_5000",
+        "validation_used_for_selection": False, "models": models,
         "source_commit": "a" * 40, "source_root": str(root / "source"),
         "python_bin": sys.executable, "runtime_root": str(root / "runtime"),
         "evaluator_path": "scripts/evaluation/error_analysis_vit.py", "evaluator_sha256": "7" * 64,
@@ -129,19 +135,24 @@ def table_fixture(experiment: dict, task: dict) -> dict:
                 "histogram": {"bounds": {"min": -0.9, "max": 0.9}, "num_values": 100,
                               "underflows": 0, "overflows": 0, "bin_counts": [100] + [0] * 2047},
             })
+    preprocessing = {"subset_samples": task["calibration_samples"], "subset_seed": 0,
+                     "subset_fingerprint": fingerprint, "subset_selection": "seeded_training_permutation_prefix"}
+    if row["task"] == "imagenet-1k":
+        preprocessing.update(preprocessing_backend="timm", preprocessing_config_sha256=row["preprocessing_sha256"])
     return {"format_version": 1, "layers": layers, "metadata": {
-        "theta": 40.0, "dtype": "float64", "dataset_split": "train", "dataset_id": row["task"],
+        "theta": task["theta"], "dtype": "float64", "dataset_split": "train", "dataset_id": row["task"],
         "model_id": row["checkpoint_path"], "model_family": "vit", "input_shape": [3, 224, 224],
         "tau_s": 1.0, "tau_m": 1.0, "clip_margin": 1e-5, "max_sequence_length": None,
         "model_options": sorted(options.items()),
-        "preprocessing": json.dumps({"subset_samples": task["calibration_samples"], "subset_seed": 0,
-                                     "subset_fingerprint": fingerprint, "subset_selection": "seeded_training_permutation_prefix"}),
+        "preprocessing": json.dumps(preprocessing),
     }}
 
 
 def log_fixture(experiment: dict, task: dict) -> str:
     row = contract.model_by_key(experiment, task["model_key"])
-    samples, correct = task["expected_samples"], task["expected_samples"] * 4 // 5
+    samples = task["expected_samples"]
+    correct = (3000 + min(task["theta_index"], 6) * 100
+               if task["kind"] == "theta_train" else samples * 4 // 5)
     text = (
         "Slurm identity — job: fixture, gpu_family: rtxa6000\n"
         "Comparison task — " + json.dumps({
@@ -150,12 +161,12 @@ def log_fixture(experiment: dict, task: dict) -> str:
         "GPU model: NVIDIA RTX A6000\n"
         f"Model backend: {task['backend']}\n"
         f"Artifact identity — source_commit: {task['source_commit']}, checkpoint_sha256: {task['checkpoint_sha256']}\n"
-        "Gaussian time noise — enabled: False, std_frac: 0.0, identity_window: 80.0, "
+        f"Gaussian time noise — enabled: False, std_frac: 0.0, identity_window: {2 * task['theta']}, "
         "std_abs: 0.0, mean_abs: 0.0, seed: 0, identity_deadline_ulp: 1e-12, "
         "std_to_identity_ulp: 0.0, deadline_margin_std: 0.0, deadline_margin_abs: 0.0\n"
         "Static threshold mismatch — enabled: False, theta_std: 0.0, seed: 0\n"
         f"Evaluation metadata — model: {row['checkpoint_path']}, dataset: {row['task']}, split: {task['split']}, "
-        f"samples: {row['expected_samples']}, theta: 40.0, precision: float64, source: disk:{row['dataset_path']}, "
+        f"samples: {samples}, theta: {task['theta']}, precision: float64, source: disk:{row['dataset_path']}, "
         f"fingerprint: {task['dataset_fingerprint']}\n"
         f"Correct: {correct}\nEvaluated samples: {samples}\nPrediction SHA256: {'f' * 64}\nAccuracy: {correct / samples}\n"
     )
@@ -171,7 +182,7 @@ def log_fixture(experiment: dict, task: dict) -> str:
 
 
 def completed_fixture(root: Path, experiment: dict, task: dict) -> dict:
-    collect = task["kind"] in {"collect", "smoke_collect"}
+    collect = task["kind"] in {"theta_collect", "smoke_collect"}
     if task["calibration_file"]:
         table_path = root / task["calibration_file"]
         put_json(table_path, table_fixture(experiment, task))
@@ -180,6 +191,7 @@ def completed_fixture(root: Path, experiment: dict, task: dict) -> dict:
         table_hash = ""
     if not collect and task["kind"] != "dense":
         task = contract.make_task(experiment, task["model_key"], task["kind"], task["batch_size"],
+                                  theta_index=task["theta_index"],
                                   calibration_sha256=table_hash, host_label=task.get("host_label"))
     put_json(root / "tasks" / (task["run_id"] + ".json"), task)
     log = root / task["log_file"]
@@ -222,11 +234,18 @@ def verify_pipeline_outputs(root: Path) -> None:
             patch.object(runner, "run_task", side_effect=execute), patch.object(runner, "event"):
         for key in contract.MODEL_KEYS:
             runner.pipeline(root, experiment, key, "local")
-    assert invoked == [(key, kind) for key in contract.MODEL_KEYS for kind in ("collect", "dense", "spiking")]
+    expected = []
+    for key in contract.MODEL_KEYS:
+        for _ in contract.theta_grid():
+            expected.extend([(key, "theta_collect"), (key, "theta_train")])
+        expected.extend([(key, "dense"), (key, "spiking")])
+    assert invoked == expected
     # Constructed results intentionally use the worker's exact schema. A reducer
     # requiring fields which the worker does not emit must fail this integration.
     value = runner.summarize(root, experiment, require_complete=True)
-    assert value["complete"] and value["calibrations_complete"] == 4 and value["evaluations_complete"] == 8
+    assert value["complete"]
+    assert value["calibrations_complete"] == 4 * len(contract.theta_grid())
+    assert value["evaluations_complete"] == 4 * (len(contract.theta_grid()) + 2)
     from scripts.analysis.summarize_vit_comparison import verify_publication_bundle
     verify_publication_bundle(root / "outputs")
 
@@ -242,16 +261,22 @@ def verify_worker_integration(root: Path) -> None:
     disk_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="comparison-worker-test-", dir=disk_root) as runtime:
         experiment["runtime_root"] = runtime
-        for kind in ("collect", "dense", "spiking", "smoke_collect", "smoke_spiking"):
-            table_name = "smoke/cifar10_vit_small/bs32/calibration.json" if kind.startswith("smoke") else "calibration/cifar10_vit_small.json"
-            digest = identity.sha256_file(root / table_name) if kind in {"spiking", "smoke_spiking"} else ""
-            task = contract.make_task(experiment, "cifar10_vit_small", kind, 32, calibration_sha256=digest)
+        kinds = [("smoke_collect", None), ("smoke_spiking", None)]
+        kinds += [("theta_collect", index) for index in range(len(contract.theta_grid()))]
+        kinds += [("theta_train", index) for index in range(len(contract.theta_grid()))]
+        kinds += [("dense", 6), ("spiking", 6)]
+        for kind, theta_index in kinds:
+            table_name = ("smoke/cifar10_vit_small/bs32/calibration.json" if kind.startswith("smoke")
+                          else f"calibration/cifar10_vit_small/theta_{theta_index:02d}.json")
+            digest = identity.sha256_file(root / table_name) if kind in {"theta_train", "spiking", "smoke_spiking"} else ""
+            task = contract.make_task(experiment, "cifar10_vit_small", kind, 32,
+                                      theta_index=theta_index, calibration_sha256=digest)
             class Child:
                 def __init__(self, command, *, stdout, **kwargs):
                     assert command == contract.evaluator_command(experiment, task, root)
                     assert kwargs["start_new_session"] is True
                     assert kwargs["env"]["CUDA_VISIBLE_DEVICES"] == "4"
-                    if kind in {"collect", "smoke_collect"}:
+                    if kind in {"theta_collect", "smoke_collect"}:
                         path = root / task["calibration_file"]
                         put_json(path, table_fixture(experiment, task))
                         total_batches = 2 * math.ceil(task["calibration_samples"] / task["batch_size"])
@@ -279,17 +304,17 @@ def verify_worker_integration(root: Path) -> None:
                 assert reloaded == result
                 assert runner.run_task(root, experiment, task, "local") == result
         value = runner.summarize(root, experiment)
-        assert value["calibrations_complete"] == 1 and value["evaluations_complete"] == 2
+        assert value["calibrations_complete"] == len(contract.theta_grid())
+        assert value["evaluations_complete"] == len(contract.theta_grid()) + 2
 
 
 def verify_contract(root: Path) -> None:
     experiment = experiment_fixture(root)
     contract.validate_experiment(experiment)
-    tasks = [contract.make_task(experiment, key, kind, 32, calibration_sha256="b" * 64 if kind == "spiking" else "")
-             for key in contract.MODEL_KEYS for kind in ("collect", "dense", "spiking")]
-    assert len({task["run_id"] for task in tasks}) == 12
-    assert sum(task["kind"] == "collect" for task in tasks) == 4
-    assert sum(task["kind"] in {"dense", "spiking"} for task in tasks) == 8
+    tasks = [contract.make_task(experiment, key, kind, 32, theta_index=6,
+                                calibration_sha256="b" * 64 if kind in {"theta_train", "spiking"} else "")
+             for key in contract.MODEL_KEYS for kind in ("theta_collect", "theta_train", "dense", "spiking")]
+    assert len({task["run_id"] for task in tasks}) == 16
     for task in tasks:
         contract.validate_task(task, experiment)
         for field, value in (("source_commit", "b" * 40), ("checkpoint_sha256", "a" * 64),
@@ -298,8 +323,8 @@ def verify_contract(root: Path) -> None:
             reject(lambda: contract.validate_task({**task, field: value}, experiment))
         reject(lambda: contract.validate_task({**task, "preprocessing_sha256": "0" * 64}, experiment))
     for batch in (0, 1, 4, 64, 128):
-        reject(lambda: contract.make_task(experiment, contract.MODEL_KEYS[0], "collect", batch))
-    for field, value in (("local_gpu_ids", [4, 5, 6, 7]), ("theta", 2000), ("evaluation_count", 4)):
+        reject(lambda: contract.make_task(experiment, contract.MODEL_KEYS[0], "theta_collect", batch, theta_index=0))
+    for field, value in (("local_gpu_ids", list(range(8))), ("theta_candidates", [40]), ("evaluation_count", 4)):
         reject(lambda: contract.validate_experiment({**experiment, field: value}))
     for field in ("dependency_sha256", "runtime_sha256", "package_versions"):
         reject(lambda: contract.validate_experiment({**experiment, field: {}}))
@@ -313,15 +338,17 @@ def verify_contract(root: Path) -> None:
 def verify_commands(root: Path) -> None:
     experiment = experiment_fixture(root)
     for key in contract.MODEL_KEYS:
-        for kind in ("collect", "dense", "spiking", "smoke_collect", "smoke_spiking"):
-            task = contract.make_task(experiment, key, kind, 16, calibration_sha256="b" * 64)
+        for kind in ("theta_collect", "theta_train", "dense", "spiking", "smoke_collect", "smoke_spiking"):
+            theta_index = 6 if kind in {"theta_collect", "theta_train", "dense", "spiking"} else None
+            task = contract.make_task(experiment, key, kind, 16, theta_index=theta_index,
+                                      calibration_sha256="b" * 64)
             args = contract.evaluator_command(experiment, task, root)
             at = lambda name: args[args.index(name) + 1]
-            assert at("--batch_size") == "16" and at("--theta") == "40" and at("--precision") == "float64"
+            assert at("--batch_size") == "16" and float(at("--theta")) == task["theta"] and at("--precision") == "float64"
             assert "--no-tensorboard" in args and "--no-gaussian-time-noise" in args and "--no-mismatch-enabled" in args
             for flag in ("--time-noise-std-frac", "--time-noise-mean", "--time-noise-deadline-margin-std", "--mismatch-theta-std", "--weight-noise-std", "--bias-noise-std"):
                 assert float(at(flag)) == 0
-            assert ("--quick-test" in args) == (key != "cifar10_vit_small")
+            assert ("--quick-test" in args) == (key != "cifar10_vit_small" and task["split"] != "train")
             if kind.startswith("smoke"):
                 assert at("--calibration-smoke-samples") == at("--calibration-samples") == "32"
                 assert "smoke/" in at("--calibration-path")
@@ -334,8 +361,9 @@ def verify_commands(root: Path) -> None:
 def verify_tables(root: Path) -> None:
     experiment = experiment_fixture(root)
     for key in contract.MODEL_KEYS:
-        for kind in ("collect", "smoke_collect"):
-            task = contract.make_task(experiment, key, kind, 32)
+        for kind in ("theta_collect", "smoke_collect"):
+            task = contract.make_task(experiment, key, kind, 32,
+                                      theta_index=0 if kind == "theta_collect" else None)
             table = table_fixture(experiment, task)
             path = root / task["calibration_file"]
             put_json(path, table)
@@ -364,15 +392,17 @@ def verify_tables(root: Path) -> None:
 def verify_completed_logs(root: Path) -> None:
     experiment = experiment_fixture(root)
     for key in contract.MODEL_KEYS:
-        for kind in ("collect", "dense", "spiking", "smoke_collect", "smoke_spiking"):
-            result = completed_fixture(root, experiment, contract.make_task(experiment, key, kind, 32))
+        for kind in ("theta_collect", "theta_train", "dense", "spiking", "smoke_collect", "smoke_spiking"):
+            theta_index = 6 if kind in {"theta_collect", "theta_train", "dense", "spiking"} else None
+            result = completed_fixture(root, experiment, contract.make_task(
+                experiment, key, kind, 32, theta_index=theta_index))
             task = runner.read_json(root / "tasks" / (result["run_id"] + ".json"))
             contract.validate_result(task, result, experiment, root)
             assert runner.completed(root, experiment, task) == result
             for field, value in (("success", False), ("source_commit", "b" * 40), ("task_sha256", "f" * 64),
                                  ("experiment_sha256", "f" * 64), ("log_sha256", "f" * 64)):
                 reject(lambda: contract.validate_result(task, {**result, field: value}, experiment, root))
-            if kind not in {"collect", "smoke_collect"}:
+            if kind not in {"theta_collect", "smoke_collect"}:
                 log = root / task["log_file"]
                 original = log.read_text()
                 for changed in (original.replace("Prediction SHA256:", "Partial prediction:"), original + "Correct: 0\n",
@@ -451,10 +481,10 @@ def verify_source_and_gpu(root: Path) -> None:
         changed["dependency_sha256"]["transformers"] = "0" * 64
         reject(lambda: contract.check_source(changed))
     good = json.dumps({"count": 1, "model": "NVIDIA RTX A6000"})
-    for gpu in range(8):
+    for gpu in range(4, 8):
         with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": str(gpu)}), patch("subprocess.check_output", return_value=good):
             assert contract.require_gpu(experiment, "local") == "NVIDIA RTX A6000"
-    for gpu in ("", "4,5", "8", "-1"):
+    for gpu in ("", "0", "1", "2", "3", "4,5", "8", "-1"):
         with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": gpu}), patch("subprocess.check_output") as query:
             reject(lambda: contract.require_gpu(experiment, "local"))
             query.assert_not_called()
@@ -482,18 +512,7 @@ def verify_policy2_and_preparation(root: Path) -> None:
         reject(lambda: contract.validate_experiment(broken))
     for value in (None, 1, 3, True):
         reject(lambda value=value: contract.validate_experiment({**experiment, "vit_calibration_policy_version": value}))
-    legacy = copy.deepcopy(experiment)
-    legacy["tag"] = contract.LEGACY_TAG
-    del legacy["vit_calibration_policy_version"]
-    for model in legacy["models"]:
-        model.pop("calibration_sites")
-    contract.validate_experiment(legacy)
-    reject(lambda: contract.require_current_experiment(legacy))
-    old_task = contract.make_task(legacy, "imagenet_vit_small", "smoke_collect", 32)
-    path = root / old_task["calibration_file"]
-    put_json(path, table_fixture(legacy, old_task))
-    contract.validate_table(path, old_task, legacy)
-    reject(lambda: contract.validate_table(path, contract.make_task(experiment, "imagenet_vit_small", "smoke_collect", 32), experiment))
+    path = root / "smoke/imagenet_vit_small/bs32/calibration.json"
     new_task = contract.make_task(experiment, "imagenet_vit_small", "smoke_collect", 32)
     table = table_fixture(experiment, new_task)
     for key, value in (("vit_calibration_policy_version", 1), ("layer_norm_eps", 1e-5),
@@ -509,7 +528,7 @@ def verify_policy2_and_preparation(root: Path) -> None:
         admit.assert_not_called()
         assert value["launch_performed"] is False and len(value["models"]) == 4
         for row in value["models"]:
-            assert set(row["commands_by_gpu"]) == {str(gpu) for gpu in range(8)}
+            assert set(row["commands_by_gpu"]) == {str(gpu) for gpu in range(4, 8)}
             for gpu, command in row["commands_by_gpu"].items():
                 assert command == ["env", "CUDA_VISIBLE_DEVICES=" + gpu, *row["command"]]
         assert all(row["batch_size"] is None and row["requires_full_calibration"] for row in value["models"])

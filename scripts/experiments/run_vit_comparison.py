@@ -25,7 +25,7 @@ from scripts.experiments.vit_comparison import (
     DEFAULT_ROOT, MODEL_KEYS, PYTHON, SOURCE, TAG, check_source, evaluator_command,
     make_task, model_by_key, parsed_result, read_json, require_gpu,
     validate_experiment, validate_result, validate_table, validate_task,
-    require_current_experiment,
+    require_current_experiment, select_model_theta, theta_grid,
 )
 from scripts.runtime import environment as runtime_environment
 from scripts.runtime import files as runtime_files
@@ -60,7 +60,7 @@ def discover_calibration_sites(config_fields: dict) -> list[dict]:
     from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTForImageClassification
     from utils.transformers.models.spiking_vit.calibration import vit_calibration_specs
     config = ViTConfig(**config_fields)
-    config.theta, config.tau_s, config.clip_margin = 40.0, 1.0, 1e-5
+    config.theta, config.tau_s, config.clip_margin = max(theta_grid()), 1.0, 1e-5
     config._attn_implementation = "eager"
     config.use_spiking_layernorm = config.use_spiking_mlp = True
     config.spiking_ln_mul = config.spiking_ln_log = config.spiking_ln_expdiff = True
@@ -87,11 +87,15 @@ def initialize(root: Path, source: Path, assets_manifest: Path) -> dict:
     assets = read_json(assets_manifest)
     experiment = {"tag": TAG, "source_root": str(source.resolve()), "python_bin": PYTHON,
                   "source_commit": subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip(),
-                  "theta": 40.0, "precision": "float64", "output_bounds_version": 3,
+                  "theta_candidates": list(theta_grid()), "precision": "float64", "output_bounds_version": 3,
                   "vit_calibration_policy_version": 2,
-                  "tau_s": 1.0, "tracking": "disabled", "local_gpu_ids": list(range(8)),
-                  "campaign_extra_local_gpus": [0, 1, 2, 3],
-                  "evaluation_count": 8, "calibration_count": 4,
+                  "tau_s": 1.0, "tracking": "disabled", "local_gpu_ids": [4, 5, 6, 7],
+                  "campaign_extra_local_gpus": [],
+                  "evaluation_count": 4 * (len(theta_grid()) + 2),
+                  "calibration_count": 4 * len(theta_grid()),
+                  "selection_tolerance_correct": 25,
+                  "selection_population": "training_seed0_5000",
+                  "validation_used_for_selection": False,
                   "models": assets["models"],
                   "assets_manifest_sha256": identity.sha256_file(assets_manifest),
                   "runtime_root": f"/data/delayed-temporal/artifacts/runtime/{TAG}",
@@ -104,9 +108,15 @@ def initialize(root: Path, source: Path, assets_manifest: Path) -> dict:
         experiment[prefix + "_sha256"] = identity.sha256_file(source / relative)
     for row in experiment["models"]:
         row["calibration_sites"] = discover_calibration_sites(row["checkpoint_config"])
-        row["preprocessing_sha256"] = identity.sha256_file(
-            Path(row["checkpoint_path"]) / "preprocessor_config.json"
-        )
+        if row["task"] == "imagenet-1k":
+            preprocessing = source / "scripts/configs/vit_timm_preprocessing.json"
+            row["image_preprocessing_config"] = str(preprocessing)
+            row["preprocessing_sha256"] = identity.sha256_file(preprocessing)
+        else:
+            row["image_preprocessing_config"] = ""
+            row["preprocessing_sha256"] = identity.sha256_file(
+                Path(row["checkpoint_path"]) / "preprocessor_config.json"
+            )
         for field in ("checkpoint", "dataset", "calibration_dataset"):
             path = row[field + "_path"]
             if path not in experiment["asset_checks"]:
@@ -167,7 +177,7 @@ def update_task_progress(root: Path, task: dict, log_path: Path) -> None:
     """Expose the latest flushed evaluator count without treating it as completion."""
     if not log_path.exists():
         return
-    prefix = "Calibration progress — " if task["kind"] in {"collect", "smoke_collect"} else "Evaluation progress — "
+    prefix = "Calibration progress — " if task["kind"] in {"theta_collect", "smoke_collect"} else "Evaluation progress — "
     rows = []
     for line in log_path.read_text(errors="replace").splitlines():
         if line.startswith(prefix):
@@ -208,7 +218,7 @@ def run_task(root: Path, experiment: dict, task: dict, host_label: str) -> dict:
         check_source(experiment)
         model = model_by_key(experiment, task["model_key"])
         check_assets(experiment, model, host_label)
-        collect = task["kind"] in {"collect", "smoke_collect"}
+        collect = task["kind"] in {"theta_collect", "smoke_collect"}
         table_path = (
             runtime_files.safe_output(root, task["calibration_file"])
             if task["calibration_file"] else None
@@ -365,11 +375,30 @@ def admission(root: Path, experiment: dict, key: str, host_label: str) -> dict:
 def pipeline(root: Path, experiment: dict, key: str, host_label: str) -> None:
     selected = admission(root, experiment, key, host_label)
     batch = selected["batch_size"]
-    collection = run_task(root, experiment, make_task(experiment, key, "collect", batch), host_label)
-    run_task(root, experiment, make_task(experiment, key, "dense", batch), host_label)
-    run_task(root, experiment, make_task(experiment, key, "spiking", batch,
-                                       calibration_sha256=collection["calibration_sha256"]), host_label)
-    event(root, "model_completed", model_key=key)
+    training_results = []
+    for theta_index in range(len(theta_grid())):
+        collection = run_task(
+            root, experiment,
+            make_task(experiment, key, "theta_collect", batch, theta_index=theta_index),
+            host_label,
+        )
+        training_results.append(run_task(
+            root, experiment,
+            make_task(experiment, key, "theta_train", batch, theta_index=theta_index,
+                      calibration_sha256=collection["calibration_sha256"]),
+            host_label,
+        ))
+    choice = select_model_theta(experiment, key, training_results)
+    selection_path = root / "selections" / f"{key}.json"
+    runtime_files.immutable_json(selection_path, choice)
+    theta_index = choice["theta_index"]
+    run_task(root, experiment,
+             make_task(experiment, key, "dense", batch, theta_index=theta_index), host_label)
+    run_task(root, experiment,
+             make_task(experiment, key, "spiking", batch, theta_index=theta_index,
+                       calibration_sha256=choice["calibration_sha256"]), host_label)
+    event(root, "model_completed", model_key=key, theta=choice["theta"],
+          validation_used_for_selection=False)
 
 
 def environment_replay(root: Path, experiment: dict, host_label: str) -> None:
@@ -426,7 +455,7 @@ def summarize(root: Path, experiment: dict, *, require_complete: bool = False) -
     results = []
     for path in sorted((root / "results").glob("*.json")):
         result = read_json(path)
-        if result["kind"] not in {"collect", "dense", "spiking"}:
+        if result["kind"] not in {"theta_collect", "theta_train", "dense", "spiking"}:
             continue
         task = read_json(root / "tasks" / (result["run_id"] + ".json"))
         validate_result(task, result, experiment, root)
@@ -449,10 +478,10 @@ def prepare_execution(root: Path, experiment: dict) -> dict:
                          "admission_verified": selected is not None,
                          "requires_full_calibration": True, "command": command,
                          "commands_by_gpu": {str(gpu): ["env", f"CUDA_VISIBLE_DEVICES={gpu}", *command]
-                                             for gpu in range(8)}})
+                                             for gpu in experiment["local_gpu_ids"]}})
     value = {"experiment_sha256": identity.json_sha256(experiment),
              "source_commit": experiment["source_commit"],
-             "vit_calibration_policy_version": 2, "allowed_gpu_ids": list(range(8)),
+             "vit_calibration_policy_version": 2, "allowed_gpu_ids": experiment["local_gpu_ids"],
              "launch_performed": False, "models": prepared}
     destination = root / "prepared" / (identity.json_sha256(value) + ".json")
     runtime_files.immutable_json(destination, value)

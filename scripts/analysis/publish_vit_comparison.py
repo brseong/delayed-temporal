@@ -150,7 +150,7 @@ def prepare_paper_update(source: str, bundle_dir: Path) -> str:
     """Return proposed manuscript text after verifying the complete artifact bundle."""
     provenance = verify_publication_bundle(bundle_dir)
     _, indexed = validate_results(provenance["experiment"], provenance["validated_results"])
-    summary, _ = comparison_rows(provenance["experiment"], indexed)
+    summary, _, _ = comparison_rows(provenance["experiment"], indexed)
     start, end = _table_span(source)
     table = _replace_caption(_correct_spikezip_costs(_replace_ours(source[start:end], summary)))
     updated = source[:start] + table + source[end:]

@@ -20,6 +20,7 @@ from scripts.analysis.summarize_vit_comparison import (
     MODEL_KEYS, build_outputs, validate_results, verify_publication_bundle,
 )
 from scripts.analysis.publish_vit_comparison import prepare_paper_update
+from scripts.experiments.vit_comparison import theta_grid
 
 
 def configuration(*, classes: int = 1000, hidden: int = 384, layers: int = 12) -> dict:
@@ -152,7 +153,8 @@ def fixture() -> tuple[dict, list[dict]]:
     digest = "a" * 64
     experiment = dict(tag="synthetic_comparison_test", source_commit="b" * 40,
                       evaluator_sha256=digest, calibration_evaluator_sha256=digest,
-                      gelu_evaluator_sha256=digest, models=[])
+                      gelu_evaluator_sha256=digest, selection_tolerance_correct=25,
+                      validation_used_for_selection=False, models=[])
     results = []
     for key in MODEL_KEYS:
         cifar = key.startswith("cifar10")
@@ -163,7 +165,7 @@ def fixture() -> tuple[dict, list[dict]]:
                      checkpoint_config=configuration(classes=10 if cifar else 1000,
                                                      hidden=hidden, layers=24 if large else 12),
                      expected_samples=10000 if cifar else 5000,
-                     checkpoint_sha256=digest, theta=40, precision="float64",
+                     checkpoint_sha256=digest, precision="float64",
                      dataset_fingerprint="eval_fingerprint",
                      calibration_dataset_fingerprint="train_fingerprint")
         experiment["models"].append(model)
@@ -171,14 +173,30 @@ def fixture() -> tuple[dict, list[dict]]:
                       checkpoint_sha256=digest, log_sha256=digest, task_sha256=digest,
                       experiment_sha256=digest, evaluator_sha256=digest,
                       calibration_evaluator_sha256=digest, gelu_evaluator_sha256=digest,
-                      batch_size=32, precision="float64", theta=40)
-        results.append(dict(common, run_id=key + "_collect", kind="collect", backend="spiking",
-                            samples=5000, sites=4 * model["checkpoint_config"]["num_hidden_layers"],
-                            calibration_sha256=digest, calibration_dataset_fingerprint="train_fingerprint"))
+                      batch_size=32, precision="float64")
+        for theta_index, theta in enumerate(theta_grid()):
+            candidate = dict(common, theta=theta, theta_index=theta_index, split="train",
+                             expected_samples=5000, dataset_fingerprint="train_fingerprint")
+            results.append(dict(candidate, run_id=f"{key}_theta_{theta_index:02d}_collect",
+                                kind="theta_collect", backend="spiking", samples=5000,
+                                sites=4 * model["checkpoint_config"]["num_hidden_layers"],
+                                calibration_sha256=digest,
+                                calibration_dataset_fingerprint="train_fingerprint"))
+            correct = 4000 + min(theta_index, 6) * 100
+            results.append(dict(candidate, run_id=f"{key}_theta_{theta_index:02d}_train",
+                                kind="theta_train", backend="spiking", samples=5000,
+                                correct=correct, accuracy=correct / 5000,
+                                prediction_sha256=digest, calibration_sha256=digest))
+        selected_index, selected_theta = 6, theta_grid()[6]
+        final = dict(common, theta=selected_theta, theta_index=selected_index,
+                     split="test" if cifar else "validation",
+                     expected_samples=model["expected_samples"],
+                     dataset_fingerprint="eval_fingerprint")
         for kind, backend, error in (("dense", "hf", 0), ("spiking", "spiking", 5)):
             samples = model["expected_samples"]
             correct = samples - 100 - error
-            results.append(dict(common, run_id=key + "_" + kind, kind=kind, backend=backend,
+            results.append(dict(final, run_id=f"{key}_{kind}_theta_{selected_index:02d}",
+                                kind=kind, backend=backend,
                                 samples=samples, correct=correct, accuracy=correct / samples,
                                 prediction_sha256=digest, calibration_sha256=digest,
                                 dataset_fingerprint="eval_fingerprint"))
@@ -265,7 +283,7 @@ class SummaryTests(unittest.TestCase):
 
     def test_missing_duplicates_and_partial_results(self) -> None:
         experiment, runs = fixture()
-        for variant in (runs + [runs[0]], [runs[2]], [dict(runs[0], success=False)],
+        for variant in (runs + [runs[0]], [runs[1]], [dict(runs[0], success=False)],
                         [dict(runs[0], sites=96)]):
             with self.subTest(variant=variant[0]["kind"]), self.assertRaises(ValueError):
                 validate_results(experiment, variant)
@@ -273,7 +291,7 @@ class SummaryTests(unittest.TestCase):
                              ("correct", 10001), ("accuracy", 0.25),
                              ("prediction_sha256", "bad"), ("total", 123)):
             variant = deepcopy(runs)
-            variant[1][field] = value
+            variant[-2][field] = value
             with self.subTest(field=field), self.assertRaises(ValueError):
                 validate_results(experiment, variant)
         for field in ("theta", "precision", "samples", "batch_size"):
@@ -285,13 +303,13 @@ class SummaryTests(unittest.TestCase):
     def test_identity_rejection(self) -> None:
         experiment, runs = fixture()
         for field, value, index in (
-            ("source_commit", "c" * 40, 1), ("checkpoint_sha256", "c" * 64, 1),
-            ("evaluator_sha256", "c" * 64, 1), ("calibration_sha256", "c" * 64, 2),
-            ("experiment_sha256", "c" * 64, 1),
+            ("source_commit", "c" * 40, -2), ("checkpoint_sha256", "c" * 64, -2),
+            ("evaluator_sha256", "c" * 64, -2), ("calibration_sha256", "c" * 64, -1),
+            ("experiment_sha256", "c" * 64, -2),
             ("calibration_evaluator_sha256", "c" * 64, 0),
-            ("gelu_evaluator_sha256", "c" * 64, 2),
-            ("dataset_fingerprint", "other", 1), ("batch_size", 16, 1),
-            ("precision", "float32", 2), ("theta", 80, 2),
+            ("gelu_evaluator_sha256", "c" * 64, -1),
+            ("dataset_fingerprint", "other", -2), ("batch_size", 16, -2),
+            ("precision", "float32", -1), ("theta", 80, -1),
         ):
             variant = deepcopy(runs)
             variant[index][field] = value
@@ -307,13 +325,13 @@ class SummaryTests(unittest.TestCase):
     def test_aliases_and_all_calibrations_required(self) -> None:
         experiment, runs = fixture()
         for run in runs:
-            if run["kind"] != "collect":
+            if run["kind"] != "theta_collect":
                 run["total"] = run.pop("samples")
                 run["prediction_digest"] = run.pop("prediction_sha256")
         normalized, _ = validate_results(experiment, runs)
         self.assertTrue(all("samples" in row for row in normalized))
         with self.assertRaises(ValueError):
-            validate_results(experiment, [row for row in runs if row["kind"] != "collect"])
+            validate_results(experiment, [row for row in runs if row["kind"] != "theta_collect"])
 
 
 def paper_fixture() -> str:
