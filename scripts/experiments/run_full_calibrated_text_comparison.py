@@ -113,6 +113,21 @@ def checkpoint_identity(path: Path) -> dict[str, str]:
     }
 
 
+def gpu_lock_filename(
+    *,
+    host_label: str,
+    physical_gpu: int,
+    family: str,
+    slurm_job_id: str | None,
+) -> str:
+    """Return a lock identity that follows the host's GPU namespace."""
+    if host_label == "local":
+        return f"gpu-{physical_gpu}.lock"
+    if not slurm_job_id or not slurm_job_id.isdigit():
+        raise ValueError("UBAI GPU locks require a Slurm job identifier")
+    return f"ubai-{slurm_job_id}-{family}.lock"
+
+
 def dataset_identity(path: Path, expected_fingerprint: str, expected_samples: int) -> dict[str, Any]:
     from datasets import load_from_disk
 
@@ -515,7 +530,12 @@ def main() -> None:
         raise RuntimeError("comparison runtime must use a disk filesystem")
 
     sys.path.insert(0, str(args.source_root))
-    lock_path = ARTIFACTS / "runtime/gpu-locks" / f"gpu-{args.gpu}.lock"
+    lock_path = ARTIFACTS / "runtime/gpu-locks" / gpu_lock_filename(
+        host_label=args.host_label,
+        physical_gpu=args.gpu,
+        family=args.family,
+        slurm_job_id=os.environ.get("SLURM_JOB_ID"),
+    )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

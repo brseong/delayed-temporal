@@ -104,6 +104,15 @@ def verify_commands(root: Path) -> None:
     assert runner.MODEL_CONFIG["roberta_large"]["tag"] == runner.ROBERTA_LARGE_TAG
     assert runner.MODEL_CONFIG["gpt2"]["tag"] == runner.GPT2_COMPOSED_GELU_TAG
     assert set(runner.FAMILY_CONFIG) == {"bert", "roberta", "gpt2"}
+    assert runner.gpu_lock_filename(
+        host_label="local", physical_gpu=4, family="gpt2", slurm_job_id=None,
+    ) == "gpu-4.lock"
+    assert runner.gpu_lock_filename(
+        host_label="ubai", physical_gpu=0, family="gpt2", slurm_job_id="123",
+    ) == "ubai-123-gpt2.lock"
+    reject(lambda: runner.gpu_lock_filename(
+        host_label="ubai", physical_gpu=0, family="gpt2", slurm_job_id=None,
+    ), ValueError)
 
 
 def verify_frozen_source_identity(root: Path) -> None:
