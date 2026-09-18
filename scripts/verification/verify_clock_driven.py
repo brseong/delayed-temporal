@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -336,6 +337,28 @@ def verify_vit_runtime_isolation() -> None:
             pass
         else:
             raise AssertionError("calibration-relevant source change was accepted")
+
+    approved_patch = b"clock patch"
+    approved_digest = hashlib.sha256(approved_patch).hexdigest()
+    safe_patch_target = (
+        "scripts.experiments.run_clock_driven_vit."
+        "calibration_safe_patch_sha256"
+    )
+    with (
+        patch(run_target, return_value=SimpleNamespace(returncode=0)),
+        patch(
+            output_target,
+            side_effect=["utils/transforms/primitive.py\n", approved_patch],
+        ),
+        patch.dict(
+            safe_patch_target,
+            {"utils/transforms/primitive.py": approved_digest},
+            clear=True,
+        ),
+    ):
+        assert calibration_compatibility_paths(
+            Path(__file__).resolve().parents[2], "a" * 40, "b" * 40
+        ) == ["utils/transforms/primitive.py"]
 
 
 # @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Contiguous Evaluation Shards]]

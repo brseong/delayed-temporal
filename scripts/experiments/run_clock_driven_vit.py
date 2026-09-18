@@ -32,6 +32,14 @@ EXTENDED_GPUS = tuple(range(8))
 CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV = (
     "DT_CALIBRATION_COMPATIBLE_SOURCE_COMMIT"
 )
+calibration_safe_patch_sha256 = {
+    "utils/transforms/primitive.py": (
+        "c426701ad31af429b62c47378cc23a17c41d991a8414deedb561d1cbf3b7ab84"
+    ),
+    "utils/transforms/spike_to_potential.py": (
+        "f6ee3475740a1b621ab1b26bcad714c595bd1e5e4528adde22310482773b5349"
+    ),
+}
 DEFAULT_TIME_STEPS = tuple(index / 10.0 for index in range(1, 11))
 PYTHON = Path("/opt/conda/envs/dt/bin/python")
 CHECKPOINT = Path(
@@ -372,6 +380,7 @@ def calibration_compatibility_paths(
         "scripts/verification/verify_clock_driven.py",
         "utils/transforms/calibration.py",
         "utils/transforms/clock.py",
+        *calibration_safe_patch_sha256,
     }
     disallowed = sorted(set(changed) - allowed)
     if disallowed:
@@ -379,6 +388,19 @@ def calibration_compatibility_paths(
             "calibration reuse crosses calibration-relevant changes: "
             + ", ".join(disallowed)
         )
+    for path in sorted(set(changed) & calibration_safe_patch_sha256.keys()):
+        patch_bytes = subprocess.check_output(
+            [
+                "git", "-C", str(source), "diff",
+                calibration_commit, execution_commit, "--", path,
+            ]
+        )
+        if hashlib.sha256(patch_bytes).hexdigest() != (
+            calibration_safe_patch_sha256[path]
+        ):
+            raise ValueError(
+                f"calibration reuse has an unapproved patch for clock execution: {path}"
+            )
     return sorted(changed)
 
 

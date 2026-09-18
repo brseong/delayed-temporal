@@ -3,7 +3,7 @@ from jaxtyping import Float, Int
 from math import exp, isclose, isfinite
 from numbers import Real
 
-from .clock import clocked_difference, clocked_exponential
+from .clock import clocked_difference, clocked_exponential, get_clock_driven
 from .noise import clamp_gaussian_output, get_gaussian_time_noise
 from .potential_to_spike import neg_identity_transform
 from .types import ClosedBounds, PotentialBounds, SpikeSample, TimeBounds, check_domain
@@ -50,9 +50,13 @@ def exp_operator(
     # Decode the earliest and deadline carriers in the payload dtype and device.
     # A very wide window or very small tau_m can underflow the earliest response to
     # zero even though Python's float would still conceal the target dtype limit.
-    endpoint_times = clocked_difference(
-        input_value.new_tensor([float(domain.min), float(domain.max)]),
-        float(domain.max),
+    endpoint_times = (
+        clocked_difference(
+            input_value.new_tensor([float(domain.min), float(domain.max)]),
+            float(domain.max),
+        )
+        if get_clock_driven().enabled
+        else input_value.new_tensor([-float(domain.range), 0.0])
     )
     decoded_endpoints = clocked_exponential(endpoint_times, tau=tau_value)
 
@@ -67,10 +71,12 @@ def exp_operator(
 
     # Evaluate the payload with the same deadline-relative exponent and return
     # concrete scalar rails for device-independent downstream interval arithmetic.
-    response = clocked_exponential(
-        clocked_difference(input_value, float(domain.max)),
-        tau=tau_value,
+    relative_input = (
+        clocked_difference(input_value, float(domain.max))
+        if get_clock_driven().enabled
+        else input_value - float(domain.max)
     )
+    response = clocked_exponential(relative_input, tau=tau_value)
     return response, PotentialBounds(
         decoded_endpoints[0].item(),
         decoded_endpoints[1].item(),
@@ -397,16 +403,24 @@ def exponential_difference_operator(
     #    = exp(-(T - theta + p) / tau_s)
     #    = exp(-T / tau_s) * exp(theta / tau_s) * exp(-p / tau_s)
     # Subtracting theta before normalized decoding removes the fixed encoder offset.
-    scaled_endpoints = clocked_difference(
-        s.new_tensor([float(domain_s.min), float(domain_s.max)]),
-        float(domain_p.max),
-    )
-    domain_s_scaled = PotentialBounds(
-        scaled_endpoints[0].item(),
-        scaled_endpoints[1].item(),
-    )
+    if get_clock_driven().enabled:
+        scaled_endpoints = clocked_difference(
+            s.new_tensor([float(domain_s.min), float(domain_s.max)]),
+            float(domain_p.max),
+        )
+        domain_s_scaled = PotentialBounds(
+            scaled_endpoints[0].item(),
+            scaled_endpoints[1].item(),
+        )
+        scaled_s = clocked_difference(s, float(domain_p.max))
+    else:
+        domain_s_scaled = PotentialBounds(
+            domain_s.min - domain_p.max,
+            domain_s.max - domain_p.max,
+        )
+        scaled_s = s - domain_p.max
     result, domain_result = normalized_exp_operator(
-        clocked_difference(s, float(domain_p.max)),
+        scaled_s,
         domain_s_scaled,
         tau_m=tau_s,
     )

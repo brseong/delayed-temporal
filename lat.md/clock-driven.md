@@ -42,6 +42,8 @@ The default local device policy remains devices 4 through 7. This campaign uses 
 
 The v1 attempt was rejected before producing a time bin result because repeated 0.1 step accumulation caused an aligned duration to fail the strict numerical alignment check. The v2 execution admits only bounded arithmetic drift accumulated by explicit state updates and still rejects a displacement of one quarter of a bin. It shares the earlier calibration table only after confirming that every changed path is unable to affect calibration. Runtime validation substitutes only the recorded source revision and requires all other metadata to match exactly.
 
+Changes inside a shared temporal operator are accepted for calibration reuse only when the complete file patch matches its approved digest and the continuous execution branch remains unchanged.
+
 ## Verification
 
 The verification cases distinguish clock semantics from ordinary floating-point evaluation.
