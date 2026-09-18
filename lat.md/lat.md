@@ -8,4 +8,5 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[noise]] — Gaussian event timing, fixed-deadline potential readout, static non-idealities, and verification.
 - [[evaluation]] — Experiment entry points, metrics, diagnostics, sweeps, and verification boundaries.
 - [[hardware]] — BrainScaleS-2 primitive timing validation plus toy ANN2SNN Hagen/TTFS hardware-in-the-loop accuracy experiments.
+- [[deprecated]] — Superseded design alternatives retained for historical context.
 - [[todo]] — Deferred implementation work with explicit completion and validation requirements.
