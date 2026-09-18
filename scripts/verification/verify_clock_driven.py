@@ -24,12 +24,16 @@ from scripts.evaluation.error_analysis_vit import (
     validate_vit_runtime_arguments,
 )
 from scripts.experiments.run_clock_driven_vit import (
+    CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV,
+    CALIBRATION_COMPATIBLE_VIT_EVALUATOR_SHA256_ENV,
+    CALIBRATION_VIT_EVALUATOR_SHA256,
     calibration_compatibility_paths,
     default_time_steps,
     default_time_steps_per_window,
     normalize_shard_indices,
     parse_result,
     prepare_evaluation_subset,
+    run_command,
     select_fixed_gpu_pool,
     tasks,
     write_summary,
@@ -461,6 +465,34 @@ def verify_vit_runtime_isolation() -> None:
         assert calibration_compatibility_paths(
             Path(__file__).resolve().parents[2], "a" * 40, "b" * 40
         ) == ["utils/transforms/primitive.py"]
+
+    with tempfile.TemporaryDirectory() as directory:
+        popen_target = "scripts.experiments.run_clock_driven_vit.subprocess.Popen"
+        with patch(popen_target, return_value=SimpleNamespace()) as popen:
+            run_command(
+                ["evaluator"],
+                Path(directory) / "compatible.log",
+                gpu=4,
+                source=REPOSITORY_ROOT,
+                calibration_source_commit="a" * 40,
+            )
+        environment = popen.call_args.kwargs["env"]
+        assert environment[CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV] == "a" * 40
+        assert (
+            environment[CALIBRATION_COMPATIBLE_VIT_EVALUATOR_SHA256_ENV]
+            == CALIBRATION_VIT_EVALUATOR_SHA256
+        )
+
+        with patch(popen_target, return_value=SimpleNamespace()) as popen:
+            run_command(
+                ["evaluator"],
+                Path(directory) / "exact.log",
+                gpu=4,
+                source=REPOSITORY_ROOT,
+            )
+        environment = popen.call_args.kwargs["env"]
+        assert CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV not in environment
+        assert CALIBRATION_COMPATIBLE_VIT_EVALUATOR_SHA256_ENV not in environment
 
 
 # @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Contiguous Evaluation Shards]]

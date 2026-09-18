@@ -24,6 +24,10 @@ if str(SOURCE) not in sys.path:
 
 from scripts.runtime import files as runtime_files
 from scripts.runtime import identity
+from utils.transforms.calibration import (
+    CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV,
+    CALIBRATION_COMPATIBLE_VIT_EVALUATOR_SHA256_ENV,
+)
 
 
 default_tag = "vit_base_clock_driven_imagenet500_theta20_float64_fine_v1"
@@ -34,8 +38,8 @@ default_evaluation_samples = 500
 default_shards = 21
 ALLOWED_GPUS = (4, 5, 6, 7)
 EXTENDED_GPUS = tuple(range(8))
-CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV = (
-    "DT_CALIBRATION_COMPATIBLE_SOURCE_COMMIT"
+CALIBRATION_VIT_EVALUATOR_SHA256 = (
+    "b2039cd53c0142b468886552caf393edcdde7eaca4513ac49124c54fe0e9c85d"
 )
 calibration_safe_patch_sha256 = {
     "scripts/evaluation/error_analysis_vit.py": (
@@ -500,6 +504,8 @@ def validate_calibration(
         raise ValueError("clock-driven calibration population differs")
     if options.get("checkpoint_sha256") != CHECKPOINT_SHA256:
         raise ValueError("clock-driven calibration checkpoint differs")
+    if options.get("vit_evaluator_sha256") != CALIBRATION_VIT_EVALUATOR_SHA256:
+        raise ValueError("clock-driven calibration evaluator identity differs")
     return identity.sha256_file(path), expected_table_commit, compatibility_paths
 
 
@@ -863,6 +869,9 @@ def run_command(
     if calibration_source_commit is not None:
         environment[CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV] = (
             calibration_source_commit
+        )
+        environment[CALIBRATION_COMPATIBLE_VIT_EVALUATOR_SHA256_ENV] = (
+            CALIBRATION_VIT_EVALUATOR_SHA256
         )
     process = subprocess.Popen(
         command,

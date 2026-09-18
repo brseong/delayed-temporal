@@ -19,6 +19,9 @@ CALIBRATION_FORMAT_VERSION = 1
 CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV = (
     "DT_CALIBRATION_COMPATIBLE_SOURCE_COMMIT"
 )
+CALIBRATION_COMPATIBLE_VIT_EVALUATOR_SHA256_ENV = (
+    "DT_CALIBRATION_COMPATIBLE_VIT_EVALUATOR_SHA256"
+)
 
 
 class CalibrationMode(StrEnum):
@@ -1664,6 +1667,13 @@ def validate_calibration_metadata(
     compatible_source_commit = os.environ.get(
         CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV
     )
+    compatible_vit_evaluator_sha256 = os.environ.get(
+        CALIBRATION_COMPATIBLE_VIT_EVALUATOR_SHA256_ENV
+    )
+    if compatible_vit_evaluator_sha256 is not None and compatible_source_commit is None:
+        raise ValueError(
+            "compatible ViT evaluator requires a compatible calibration source commit"
+        )
     if compatible_source_commit is not None:
         if re.fullmatch(r"[0-9a-f]{40}", compatible_source_commit) is None:
             raise ValueError("compatible calibration source commit must be 40 hex digits")
@@ -1674,6 +1684,23 @@ def validate_calibration_metadata(
                 "calibration table source commit does not match the compatibility gate"
             )
         expected_options["source_commit"] = compatible_source_commit
+        if compatible_vit_evaluator_sha256 is not None:
+            if re.fullmatch(
+                r"[0-9a-f]{64}", compatible_vit_evaluator_sha256
+            ) is None:
+                raise ValueError(
+                    "compatible ViT evaluator SHA-256 must be 64 hex digits"
+                )
+            if (
+                actual_options.get("vit_evaluator_sha256")
+                != compatible_vit_evaluator_sha256
+            ):
+                raise ValueError(
+                    "calibration table ViT evaluator does not match the compatibility gate"
+                )
+            expected_options["vit_evaluator_sha256"] = (
+                compatible_vit_evaluator_sha256
+            )
         expected = replace(
             expected,
             model_options=tuple(sorted(expected_options.items())),

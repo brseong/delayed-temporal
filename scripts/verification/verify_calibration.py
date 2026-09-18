@@ -26,6 +26,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from utils.transforms.calibration import (  # noqa: E402
     CALIBRATION_FORMAT_VERSION,
     CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV,
+    CALIBRATION_COMPATIBLE_VIT_EVALUATOR_SHA256_ENV,
     CalibrationClippingCounts,
     CalibrationHistogram,
     CalibrationMetadata,
@@ -2217,6 +2218,78 @@ def verify_canonical_table_round_trip() -> None:
                 replace(compatible_expected, theta=1000.0),
             ),
             "theta",
+        )
+
+    old_evaluator = "c" * 64
+    new_evaluator = "d" * 64
+    evaluator_actual = replace(
+        metadata,
+        model_options=tuple(sorted((
+            *metadata.model_options,
+            ("source_commit", old_commit),
+            ("vit_evaluator_sha256", old_evaluator),
+        ))),
+    )
+    evaluator_expected = replace(
+        metadata,
+        model_options=tuple(sorted((
+            *metadata.model_options,
+            ("source_commit", new_commit),
+            ("vit_evaluator_sha256", new_evaluator),
+        ))),
+    )
+    with patch.dict(
+        os.environ,
+        {
+            CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV: old_commit,
+            CALIBRATION_COMPATIBLE_VIT_EVALUATOR_SHA256_ENV: old_evaluator,
+        },
+    ):
+        validate_calibration_metadata(evaluator_actual, evaluator_expected)
+        _expect_raises(
+            ValueError,
+            lambda: validate_calibration_metadata(
+                replace(
+                    evaluator_actual,
+                    model_options=tuple(sorted((
+                        *metadata.model_options,
+                        ("source_commit", old_commit),
+                        ("vit_evaluator_sha256", "e" * 64),
+                    ))),
+                ),
+                evaluator_expected,
+            ),
+            "evaluator",
+        )
+
+    with patch.dict(
+        os.environ,
+        {CALIBRATION_COMPATIBLE_VIT_EVALUATOR_SHA256_ENV: old_evaluator},
+        clear=True,
+    ):
+        _expect_raises(
+            ValueError,
+            lambda: validate_calibration_metadata(
+                evaluator_actual,
+                evaluator_expected,
+            ),
+            "source commit",
+        )
+    with patch.dict(
+        os.environ,
+        {
+            CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV: old_commit,
+            CALIBRATION_COMPATIBLE_VIT_EVALUATOR_SHA256_ENV: "not-a-digest",
+        },
+        clear=True,
+    ):
+        _expect_raises(
+            ValueError,
+            lambda: validate_calibration_metadata(
+                evaluator_actual,
+                evaluator_expected,
+            ),
+            "64 hex digits",
         )
 
     # In-memory schema round-trip returns independent immutable data and catches both
