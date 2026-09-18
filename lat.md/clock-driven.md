@@ -78,6 +78,12 @@ The ViT evaluator accepts a positive global time step only for a spiking backend
 
 The configured evaluation population is divided into balanced contiguous half-open ranges with no overlap or omission, and aggregation requires complete ordered coverage of that population.
 
+### Selected Evaluation Shards
+
+A distributed worker may evaluate explicit shard indices without changing the global shard count or contiguous range definition.
+
+Duplicate indices or indices outside the valid range are rejected. Final reporting still requires every shard.
+
 ### Completed Sweep Reporting
 
 Final reporting accepts only all 11 conditions, 21 contiguous shards per condition, exact 500 image coverage, matching identities, positive state update counts, and matching generated summaries.

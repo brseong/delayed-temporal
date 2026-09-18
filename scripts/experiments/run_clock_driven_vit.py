@@ -131,17 +131,36 @@ def source_commit(source: Path) -> str:
 def tasks(
     time_steps: tuple[float, ...],
     shard_count: int,
+    shard_indices: tuple[int, ...] | None = None,
 ) -> tuple[tuple[str, float | None, int], ...]:
-    """Return every contiguous shard of the baseline and requested time bins."""
+    """Return selected contiguous shards of the baseline and requested time bins."""
 
     conditions = (("continuous", None),) + tuple(
         (f"dt_{time_step:g}", time_step) for time_step in time_steps
     )
+    selected = normalize_shard_indices(shard_count, shard_indices)
     return tuple(
         (f"{condition}_shard_{shard_index:02d}", time_step, shard_index)
         for condition, time_step in conditions
-        for shard_index in range(shard_count)
+        for shard_index in selected
     )
+
+
+def normalize_shard_indices(
+    shard_count: int,
+    requested: tuple[int, ...] | None,
+) -> tuple[int, ...]:
+    """Validate an optional deterministic subset of global shard indices."""
+
+    if requested is None:
+        return tuple(range(shard_count))
+    if not requested:
+        raise ValueError("selected shard indices must not be empty")
+    if len(set(requested)) != len(requested):
+        raise ValueError("selected shard indices must be unique")
+    if any(index < 0 or index >= shard_count for index in requested):
+        raise ValueError("selected shard index is outside the global shard range")
+    return tuple(sorted(requested))
 
 
 def common_arguments(
@@ -258,10 +277,11 @@ def build_experiment(
     controller_commit: str,
     requested_gpus: tuple[int, ...],
     extended_gpu_pool: bool,
+    selected_shards: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     """Create the immutable campaign identity from source and local artifacts."""
 
-    return {
+    experiment = {
         "tag": tag,
         "controller_source_root": str(SOURCE),
         "controller_source_commit": controller_commit,
@@ -305,6 +325,9 @@ def build_experiment(
             source / "utils/transforms/clock.py"
         ),
     }
+    if selected_shards is not None:
+        experiment["selected_shards"] = list(selected_shards)
+    return experiment
 
 
 def gpu_snapshot() -> dict[int, tuple[int, int]]:
@@ -783,6 +806,16 @@ def main() -> None:
         default=default_shards,
         help="Contiguous validation shards per condition (default: 21).",
     )
+    parser.add_argument(
+        "--shard-indices",
+        type=int,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional global shard indices to run; the global shard count and "
+            "range definition remain unchanged."
+        ),
+    )
     args = parser.parse_args()
 
     source = args.source_root.resolve()
@@ -801,6 +834,13 @@ def main() -> None:
         raise ValueError("shards must be positive")
     if args.evaluation_samples < args.shards:
         raise ValueError("evaluation samples must be no smaller than shard count")
+    selected_shards = normalize_shard_indices(
+        args.shards,
+        None if args.shard_indices is None else tuple(args.shard_indices),
+    )
+    explicit_shard_selection = (
+        None if args.shard_indices is None else selected_shards
+    )
 
     controller_commit = source_commit(SOURCE)
     commit = source_commit(source)
@@ -883,12 +923,14 @@ def main() -> None:
         controller_commit=controller_commit,
         requested_gpus=requested_gpus,
         extended_gpu_pool=args.allow_gpus_0_3,
+        selected_shards=explicit_shard_selection,
     )
     runtime_files.immutable_json(root / "experiment.json", experiment)
 
     accepted: list[dict[str, Any]] = []
     pending: list[tuple[str, float | None, int]] = []
-    for run_id, time_step, shard_index in tasks(time_steps, args.shards):
+    selected_tasks = tasks(time_steps, args.shards, selected_shards)
+    for run_id, time_step, shard_index in selected_tasks:
         result_path = root / "results" / f"{run_id}.json"
         if result_path.exists():
             result = json.loads(result_path.read_text())
@@ -1011,7 +1053,7 @@ def main() -> None:
                 flush=True,
             )
 
-    if len(accepted) != len(tasks(time_steps, args.shards)):
+    if len(accepted) != len(selected_tasks):
         raise RuntimeError("clock-driven campaign ended without every condition")
     write_summary(
         root,

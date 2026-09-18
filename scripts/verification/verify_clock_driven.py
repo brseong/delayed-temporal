@@ -26,9 +26,11 @@ from scripts.evaluation.error_analysis_vit import (
 from scripts.experiments.run_clock_driven_vit import (
     calibration_compatibility_paths,
     default_time_steps,
+    normalize_shard_indices,
     parse_result,
     prepare_evaluation_subset,
     select_fixed_gpu_pool,
+    tasks,
     write_summary,
 )
 from scripts.analysis.plot_clock_time_step_sweep import (
@@ -448,6 +450,25 @@ def verify_contiguous_evaluation_shards() -> None:
         assert Dataset.load_from_disk(str(subset_path))["value"] == list(range(5))
 
 
+# @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Selected Evaluation Shards]]
+def verify_selected_evaluation_shards() -> None:
+    assert normalize_shard_indices(4, None) == (0, 1, 2, 3)
+    assert normalize_shard_indices(4, (3, 1)) == (1, 3)
+    assert tasks((0.01,), 4, (1, 3)) == (
+        ("continuous_shard_01", None, 1),
+        ("continuous_shard_03", None, 3),
+        ("dt_0.01_shard_01", 0.01, 1),
+        ("dt_0.01_shard_03", 0.01, 3),
+    )
+    for invalid in ((), (1, 1), (-1,), (4,)):
+        try:
+            normalize_shard_indices(4, invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid shard selection was accepted: {invalid}")
+
+
 # @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Completed Sweep Reporting]]
 def verify_completed_sweep_reporting() -> None:
     with tempfile.TemporaryDirectory() as directory:
@@ -599,6 +620,7 @@ if __name__ == "__main__":
         verify_disabled_mode_parity,
         verify_vit_runtime_isolation,
         verify_contiguous_evaluation_shards,
+        verify_selected_evaluation_shards,
         verify_completed_sweep_reporting,
         verify_composed_encoder_statistics,
     )
