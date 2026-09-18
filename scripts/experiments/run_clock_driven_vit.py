@@ -52,7 +52,7 @@ calibration_safe_patch_sha256 = {
         "10fc31cff8d361767f28b62c81f24e3ec0a6d028d41d2b0e8f26a48ea2a59a61"
     ),
     "utils/transforms/clock.py": (
-        "df5265dc323ac8a1255c0367a00d8e77607af1ac1c183040d1402eb8959a7066"
+        "96dc28f2350cfacd8e00f3f7c51506282ef9611e4b49b75ad2842b9c24b6c90f"
     ),
     "utils/transforms/primitive.py": (
         "2433001e0485a2b48ba40d28f97f4b0b67570150d1788104a288da7ac0b85985"
