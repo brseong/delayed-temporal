@@ -3,7 +3,7 @@ from jaxtyping import Float, Int
 from math import exp, isclose, isfinite
 from numbers import Real
 
-from .clock import clocked_exponential
+from .clock import clocked_difference, clocked_exponential
 from .noise import clamp_gaussian_output, get_gaussian_time_noise
 from .potential_to_spike import neg_identity_transform
 from .types import ClosedBounds, PotentialBounds, SpikeSample, TimeBounds, check_domain
@@ -50,11 +50,9 @@ def exp_operator(
     # Decode the earliest and deadline carriers in the payload dtype and device.
     # A very wide window or very small tau_m can underflow the earliest response to
     # zero even though Python's float would still conceal the target dtype limit.
-    endpoint_times = input_value.new_tensor(
-        [
-            -float(domain.range),
-            0.0,
-        ]
+    endpoint_times = clocked_difference(
+        input_value.new_tensor([float(domain.min), float(domain.max)]),
+        float(domain.max),
     )
     decoded_endpoints = clocked_exponential(endpoint_times, tau=tau_value)
 
@@ -70,7 +68,7 @@ def exp_operator(
     # Evaluate the payload with the same deadline-relative exponent and return
     # concrete scalar rails for device-independent downstream interval arithmetic.
     response = clocked_exponential(
-        input_value - float(domain.max),
+        clocked_difference(input_value, float(domain.max)),
         tau=tau_value,
     )
     return response, PotentialBounds(
@@ -399,12 +397,16 @@ def exponential_difference_operator(
     #    = exp(-(T - theta + p) / tau_s)
     #    = exp(-T / tau_s) * exp(theta / tau_s) * exp(-p / tau_s)
     # Subtracting theta before normalized decoding removes the fixed encoder offset.
+    scaled_endpoints = clocked_difference(
+        s.new_tensor([float(domain_s.min), float(domain_s.max)]),
+        float(domain_p.max),
+    )
     domain_s_scaled = PotentialBounds(
-        domain_s.min - domain_p.max,
-        domain_s.max - domain_p.max,
+        scaled_endpoints[0].item(),
+        scaled_endpoints[1].item(),
     )
     result, domain_result = normalized_exp_operator(
-        s - domain_p.max,
+        clocked_difference(s, float(domain_p.max)),
         domain_s_scaled,
         tau_m=tau_s,
     )

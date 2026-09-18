@@ -321,6 +321,23 @@ def clock_step_indices(value: Tensor) -> Tensor:
     return nearest
 
 
+def clocked_difference(value: Tensor, reference: Tensor | float) -> Tensor:
+    """Subtract two times on the clock grid without losing their integer steps."""
+
+    config = get_clock_driven()
+    if not config.enabled:
+        return value - reference
+    reference_tensor = (
+        reference.to(dtype=value.dtype, device=value.device)
+        if isinstance(reference, Tensor)
+        else value.new_tensor(reference)
+    )
+    value_steps = clock_step_indices(value).to(dtype=torch.int64)
+    reference_steps = clock_step_indices(reference_tensor).to(dtype=torch.int64)
+    difference_steps = value_steps - reference_steps
+    return difference_steps.to(dtype=value.dtype) * value.new_tensor(config.time_step)
+
+
 def clocked_exponential(value: Tensor, *, tau: float) -> Tensor:
     """Evaluate repeated per-step exponential state updates for signed time."""
 

@@ -29,6 +29,7 @@ from scripts.experiments.run_clock_driven_vit import (
     write_summary,
 )
 from utils.transforms.clock import (
+    clocked_difference,
     clock_step_indices,
     get_clock_driven_stats,
     get_clock_update_stats,
@@ -157,6 +158,17 @@ def verify_exponential_state_updates() -> None:
     assert updates["calls"] == 4
     assert updates["time_steps"] == 24
     assert updates["element_updates"] == 60
+
+    set_clock_driven(enabled=True, time_step=0.1)
+    cancellation_prone = torch.tensor(12.500000000000046, dtype=torch.float64)
+    aligned_difference = clocked_difference(cancellation_prone, 12.8)
+    assert clock_step_indices(aligned_difference).item() == -3
+    torch.testing.assert_close(
+        aligned_difference,
+        torch.tensor(-0.3, dtype=torch.float64),
+        atol=1.0e-15,
+        rtol=0.0,
+    )
     set_clock_driven(enabled=False)
 
 

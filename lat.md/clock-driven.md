@@ -18,6 +18,8 @@ Affine and attention kernels retain their tensor reductions, but their temporal 
 
 Clock index recovery admits bounded arithmetic drift accumulated by repeated explicit state updates. The tolerance remains below one quarter of a bin, so a materially unaligned duration is rejected.
 
+Durations relative to a deadline or offset are formed by subtracting their integer clock indices and converting the resulting index once. This preserves alignment when two large aligned times cancel to a small duration.
+
 ## Evaluation Contract
 
 The first maintained evaluation uses calibrated ViT-B/16 on the fixed ImageNet-1k validation subset of 5,000 images.
