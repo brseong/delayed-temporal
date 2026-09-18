@@ -305,8 +305,18 @@ def clock_step_indices(value: Tensor) -> Tensor:
         accumulated_roundoff,
         quotient.new_full((), 0.25),
     )
-    if not bool(((quotient - nearest).abs() <= tolerance).all()):
-        raise ValueError("clock-driven duration is not aligned to the global time step")
+    error = (quotient - nearest).abs()
+    if not bool((error <= tolerance).all()):
+        flat_index = int(error.argmax().item())
+        flat_value = value.reshape(-1)[flat_index].item()
+        flat_quotient = quotient.reshape(-1)[flat_index].item()
+        flat_error = error.reshape(-1)[flat_index].item()
+        flat_tolerance = tolerance.reshape(-1)[flat_index].item()
+        raise ValueError(
+            "clock-driven duration is not aligned to the global time step: "
+            f"value={flat_value!r}, quotient={flat_quotient!r}, "
+            f"error={flat_error!r}, tolerance={flat_tolerance!r}"
+        )
     return nearest
 
 
