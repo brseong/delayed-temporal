@@ -66,6 +66,10 @@ The verification record confirms seven conditions, 147 shard runs, exact 500-ima
 
 The authoritative outputs are `summary.csv`, `summary.json`, `raw_shards.csv`, and `verification.json` under `artifacts/logs/clock_driven/vit_base_clock_driven_window_steps_imagenet500_theta20_float64_v1/`. The generated figure files are under its `figures/` directory.
 
+An additional evaluation used 384 and 768 time steps per time window under the same source, frozen calibration, accelerator family, first 500 image ordering, and 21 shard coverage as the completed benchmark. The 384 and 768 conditions obtained 137/500 (27.4%) and 403/500 (80.6%), respectively.
+
+The original benchmark remains unchanged. The combined summary for nine conditions, 189 shard records, verification hashes, and diagnostic figure are stored separately under `artifacts/logs/clock_driven/vit_base_clock_driven_window_steps_384_768_imagenet500_theta20_float64_v1/`.
+
 The first attempt for this sweep was rejected because subtracting a large nonzero time-window origin exposed floating-point cancellation in an otherwise aligned duration. The completed execution admits only bounded arithmetic drift accumulated by explicit state updates and origin subtraction, while still rejecting a displacement of one quarter of a time step.
 
 It shares the earlier calibration table only after confirming that every changed path is unable to affect calibration. Runtime validation substitutes the recorded source revision and the calibration table's recorded ViT evaluator digest, while requiring every other metadata field to match exactly.
