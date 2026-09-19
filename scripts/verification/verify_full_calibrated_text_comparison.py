@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from datasets import Dataset, load_from_disk
 
@@ -98,7 +102,44 @@ def verify_commands(root: Path) -> None:
     assert commands["collect"][2].endswith("error_analysis_roberta.py")
     assert runner.MODEL_CONFIG["roberta_large"]["sites"] == 218
     assert runner.MODEL_CONFIG["roberta_large"]["tag"] == runner.ROBERTA_LARGE_TAG
+    assert runner.MODEL_CONFIG["gpt2"]["tag"] == runner.GPT2_COMPOSED_GELU_TAG
     assert set(runner.FAMILY_CONFIG) == {"bert", "roberta", "gpt2"}
+    assert runner.gpu_lock_filename(
+        host_label="local", physical_gpu=4, family="gpt2", slurm_job_id=None,
+    ) == "gpu-4.lock"
+    assert runner.gpu_lock_filename(
+        host_label="ubai", physical_gpu=0, family="gpt2", slurm_job_id="123",
+    ) == "ubai-123-gpt2.lock"
+    reject(lambda: runner.gpu_lock_filename(
+        host_label="ubai", physical_gpu=0, family="gpt2", slurm_job_id=None,
+    ), ValueError)
+
+
+def verify_frozen_source_identity(root: Path) -> None:
+    source = Path(__file__).resolve().parents[2]
+    commit = subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", "HEAD"], text=True,
+    ).strip()
+    with patch.object(
+        runner.subprocess,
+        "check_output",
+        side_effect=[commit + "\n", ""],
+    ):
+        hashes = runner.source_identity(source, commit, "gpt2")
+    frozen = root / "source-identity.json"
+    frozen.write_text(json.dumps({
+        "source_commit": commit,
+        "families": {"gpt2": hashes},
+    }))
+    with patch.object(runner.shutil, "which", return_value=None), patch.dict(
+        os.environ,
+        {"FROZEN_SOURCE_IDENTITY_PATH": str(frozen)},
+    ):
+        assert runner.source_identity(source, commit, "gpt2") == hashes
+        changed = json.loads(frozen.read_text())
+        changed["families"]["gpt2"][next(iter(hashes))] = "0" * 64
+        frozen.write_text(json.dumps(changed))
+        reject(lambda: runner.source_identity(source, commit, "gpt2"), ValueError)
 
 
 def verify_collection_progress(root: Path) -> None:
@@ -163,8 +204,12 @@ def verify_summarizer(root: Path) -> None:
                              "log_file": str(log.relative_to(output)),
                              "log_sha256": identity.sha256_file(log)}
         calibration_sha = identity.sha256_file(output / "calibration.json")
+        phases["collect"]["calibration_sha256"] = calibration_sha
         output.joinpath("manifest.json").write_text(json.dumps({
-            "tag": runner.TAG, "family": family, "source_commit": "a" * 40,
+            "tag": runner.MODEL_CONFIG[family]["tag"],
+            "family": family,
+            "evaluator_family": runner.MODEL_CONFIG[family]["evaluator_family"],
+            "source_commit": "a" * 40,
             "checkpoint_files_sha256": {"model": "b" * 64},
             "calibration_dataset": {"fingerprint": "training"},
             "evaluation_dataset": {"fingerprint": "evaluation"},
@@ -179,6 +224,47 @@ def verify_summarizer(root: Path) -> None:
     provenance = summary.build(campaign, campaign / "outputs", require_complete=True)
     assert provenance["complete"] and len(provenance["families"]) == 3
     assert set(provenance["files"]) == {"raw_runs.csv", "summary.csv", "calibration_sites.csv"}
+
+    reused = root / "reused"
+    for family in ("roberta", "gpt2"):
+        source = campaign / family
+        source_manifest = json.loads((source / "manifest.json").read_text())
+        if family == "roberta":
+            source_manifest.pop("evaluator_family")
+            (source / "manifest.json").write_text(json.dumps(source_manifest))
+        evidence, sites = runner.reused_calibration_evidence(
+            source,
+            family=family,
+            evaluator_family=runner.MODEL_CONFIG[family]["evaluator_family"],
+            checkpoint_files_sha256=source_manifest["checkpoint_files_sha256"],
+            calibration_dataset=source_manifest["calibration_dataset"],
+            expected_sites=runner.MODEL_CONFIG[family]["sites"],
+        )
+        assert len(sites) == runner.MODEL_CONFIG[family]["sites"]
+        output = reused / family
+        output.joinpath("logs").mkdir(parents=True)
+        shutil.copyfile(source / "calibration.json", output / "calibration.json")
+        source_result = json.loads((source / "result.json").read_text())
+        phases = {}
+        for phase in ("ann", "snn"):
+            shutil.copyfile(source / "logs" / f"{phase}.log", output / "logs" / f"{phase}.log")
+            phases[phase] = source_result["phases"][phase]
+        manifest = dict(source_manifest)
+        manifest.update(tag=runner.POWER_REUSE_TAG, calibration_reuse=evidence,
+                        gelu_cubic_implementation="phi_nl_psi_ed_v1")
+        output.joinpath("manifest.json").write_text(json.dumps(manifest))
+        output.joinpath("result.json").write_text(json.dumps({
+            "state": "complete", "family": family, "phases": phases,
+            "calibration_sha256": evidence["calibration_sha256"],
+            "calibration_reuse": evidence,
+        }))
+    reuse_provenance = summary.build(
+        reused,
+        reused / "outputs",
+        require_complete=True,
+        requested_models=("roberta", "gpt2"),
+    )
+    assert reuse_provenance["tag"] == runner.POWER_REUSE_TAG
     (campaign / "gpt2" / "result.json").unlink()
     reject(lambda: summary.build(campaign, campaign / "partial", require_complete=True), ValueError)
 
@@ -193,6 +279,7 @@ def main() -> None:
         verify_classification_parser()
         verify_gpt2_parser()
         verify_commands(root)
+        verify_frozen_source_identity(root)
         verify_collection_progress(root)
         verify_summarizer(root)
     print("Full calibrated text comparison checks passed")

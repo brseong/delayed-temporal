@@ -50,7 +50,7 @@ GPT-2 adapts causal self-attention, cache-aware decoding, pre-norm blocks, and t
 
 [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Attention#forward]] uses `max_position_embeddings` for the spiking attention rail and preserves the combined projection range for dense attention. Its resolved `attention_theta` controls Q/K score coding, softmin, and V readout without narrowing LayerNorm or affine/MLP rails; `None` falls back to global `theta`. Eager attention and residual dropout propagate analytic ranges without runtime extrema; nonzero spiking attention training dropout remains outside the paper scope.
 
-The adapter does not support cross-attention in its spiking `GPT2Attention`. Its current MLP uses spiking projections when enabled but evaluates the configured activation directly, so model-family claims must record which nonlinear path is actually operator-composed.
+The adapter does not support cross-attention in its spiking `GPT2Attention`. With spiking MLP enabled, the paper configuration's `gelu_new` activation uses [[utils/transforms/functions.py#gelu_approximation]]; dense MLP ablations and other configured activations retain direct evaluation with a distinct persisted identity.
 
 ## Attention Backend Selection
 

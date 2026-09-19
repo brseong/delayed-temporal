@@ -13,11 +13,16 @@ if str(_REPO_ROOT) not in sys.path:
 import torch
 
 from scripts.analysis.gelu_cubic_phi_nl_vit import (
+    gelu_with_multiplication_cube,
     gelu_with_phi_nl_psi_ed_cube,
+    install_gelu_cubic_implementation,
     install_phi_nl_psi_ed_cube,
     phi_nl_psi_ed_cube,
 )
+from utils.transformers.models.spiking_gpt2 import modeling_spiking_gpt2
+from utils.transformers.models.spiking_roberta import modeling_spiking_roberta
 from utils.transformers.models.spiking_vit import modeling_spiking_vit
+from utils.transforms import functions
 from utils.transforms.functions import gelu_approximation
 from utils.transforms.noise import (
     get_gaussian_noise_stats,
@@ -100,11 +105,34 @@ def verify_phi_nl_psi_ed_cube() -> None:
     )
     assert alternative_domain == baseline_domain
 
+    multiplication, multiplication_domain = gelu_with_multiplication_cube(
+        input32,
+        domain,
+        theta=2000.0,
+    )
+    torch.testing.assert_close(
+        baseline,
+        multiplication,
+        rtol=8.0e-4,
+        atol=7.0e-4,
+    )
+    assert multiplication_domain == baseline_domain
+
+    # ViT, RoBERTa and GPT-2 all resolve the same canonical production GELU.
+    assert modeling_spiking_vit.gelu_approximation is functions.gelu_approximation
+    assert modeling_spiking_roberta.gelu_approximation is functions.gelu_approximation
+    assert modeling_spiking_gpt2.gelu_approximation is functions.gelu_approximation
+
     original_vit_symbol = modeling_spiking_vit.gelu_approximation
     try:
         install_phi_nl_psi_ed_cube(magnitude_floor=1.0e-5)
         assert modeling_spiking_vit.gelu_approximation is not original_vit_symbol
         assert gelu_approximation is original_vit_symbol
+        install_gelu_cubic_implementation(
+            "multiplication",
+            magnitude_floor=1.0e-5,
+        )
+        assert modeling_spiking_vit.gelu_approximation is not original_vit_symbol
     finally:
         modeling_spiking_vit.gelu_approximation = original_vit_symbol
 

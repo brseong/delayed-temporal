@@ -284,11 +284,14 @@ class DeploymentAndTransferTests(unittest.TestCase):
             root = Path(temporary)
             (root / "ubai").mkdir()
             subject = controller(root)
+            subject.experiment = experiment_fixture(root)
             subject.state["models"]["imagenet_vit_small"]["owner"] = "local"
+            put_json(root / "admissions/imagenet_vit_base.json", {"batch_size": 32})
+            subject.remote_exists = Mock(return_value=False)
             subject.transfer = Mock()
             subject.sync_remote()
             names = subject.transfer.call_args.args[0]
-            self.assertTrue(any("imagenet_vit_base_collect" in name for name in names))
+            self.assertTrue(any("imagenet_vit_base_theta_00_collect" in name for name in names))
             self.assertFalse(any("imagenet_vit_small" in name for name in names))
             self.assertFalse(any("cifar10" in name or "vit_large" in name for name in names))
             self.assertNotIn("assignments.json", names)
@@ -300,7 +303,12 @@ class DeploymentAndTransferTests(unittest.TestCase):
             (root / "ubai").mkdir()
             subject = controller(root)
             subject.experiment = experiment_fixture(root)
-            task = make_task(subject.experiment, "imagenet_vit_base", "dense", 32, host_label="ubai")
+            put_json(root / "admissions/imagenet_vit_base.json", {"batch_size": 32})
+            selection = {"theta_index": 6, "calibration_sha256": "a" * 64}
+            subject.remote_exists = Mock(return_value=True)
+            subject.remote = Mock(return_value=json.dumps(selection))
+            task = make_task(subject.experiment, "imagenet_vit_base", "dense", 32,
+                             theta_index=6, host_label="ubai")
             completed_fixture(root, subject.experiment, task)
             path = root / task["result_file"]
             original = path.read_bytes()
@@ -322,7 +330,12 @@ class DeploymentAndTransferTests(unittest.TestCase):
             (root / "ubai").mkdir()
             subject = controller(root)
             subject.experiment = experiment_fixture(root)
-            task = make_task(subject.experiment, "imagenet_vit_base", "dense", 32, host_label="ubai")
+            put_json(root / "admissions/imagenet_vit_base.json", {"batch_size": 32})
+            selection = {"theta_index": 6, "calibration_sha256": "a" * 64}
+            subject.remote_exists = Mock(return_value=True)
+            subject.remote = Mock(return_value=json.dumps(selection))
+            task = make_task(subject.experiment, "imagenet_vit_base", "dense", 32,
+                             theta_index=6, host_label="ubai")
 
             def transfer(names: list[str], *, pull: bool, target: Path) -> None:
                 completed_fixture(target, subject.experiment, task)
@@ -340,7 +353,12 @@ class DeploymentAndTransferTests(unittest.TestCase):
             (root / "ubai").mkdir()
             subject = controller(root)
             subject.experiment = experiment_fixture(root)
-            task = make_task(subject.experiment, "imagenet_vit_base", "dense", 32, host_label="ubai")
+            put_json(root / "admissions/imagenet_vit_base.json", {"batch_size": 32})
+            selection = {"theta_index": 6, "calibration_sha256": "a" * 64}
+            subject.remote_exists = Mock(return_value=True)
+            subject.remote = Mock(return_value=json.dumps(selection))
+            task = make_task(subject.experiment, "imagenet_vit_base", "dense", 32,
+                             theta_index=6, host_label="ubai")
 
             def transfer(names: list[str], *, pull: bool, target: Path) -> None:
                 completed_fixture(target, subject.experiment, task)
@@ -356,8 +374,10 @@ class DeploymentAndTransferTests(unittest.TestCase):
             (root / "ubai").mkdir()
             subject = controller(root)
             subject.experiment = experiment_fixture(root)
+            put_json(root / "admissions/imagenet_vit_base.json", {"batch_size": 32})
+            subject.remote_exists = Mock(return_value=False)
             task = make_task(subject.experiment, "imagenet_vit_base", "spiking", 32,
-                                    calibration_sha256="a" * 64, host_label="ubai")
+                             theta_index=6, calibration_sha256="a" * 64, host_label="ubai")
 
             def transfer(names: list[str], *, pull: bool, target: Path) -> None:
                 completed_fixture(target, subject.experiment, task)

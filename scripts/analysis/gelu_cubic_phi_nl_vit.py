@@ -1,4 +1,4 @@
-"""Compare ViT GELU cubic constructions without changing production modules."""
+"""Compare ViT GELU cubic constructions without duplicating the production path."""
 
 from __future__ import annotations
 
@@ -21,15 +21,16 @@ from scripts.evaluation.error_analysis_vit import (
 )
 from utils.transformers.models.spiking_vit import modeling_spiking_vit
 from utils.transforms.functions import (
+    GELU_CUBIC_MAGNITUDE_FLOOR,
     _constant_synaptic_scale,
     _tanh_sigmoid_gate,
     clamp_gelu_output,
+    clamp_gelu_square_output,
+    gelu_approximation,
+    gelu_cubic_power_operator,
     multiplication_operator,
 )
-from utils.transforms.noise import get_gaussian_time_noise
-from utils.transforms.potential_to_spike import neg_log_transform
-from utils.transforms.spike_to_potential import exponential_difference_operator
-from utils.transforms.types import PotentialBounds, SpikeSample
+from utils.transforms.types import PotentialBounds
 
 
 _CUBIC_IMPLEMENTATIONS = ("multiplication", "phi_nl_psi_ed")
@@ -44,136 +45,13 @@ def phi_nl_psi_ed_cube(
     theta: float,
     magnitude_floor: float,
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Construct the signed GELU cubic term with scaled logarithmic encoding.
-
-    Positive and negative magnitudes use ``phi_NL`` with ``3 * tau_s``. Their
-    domain upper endpoint reference has latency zero, so ``psi_ED`` with scale
-    ``tau_s`` returns the normalized magnitude cube. A fixed receiving gain restores
-    the original potential scale, and the two rails recover the odd sign.
-
-    Under Gaussian timing noise, the positive and negative magnitude encoders and
-    their shared upper-endpoint reference return event-aware samples. The existing
-    exponential-difference operator then applies the same delivery and internal
-    event semantics as the rest of the maintained noise path.
-    """
-    tau_value = float(tau_s)
-    theta_value = float(theta)
-    floor_value = float(magnitude_floor)
-    if not isfinite(tau_value) or tau_value <= 0.0:
-        raise ValueError("tau_s must be finite and positive")
-    if not isfinite(theta_value) or theta_value <= 0.0:
-        raise ValueError("theta must be finite and positive")
-    if not isfinite(floor_value) or floor_value <= 0.0:
-        raise ValueError("magnitude_floor must be finite and positive")
-    magnitude_upper = min(
-        max(abs(float(domain.min)), abs(float(domain.max))),
-        theta_value,
-    )
-    if magnitude_upper <= floor_value:
-        raise ValueError("GELU magnitude domain must exceed magnitude_floor")
-
-    input_clamped = domain.clamp(input_value, name="gelu_phi_nl_x")
-    magnitude_domain = PotentialBounds(floor_value, magnitude_upper)
-    positive_magnitude = input_clamped.clamp(min=0.0, max=magnitude_upper)
-    negative_magnitude = (-input_clamped).clamp(min=0.0, max=magnitude_upper)
-    positive_active = positive_magnitude >= floor_value
-    negative_active = negative_magnitude >= floor_value
-    positive_carrier = magnitude_domain.clamp(
-        positive_magnitude,
-        name="gelu_phi_nl_positive_carrier",
-    )
-    negative_carrier = magnitude_domain.clamp(
-        negative_magnitude,
-        name="gelu_phi_nl_negative_carrier",
-    )
-
-    encoder_tau = 3.0 * tau_value
-    gaussian_enabled = get_gaussian_time_noise().enabled
-    encoder_kwargs: dict[str, object] = {}
-    if gaussian_enabled:
-        encoder_kwargs["return_spike_sample"] = True
-
-    positive_time = neg_log_transform(
-        positive_carrier,
-        magnitude_domain,
-        tau_s=encoder_tau,
-        noise_site="gelu.cubic.log_positive",
-        **encoder_kwargs,
-    )
-    negative_time = neg_log_transform(
-        negative_carrier,
-        magnitude_domain,
-        tau_s=encoder_tau,
-        noise_site="gelu.cubic.log_negative",
-        **encoder_kwargs,
-    )
-    reference_time = neg_log_transform(
-        input_value.new_tensor(magnitude_upper),
-        magnitude_domain,
-        tau_s=encoder_tau,
-        noise_site="gelu.cubic.log_reference",
-        **encoder_kwargs,
-    )
-    if gaussian_enabled:
-        if not all(
-            isinstance(event, SpikeSample)
-            for event in (positive_time, negative_time, reference_time)
-        ):
-            raise RuntimeError(
-                "Gaussian GELU cubic encoders must return SpikeSample"
-            )
-        time_domain = positive_time.domain
-        negative_time_domain = negative_time.domain
-        reference_time_domain = reference_time.domain
-    else:
-        positive_time, time_domain = positive_time
-        negative_time, negative_time_domain = negative_time
-        reference_time, reference_time_domain = reference_time
-    if negative_time_domain != time_domain or reference_time_domain != time_domain:
-        raise RuntimeError("GELU cubic log encoders require one shared time domain")
-
-    positive_normalized, _ = exponential_difference_operator(
-        positive_time,
-        time_domain,
-        reference_time,
-        reference_time_domain,
-        tau_s=tau_value,
-    )
-    negative_normalized, _ = exponential_difference_operator(
-        negative_time,
-        negative_time_domain,
-        reference_time,
-        reference_time_domain,
-        tau_s=tau_value,
-    )
-    unit_domain = PotentialBounds(0.0, 1.0)
-    positive_normalized = torch.where(
-        positive_active,
-        unit_domain.clamp(
-            positive_normalized,
-            name="gelu_phi_nl_positive_cube",
-        ),
-        torch.zeros_like(positive_normalized),
-    )
-    negative_normalized = torch.where(
-        negative_active,
-        unit_domain.clamp(
-            negative_normalized,
-            name="gelu_phi_nl_negative_cube",
-        ),
-        torch.zeros_like(negative_normalized),
-    )
-
-    cube_domain = PotentialBounds(
-        -(magnitude_upper ** 3),
-        magnitude_upper ** 3,
-    )
-    cube = magnitude_upper ** 3 * (
-        positive_normalized - negative_normalized
-    )
-    return (
-        cube_domain.clamp(cube, name="gelu_phi_nl_cube"),
-        cube_domain,
+    """Compatibility entry point for the canonical signed cubic power operator."""
+    return gelu_cubic_power_operator(
+        input_value,
+        domain,
+        tau_s=tau_s,
+        theta=theta,
+        magnitude_floor=magnitude_floor,
     )
 
 
@@ -183,39 +61,55 @@ def gelu_with_phi_nl_psi_ed_cube(
     *,
     tau_s: float = 1.0,
     theta: float = 400.0,
-    magnitude_floor: float = 1.0e-5,
-    **_: object,
+    magnitude_floor: float = GELU_CUBIC_MAGNITUDE_FLOOR,
+    **kwargs: object,
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Evaluate GELU with only the cubic path of its tanh approximation changed."""
-    input_clamped = domain.clamp(input_value, name="gelu_phi_nl_input")
-    cube, cube_domain = phi_nl_psi_ed_cube(
-        input_clamped,
+    """Compatibility entry point for the canonical composed GELU."""
+    return gelu_approximation(
+        input_value,
         domain,
         tau_s=tau_s,
         theta=theta,
         magnitude_floor=magnitude_floor,
+        **kwargs,
     )
 
+
+def gelu_with_multiplication_cube(
+    input_value: torch.Tensor,
+    domain: PotentialBounds,
+    *,
+    tau_s: float = 1.0,
+    theta: float = 400.0,
+    **_: object,
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Retain the repeated multiplication cubic only as a comparison condition."""
+    input_clamped = domain.clamp(input_value, name="gelu_x")
+    square, square_domain = multiplication_operator(
+        input_clamped, domain, input_clamped, domain, theta,
+    )
+    square, square_domain = clamp_gelu_square_output(
+        square, domain, theta=theta,
+    )
+    cube, cube_domain = multiplication_operator(
+        square, square_domain, input_clamped, domain, theta,
+    )
     scaled_cube, scaled_cube_domain = _constant_synaptic_scale(
         cube,
         cube_domain,
         0.044715,
-        name="gelu_phi_nl_cubic_coefficient",
+        name="gelu_cubic_coefficient",
     )
     inner_domain = PotentialBounds(
         domain.min + scaled_cube_domain.min,
         domain.max + scaled_cube_domain.max,
     )
-    inner = inner_domain.clamp(
-        input_clamped + scaled_cube,
-        name="gelu_phi_nl_inner",
-    )
-
+    inner = inner_domain.clamp(input_clamped + scaled_cube, name="gelu_inner")
     tanh_input, tanh_input_domain = _constant_synaptic_scale(
         inner,
         inner_domain,
         0.7978845608028654,
-        name="gelu_phi_nl_tanh_scale",
+        name="gelu_tanh_scale",
     )
     gate, gate_domain = _tanh_sigmoid_gate(
         tanh_input,
@@ -233,14 +127,23 @@ def gelu_with_phi_nl_psi_ed_cube(
     return clamp_gelu_output(result, domain)
 
 
-def install_phi_nl_psi_ed_cube(*, magnitude_floor: float) -> None:
-    """Patch only the GELU symbol resolved by the local ViT adapter."""
+def install_gelu_cubic_implementation(
+    implementation: str,
+    *,
+    magnitude_floor: float,
+) -> None:
+    """Install one explicitly selected comparison path in the local ViT adapter."""
+    if implementation not in _CUBIC_IMPLEMENTATIONS:
+        raise ValueError("unsupported GELU cubic implementation")
+
     def configured_gelu(
         input_value: torch.Tensor,
         domain: PotentialBounds,
         **kwargs: object,
     ) -> tuple[torch.Tensor, PotentialBounds]:
-        return gelu_with_phi_nl_psi_ed_cube(
+        if implementation == "multiplication":
+            return gelu_with_multiplication_cube(input_value, domain, **kwargs)
+        return gelu_approximation(
             input_value,
             domain,
             magnitude_floor=magnitude_floor,
@@ -248,6 +151,14 @@ def install_phi_nl_psi_ed_cube(*, magnitude_floor: float) -> None:
         )
 
     modeling_spiking_vit.gelu_approximation = configured_gelu
+
+
+def install_phi_nl_psi_ed_cube(*, magnitude_floor: float) -> None:
+    """Keep the archived analysis API while delegating to the canonical owner."""
+    install_gelu_cubic_implementation(
+        "phi_nl_psi_ed",
+        magnitude_floor=magnitude_floor,
+    )
 
 
 def parse_arguments() -> tuple[Arguments, str, float]:
@@ -262,7 +173,7 @@ def parse_arguments() -> tuple[Arguments, str, float]:
     parser.add_argument(
         "--gelu-cubic-floor",
         type=float,
-        default=1.0e-5,
+        default=GELU_CUBIC_MAGNITUDE_FLOOR,
     )
     analysis_args, remaining = parser.parse_known_args()
 
@@ -276,9 +187,7 @@ def parse_arguments() -> tuple[Arguments, str, float]:
     implementation = str(analysis_args.gelu_cubic_implementation)
     magnitude_floor = float(analysis_args.gelu_cubic_floor)
     if vit_args.spiking_mlp_exact_gelu or vit_args.spiking_mlp_exact_gelu_layers:
-        raise ValueError(
-            "GELU cubic comparison cannot be combined with exact GELU modes"
-        )
+        raise ValueError("GELU cubic comparison cannot be combined with exact GELU modes")
     if not isfinite(magnitude_floor) or magnitude_floor <= 0.0:
         raise ValueError("gelu-cubic-floor must be finite and positive")
 
@@ -290,8 +199,10 @@ def parse_arguments() -> tuple[Arguments, str, float]:
 def main() -> None:
     """Install the selected analysis path and run the maintained ViT evaluator."""
     args, implementation, magnitude_floor = parse_arguments()
-    if implementation == "phi_nl_psi_ed":
-        install_phi_nl_psi_ed_cube(magnitude_floor=magnitude_floor)
+    install_gelu_cubic_implementation(
+        implementation,
+        magnitude_floor=magnitude_floor,
+    )
     print(f"GELU cubic implementation: {implementation}")
     print(f"GELU cubic magnitude floor: {magnitude_floor:.9g}")
     evaluate_vit_model(args)

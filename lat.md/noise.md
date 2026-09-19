@@ -152,16 +152,9 @@ The event-aware migration is complete across the shared sampler and encoder boun
 
 Affine, multiplication, exponential, exponential-difference/division, activation, softmin, and attention value paths use decorated events and retain noise-off parity references. Verification exercises opening, closing/reference, and internal exp-temporal cases.
 
-A manuscript-supporting ViT-B/16 noise campaign would require an `approved` `selection.json` produced by [[evaluation#ViT-B/16 Global Theta Selection]]. The active evidence is instead bounded to the `confirmed` $\theta=40$ operating point on the fixed 5,000-image validation subset. Broader validation and independent uncertainty axes are catalogued in [[deferred-experiments]] and are not scheduled.
+The authoritative ViT-B/16 evidence is the completed calibrated campaign `vit_base_calibrated_theta_rt_ratio_float64_bounds3_v2` at source `f7b74c1aef38502caccf532d1e58a7cf321833d6`. It uses calibration policy 2, output bounds policy 3, float64, batch size 32, and the fixed 5,000-image ImageNet-1k validation subset. The threshold is $\theta=20$, selected on the separate training 5k artifact and confirmed by replay and neighboring validation candidates.
 
-The active protocol is:
-
-1. retain clean spiking and dense references and verify checkpoint parity;
-2. aggregate the completed pilot only through its first transition bracket;
-3. align the GELU constant synaptic scaling with the manuscript before any result is used for reporting;
-4. in one clean pass, count scalar values entering the GELU cubic term outside $[-\theta,\theta]$ before clamping as a diagnostic rather than a stopping gate;
-5. after the scaling change, recheck only the two bracket endpoints and, if the bracket persists, add one midpoint at $r_t=3.162\times10^{-5}$; and
-6. keep the pilot and accepted results from the changed source separate while reporting accuracy, confidence intervals, and empirical miss statistics without describing the fixed subset as full validation.
+The maintained order is threshold calibration and selection, deterministic dense and spiking references, the timing-noise sweep at deadline margin ratio 4, and the deadline margin ratio sweep at $r_t=10^{-5}$. The later high-scale extension changes only the timing-noise grid. Static threshold mismatch, parameter perturbation, 50k validation, W&B, and TensorBoard are excluded from this evidence.
 
 Until timing error draws for inactive members of signed pairs are removed, site counts are simulator diagnostics and are not interpreted as physical event totals or energy estimates.
 
@@ -169,105 +162,35 @@ Every stage keeps the noise-free tensor path as a parity reference. No stage may
 
 ## Sigma and Deadline-Margin Grid
 
-This section preserves the earlier ViT-B/16 grid design and its tooling contract as historical provenance; the grid is not active compute.
+The earlier 12 by 13 joint grid and its 470-run manifest are historical tooling, not the current result or an active queue.
 
-The experiment fixes the `confirmed` threshold \(\theta^*=40\) from [[evaluation#ViT-B/16 Global Theta Selection]] and defines
-
-$$
-\sigma_t=r_t(2\theta^*),\qquad k=\frac{m}{\sigma_t},\qquad m=k\sigma_t.
-$$
-
-It evaluates the existing 12-point $r_t$ grid against $k\in\{0,0.5,1,1.5,2,2.5,3,4,5,6,8,10,12\}$ on the fixed first 5,000 validation images. Every stochastic cell uses seeds 0, 1, and 2; clean spiking and dense references are deterministic singletons. Static mismatch, calibration, learned-parameter noise, and a second theta axis remain disabled.
-
-[[scripts/experiments/ubai/build_sigma_margin_manifest.py#main]] validates `selection.json`, the theta raw CSV, the 5k confirmation manifest, and GPU selection. It requires lower candidates 10 and 20, validation neighbors 20, 40, and 80, replay count/digest equality, validation stability, and matching data, checkpoint, and source identities. Their SHA-256 values are embedded in each of the 470 immutable rows.
-
-A six-run pilot records clean spiking, dense reference, three zero-margin noise scales, and the largest-scale `k=12` endpoint.
-
-Cluster tasks disable external experiment tracking and treat the immutable manifest plus complete evaluator logs as the sole resume and aggregation contract. Existing tracking artifacts remain archived but are not required for completion.
-
-For local execution, [[scripts/experiments/run_sigma_margin_local.py#main]] accepts only physical GPUs 4--7, keeps one evaluator per GPU, and dynamically assigns the next pending row to the first free worker. Per-run temporary data is created under an explicit persistent runtime root and removed after the evaluator exits.
-
-An exploratory mixed-code campaign may reuse completed cluster logs and fill only missing rows with a separately committed local source after overlapping conditions differ by at most one percentage point. Such a mixed result is diagnostic evidence only: source identities stay separate, and it cannot satisfy the single-source manuscript contract.
-
-A single-scale ratio diagnostic sets `time_noise_std_frac=1` with `theta=40`, giving an absolute timing-noise standard deviation of 80, and varies only the deadline margin/noise standard deviation ratio. The local runner accepts this complete noncanonical manifest only through an explicit opt-in flag.
-
-[[scripts/analysis/summarize_single_scale_margin_ratio.py#main]] validates the completed 41-run contract and generates replica-level, cell-level, and site-level CSV files plus a two-panel diagnostic figure. The figure uses plain-language axis labels and remains in `artifacts/`.
-
-The portable Python environment is unpacked under the local container data path on each compute node and removed when each task exits. Runtime extraction and temporary caches never use the compute node temporary directory, and stale experiment directories older than the task limit are removed before evaluation.
-
-The full array is submitted only after the pilot passes and its projected total asset use remains at or below 60 GB.
-
-[[scripts/analysis/summarize_sigma_margin_sweep.py#build_frontier]] defines recovery at each $r_t$ as the smallest preregistered $k$ whose three-seed mean is within one percentage point of the clean spiking baseline. Failure to recover at $k=12$ is retained as `unrecovered`, and later nonmonotonic cells are reported rather than removed.
-
-The result set contains replica-level, cell-level, and site-level CSV files; a provenance JSON; a recovery-frontier JSON; and a three-panel accuracy, confidence-width, and pooled-miss-rate figure. It remains under `artifacts/` because this protocol intentionally stops at 5,000 images and does not by itself authorize manuscript promotion.
-
-While the array is still running, [[scripts/analysis/preview_sigma_margin_sweep.py#collect_complete_cells]] may create a diagnostic snapshot from the two deterministic baselines and stochastic cells whose seeds 0, 1, and 2 all have valid logs. Missing or invalid replicas leave the corresponding cell blank instead of contributing a zero, and the preview does not estimate the final recovery boundary or authorize manuscript promotion.
-
-[[scripts/verification/verify_sigma_margin_sweep.py#main]] checks the confirmed evidence gate, canonical grid, physical scale identities, confidence intervals, pooled counts, frontier rule, single-device Slurm contract, disabled tracking mode, pilot contract, and resumable pending manifest.
-
-Reviving the 12 by 13 grid or adding another uncertainty axis follows [[deferred-experiments#Additional Robustness Axes]] rather than the active TODO.
+The completed campaign separates the two questions into one-dimensional sweeps after selecting $\theta$. A new joint grid, static threshold mismatch, or another uncertainty axis requires a separate protocol under [[deferred-experiments#Additional Robustness Axes]]. The former threshold-40 and uncalibrated designs are summarized in [[deprecated#과거 실험과 범위 감사#과거 ViT Timing Noise Campaigns]].
 
 ## Timing Noise Scale Sweep at Ratio 4
 
-After the ratio diagnostic, the transition search fixes the deadline margin/noise standard deviation ratio at 4 and varies only $r_t$ with $\theta=40$.
+The completed sweep fixes the deadline margin/noise standard deviation ratio at 4 and varies $r_t$ with the selected $\theta=20$.
 
-The completed `v3` pilot brackets its first transition between $r_t=10^{-5}$ and $r_t=10^{-4}$ across all three seeds. It predates the constant synaptic scaling correction and remains separate historical evidence; no `v3` log is reused or pooled with the corrected source.
+For the base campaign, $r_t=10^{-5}10^{i/8}$ for integer indices 0 through 8. Each point uses seeds 0, 1, and 2. The mean top-1 accuracies are 85.9200, 85.8133, 85.8133, 85.7667, 85.5467, 85.2600, 84.3933, 82.9667, and 79.8733 percent in increasing $r_t$ order. The clean spiking reference is 86.00 percent.
 
-The local run uses physical GPUs 4--7 with one evaluator per GPU, disables external experiment tracking, and may reuse a completed log only when the full manifest identity and run parameters match. This diagnostic locates the accuracy transition before a narrower refinement sweep.
+The completed high-scale extension keeps the same source, checkpoint, data, selected calibration table, ratio, and seeds. It adds $r_t\in\{1.778279\times10^{-4},3.162278\times10^{-4},5.623413\times10^{-4},10^{-3}\}$ with mean accuracies 63.44, 34.34, 8.48, and 0.6867 percent. Their 95% Student-$t$ intervals are 60.553--66.327, 30.874--37.806, 6.800--10.160, and 0.184--1.189 percent.
 
-The restarted scale sweep uses the alternative GELU cubic construction. Positive and negative magnitudes use $\phi_{\mathrm{NL}}$ with $3\tau_s$, share one domain endpoint reference event, and are decoded by $\psi_{\mathrm{ED}}$ with $\tau_s$. Every sampled encoder event follows the maintained observation deadline and configured margin.
-
-The manifest source identity distinguishes this topology from the earlier cubic path constructed from multiplication; their logs are never combined.
-
-The current `v5` campaign records evaluator source `648af9bb`; `67de065` is an earlier corrected revision. The adaptive control implementation originated at `f48dfc3`, and constant synaptic scaling at `0eec3e2`. Changes to execution control do not imply changes to the frozen evaluator.
-
-The campaign reuses $\theta=40$ selected at source `bc973317` by [[evaluation#ViT-B/16 Global Theta Selection]]. Accuracy at 40 has been checked with the corrected GELU implementation, but minimality among candidates has not been verified again for that source. The selection accepts clipping and does not require every internal potential to lie within the threshold.
-
-Layer-wise calibration is disabled through `--calibration-mode none` in [[scripts/experiments/run_sigma_margin_local.py#main]]. Residual sums and affine intervals are not replaced with measured layer-wise ranges. Configuration limits and analytic bounds remain fixed; disabling calibration never reintroduces bounds from current activation extrema. This satisfies the requirement for fixed bounds but does not exercise the layer-wise limits intended to control range growth in [[domain#Domain Propagation]].
-
-The GELU cubic magnitude floor is fixed at `1e-5`; its upper endpoint is the smaller of theta and the largest absolute endpoint of its declared input interval. LayerNorm separately uses `clip_margin=1e-5` for its positive magnitude log inputs, with a distinct variance interval. The GELU gate's exponential input is limited to $[-80\tau_s,80\tau_s]$. These floors and the exponential limit are fixed settings, not results of layer-wise calibration or the theta search. They do not imply that every log input has the same endpoints or every potential lies in $[-40,40]$.
-
-The `v5` configuration is recorded in `artifacts/logs/noise_scan/vit_base_rt_sweep_ratio4_theta40_gelu_synaptic_scaling_float64_v5/local-assets/experiment.json`. The later ratio sweep records the same evaluator source and settings in its `ratio-grid-13/experiment.json`. Bounds and clamp settings remain identical between clean and noisy conditions.
-
-The corrected clean pass records the count and rate of scalar values entering the GELU cubic term outside $[-\theta,\theta]$ before clamping, without changing the existing computation. The clean smoke over five batches and 160 images counted 12,830,744 of 1,161,953,280 such values (1.104%): 12,826,654 were below the negative limit and 4,090 were above the positive limit. This denominator is scalar occurrences across sites, not images, and almost all counts lie on the negative side where the GELU gate is already saturated. The rate remains a diagnostic and is not a technical failure or stopping condition; it must not be assigned a causal top-1 accuracy loss without a matched comparison.
-
-The corrected search starts with $r_t=10^{-5}$ and runs seeds 0, 1, and 2 over all 5,000 images. Each complete scale is reported before the user approves another round. A scale is recovered when its mean top-1 accuracy is within one percentage point of the new clean spiking result, collapsed when its mean is at most one percent and every replica is at most two percent, and degraded otherwise.
-
-When adjacent results have the same classification, the next proposed scale moves by $\sqrt{10}$. Once a recovered lower endpoint and a degraded or collapsed upper endpoint exist, only one geometric midpoint is proposed. No larger scale is submitted after collapse, and reaching $10^{-6}$ or $10^{-3}$ without a bracket stops the search for review. The authoritative checklist is [[todo#Active Experiment Work#ViT-B Timing Robustness]].
-
-## 적응형 실험 일괄 실행
-
-2026-09-12 사용자 승인으로 각 단계의 추가 확인 없이 기존 적응형 탐색 규칙을 순서대로 실행한다.
-
-2026-09-13 사용자 승인으로 기존 세 점 사이를 로그 등간격 9점으로 보강한다. 양 끝은 0.00001과 0.0001이며 기존 중간값은 그대로 재사용한다. 각 점의 seed는 0, 1, 2이고 기준 평가 두 개를 포함해 총 29회 중 11회를 재사용하며 18회를 추가한다. 기존 적응형 탐색과 별도 manifest에 기록하고 평가 소스·모델·데이터는 동일하게 유지한다.
-
-각 스케일의 세 seed가 완료된 후 기존 집계와 판정을 실행하고 다음 권장값을 승인한다. 기존 범위, 붕괴 후 상한 제한, 중간값 한 번 평가 규칙을 유지한다. 기술 실패나 판정 불일치가 있으면 진행을 멈춘다. GPU 4–7과 검증된 로컬 모델 및 데이터를 사용한다. 승인 근거는 실행 디렉터리에 보존한다.
-
-추가 프로세스 감지는 사용자 지시에 따라 기록만 하고 실행 중 평가를 중단하지 않는다. 새 평가를 시작할 때는 물리 장치 4–7 중 비어 있는 장치를 선택한다. 실행 중 메모리 부족, 비정상 종료, 결과 검증 실패는 기술 실패로 처리한다. 실행 제어만 별도 래퍼에서 변경하며 평가 소스와 모델·데이터 해시는 유지한다.
+The combined display uses nine logarithmically spaced values $10^{-5}10^{i/4}$ over two decades, reusing the five exact matching base points and adding the four extension points. It does not pool source identities or interpolate unexecuted conditions. The extension is a diagnostic stress test on the fixed 5k subset and is not a full ImageNet-1k validation result.
 
 ## 마진과 노이즈의 비율 실험
 
-역치 40과 시간 노이즈 비율 0.00001을 고정하고 마진을 바꾸어 정확도와 마감시간 초과 비율을 측정한다.
+선택된 $\theta=20$과 $r_t=10^{-5}$를 고정하고 deadline margin/noise standard deviation ratio만 바꾸어 정확도와 deadline miss를 측정한다.
 
-이 실험은 [[noise#Timing Noise Scale Sweep at Ratio 4]]의 source 648af9bb, 층별 calibration 미사용, 기존 theta 선택값과 고정 입력 제한을 유지한다. 마진을 바꾸는 것은 activation bound를 다시 calibration하는 것이 아니다.
+비율은 0, 1, 2, 2.5, 3, 3.5, 4, 5, 6이고 각 조건은 seed 0, 1, 2로 반복한다. 증가하는 비율 순서의 평균 top-1 정확도는 77.3200, 85.3467, 85.9267, 85.9733, 85.9267, 85.9400, 85.9200, 85.9133, 85.9133 percent이다. 비율 2 이상에서는 clean spiking 기준 86.00 percent와 거의 같은 plateau를 보인다.
 
-비율은 0, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, 12이며 각 조건은 seed 0, 1, 2로 반복한다. 기존 기준 평가와 비율 4 결과를 재사용하여 총 41회 중 36회를 추가한다. 비율 그래프는 로그 세로축으로 표시하고 0인 값은 표시하지 않았음을 명시한다. 실행은 기존 검증된 로컬 자산과 평가 소스를 사용한다.
-
-사용자의 계속 진행 지시에 따라 비율 실험에서는 새 평가 시작 시 기존 점유 메모리가 1GiB 이하이고 사용률이 5% 이하인 장치도 허용한다. 실제 점유 정보는 로그에 보존하고 장치 4–7만 사용한다. 실행 중 추가 프로세스만으로는 평가를 종료하지 않는다.
-
-조건 전환 시 점유 검사에 걸리면 해당 장치에서 대기 후 재검사하며 전체 실험을 실패 처리하지 않는다. 검증은 연속 조건 실행과 일시적인 사용률 상승 후 재개, 완료 결과 재사용을 포함한다.
-
-이전 승인된 메모리 1GiB 이하·사용률 5% 이하 기준은 현재 [[evaluation#Calibrated Three Sweep Distribution]]에도 유지한다. 프로세스 존재만으로 사용을 막는 규칙으로 되돌리지 않는다. 각 캠페인 작업의 단일 GPU 배정과 중복 실행 방지는 별도로 유지한다.
+Deadline margin은 calibration의 5% 구간 여유와 다른 설정이며 frozen range를 다시 선택하지 않는다. 정확도와 deadline miss의 관계는 simulator robustness로 해석하고 calibrated hardware behavior로 해석하지 않는다.
 
 ## Calibrated Threshold and Noise Sweeps
 
-The current campaign repeats threshold selection with calibration and output bounds policy 3 before evaluating separate timing noise and deadline margin sweeps; previous threshold-40 results remain historical evidence.
+The completed campaign selects $\theta$ with calibration and output bounds policy 3 before evaluating the two separate noise axes; threshold-40 uncalibrated results are historical evidence only.
 
-The approved tag is `vit_base_calibrated_theta_rt_ratio_float64_bounds3_v1`. [[evaluation#Calibrated Three Sweep Campaign]] defines training-only selection and opposite-environment replay. The exact threshold values are $10\,2^{i/2}$ for integer indices 0 through 8; timing noise values are $10^{-5}10^{i/8}$ over the same indices. These are not rounded before execution.
+The exact threshold candidates are $10\,2^{i/2}$ for integer indices 0 through 8. Each candidate receives a separate 109-site calibration table from the training 5k artifact. The smallest candidate within 0.5 percentage points of the best training accuracy is $\theta=20$: it records 4,590/5,000 correct, replays with the same count and prediction digest, and records 4,300/5,000 on validation. The dense validation reference is 4,303/5,000. All candidates from 20 through 160 record the same 86.00 percent validation accuracy; 10 and $10\sqrt{2}$ record 76.86 and 84.68 percent.
 
-For the confirmed threshold, the absolute timing standard deviation is $\sigma_t=2\theta r_t$ and deadline margin is the requested ratio multiplied by $\sigma_t$. The timing noise sweep fixes ratio 4. The ratio sweep fixes $r_t=10^{-5}$ and uses 0, 1, 2, 2.5, 3, 3.5, 4, 5, and 6. Deadline margin is distinct from the additional 5% calibration interval width. Bounds stay frozen during each evaluation.
-
-[[evaluation#Calibrated Three Sweep Scheduling]] enforces 17 distinct conditions for each of seeds 0, 1, and 2 and reports twice before the final aggregate. [[evaluation#Calibrated Three Sweep Reporting]] keeps temporary estimates separate from final confidence intervals. No static mismatch, weight noise, 50k evaluation, automatic range extension, or automatic manuscript promotion is part of this campaign.
+For $\theta=20$, $\sigma_t=2\theta r_t=40r_t$ and the deadline margin is the requested ratio multiplied by $\sigma_t$. [[evaluation#Calibrated Three Sweep Campaign]] defines the selection and identity contract, while [[evaluation#Calibrated Three Sweep Reporting]] defines final three-replica aggregation. The campaign completed nine calibration collections and 71 evaluations; 50k confirmation and automatic manuscript promotion were deliberately omitted.
 
 ## Gaussian Noise Statistics
 

@@ -25,7 +25,7 @@ On GPU, spiking attention is registered through Hugging Face’s attention inter
 
 Task metrics retain each evaluator's established aggregation so operator conversion can be compared with a source model under the identical runner.
 
-ViT, BERT, and RoBERTa report classification accuracy. GPT-2 masks padding labels and reports $\exp$ of the unweighted mean of per-batch causal-language-model losses. This is batching-consistent but is not token-weighted corpus perplexity; publication tables must either retain identical batching and disclose the aggregation or rerun all GPT-2 conditions with token-weighted NLL.
+ViT, BERT, and RoBERTa report classification accuracy. The complete GPT-2 campaign masks padding labels, accumulates negative log likelihood and valid-token count, and reports token-weighted corpus perplexity as its primary metric. It also retains $\exp$ of the unweighted mean of per-batch losses as an explicitly named compatibility metric.
 
 Quick tests and `max_eval_batches` are smoke-test controls, not final evaluation protocols. Final comparisons should keep dataset split, preprocessing, batch limit, precision, checkpoint, and random seed fixed across backends.
 
@@ -172,27 +172,23 @@ The audited BERT, RoBERTa, and GPT-2 configurations use the same explicit LayerN
 
 ## ViT-B/16 Global Theta Selection
 
-The deterministic selection workflow chooses the smallest accurate global threshold before any new ViT-B/16 robustness result can be treated as manuscript evidence.
+The maintained selection workflow chooses the smallest calibrated global threshold within 0.5 percentage points of the best training candidate before evaluating ViT-B/16 timing noise.
 
 [[scripts/evaluation/error_analysis_vit.py#load_evaluation_dataset]] accepts a self-contained Hugging Face dataset artifact through `--evaluation-dataset-path`. It preserves saved order and fingerprints, accumulates top-1 from local correct/total counts, writes a prediction SHA-256 digest, and can disable TensorBoard completely with `--no-tensorboard`.
 
-The training candidates are $\theta\in\{10,20,40,80,160,320,640,1000,1400,2000,2800,4000\}$. If 10 remains within 0.005 of the best accuracy, the lower boundary is unresolved and must be halved again until the first lower candidate fails; unresolved boundaries cannot be confirmed. Every run uses the seed-0 shuffled ImageNet training subset of exactly 5,000 images, float64, batch size 32, analytic ranges, all maintained ViT spiking paths, and zero timing noise, mismatch, deadline margin, weight noise, and bias noise.
+The completed candidate grid is $\theta=10\,2^{i/2}$ for integer indices 0 through 8. Every candidate receives a fresh 109-site policy-2 calibration table from the same seed-0 ImageNet training subset of 5,000 images. Runs use float64, batch size 32, output bounds policy 3, all maintained ViT spiking paths, and zero timing noise, mismatch, deadline margin, weight noise, and bias noise.
 
-[[scripts/analysis/summarize_theta_selection.py#choose_theta]] selects the smallest candidate whose accuracy is within 0.005 of the best spiking candidate, not the dense ANN reference. A gain above 0.001 from 2,800 to 4,000 requires 5,600 and 8,000; a further gain above 0.001 from 5,600 to 8,000 marks the search range insufficient rather than approving an endpoint.
+[[scripts/experiments/calibrated_three_sweeps.py#select_theta]] selects the smallest candidate whose training accuracy is within 25 correct predictions of the best candidate. It rejects the smallest endpoint and rejects an unresolved gain of more than five correct predictions between the two largest candidates.
 
-The completed selection used source `bc973317` with layer-wise calibration disabled. The corrected GELU campaign at source `648af9bb` reuses the selected theta of 40; it did not repeat the candidate search. Its clean validation result confirms accuracy at 40, not that 40 remains the smallest acceptable candidate under the new implementation. Neither this global search nor its replay selects the positive log lower endpoint. See [[noise#Timing Noise Scale Sweep at Ratio 4]] for the actual fixed input bounds.
+The completed source `f7b74c1aef38502caccf532d1e58a7cf321833d6` selects $\theta=20$ with 4,590/5,000 correct. The opposite-environment replay has the same correct count and prediction digest. The saved validation records are final evaluation diagnostics and do not participate in the choice.
 
-Threshold selection is based on accuracy rather than a requirement of zero clipping. At $\theta=40$, clipping at the finite potential domain is an intended part of the selected bounded implementation; its frequency is reported as a diagnostic and does not by itself invalidate selection.
-
-The selected training condition must replay with the identical correct count and prediction digest. The selected candidate and its immediate available neighbors are then evaluated on the first 5,000 examples of the self-contained validation artifact; selection fails if the chosen value is more than 0.005 below that local validation maximum. Full-validation approval additionally requires selected-spiking and dense-reference runs on all 50,000 validation images. `THETA_SKIP_FULL_VALIDATION=1` explicitly stops after successful 5k confirmation, records `full_validation=skipped`, and retains `confirmed` rather than `approved` status.
+Threshold selection is accuracy based rather than a requirement of zero clipping. Historical artifacts retain their original status fields, but new selection evidence is accepted from complete training candidates and replay alone. It must not be described as a full ImageNet-1k validation result.
 
 Clamp reports retain the maximum pre-clamp rail-saturation rate and its site as diagnostics. Inactive dual rails named `x_err_neg` or `x_err_pos` and multiplication's `multiplication_result` reset rail are counted separately from the other clamp diagnostics and cannot change the accuracy-based choice.
 
-UBAI execution benchmarks RTX 3090, A10, RTX 6000 Ada, and RTX A6000 twice with five warm-up and twenty measured batches. [[scripts/analysis/select_ubai_gpu_family.py#choose_family]] rejects OOM, incomplete timing, wrong hardware identity, replica disagreement, and predictions differing from the RTX A6000 reference. It chooses the lowest median seconds per image; families within 5% use current free-GPU capacity as the tie-break.
+The retained UBAI contract uses one visible GPU per evaluator, immutable condition and asset identities, and job-local storage on checked disk rather than `/tmp`, tmpfs, or ramfs. A diagnostic replay may reuse only a completed result whose source, evaluator, dataset, checkpoint, preprocessing, calibration, and condition identities all match.
 
-The UBAI task contract uses one GPU, four CPUs, 64 GB RAM, no `DataParallel`, and immutable condition/data/checkpoint/commit/GPU-family manifests. The portable environment is stored once as a compressed archive and expanded into job-local temporary storage, avoiding a second persistent copy under the 100 GB home quota. [[scripts/experiments/ubai/build_theta_selection_manifest.py#main]] creates one row per array index, and completed logs are resumed only after their recorded identity matches that row. A lightweight dependency controller uses an explicit Python 3.11-or-newer bootstrap interpreter to submit selection, conditional upper-grid extension, confirmation, and optional full-validation stages only after the preceding reducer succeeds; model evaluation still uses the archived Python 3.12 environment. Reducer submission preserves the scheduler-visible absolute path spelling, including `/home1` aliases, and splits multi-manifest inputs before container-path translation.
-
-[[scripts/verification/verify_theta_selection.py#main]] covers the 0.5-point boundary, tie behavior, upper-grid guard, replay and validation gates, offline dataset order and fingerprint replay, TensorBoard suppression, GPU-family selection, and one-GPU manifest contract.
+[[scripts/verification/verify_calibrated_three_sweep_contract.py#main]] covers the 0.5-point boundary, endpoint guards, replay, exact grids, table identity, and rejection of old metadata. The historical validation gate is not part of future threshold selection.
 
 ## Noise and Ablation Sweeps
 
@@ -246,15 +242,15 @@ The float64 diagnostic places full Gaussian, block-10 bypass, and all-GELU bypas
 
 ### GELU Cubic Construction Comparison
 
-The deterministic ViT comparison changes only construction of the cubic term in the maintained tanh-based GELU approximation.
+The deterministic ViT comparison changed only construction of the cubic term in the maintained tanh-based GELU approximation; its selected Power path is now the shared production implementation.
 
-[[scripts/analysis/gelu_cubic_phi_nl_vit.py#phi_nl_psi_ed_cube]] splits the signed input into positive and negative magnitudes, applies $\phi_{\mathrm{NL}}$ with $3\tau_s$, and evaluates each encoded time against one domain upper endpoint with $\psi_{\mathrm{ED}}$ at $\tau_s$. The resulting normalized cubes receive the fixed magnitude gain before signed recombination.
+[[utils/transforms/functions.py#gelu_cubic_power_operator]] splits the signed input into positive and negative magnitudes, applies $\phi_{\mathrm{NL}}$ with $3\tau_s$, and evaluates each encoded time against one domain upper endpoint with $\psi_{\mathrm{ED}}$ at $\tau_s$. The resulting normalized cubes receive the fixed magnitude gain before signed recombination.
 
-The `multiplication` condition retains the production $x^2$ and $x^3$ chain. The `phi_nl_psi_ed` condition replaces only that chain; coefficient scaling, membrane superposition, the tanh gate, final multiplication by the input, propagated domains, checkpoint, dataset order, and all other model paths remain fixed.
+The `multiplication` condition retains the earlier $x^2$ and $x^3$ chain as an analysis baseline. The `phi_nl_psi_ed` condition uses the production Power path; coefficient scaling, membrane superposition, the tanh gate, final multiplication by the input, propagated domains, checkpoint, dataset order, and all other model paths remain fixed.
 
 The deterministic construction comparison keeps direct Gaussian timing error disabled so its accuracy result isolates the cubic implementation. The alternative construction also supports robustness experiments: both signed magnitude encoders, their shared domain endpoint reference, and the internal encoding inside $\psi_{\mathrm{ED}}$ receive the replica Gaussian timing draws.
 
-The alternative limits each signed magnitude to `theta` before log encoding, matching the bounded log domain used by LayerNorm and accepting wider analytic upstream bounds. [[scripts/verification/verify_gelu_cubic_phi_nl.py#verify_phi_nl_psi_ed_cube]] checks signed cubic values, invariance across positive time constants, finite domain floor behavior, threshold limiting, float32 GELU agreement, propagated bounds, parity without noise, seeded replay, seed independence, and patch isolation in the local ViT adapter.
+The Power path limits each signed magnitude to `theta` before log encoding, matching the bounded log domain used by LayerNorm and accepting wider analytic upstream bounds. [[scripts/verification/verify_gelu_cubic_phi_nl.py#verify_phi_nl_psi_ed_cube]] checks signed cubic values, invariance across positive time constants, finite domain floor behavior, threshold limiting, float32 GELU agreement, propagated bounds, parity without noise, seeded replay, seed independence, and shared ViT, RoBERTa, and GPT-2 ownership.
 
 #### Observed ViT-S Result
 
@@ -385,19 +381,15 @@ The CPU diagnostic captures declared hidden activation bounds from the frozen ev
 
 ## Calibrated ViT Noise Comparison
 
-A separate experiment repeats the existing timing noise and deadline margin sweeps with frozen layer-wise calibration at threshold 40; previous uncalibrated results remain unchanged.
+The former threshold-40, 48-site, 65-condition comparison is preserved only as historical evidence and is superseded by the policy-2 threshold-selection campaign.
 
-[[scripts/experiments/run_calibrated_noise_vit.py#execute]] uses [[scripts/analysis/evaluate_calibrated_vit.py#main]] to consume the same seed-0 training 5k artifact in both collection passes without reshuffling. Observed minimum and maximum values receive an additional 5% of interval width on each calibrated side. All 48 configured sites are required; validation 5k never selects ranges. The 65-condition union reuses only the dense reference and keeps three seeds per stochastic condition. This is a controlled comparison at threshold 40, not a repeated threshold selection.
-
-Source, checkpoint, training artifact, GELU implementation, floor, wrapper, and frozen table identities are checked before reuse. A complete clean evaluation precedes the stochastic sweep; clean accuracy at or below 1% stops execution for inspection. Partial outputs show all completed replicas but compute confidence intervals only for complete three-seed cells. GPU capacity waits never terminate the campaign merely because a device is occupied. Local execution remains restricted to GPU devices 4–7 and persistent runtime storage.
-
-[[scripts/analysis/plot_calibrated_noise_progress.py#plot_snapshot]] creates an immutable intermediate figure from validated completed logs without rewriting runner outputs. Individual finished seeds remain visible for incomplete conditions; only complete three-seed conditions receive means and Student-t intervals. The figure includes source identity, calibration identity in its snapshot, and separate full-scale accuracy, detailed noisy accuracy, and pooled physical rates. Baseline counters are not plotted as measured zero rates. These snapshots stay in artifacts and are not promoted to the manuscript.
+Its runner and intermediate plots remain reproducible, but its calibration scope, threshold, source, and condition grid do not match the current evidence. They must not be pooled with `vit_base_calibrated_theta_rt_ratio_float64_bounds3_v2` or used to fill missing current conditions. Historical details are in [[deprecated#과거 실험과 범위 감사#과거 ViT Timing Noise Campaigns]].
 
 ## Calibrated ViT UBAI Preparation
 
-UBAI preparation copies the existing calibrated experiment contract into a separate deployment and verifies runtime compatibility without changing the numerical source or submitting the noise sweep.
+UBAI preparation records the historical 65-condition deployment and the disk-safety rules later reused by the completed campaign.
 
-[[scripts/experiments/ubai/prepare_calibrated_noise_ubai.py#prepare]] preserves the 65-condition manifest, calibration table, collection evidence, and checkpoint identity. Its pending manifest is a snapshot of stochastic conditions, not an assignment: the deployment remains `prepared` while the local runner retains ownership. GPU execution requires a separate, non-overlapping assignment and a validated clean reference.
+[[scripts/experiments/ubai/prepare_calibrated_noise_ubai.py#prepare]] preserves the old manifest, calibration table, collection evidence, and checkpoint identity. That deployment is not an active assignment and cannot supply current results.
 
 The deployment records the shared runtime module hashes and the worker verifies those canonical modules before evaluating a condition, so UBAI does not regain private filesystem, identity, or GPU admission implementations.
 
@@ -405,37 +397,37 @@ The new task uses one RTX A6000, four CPUs, and 64 GiB of host memory. The accou
 
 Environment extraction and temporary caches use a checked disk filesystem under `/enroot`. The task rejects `tmpfs` and `ramfs`, reserves space for the environment and scratch data, and removes only its own runtime directory. It never deletes another job's directories by age. Large checksum and environment checks run on a Slurm CPU node, not a login node.
 
-Separate clean checkouts retain the existing numerical source and calibrated evaluator. Container mounts reproduce the original checkpoint and dataset paths so calibration metadata stays identical. W&B and TensorBoard remain disabled. Preparation validation covers checksums, source identity, rejected overlapping execution, and the one-GPU resource contract.
+Separate clean checkouts retain the frozen numerical source and evaluator. Container mounts reproduce checkpoint and dataset paths so metadata stays identical. W&B and TensorBoard remain disabled. Preparation validation covers checksums, source identity, rejected overlapping execution, and the one-GPU resource contract.
 
 ## Calibrated Three Sweep Campaign
 
-The current ViT-B/16 campaign selects a threshold using training 5k and compares nine validation points on each of the threshold, timing noise, and deadline margin axes with output bounds policy 3.
+The completed ViT-B/16 campaign selects a threshold using training 5k and compares nine validation points on each of the threshold, timing noise, and deadline margin axes with output bounds policy 3.
 
-[[scripts/experiments/calibrated_three_sweeps.py#make_tasks]] fixes nine thresholds from 10 to 160 at equal logarithmic intervals. Each threshold receives a new 48-site calibration table from the seed-0 training 5k artifact: observed minimum and maximum, 5% additional interval width, and two collection passes. The same training 5k determines the smallest candidate within 25 correct predictions of the best candidate. Validation 5k is never used for calibration or selection.
+[[scripts/experiments/calibrated_three_sweeps.py#make_tasks]] fixes nine thresholds from 10 to 160 at equal logarithmic intervals. Each threshold receives a new 109-site policy-2 calibration table from the seed-0 training 5k artifact: observed minimum and maximum, 5% additional interval width, and two collection passes. The same training 5k determines the smallest candidate within 25 correct predictions of the best candidate. Validation 5k is never used for calibration or selection.
 
-[[scripts/experiments/calibrated_three_sweeps.py#select_theta]] refuses selection at the smallest candidate or a gain greater than five correct predictions between the two largest candidates. [[scripts/experiments/calibrated_three_sweeps.py#confirm_selection]] requires exact training correct count and prediction digest on the opposite execution environment, plus validation accuracy within 25 correct predictions of the best immediate neighbor. Passing evidence is `confirmed` on 5k, not approved on 50k.
+[[scripts/experiments/calibrated_three_sweeps.py#select_theta]] refuses selection at the smallest candidate or a gain greater than five correct predictions between the two largest candidates. The exact training correct count and prediction digest may be replayed on the opposite execution environment, but validation accuracy does not select or reject the threshold.
 
-The experiment uses the augreg2 ViT-B/16 checkpoint, float64, batch size 32, time constant 1, all three spiking LayerNorm stages, attention and MLP, the current GELU construction, and no mismatch or weight noise. Tracking and TensorBoard are disabled. The basic workload is 71 evaluations and nine calibration collections; four short environment comparisons are separate. [[scripts/verification/verify_calibrated_three_sweep_contract.py#main]] verifies the counts, exact grids, table identity, replay, boundary selection, and old metadata rejection.
+The experiment uses the augreg2 ViT-B/16 checkpoint, float64, batch size 32, time constant 1, all three spiking LayerNorm stages, attention and MLP, the current GELU construction, and no mismatch or weight noise. Tracking and TensorBoard are disabled. Tag `vit_base_calibrated_theta_rt_ratio_float64_bounds3_v2` completed all 71 evaluations and nine calibration collections at source `f7b74c1aef38502caccf532d1e58a7cf321833d6`. [[scripts/verification/verify_calibrated_three_sweep_contract.py#main]] verifies the counts, exact grids, table identity, replay, boundary selection, and old metadata rejection.
 
 ## Calibrated Three Sweep Scheduling
 
-One local controller owns all assignments and waits for complete seeds in order. Unstarted cluster work can move to local workers only after guarded cancellation and terminal confirmation.
+The completed scheduler used one controller, enforced seed order, and allowed guarded reassignment of unstarted cluster work without duplicate evaluation.
 
 [[scripts/experiments/run_calibrated_three_sweeps.py#Controller]] freezes the source commit, evaluator and runtime hashes, checkpoint, datasets, and per-threshold calibration hashes. Immutable task and phase manifests accompany a resumable assignment record. Only completed results whose raw logs and identities validate can be reused. Partial logs are preserved; a repeatedly failing task requires inspection instead of being classified as scientific accuracy collapse.
 
 Theta collection is followed by matched clean and seed-0 noisy short evaluations on both environments. Training and validation evaluate all nine candidates, then the selected training condition is replayed on the opposite environment. The two noise sweeps share one condition and therefore require 17 evaluations per seed. All seed 0 conditions complete before seed 1; all seed 1 conditions complete before seed 2. Normal completion advances automatically. Missing results prevent advancing.
 
-After seed 0, execution stops for a range decision if all nine timing noise points are within one percentage point of clean accuracy, or all are at most one percent accurate. Individual low or nonmonotonic results are retained. [[scripts/verification/verify_calibrated_three_sweep_runner.py#main]] tests seed completion, resource limits, duplicate prevention, resume behavior, and the range decision. The old threshold-40 campaign was stopped under the user's 2026-09-14 instruction; its complete and partial outputs remain separate.
+After seed 0, the range check found a meaningful transition and execution continued through seeds 1 and 2. Individual low or nonmonotonic results were retained. [[scripts/verification/verify_calibrated_three_sweep_runner.py#main]] tests seed completion, resource limits, duplicate prevention, resume behavior, and the range decision. The old threshold-40 campaign remains separate.
 
 ## Calibrated Three Sweep Distribution
 
-Local GPU devices 4–7 remain the default and share work with the UBAI RTX A6000 partitions. Temporary permission for devices 0–3 applies only to the remaining work of the current campaign; cluster temporary storage stays on verified disk.
+Local GPU devices 4–7 remain the repository default. The completed campaign also used a versioned temporary permission for devices 0–3; that permission ended with the campaign and does not apply to new work.
 
 The initial assignment is six theta candidates on UBAI and three locally, and eleven noise conditions on UBAI and six locally per seed. Each experiment uses one GPU and four CPU cores. Following the user's allocation change, new UBAI jobs pair two experiments and request two GPUs, eight CPU cores and 128 GiB. Account limits remain ten running jobs, twenty submitted jobs and twelve GPUs. Existing jobs and odd remaining conditions retain one GPU and 64 GiB. No DataParallel is used.
 
 Local admission retains the user's existing limit: total device memory at most 1 GiB and GPU utilization at most 5%, including both endpoints. A foreign compute PID alone does not block a device. [[scripts/runtime/local_gpu.py#gpu_available]] is used both when finding available devices and immediately before launch under the device lock. The controller records actual memory, utilization and PIDs; its own assignments and locks still allow only one campaign worker per GPU. Missing telemetry prevents new local launches without stopping cluster tasks.
 
-The user's 2026-09-15 permission requires the explicit `--temporary-local-gpus` option for this campaign and its existing frozen source. It does not change the default device list or other experiment runners. The controller records the active device list separately from the immutable experiment and clears temporary permission when the campaign completes. Without the option, a new controller uses devices 4–7. CPU slots retain the order 4, 5, 6, 7, 0, 1, 2, 3 so existing workers keep their original four cores while additional workers use separate cores.
+The explicit `--temporary-local-gpus` option is valid only for the frozen completed tag. It does not change the default device list or authorize devices 0–3 for another campaign. A new controller uses devices 4–7 unless a new campaign-specific exception is recorded.
 
 A controller-only correction may use a separately committed clean checkout while evaluation, calibration, task manifests and active cluster jobs retain their original frozen source. [[scripts/experiments/run_calibrated_three_sweeps.py#controller_identity]] records the controller commit, content hash and admission policy separately and rejects changes to imported experiment or reporting helpers. This avoids restarting scientifically unchanged work merely to correct task allocation.
 
@@ -459,7 +451,7 @@ One failed condition does not cancel its peer. After Slurm confirms termination,
 
 A separately verified local wrapper changes only device admission and delegates evaluation to the existing frozen worker, preserving the source, conditions, completed results and reporting contract.
 
-[[scripts/experiments/run_calibrated_three_sweep_local_task.py#main]] checks the clean controller commit and content hashes before loading the original worker from the frozen source. It replaces only the worker's device-admission function, strips the wrapper-specific temporary option, and delegates the original task arguments. The evaluator, task and experiment files are not rewritten. Default admission remains devices 4–7; devices 0–3 additionally require the current campaign tag, frozen source and explicit temporary option.
+[[scripts/experiments/run_calibrated_three_sweep_local_task.py#main]] checks the clean controller commit and content hashes before loading the original worker from the frozen source. It replaces only the worker's device-admission function, strips the wrapper-specific temporary option, and delegates the original task arguments. The evaluator, task and experiment files are not rewritten. Default admission remains devices 4–7; the completed tag alone retains the historical record that devices 0–3 were temporarily admitted.
 
 [[scripts/verification/verify_calibrated_three_sweep_local_task.py#main]] verifies default and temporary permission, single-device validation, wrong-campaign rejection, source and controller integrity, and unchanged evaluator delegation. The scheduling tests retain both legacy and new worker identification through exact experiment and task paths, along with separate CPU assignments for eight workers.
 
@@ -473,23 +465,23 @@ When cluster allocation is delayed, available local devices can take over pendin
 
 ## Calibrated Three Sweep Controller Lifetime
 
-The local controller runs in a detached tmux session so closing the command session does not end scheduling; completed results and frozen experiment identities remain reusable.
+The campaign controller could run in a detached tmux session; no controller or evaluator from this completed campaign remains active.
 
 The tmux socket is stored under the campaign's `artifacts/runtime/` directory, not `/tmp`. The controller uses the existing clean checkout and writes both standard output and errors to the persistent controller log. The pane remains after command exit so the return status is inspectable. The controller lock still prevents duplicate scheduling, and a failed controller is not restarted automatically before its exit reason is checked.
 
-Before resuming, verify that no controller or assigned evaluator remains active. Completed task results and seed snapshots must pass the existing identity checks. Temporary devices 0–3 require the explicit current-campaign option; devices 4–7 remain the default. A detached controller does not survive host or container termination, and stale assignment records alone are not evidence of live evaluation.
+Before any diagnostic replay, verify that no controller or assigned evaluator remains active. Completed task results and seed snapshots must pass the existing identity checks. Devices 4–7 remain the default. A detached controller does not survive host or container termination, and stale assignment records alone are not evidence of live evaluation.
 
 ## Calibrated Three Sweep Reporting
 
-Live figures show completed evaluations only; immutable seed snapshots distinguish provisional one- and two-seed results from final three-seed Student-t confidence intervals.
+Figures show completed evaluations only; immutable seed snapshots distinguish provisional one- and two-seed results from final three-seed Student-$t$ confidence intervals.
 
 [[scripts/analysis/summarize_calibrated_three_sweeps.py#summarize]] regenerates replica, cell and site CSVs plus progress and source evidence from verified raw logs. Training selection results have a separate CSV from validation plots. Accuracy has three panels: logarithmic threshold and timing noise axes, and a linear deadline margin/noise standard deviation ratio axis. Deadline-miss and pre-clamp rail-saturation rates use a separate figure with true zeros retained.
 
-One seed is a single observation; two seeds give a provisional mean without a 95% interval. Three seeds give the mean and 95% Student-t interval with two degrees of freedom. Physical rates always pool raw numerators and denominators. The shared timing noise and margin condition is evaluated once per seed but appears in both corresponding panels. [[scripts/verification/verify_calibrated_three_sweep_summary.py#main]] checks incomplete evidence, duplicate seeds, pooled rates, confidence intervals and immutable snapshots. Results remain under the campaign artifact tag and are not automatically promoted to the paper.
+One seed is a single observation; two seeds give a provisional mean without a 95% interval. Three seeds give the mean and 95% Student-$t$ interval with two degrees of freedom. Physical rates always pool raw numerators and denominators. The shared timing noise and margin condition is evaluated once per seed but appears in both corresponding panels. [[scripts/verification/verify_calibrated_three_sweep_summary.py#main]] checks incomplete evidence, duplicate seeds, pooled rates, confidence intervals and immutable snapshots. Results remain under the campaign artifact tag and are not automatically promoted to the paper.
 
-The accuracy footer describes the seeds and confidence intervals actually displayed. With only seeds 0 and 1 it states that their mean is shown without confidence intervals; it mentions Student-t intervals only when at least one plotted condition has a complete three-seed interval. Mixed completion states are described separately. [[scripts/analysis/summarize_calibrated_three_sweeps.py#_accuracy_footer]] and the reporting verification cover empty, single-seed, two-seed, three-seed, mixed, and zero-width interval cases.
+The accuracy footer describes the seeds and confidence intervals actually displayed. With only seeds 0 and 1 it states that their mean is shown without confidence intervals; it mentions Student-$t$ intervals only when at least one plotted condition has a complete three-seed interval. Mixed completion states are described separately. [[scripts/analysis/summarize_calibrated_three_sweeps.py#_accuracy_footer]] and the reporting verification cover empty, single-seed, two-seed, three-seed, mixed, and zero-width interval cases.
 
-This presentation change applies to future rendering with the updated plotter. Existing immutable snapshots and the active campaign's frozen checkout are not rewritten; future manual plots must use the updated plotter rather than the old frozen reporting copy.
+This presentation change applies to future rendering with the updated plotter. Existing immutable snapshots and the completed campaign's frozen checkout are not rewritten; future manual plots must use the updated plotter rather than the old frozen reporting copy.
 
 ## Symbolic Operation-Count Check
 

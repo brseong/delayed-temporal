@@ -25,7 +25,7 @@ MODEL_KEYS = (
     "cifar10_vit_small", "imagenet_vit_small", "imagenet_vit_base",
     "imagenet_vit_large",
 )
-KINDS = ("collect", "dense", "spiking")
+KINDS = ("theta_collect", "theta_train", "dense", "spiking")
 
 
 def _integer(value: Any, name: str, *, minimum: int = 0) -> int:
@@ -70,8 +70,8 @@ def validate_results(experiment: dict, runs: list[dict]) -> tuple[list[dict], di
             raise ValueError("Model and task disagree")
         if model.get("expected_samples") != expected_samples:
             raise ValueError("Unexpected evaluation sample count")
-        if float(model.get("theta", 40)) != 40 or model.get("precision", "float64") != "float64":
-            raise ValueError("Comparison requires theta 40 and float64")
+        if model.get("precision", "float64") != "float64":
+            raise ValueError("Comparison requires float64")
         _digest(model.get("checkpoint_sha256"), "checkpoint_sha256")
         cost = estimate_vit_cost(model["checkpoint_config"])
         if cost["configuration"]["classes"] != (10 if expected_task == "cifar10" else 1000):
@@ -81,24 +81,30 @@ def validate_results(experiment: dict, runs: list[dict]) -> tuple[list[dict], di
         if (cost["configuration"]["hidden"], cost["configuration"]["depth"]) != (expected_hidden, expected_depth):
             raise ValueError("Checkpoint dimensions do not match comparison architecture")
 
-    indexed: dict[tuple[str, str], dict] = {}
+    indexed: dict[tuple[str, str, int], dict] = {}
     identifiers: set[str] = set()
     normalized = []
     for supplied in runs:
         row = dict(supplied)
         model_key, kind = row.get("model_key"), row.get("kind")
         if model_key not in by_model or kind not in KINDS:
-            raise ValueError("Only the twelve planned comparison conditions are accepted")
+            raise ValueError("Only the planned comparison conditions are accepted")
         if row.get("success") is not True:
             raise ValueError("Incomplete or unsuccessful result")
-        if (model_key, kind) in indexed:
+        theta_index = row.get("theta_index")
+        if type(theta_index) is not int:
+            raise ValueError("Every comparison result requires a theta candidate index")
+        index_key = (model_key, kind, theta_index)
+        if index_key in indexed:
             raise ValueError("Duplicate model condition")
         model = by_model[model_key]
         _require_identity(row, experiment, ("source_commit",))
         if version == 2:
             _require_identity(row, experiment, ("vit_calibration_policy_version",))
         _require_identity(row, model, ("checkpoint_sha256",))
-        if row.get("precision") != "float64" or row.get("theta") != 40:
+        from scripts.experiments.vit_comparison import theta_grid
+        if (row.get("precision") != "float64" or not 0 <= theta_index < len(theta_grid())
+                or row.get("theta") != theta_grid()[theta_index]):
             raise ValueError("Unexpected numerical evaluation condition")
         if row.get("backend") not in ({"hf"} if kind == "dense" else {"spiking"}):
             raise ValueError("Condition and evaluator backend disagree")
@@ -111,7 +117,7 @@ def validate_results(experiment: dict, runs: list[dict]) -> tuple[list[dict], di
             _digest(row.get(field), field)
         if _integer(row.get("batch_size"), "batch_size", minimum=1) not in {8, 16, 32}:
             raise ValueError("Unexpected batch size")
-        if kind == "collect":
+        if kind == "theta_collect":
             _digest(row.get("calibration_sha256"), "calibration_sha256")
             _require_identity(row, model, ("calibration_dataset_fingerprint",))
             _require_identity(row, experiment, ("calibration_evaluator_sha256",))
@@ -128,13 +134,17 @@ def validate_results(experiment: dict, runs: list[dict]) -> tuple[list[dict], di
             if row.get("samples", row.get("total")) != 5000:
                 raise ValueError("Calibration must use training 5k")
         else:
-            _require_identity(row, model, ("dataset_fingerprint",))
+            expected_fingerprint = (model["calibration_dataset_fingerprint"]
+                                    if kind == "theta_train" else model["dataset_fingerprint"])
+            if row.get("dataset_fingerprint") != expected_fingerprint:
+                raise ValueError("Evaluation population identity differs")
             _require_identity(row, experiment, ("evaluator_sha256",))
             samples = _integer(row.get("samples", row.get("total")), "samples", minimum=1)
             correct = _integer(row.get("correct"), "correct")
             if "total" in row and row["total"] != samples:
                 raise ValueError("Conflicting sample counts")
-            if samples != model["expected_samples"] or correct > samples:
+            expected_samples = 5000 if kind == "theta_train" else model["expected_samples"]
+            if samples != expected_samples or correct > samples:
                 raise ValueError("Incorrect or partial evaluation sample count")
             accuracy = float(row.get("accuracy", float("nan")))
             if not math.isfinite(accuracy) or not 0 <= accuracy <= 1:
@@ -147,20 +157,31 @@ def validate_results(experiment: dict, runs: list[dict]) -> tuple[list[dict], di
                 raise ValueError("Conflicting prediction hashes")
             row.update(samples=samples, correct=correct, accuracy=accuracy,
                        prediction_sha256=prediction)
-            if kind == "spiking":
+            if kind in {"theta_train", "spiking"}:
                 _digest(row.get("calibration_sha256"), "calibration_sha256")
                 _require_identity(row, experiment, ("gelu_evaluator_sha256",))
-        indexed[(model_key, kind)] = row
+        indexed[index_key] = row
         normalized.append(row)
 
+    from scripts.experiments.vit_comparison import select_model_theta, theta_grid
     for model_key in MODEL_KEYS:
-        collect = indexed.get((model_key, "collect"))
-        snn = indexed.get((model_key, "spiking"))
-        ann = indexed.get((model_key, "dense"))
-        if snn:
-            if collect is None or snn["calibration_sha256"] != collect["calibration_sha256"]:
-                raise ValueError("SNN result has no matching completed calibration")
-        batches = {r["batch_size"] for r in (collect, snn, ann) if r and "batch_size" in r}
+        training = [indexed[(model_key, "theta_train", index)]
+                    for index in range(len(theta_grid()))
+                    if (model_key, "theta_train", index) in indexed]
+        selection = select_model_theta(experiment, model_key, training) if len(training) == len(theta_grid()) else None
+        for index in range(len(theta_grid())):
+            collect = indexed.get((model_key, "theta_collect", index))
+            train = indexed.get((model_key, "theta_train", index))
+            if train and (collect is None or train["calibration_sha256"] != collect["calibration_sha256"]):
+                raise ValueError("Training result has no matching theta calibration")
+        selected_index = selection["theta_index"] if selection else -1
+        snn = indexed.get((model_key, "spiking", selected_index))
+        ann = indexed.get((model_key, "dense", selected_index))
+        collect = indexed.get((model_key, "theta_collect", selected_index))
+        if snn and (selection is None or collect is None
+                    or snn["calibration_sha256"] != collect["calibration_sha256"]):
+            raise ValueError("SNN result has no matching selected calibration")
+        batches = {r["batch_size"] for r in (collect, snn, ann, *training) if r and "batch_size" in r}
         if len(batches) > 1:
             raise ValueError("A model must use one frozen batch size")
     if len({row["experiment_sha256"] for row in normalized}) > 1:
@@ -172,18 +193,28 @@ def validate_results(experiment: dict, runs: list[dict]) -> tuple[list[dict], di
     return normalized, indexed
 
 
-def comparison_rows(experiment: dict, indexed: dict) -> tuple[list[dict], list[dict]]:
+def comparison_rows(experiment: dict, indexed: dict) -> tuple[list[dict], list[dict], list[dict]]:
     """Join matched ANN/SNN counts without introducing stochastic intervals."""
     models = {model["model_key"]: model for model in experiment["models"]}
-    summary, breakdown = [], []
+    from scripts.experiments.vit_comparison import select_model_theta, theta_grid
+    summary, breakdown, selections = [], [], []
     for key in MODEL_KEYS:
         model = models[key]
         cost = estimate_vit_cost(model["checkpoint_config"])
-        ann, snn = indexed.get((key, "dense")), indexed.get((key, "spiking"))
+        training = [indexed[(key, "theta_train", index)]
+                    for index in range(len(theta_grid()))
+                    if (key, "theta_train", index) in indexed]
+        selection = select_model_theta(experiment, key, training) if len(training) == len(theta_grid()) else None
+        selected_index = selection["theta_index"] if selection else -1
+        ann = indexed.get((key, "dense", selected_index))
+        snn = indexed.get((key, "spiking", selected_index))
         row = {
             "model_key": key, "task": model["task"], "architecture": model["architecture"],
             "complete": bool(ann and snn), "samples": model["expected_samples"],
-            "theta": 40, "precision": "float64", "checkpoint_sha256": model["checkpoint_sha256"],
+            "theta": selection["theta"] if selection else None,
+            "theta_selection_population": "training seed-0 5k",
+            "validation_used_for_selection": False,
+            "precision": "float64", "checkpoint_sha256": model["checkpoint_sha256"],
             "ann_correct": ann["correct"] if ann else None,
             "snn_correct": snn["correct"] if snn else None,
             "ann_accuracy_percent": 100 * ann["accuracy"] if ann else None,
@@ -195,8 +226,10 @@ def comparison_rows(experiment: dict, indexed: dict) -> tuple[list[dict], list[d
             "cost_model_version": cost["cost_model_version"],
         }
         summary.append(row)
+        if selection:
+            selections.append(selection)
         breakdown.extend({"model_key": key, **stage} for stage in cost["breakdown"])
-    return summary, breakdown
+    return summary, breakdown, selections
 
 
 def render_latex_rows(summary: list[dict]) -> str:
@@ -234,9 +267,11 @@ def build_outputs(experiment: dict, validated_runs: list[dict], output_dir: Path
                   *, require_complete: bool = False) -> dict:
     """Write progressive CSVs and complete-only LaTeX with a final status marker."""
     normalized, indexed = validate_results(experiment, validated_runs)
-    complete = len(indexed) == 12
+    from scripts.experiments.vit_comparison import theta_grid
+    expected_total = len(MODEL_KEYS) * (2 * len(theta_grid()) + 2)
+    complete = len(indexed) == expected_total
     if require_complete and not complete:
-        raise ValueError("Four calibrations and eight evaluations must complete")
+        raise ValueError("All per-model training selections and final evaluations must complete")
     output_dir = Path(output_dir)
     previous_path = output_dir / "provenance.json"
     experiment_identity = runtime_identity.json_sha256(experiment)
@@ -246,10 +281,11 @@ def build_outputs(experiment: dict, validated_runs: list[dict], output_dir: Path
             raise ValueError("Output directory belongs to a different experiment")
         if previous.get("complete") and not complete:
             raise ValueError("Refusing to replace complete results with partial results")
-    summary, breakdown = comparison_rows(experiment, indexed)
+    summary, breakdown, selections = comparison_rows(experiment, indexed)
     files = {
         "raw_runs.csv": _csv(normalized, empty_fields=("run_id", "model_key", "kind")),
-        "summary.csv": _csv(summary), "sop_breakdown.csv": _csv(breakdown),
+        "summary.csv": _csv(summary), "theta_selection.csv": _csv(selections),
+        "sop_breakdown.csv": _csv(breakdown),
     }
     if complete:
         files["ours_rows.tex"] = render_latex_rows(summary)
@@ -258,8 +294,8 @@ def build_outputs(experiment: dict, validated_runs: list[dict], output_dir: Path
         "experiment_content_sha256": experiment_identity, "experiment": experiment,
         "validated_results_content_sha256": runtime_identity.json_sha256(normalized),
         "validated_results": normalized,
-        "calibrations_complete": sum(kind == "collect" for _, kind in indexed),
-        "evaluations_complete": sum(kind != "collect" for _, kind in indexed),
+        "calibrations_complete": sum(kind == "theta_collect" for _, kind, _ in indexed),
+        "evaluations_complete": sum(kind != "theta_collect" for _, kind, _ in indexed),
         "files": {
             name: runtime_identity.sha256_bytes(text.encode()) for name, text in files.items()
         },
@@ -284,9 +320,12 @@ def verify_publication_bundle(output_dir: Path) -> dict:
     provenance = json.loads((output_dir / "provenance.json").read_text())
     if provenance.get("complete") is not True:
         raise ValueError("Comparison bundle is incomplete")
-    if provenance.get("calibrations_complete") != 4 or provenance.get("evaluations_complete") != 8:
+    from scripts.experiments.vit_comparison import theta_grid
+    if (provenance.get("calibrations_complete") != 4 * len(theta_grid())
+            or provenance.get("evaluations_complete") != 4 * (len(theta_grid()) + 2)):
         raise ValueError("Comparison completion counts are incorrect")
-    if set(provenance["files"]) != {"raw_runs.csv", "summary.csv", "sop_breakdown.csv", "ours_rows.tex"}:
+    if set(provenance["files"]) != {"raw_runs.csv", "summary.csv", "theta_selection.csv",
+                                      "sop_breakdown.csv", "ours_rows.tex"}:
         raise ValueError("Unexpected comparison bundle members")
     for name, digest in provenance["files"].items():
         if runtime_identity.sha256_file(output_dir / name) != digest:
@@ -295,12 +334,13 @@ def verify_publication_bundle(output_dir: Path) -> dict:
     if runtime_identity.json_sha256(experiment) != provenance["experiment_content_sha256"]:
         raise ValueError("Experiment provenance checksum mismatch")
     runs, indexed = validate_results(experiment, provenance["validated_results"])
-    if (len(indexed) != 12
+    if (len(indexed) != 4 * (2 * len(theta_grid()) + 2)
             or runtime_identity.json_sha256(runs) != provenance["validated_results_content_sha256"]):
         raise ValueError("Validated result provenance checksum mismatch")
-    summary, breakdown = comparison_rows(experiment, indexed)
+    summary, breakdown, selections = comparison_rows(experiment, indexed)
     reproduced = {
         "raw_runs.csv": _csv(runs), "summary.csv": _csv(summary),
+        "theta_selection.csv": _csv(selections),
         "sop_breakdown.csv": _csv(breakdown), "ours_rows.tex": render_latex_rows(summary),
     }
     for name, content in reproduced.items():

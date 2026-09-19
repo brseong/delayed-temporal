@@ -8,7 +8,7 @@ The multi-file Python campaigns use a contract module, one or more workers or co
 
 | Campaign | Contract and runners | Result processing |
 |---|---|---|
-| Calibrated ViT comparison | `vit_comparison.py`, `run_vit_comparison.py`, `vit_comparison_controller.py`, `run_vit_comparison_extra_gpus.py` | `scripts/analysis/summarize_vit_comparison.py` |
+| Calibrated ViT comparison | `vit_comparison.py`, `run_vit_comparison.py`, `vit_comparison_controller.py` | `scripts/analysis/summarize_vit_comparison.py` |
 | Calibrated text comparison | `run_full_calibrated_text_comparison.py` | `scripts/analysis/summarize_full_calibrated_text_comparison.py` |
 | Threshold, timing-noise, and deadline-margin sweeps | `calibrated_three_sweeps.py`, `run_calibrated_three_sweeps.py`, `run_calibrated_three_sweep_task.py` | `scripts/analysis/summarize_calibrated_three_sweeps.py` |
 | Calibrated ViT noise comparison | `run_calibrated_noise_vit.py` | `scripts/analysis/plot_calibrated_noise_progress.py` |

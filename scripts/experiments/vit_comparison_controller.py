@@ -17,8 +17,8 @@ from typing import Any
 import uuid
 
 from scripts.experiments.vit_comparison import (
-    MODEL_KEYS, TAG, check_source, model_by_key, read_json,
-    validate_experiment, validate_result, validate_task,
+    MODEL_KEYS, TAG, check_source, make_task, model_by_key, read_json,
+    select_model_theta, theta_grid, validate_experiment, validate_result, validate_task,
 )
 from scripts.experiments.calibrated_three_sweep_rebalance import parse_slurm_job, TERMINAL
 from scripts.runtime import environment as runtime_environment
@@ -287,8 +287,41 @@ class Controller:
         return True
 
     def model_complete(self, key: str) -> bool:
-        for kind in ("collect", "dense", "spiking"):
-            run_id = f"{key}_{kind}"
+        admission_record = self.root / "admissions" / f"{key}.json"
+        if not admission_record.exists():
+            return False
+        batch = read_json(admission_record)["batch_size"]
+        training = []
+        for theta_index in range(len(theta_grid())):
+            for kind in ("theta_collect", "theta_train"):
+                calibration = ""
+                if kind == "theta_train":
+                    collect_task = make_task(self.experiment, key, "theta_collect", batch,
+                                             theta_index=theta_index)
+                    collect_result = self.root / collect_task["result_file"]
+                    if not collect_result.exists():
+                        return False
+                    calibration = read_json(collect_result)["calibration_sha256"]
+                task = make_task(self.experiment, key, kind, batch, theta_index=theta_index,
+                                 calibration_sha256=calibration)
+                run_id = task["run_id"]
+                path = self.root / "results" / (run_id + ".json")
+                if not path.exists():
+                    return False
+                result = read_json(path)
+                validate_result(read_json(self.root / "tasks" / (run_id + ".json")), result,
+                                self.experiment, self.root)
+                if kind == "theta_train":
+                    training.append(result)
+        selection = select_model_theta(self.experiment, key, training)
+        selection_path = self.root / "selections" / f"{key}.json"
+        if not selection_path.exists() or read_json(selection_path) != selection:
+            return False
+        for kind in ("dense", "spiking"):
+            task = make_task(self.experiment, key, kind, batch,
+                             theta_index=selection["theta_index"],
+                             calibration_sha256=selection["calibration_sha256"] if kind == "spiking" else "")
+            run_id = task["run_id"]
             path = self.root / "results" / (run_id + ".json")
             if not path.exists():
                 return False
@@ -481,10 +514,27 @@ class Controller:
         for key in REMOTE_MODELS:
             if self.state["models"][key]["owner"] != "ubai":
                 continue
-            for kind in ("collect", "dense", "spiking"):
-                run_id = f"{key}_{kind}"
-                names.extend([f"tasks/{run_id}.json", f"logs/{run_id}.log", f"results/{run_id}.json"])
-            names.append(f"calibration/{key}.json")
+            admission_path = self.root / "admissions" / f"{key}.json"
+            if not admission_path.exists():
+                continue
+            admission = read_json(admission_path)
+            batch = admission["batch_size"]
+            for theta_index in range(len(theta_grid())):
+                for kind in ("theta_collect", "theta_train"):
+                    run_id = make_task(self.experiment, key, kind, batch,
+                                       theta_index=theta_index)["run_id"]
+                    names.extend([f"tasks/{run_id}.json", f"logs/{run_id}.log", f"results/{run_id}.json"])
+                names.append(f"calibration/{key}/theta_{theta_index:02d}.json")
+            names.append(f"selections/{key}.json")
+            remote_selection = self.remote_root + f"/selections/{key}.json"
+            if self.remote_exists(remote_selection):
+                selection = json.loads(self.remote(["cat", remote_selection]))
+                for kind in ("dense", "spiking"):
+                    run_id = make_task(self.experiment, key, kind, batch,
+                                       theta_index=selection["theta_index"],
+                                       calibration_sha256=(selection["calibration_sha256"]
+                                                           if kind == "spiking" else ""))["run_id"]
+                    names.extend([f"tasks/{run_id}.json", f"logs/{run_id}.log", f"results/{run_id}.json"])
         admission_path = self.root / "admissions/imagenet_vit_base.json"
         if admission_path.exists():
             batch = read_json(admission_path)["batch_size"]
@@ -527,9 +577,12 @@ class Controller:
             accepted_results.add(result["run_id"])
         for run_id in list(accepted_results):
             task = read_json(incoming / "tasks" / (run_id + ".json"))
-            if task["kind"] != "spiking":
+            if task["kind"] not in {"theta_train", "spiking"}:
                 continue
-            collection = task["model_key"] + "_collect"
+            collection = make_task(
+                self.experiment, task["model_key"], "theta_collect", task["batch_size"],
+                theta_index=task["theta_index"],
+            )["run_id"]
             if collection in accepted_results:
                 continue
             prior = self.root / "results" / (collection + ".json")
@@ -547,8 +600,16 @@ class Controller:
                 continue
             if name.startswith("results/") and source.stem not in accepted_results:
                 continue
-            if name.startswith("calibration/") and source.stem + "_collect" not in accepted_results:
-                continue
+            if name.startswith("calibration/"):
+                parts = Path(name).parts
+                if len(parts) != 3 or not re.fullmatch(r"theta_(\d{2})\.json", parts[2]):
+                    raise ValueError("Unexpected comparison calibration path")
+                theta_index = int(re.fullmatch(r"theta_(\d{2})\.json", parts[2]).group(1))
+                collection = make_task(self.experiment, parts[1], "theta_collect",
+                                       read_json(self.root / "admissions" / f"{parts[1]}.json")["batch_size"],
+                                       theta_index=theta_index)["run_id"]
+                if collection not in accepted_results:
+                    continue
             if (destination.exists()
                     and identity.sha256_file(source) == identity.sha256_file(destination)):
                 continue

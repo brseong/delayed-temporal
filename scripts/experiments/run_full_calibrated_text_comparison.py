@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -24,20 +25,31 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.runtime import files as runtime_files
 from scripts.runtime import identity
 from scripts.runtime import local_gpu
+from utils.transforms.functions import GELU_CUBIC_IMPLEMENTATION
 
 
 ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", "/data/delayed-temporal/artifacts"))
 TAG = "conversion_comparison_theta40_calibrated_float64_bounds3_v3"
+GPT2_COMPOSED_GELU_TAG = "gpt2_theta40_calibrated_float64_bounds3_composed_gelu_v1"
 FAMILY_CONFIG = {
     "bert": {"task": "sst2", "evaluation_samples": 872, "sites": 110, "activation": "gelu"},
     "roberta": {"task": "sst2", "evaluation_samples": 872, "sites": 110, "activation": "gelu"},
-    "gpt2": {"task": "wikitext2", "evaluation_samples": 2891, "sites": 109, "activation": "gelu_new"},
+    "gpt2": {
+        "task": "wikitext2", "evaluation_samples": 2891, "sites": 109,
+        "activation": "gelu_new",
+        "activation_implementation": "composed_gelu_new_v1",
+    },
 }
 ROBERTA_LARGE_TAG = "roberta_large_theta40_calibrated_float64_bounds3_v1"
+POWER_REUSE_TAG = "text_power_gelu_theta40_float64_reused_calibration_v1"
 MODEL_CONFIG = {
     **{
         name: {**config, "evaluator_family": name, "tag": TAG}
         for name, config in FAMILY_CONFIG.items()
+    },
+    "gpt2": {
+        **FAMILY_CONFIG["gpt2"], "evaluator_family": "gpt2",
+        "tag": GPT2_COMPOSED_GELU_TAG,
     },
     "roberta_large": {
         "task": "sst2", "evaluation_samples": 872, "sites": 218,
@@ -53,12 +65,6 @@ def canonical(value: Any) -> str:
 
 
 def source_identity(source: Path, expected_commit: str, family: str) -> dict[str, str]:
-    head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
-    dirty = subprocess.check_output(
-        ["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"], text=True,
-    ).strip()
-    if head != expected_commit or dirty or not re.fullmatch(r"[0-9a-f]{40}", expected_commit):
-        raise ValueError("text comparison requires the clean frozen source commit")
     paths = sorted(source.joinpath("utils").rglob("*.py"))
     paths += [
         source / "scripts/evaluation" / "text_calibration_runtime.py",
@@ -68,10 +74,35 @@ def source_identity(source: Path, expected_commit: str, family: str) -> dict[str
         source / "scripts/runtime" / "local_gpu.py",
         Path(__file__).resolve(),
     ]
-    return {
+    hashes = {
         str(path.relative_to(source)): identity.sha256_file(path)
         for path in sorted(set(paths))
     }
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_commit):
+        raise ValueError("text comparison requires a full source commit")
+    git_path = shutil.which("git")
+    if git_path is not None:
+        head = subprocess.check_output(
+            [git_path, "-C", str(source), "rev-parse", "HEAD"], text=True,
+        ).strip()
+        dirty = subprocess.check_output(
+            [git_path, "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
+            text=True,
+        ).strip()
+        if head != expected_commit or dirty:
+            raise ValueError("text comparison requires the clean frozen source commit")
+        return hashes
+
+    frozen_path = os.environ.get("FROZEN_SOURCE_IDENTITY_PATH")
+    if not frozen_path:
+        raise RuntimeError("git or a frozen source identity is required")
+    frozen = json.loads(Path(frozen_path).read_text())
+    if (
+        frozen.get("source_commit") != expected_commit
+        or frozen.get("families", {}).get(family) != hashes
+    ):
+        raise ValueError("frozen source identity differs from the mounted source")
+    return hashes
 
 
 def checkpoint_identity(path: Path) -> dict[str, str]:
@@ -80,6 +111,21 @@ def checkpoint_identity(path: Path) -> dict[str, str]:
         for item in sorted(path.rglob("*"))
         if item.is_file()
     }
+
+
+def gpu_lock_filename(
+    *,
+    host_label: str,
+    physical_gpu: int,
+    family: str,
+    slurm_job_id: str | None,
+) -> str:
+    """Return a lock identity that follows the host's GPU namespace."""
+    if host_label == "local":
+        return f"gpu-{physical_gpu}.lock"
+    if not slurm_job_id or not slurm_job_id.isdigit():
+        raise ValueError("UBAI GPU locks require a Slurm job identifier")
+    return f"ubai-{slurm_job_id}-{family}.lock"
 
 
 def dataset_identity(path: Path, expected_fingerprint: str, expected_samples: int) -> dict[str, Any]:
@@ -157,6 +203,63 @@ def parse_sites(path: Path, expected: int) -> tuple[dict[str, Any], set[str]]:
     if dict(metadata["model_options"])["text_calibration_policy_version"] != 1:
         raise ValueError("text calibration policy differs")
     return metadata, sites
+
+
+def reused_calibration_evidence(
+    source: Path,
+    *,
+    family: str,
+    evaluator_family: str,
+    checkpoint_files_sha256: dict[str, str],
+    calibration_dataset: dict[str, Any],
+    expected_sites: int,
+) -> tuple[dict[str, Any], set[str]]:
+    """Authenticate a completed calibration artifact for evaluation reuse."""
+    source = source.resolve(strict=True)
+    source_manifest_path = source / "manifest.json"
+    source_result_path = source / "result.json"
+    calibration_path = source / "calibration.json"
+    if not all(path.is_file() for path in (
+        source_manifest_path, source_result_path, calibration_path,
+    )):
+        raise ValueError("reused calibration source is incomplete")
+    source_manifest = json.loads(source_manifest_path.read_text())
+    source_result = json.loads(source_result_path.read_text())
+    if (
+        source_result.get("state") != "complete"
+        or source_manifest.get("family") != family
+        or source_manifest.get("evaluator_family", source_manifest.get("family"))
+        != evaluator_family
+        or source_manifest.get("checkpoint_files_sha256") != checkpoint_files_sha256
+        or {
+            key: value for key, value in source_manifest.get("calibration_dataset", {}).items()
+            if key != "path"
+        } != {
+            key: value for key, value in calibration_dataset.items() if key != "path"
+        }
+        or source_manifest.get("theta") != 40.0
+        or source_manifest.get("dtype") != "float64"
+    ):
+        raise ValueError("reused calibration identity differs from the evaluation")
+    calibration_sha256 = identity.sha256_file(calibration_path)
+    collect = source_result.get("phases", {}).get("collect")
+    if (
+        not isinstance(collect, dict)
+        or collect.get("calibration_sha256") != calibration_sha256
+        or source_result.get("calibration_sha256") != calibration_sha256
+    ):
+        raise ValueError("reused calibration hash differs from its completed source")
+    _, sites = parse_sites(calibration_path, expected_sites)
+    return {
+        "source_output": str(source),
+        "source_tag": source_manifest["tag"],
+        "source_commit": source_manifest["source_commit"],
+        "source_manifest_sha256": identity.sha256_file(source_manifest_path),
+        "source_result_sha256": identity.sha256_file(source_result_path),
+        "calibration_path": str(calibration_path),
+        "calibration_sha256": calibration_sha256,
+        "collection_log_sha256": collect["log_sha256"],
+    }, sites
 
 
 def parse_classification(log: str, expected_samples: int, sites: set[str] | None) -> dict[str, Any]:
@@ -331,6 +434,7 @@ def main() -> None:
     parser.add_argument("--cache-dir", default="/root/.cache/huggingface/datasets")
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--runtime-root", type=Path)
+    parser.add_argument("--reuse-calibration-from", type=Path)
     args = parser.parse_args()
 
     if args.host_label == "local" and socket.gethostname() != "baekryun-cuda129":
@@ -348,32 +452,49 @@ def main() -> None:
     args.calibration_dataset_path = str(calibration_dataset)
     args.evaluation_dataset_path = str(evaluation_dataset)
     output = args.output_root.resolve()
-    allowed = ARTIFACTS / "logs/conversion_comparison" / config["tag"] / "text"
+    run_tag = POWER_REUSE_TAG if args.reuse_calibration_from is not None else config["tag"]
+    allowed = ARTIFACTS / "logs/conversion_comparison" / run_tag / "text"
     if output.parent != allowed or output.name != args.family:
         raise ValueError("output path differs from the fixed full comparison layout")
     runtime = ((args.runtime_root / args.family) if args.runtime_root is not None else
-               ARTIFACTS / "runtime" / config["tag"] / "text" / args.family).resolve()
+               ARTIFACTS / "runtime" / run_tag / "text" / args.family).resolve()
     if args.host_label == "local":
-        required_runtime = (ARTIFACTS / "runtime" / config["tag"] / "text").resolve()
+        required_runtime = (ARTIFACTS / "runtime" / run_tag / "text").resolve()
         if runtime.parent != required_runtime:
             raise ValueError("local runtime differs from the fixed comparison layout")
     else:
         if "SLURM_JOB_ID" not in os.environ or not runtime.is_relative_to(Path("/enroot")):
             raise ValueError("UBAI runtime must be a Slurm-owned path below /enroot")
+    checkpoint_files_sha256 = checkpoint_identity(model)
+    calibration_dataset_identity = dataset_identity(
+        calibration_dataset, args.calibration_dataset_fingerprint, CALIBRATION_SAMPLES,
+    )
+    evaluation_dataset_identity = dataset_identity(
+        evaluation_dataset, args.evaluation_dataset_fingerprint,
+        config["evaluation_samples"],
+    )
+    calibration_reuse = None
+    reused_sites: set[str] | None = None
+    if args.reuse_calibration_from is not None:
+        calibration_reuse, reused_sites = reused_calibration_evidence(
+            args.reuse_calibration_from,
+            family=args.family,
+            evaluator_family=evaluator_family,
+            checkpoint_files_sha256=checkpoint_files_sha256,
+            calibration_dataset=calibration_dataset_identity,
+            expected_sites=config["sites"],
+        )
     commands = build_commands(args, output)
+    if calibration_reuse is not None:
+        commands.pop("collect")
     manifest = {
-        "schema_version": 1, "tag": config["tag"], "family": args.family,
+        "schema_version": 1, "tag": run_tag, "family": args.family,
         "evaluator_family": evaluator_family,
         "source_root": str(args.source_root), "source_commit": args.expected_commit,
         "source_hashes": source_hashes, "model_id": str(model),
-        "checkpoint_files_sha256": checkpoint_identity(model),
-        "calibration_dataset": dataset_identity(
-            calibration_dataset, args.calibration_dataset_fingerprint, CALIBRATION_SAMPLES,
-        ),
-        "evaluation_dataset": dataset_identity(
-            evaluation_dataset, args.evaluation_dataset_fingerprint,
-            config["evaluation_samples"],
-        ),
+        "checkpoint_files_sha256": checkpoint_files_sha256,
+        "calibration_dataset": calibration_dataset_identity,
+        "evaluation_dataset": evaluation_dataset_identity,
         "calibration_samples": CALIBRATION_SAMPLES,
         "evaluation_samples": config["evaluation_samples"],
         "batch_size": BATCH_SIZE, "theta": 40.0, "dtype": "float64",
@@ -382,6 +503,10 @@ def main() -> None:
         "calibration_margin_fraction": 0.05, "text_calibration_policy_version": 1,
         "output_bounds_version": 3, "noise": False, "wandb": False,
         "tensorboard": False, "host_label": args.host_label, "physical_gpu": args.gpu,
+        "activation": config["activation"],
+        "activation_implementation": config.get("activation_implementation", "model_default"),
+        "gelu_cubic_implementation": GELU_CUBIC_IMPLEMENTATION,
+        "calibration_reuse": calibration_reuse,
         "campaign_extra_local_gpus": bool(args.campaign_extra_local_gpus),
         "commands": commands, "runtime_dir": str(runtime),
     }
@@ -392,13 +517,26 @@ def main() -> None:
             raise ValueError("existing model manifest differs")
     else:
         runtime_files.new_json(manifest_path, manifest)
+    if calibration_reuse is not None:
+        calibration_path = output / "calibration.json"
+        source_calibration_path = Path(calibration_reuse["calibration_path"])
+        if calibration_path.exists():
+            if identity.sha256_file(calibration_path) != calibration_reuse["calibration_sha256"]:
+                raise ValueError("existing reused calibration hash differs")
+        else:
+            shutil.copyfile(source_calibration_path, calibration_path)
     runtime.mkdir(parents=True, exist_ok=True)
     filesystem = subprocess.check_output(["findmnt", "-n", "-o", "FSTYPE", "-T", str(runtime)], text=True).strip()
     if filesystem in {"tmpfs", "ramfs"}:
         raise RuntimeError("comparison runtime must use a disk filesystem")
 
     sys.path.insert(0, str(args.source_root))
-    lock_path = ARTIFACTS / "runtime/gpu-locks" / f"gpu-{args.gpu}.lock"
+    lock_path = ARTIFACTS / "runtime/gpu-locks" / gpu_lock_filename(
+        host_label=args.host_label,
+        physical_gpu=args.gpu,
+        family=args.family,
+        slurm_job_id=os.environ.get("SLURM_JOB_ID"),
+    )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -428,10 +566,13 @@ def main() -> None:
             ))),
         )
         state: dict[str, Any] = {"state": "running", "family": args.family, "phases": {}}
+        if calibration_reuse is not None:
+            state["calibration_reuse"] = calibration_reuse
         runtime_files.atomic_json(output / "result.json", state)
         try:
-            sites: set[str] | None = None
-            for phase in ("collect", "ann", "snn"):
+            sites: set[str] | None = reused_sites
+            phases = ("ann", "snn") if calibration_reuse is not None else ("collect", "ann", "snn")
+            for phase in phases:
                 verify_dataset_snapshot(manifest["calibration_dataset"])
                 verify_dataset_snapshot(manifest["evaluation_dataset"])
                 phase_path = output / "phases" / f"{phase}.json"
@@ -483,7 +624,10 @@ def main() -> None:
             if ann["evaluation_dataset_fingerprint"] != snn["evaluation_dataset_fingerprint"]:
                 raise ValueError("ANN and SNN evaluation dataset fingerprints differ")
             state["state"] = "complete"
-            state["calibration_sha256"] = state["phases"]["collect"]["calibration_sha256"]
+            state["calibration_sha256"] = (
+                calibration_reuse["calibration_sha256"] if calibration_reuse is not None
+                else state["phases"]["collect"]["calibration_sha256"]
+            )
             source_identity(args.source_root, args.expected_commit, evaluator_family)
             verify_dataset_snapshot(manifest["calibration_dataset"])
             verify_dataset_snapshot(manifest["evaluation_dataset"])

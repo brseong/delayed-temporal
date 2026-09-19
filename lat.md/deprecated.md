@@ -256,6 +256,24 @@ Deprecated. Attention 없는 작은 변환 네트워크의 하드웨어 결과�
 
 Deprecated. 보존된 정밀도 결과와 기술 검산의 실측·분석을 출처별로 연결한다. 원본에 적힌 수치는 해당 코드·데이터의 결과이며 새 버전이나 다른 프로토콜로 합산하지 않는다.
 
+### 과거 ViT Timing Noise Campaigns
+
+Deprecated. Calibration 정책 2와 $\theta=20$을 적용하기 전의 threshold-40 및 uncalibrated timing-noise 실행은 현재 robustness 결과와 합치지 않는다.
+
+Source `bc973317`의 초기 threshold 선택은 layer-wise calibration 없이 40을 선택했다. Source `648af9bb`의 `log-grid-9`와 `ratio-grid-13`, 그 이전 `v3`/`v5` 적응형 실행, 12 by 13 sigma-margin 계획, 48-site 65-condition 비교는 서로 다른 GELU·calibration·bound 계약을 사용한다. 완료 로그와 그림은 provenance로 보존하지만 현재 source `f7b74c1aef38502caccf532d1e58a7cf321833d6`의 109-site policy-2 결과를 보충하는 replica가 아니다.
+
+[[scripts/analysis/plot_iclr_timing_noise.py#main]]은 당시 `log-grid-9`와 `ratio-grid-13`의 identity를 확인해 ICLR 부록용 2-panel 그림을 만들었다. 이 도구와 생성물은 source `648af9bb`의 역사 자료이며 현재 calibrated 그림 생성기로 승격하지 않는다.
+
+현재 근거는 [[noise#Calibrated Threshold and Noise Sweeps]]의 training 5k 선택, fixed validation 5k의 두 one-dimensional sweep, 그리고 같은 identity의 high-scale timing-noise extension이다. 과거 $\theta=2000$, static threshold mismatch, 470-run joint grid와 자동 W&B 동기화 계획은 현재 표나 그림의 근거가 아니다.
+
+### 과거 ViT Conversion Comparison
+
+Deprecated. 2026-09-15의 48/96-site 비교와 64-image LayerNorm 진단은 policy-2 범위 전달과 timm preprocessing correction 이전 상태를 기록한다.
+
+초기 v1 결과에서 CIFAR-10 ViT-S 91.56%, ImageNet ViT-S 60.14%처럼 낮은 clean SNN accuracy가 관측됐다. 당시 Q/K/V와 centered LayerNorm 입력이 calibration site가 아니었고 ImageNet에는 bilinear direct resize가 적용됐다. LayerNorm threshold만 2000으로 바꾼 64-image 진단은 원인 분해용이며 현재 full result가 아니다.
+
+후속 policy 2는 ViT-S/B 109곳과 ViT-L 217곳을 수집하고 실제 attention·LayerNorm 연산에 전달한다. 현재 표의 ImageNet 행은 [[conversion-comparison#ImageNet Preprocessing Correction]]의 timm v4 결과이고, CIFAR 행은 완성된 v3 policy-2 결과다. Direct-resize ImageNet 값은 replica나 baseline으로 재사용하지 않는다.
+
 ### GPT-2 정밀도 통제 실험
 
 Deprecated. 정밀도 통제 노트는 큰 공통 시간창에서 생긴 추가 attention 성능 저하가 주로 유한 정밀도와 관련됨을 보여 준다. 전체 변환 오차가 모두 사라졌다는 뜻은 아니다.
@@ -392,3 +410,292 @@ Deprecated. 최초 통합의 원본 13개 중 남긴 두 파일과 삭제·압�
 | `gpt2_fp_precision_appendix_results_ko.md` | 삭제·압축 보관 | [[deprecated#과거 실험과 범위 감사#GPT-2 정밀도 통제 실험]] |
 | [neurips_2026_terminology_audit_ko.md](../paper/neurips_2026/neurips_2026_terminology_audit_ko.md) | 유지 | [[deprecated#과거 원고 검토#용어 감사와 표기 원칙]] |
 | `iclr_sections_2_3_review_ko.md` | 삭제·압축 보관 | [[deprecated#과거 원고 검토#후속 원고의 선행연구와 예비 정의]] |
+
+## 완료된 TODO 기록
+
+Deprecated. [[todo]]에서 모든 항목이 완료된 작업 단위를 본문 그대로 옮겨 보존한다. 완료 당시의 기록이며 새 실행 지시가 아니다. 진행 중인 작업은 [[todo]]에만 남긴다.
+
+각 기록의 상세 근거는 [[bounds-audit]], [[calibration]], [[evaluation]], [[conversion-comparison]], [[noise]]에 있다. 여기의 체크박스는 완료 상태의 사본이므로 다시 열지 않는다.
+
+### GPT-2 Composed GELU Rerun
+
+The user authorized a fresh calibrated WikiText-2 evaluation after replacing the direct GPT-2 block activation with the maintained composed GELU.
+
+- [x] Connect `gelu_new` selected by the checkpoint to the composed operator path and distinguish it in calibration metadata.
+- [x] Preserve the earlier direct-activation logs and assign the rerun a separate tag.
+- [x] Collect fresh ranges from the fixed training 5,000 artifact.
+- [x] Evaluate the dense reference and converted model on all 2,891 nonempty fixed test texts.
+- [x] Validate and summarize the new artifact before changing the ICLR GPT-2 row or prose.
+
+### Shared Power Cubic Text Rerun
+
+The user authorized RoBERTa-B, RoBERTa-L, and GPT-2 evaluation with the same Power cubic used by the ViT rows, while explicitly reusing completed calibration artifacts.
+
+- [x] Move the signed Power cubic into the canonical GELU implementation and keep repeated multiplication only as an analysis condition.
+- [x] Add strict calibration-reuse evidence containing the original source, manifest, result, collection log, and calibration hashes.
+- [x] Complete ANN and SNN evaluation for both RoBERTa checkpoints and GPT-2 without running a collection phase.
+- [x] Validate the combined summary and remove the model-specific cubic distinction from the ICLR appendix.
+
+### Imported Completed Foundations
+
+These completed items are retained here so the migrated checklist does not lose the legacy status record.
+
+- [x] Separate LayerNorm's denominator regularizer from the finite-window encoder floor.
+- [x] Separate actual dual-rail magnitude from floor-clamped logarithm inputs and preserve inactive-rail no-spike semantics.
+- [x] Compute LayerNorm variance from actual magnitudes rather than floor-clamped rails.
+- [x] Publish the tensor versus spiking execution topology for the LayerNorm stages and model configurations.
+- [x] Decompose the current GPT-2 degradation across attention, LayerNorm, MLP affine, residual, and wrapper paths.
+
+### Static Bounds 구현 체크리스트
+
+[[todo#Static Bounds for All Operators]]의 완료된 수용 기준, 후속 항목, 구현 체크리스트 80개를 보존한다. 해당 섹션의 설계 근거와 런타임 계약은 현행 문서이므로 [[todo]]에 그대로 남아 있다.
+
+#### Acceptance Criteria
+
+The migration is complete only when static-domain behavior is invariant under evaluation batching and all runtime extrema-derived domain construction has left maintained paths.
+
+- [x] Reordering identical samples, changing batch size, or partitioning a batch produces identical declared bounds in representative shared operators, while the AST audit excludes activation-extrema construction across all maintained sites.
+- [x] Changing the Gaussian seed changes sampled events and outputs but never changes any declared potential or time bound.
+- [x] Every calibrated or Gaussian out-of-envelope value increments pre-clamp underflow or overflow statistics without mutating the envelope.
+- [x] Evaluation fails clearly when a required calibrated bound is absent or incompatible instead of silently measuring the current tensor.
+- [x] With frozen calibration enabled, selected ViT and GPT-2 residual boundaries use persisted ranges for each block instead of accumulating analytic interval sums; disabled calibration retains those sums.
+- [x] A final AST source audit and direct tests reject `PotentialBounds` or `TimeBounds` constructed directly or through local aliases from live forward-tensor extrema.
+
+#### Follow-up After Bound Re-Audit
+
+The merged calibration work closes every known live-extrema violation; the remaining work concerns central validation and empirical evaluation rather than runtime calibration.
+
+- [x] Rename the inclusive base interval to `ClosedBounds`; clamping, membership, and deadline equality all include both endpoints.
+- [x] Enforce finite, ordered bound endpoints centrally and replace `check_domain` assertions with explicit exceptions that remain active under optimized Python.
+- [x] Keep nonzero spiking attention training dropout outside the paper scope; the compatibility branch is documented, and maintained fixed-range claims apply only to evaluation with dropout disabled.
+- [x] Run the ViT-S/ImageNet-1k real-checkpoint audit and report per-site clipping, Gaussian saturation, deadline misses, and task accuracy for LayerNorm, attention, affine, embedding, and the conventional task head; see [[evaluation#Fixed-Domain ViT-S Real-Data Audit]].
+- [x] Repeat the real-data fixed-domain audit for BERT, RoBERTa, and GPT-2; the classifier gaps are small, and under the simultaneous current protocol GPT-2's attention-local threshold reduces the single-threshold PPL gap from 2.3248 to 0.1915; see [[evaluation#Fixed-Domain Text-Model Real-Data Audit]].
+
+#### Implementation Checklist
+
+The implementation work covers every maintained transform and model adapter, not only LayerNorm or operators that directly emit spikes.
+
+- [x] Audit every maintained `PotentialBounds` and `TimeBounds` construction, including model inputs, embeddings, residuals, normalization, activations, attention, projections, and task readouts; the remaining violations are listed in [[bounds-audit#전수 검색 결과]].
+- [x] Correct multiplication bounds to use the encoded operand's declared clamped endpoints instead of multiplying every ideal result by the full `theta` rail.
+- [x] Restrict ordered division output to the noise-independent $[0,1]$ range; count and clamp Gaussian excursions without restricting the unrestricted exponential-difference primitive used by dual-rail LayerNorm.
+- [x] Permanently verify division noise-mode domain identity, zero-noise output statistics, numerator-miss in-range behavior, denominator-miss overflow clamping, internal reset zero, and unrestricted exponential difference for LayerNorm.
+- [x] Return softmin weights on the structural $[0,1]$ domain and count Gaussian excursions before the final rail clamp.
+- [x] Permanently verify softmin noise-mode domain identity, zero-noise saturation counts, forced-miss excursion accounting, and final $[0,1]$ clamping.
+- [x] Return tanh on the structural $[-1,1]$ domain and count Gaussian excursions before the final activation clamp.
+- [x] Permanently verify tanh deterministic/zero-noise parity, the common $[-1,1]$ domain, forced excursion accounting, and final clamping.
+- [x] Return sigmoid-GELU and Gaussian/deterministic SwiGLU gates on the structural $[0,1]$ domain before downstream multiplication.
+- [x] Permanently verify sigmoid-GELU and SwiGLU gate-derived output domains, zero-noise counters, forced gate excursion accounting, and finite clamping.
+- [x] Replace global-extrema-times-fan-in bounds in all three affine adapters with exact output-specific interval arithmetic before applying calibration.
+- [x] Define `CalibrationMode` with distinct `collect`, `validate`, and `inference` phases so command-line and persisted representations use the same stable values.
+- [x] Define the common layer-wise calibration data types: immutable ranges, histograms, layer records, run metadata, and calibration tables, plus mutable min-max observer, histogram observer, and clipping-count state with fixed fields.
+- [x] Add a batch-order-independent min-max observer update that records finite signed extrema and tensor-element counts without retaining tensors or autograd graphs.
+- [x] Select two deterministic calibration collection passes: signed min/max first, then fixed-bin histograms over the same dataset before frozen validation.
+- [x] Construct each second-pass histogram from populated first-pass extrema with an explicit bin count and collection device, zeroed `int64` counters, and no arbitrary widening of constant ranges.
+- [x] Accumulate batch-order-independent fixed-bin counts with inclusive outer endpoints, explicit underflow and overflow tails, constant-range handling, and no hidden device transfer.
+- [x] Finalize a completed histogram only when bins and tails exactly match the total, copying device counters into an immutable JSON-compatible integer tuple without mutating the observer.
+- [x] Select signed lower and upper quantiles from the immutable histogram with outward bin-edge rounding, rejecting cutoffs that fall inside unrecorded tails and leaving margin expansion as a separate policy.
+- [x] Expand symmetric ranges on both calibrated sides, but expand one-sided ranges only toward the calibrated endpoint so a finite analytic endpoint never moves; leave zero-width ranges unchanged rather than inventing an absolute epsilon.
+- [x] Persist policy-specific optional quantiles, analytic endpoints, and margin separately in each immutable layer calibration record so its final range can be reproduced and audited.
+- [x] Build immutable layer records only from identical deterministic passes with zero replay tails, and count strict runtime excursions before autograd-preserving clamp.
+- [x] Canonicalize calibration tables by stable layer identity, require exact metadata compatibility, and provide strict versioned JSON save, load, and setup-time lookup.
+- [x] Permanently verify observer invariants, quantile and margin selection, frozen clipping, schema rejection, tamper detection, and deterministic persistence round trips.
+- [x] Separate two-pass collection from frozen validation and inference with explicit state, one-way phase transitions, missing-site failure, and immutable clipping-report snapshots.
+- [x] Declare calibration targets and endpoint policy per layer: signed-symmetric sites calibrate both sides, one-sided sites preserve their known endpoint, and practical structural bounds remain analytic; finiteness alone does not exclude a site.
+- [x] Bind calibration state to stable model-module identities without checkpoint keys, use analytic safety bounds during collection, and return persisted clamp bounds as `PotentialBounds` during validation and inference.
+- [x] Select a fixed-size prefix of a seeded training-split permutation for ViT calibration, replay the exact subset sequentially in both passes, and persist its split, seed, sample count, fingerprint, preprocessing, dtype, and model-path identity.
+- [x] Add ViT collection, frozen-validation, and inference CLI modes with strict clean-collection constraints, exact metadata validation, missing-entry failure, and per-layer frozen clipping reports.
+- [x] Replace ViT bounds from live activation extrema with preprocessing and analytic intervals plus two optional residual calibration boundaries per block; disabled calibration retains fixed residual interval sums.
+- [x] Replace BERT intermediate GELU and ReLU live output extrema with ranges derived from the fixed affine input interval.
+- [x] Propagate the fixed BERT encoder range through first-token pooling and use a configuration-derived standalone encoder fallback without live extrema.
+- [x] Freeze BERT word, token-type, and position table ranges, sum their intervals before embedding LayerNorm, and preserve the resulting `Potential` through the internal encoder API.
+- [x] Remove all RoBERTa live bounds by freezing embedding and affine ranges, propagating `Potential` through the encoder and pooler, and carrying the final range into local LM and classification heads without changing public model outputs.
+- [x] Remove all GPT-2 live bounds with frozen embedding and Conv1D intervals, an analytic model-entry range, analytic MLP activation ranges, residual endpoint addition, and two-per-block calibration bindings.
+- [x] Add GPT-2 collection, frozen-validation, and inference evaluator modes using filtered WikiText training subsets, fixed tokenizer/sequence metadata, sequential two-pass replay, and per-site clipping reports.
+- [x] Use operator interval arithmetic where it provides a practical bound; retain calibration at selected boundaries whose finite ranges become excessively wide.
+- [x] For paths without a practical tight analytic envelope, calibrate only ViT/GPT-2 pre-norm residual resets, ViT composed-GELU pre-activations, and spiking attention scores; analytic model entries bypass calibration.
+- [x] Make maintained calibration retain observed min/max without tail truncation and add a 5% per-side margin; keep interior quantiles only as explicit diagnostic overrides.
+- [x] Persist stable site identifiers together with the checkpoint, dataset split, preprocessing, model family, and active ablation configuration used for calibration.
+- [x] Add explicit collection, frozen-validation, and inference modes so a site cannot measure and clamp against a range created by the same forward invocation.
+- [x] Freeze learned-parameter and embedding-table bounds in versioned caches after checkpoint setup instead of recomputing parameter extrema on repeated forwards, including ordinary and spiking LayerNorm.
+- [x] Add `SpikingLinear.freeze_parameter_bounds` with exact sign-aware rails per fixed input domain, immutable reuse, mutation rejection, and explicit refresh.
+- [x] Allow `SpikingLinear._gaussian_forward` to use the frozen output bound for saturation accounting without rescanning parameters.
+- [x] Connect `SpikingLinear.forward` so deterministic and Gaussian execution attach the same frozen output bound and deterministic execution performs no parameter extrema scan.
+- [x] Remove the transitional `domain_W` argument and fallback from `SpikingLinear._gaussian_forward`, eliminating the remaining Gaussian weight scan.
+- [x] Apply the same fixed-input-domain interval arithmetic, parameter mutation validation, and noise-independent metadata to grouped `SpikingConv2d`.
+- [x] Apply the same fixed-input-domain interval arithmetic, parameter mutation validation, and noise-independent metadata to GPT-2 `SpikingConv1D`.
+- [x] Make all three affine adapters consume upstream zero-containing fixed ranges, derive the zero-reference time from those ranges, and permanently verify asymmetric-domain parity and memoization.
+- [x] Add `SpikingLayerNorm.freeze_parameter_bounds` for dense, direct exponential, and spiking exponential-difference envelopes with parameter/configuration mutation rejection.
+- [x] Connect `SpikingLayerNorm._gaussian_forward` to frozen weight, bias, and final output domains before event sampling.
+- [x] Connect deterministic `SpikingLayerNorm.forward` to the same frozen parameter and output contract.
+- [x] Permanently verify all eight `SpikingLayerNorm` ablation domains, deterministic/zero-noise metadata identity, stale-cache rejection, and explicit refresh.
+- [x] Initialize every model-family entry potential bound from frozen embedding/preprocessing intervals or explicit calibration rather than measuring the first or current batch.
+- [x] Clamp every calibrated out-of-envelope value against its fixed bound and report underflow and overflow counts without widening that bound at runtime; Gaussian operator rails use their separate saturation counters.
+- [x] Use the implemented LayerNorm normalization bounds that do not accumulate growth of input ranges across layers, then derive the output interval from scale and bias; a tighter output calibration remains a separate extension.
+- [x] Support residual collection for each ViT/GPT-2 block and, when frozen calibration is enabled, count values outside the interval and clamp to the persisted interval.
+- [x] Connect both ViT pre-norm residual boundaries to optional explicit calibration bindings while retaining batch-independent analytic interval addition when calibration is absent.
+- [x] Support one measured symmetric score range per ViT/GPT-2 attention layer, subject to the analytic representability ceiling; without calibration, use the fixed score limit and retain separate Gaussian validation of value readout.
+- [x] Replace the attention-specific `tau_m` and `tau_s` names with one `tau`; model adapters derive it from their shared `tau_s` configuration, and the ViT-only `tau_m` field is removed.
+- [x] Support optional layer-wise calibration of affine inputs to composed GELU, retain an analytic final activation interval, and remove avoidable deterministic exponential overflow without changing the operator equation.
+- [x] Keep spike-time windows configuration-derived: LayerNorm log windows remain fixed by `clip_margin`, `theta`, and `tau_s`, while affine identity encoding uses each declared zero-containing fixed interval.
+- [x] Make declared potential and time bounds immutable so cached or propagated endpoints cannot be widened in place.
+- [x] Keep masked attention scores inside the declared softmin range and clamp both Gaussian and noise-free value readouts to a rail derived from fixed $S_{\max}$ and $\theta$.
+- [x] Attach that shared fixed attention-output range to `Potential` in the ViT, BERT, RoBERTa, and GPT-2 adapters instead of reusing the value range or measuring output extrema.
+- [x] Remove live activation extrema from the Gaussian `SpikingLayerNorm` path by propagating operator intervals and using the finite-feature dense LayerNorm bound.
+- [x] Remove live activation extrema from deterministic `SpikingLayerNorm.forward` with the same operator intervals and finite-feature dense bound.
+- [x] Remove live output extrema from ordinary `nn.LayerNorm` calls in `_apply_norm` with the finite-feature bound and learned affine endpoint propagation.
+- [x] Verify bounds are identical across batch contents, ordering, and batch size, and add a final source audit that rejects runtime tensor-extrema domain construction in maintained paths.
+
+### Completed LayerNorm Upper Endpoint Change
+
+사용자 승인에 따라 상한에서만 `clip_margin`을 빼던 정의를 코드에 수정했다. 양의 하한과 기존 실험 기록은 유지한다. 아래 비교는 변경 전후를 기록하며, 추가 실험이나 원고 변경은 수행하지 않는다.
+
+#### Direct Changes
+
+공유 [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm]]의 입력 범위 정의를 아래처럼 바꿨다. $m$은 현재 `clip_margin` 값이며 기본값은 계속 $10^{-5}$다.
+
+| 변경 대상 | 변경 전 코드 | 적용 코드 |
+| --- | --- | --- |
+| 실제 양/음 magnitude 범위 | `PotentialBounds(0.0, theta - clip_margin)` | `PotentialBounds(0.0, theta)` |
+| log 계산용 범위 | `PotentialBounds(clip_margin, theta - clip_margin)` | `PotentialBounds(clip_margin, theta)` |
+| margin 유효성 검사 | `margin >= theta / 2.0`이면 거부 | `margin >= theta`이면 거부 |
+
+앞의 두 범위는 [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#_gaussian_forward]]와 [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#forward]]에 각각 있어 총 네 곳이다. 검사도 constructor와 [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#freeze_parameter_bounds]]의 두 곳에서 일치시킨다. Constructor의 변수명은 `normalized_margin`이며, 기존 finite/positive 검사는 유지한다.
+
+문서 문자열, 주석, 오류 메시지의 "양 끝점을 안쪽으로 이동"과 `theta/2` 설명을 "양의 log 입력 하한" 및 `0 < clip_margin < theta`로 바꾼다. 호출부와 설정 파일의 `clip_margin` 이름은 이번 범위에서 바꾸지 않는다.
+
+#### Derived Bounds
+
+분산 범위와 시간창은 log 입력 구간의 끝점에서 이미 계산되므로, 별도 상수를 추가하거나 파생 수식을 중복 수정하지 않는다.
+
+| 파생값 | 변경 전 | 적용 후 |
+| --- | --- | --- |
+| 분산 인코딩 범위 | $[m^2,(\theta - m)^2]$ | $[m^2,\theta^2]$ |
+| magnitude 인코딩 시간창 길이 | $\tau_s\log((\theta - m)/m)$ | $\tau_s\log(\theta/m)$ |
+
+기존 `domain_var = PotentialBounds(domain_err.min ** 2, domain_err.max ** 2)`와 `T0 = tau_s * math.log(domain_err.max / domain_err.min)`는 그대로 둔다. 분산 인코더의 시간상수 $\tau_s/2$도 유지하면 제곱된 구간으로부터 같은 시간창과 log 기준값이 나온다. 직접 로그를 계산하는 ablation 역시 `domain_err.max`와 그 제곱을 사용하므로 새 상한을 자동으로 따른다.
+
+#### Unchanged Behavior
+
+하한의 의미, signed 값의 처리와 LayerNorm의 최종 출력 제한은 이번 변경 대상이 아니다.
+
+- `clip_margin=0`으로 바꾸지 않는다. 실제 magnitude에는 0을 허용하되 log 계산용 값에만 양의 하한을 적용한다.
+- `positive_active`와 `negative_active`의 하한 판정, 비활성 경로의 출력 기여 제거, 분산 계산에 쓰는 0 magnitude를 유지한다.
+- 분산에 더하는 `eps`, 시간상수, 가중치와 bias, normalized 및 최종 affine 출력 bound를 유지한다.
+- [[utils/transforms/potential_to_spike.py#neg_log_transform]], [[utils/transforms/spike_to_potential.py#exponential_difference_operator]], 일반 곱셈의 정의는 바꾸지 않는다.
+- GELU의 magnitude 하한, 전역 theta 선택 절차, calibration 수집 위치와 표본 선택은 바꾸지 않는다.
+- 공통 LayerNorm 클래스 변경이므로 ViT만의 변경으로 설명하지 않는다. 이 클래스를 사용하는 다른 모델과 ablation에도 적용된다.
+
+#### Verification Changes
+
+기존 검사의 하드코딩된 내부 범위를 갱신하고, 새로 허용되는 상한을 실제로 밟는 경계 검사를 보강한다. 테스트가 기존 상한보다 작은 값만 사용하면 변경을 검증하지 못한다.
+
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_spiking_layernorm]]의 `PotentialBounds(0.0, 3.9)`를 `PotentialBounds(0.0, 4.0)`, `PotentialBounds(0.1, 3.9)`를 `PotentialBounds(0.1, 4.0)`로 바꾼다. 나머지 파생 variance와 deadline은 같은 계산식을 유지한다. Event 수와 miss 수 기대값을 새 결과에 맞춰 무작정 고치지 않는다.
+
+- theta=4에서 평균이 0인 `[-4,-1,1,4]` 및 상한 초과 입력으로 magnitude/log 상한이 4인지 확인한다. 모든 원소가 같은 비율로 잘려 normalization에서 차이가 상쇄되는 입력만 사용하지 않는다.
+- 0, 양의 하한 미만, 하한과 같은 입력에서 log 계산용 값과 비활성 경로를 구분한다. 상수 입력의 출력이 bias가 되는 기존 검사를 보존한다.
+- Constructor와 bounds freeze가 theta=4에서 margin=2 또는 3을 허용하고, 0 이하, 4 이상, NaN/Inf는 거부하는지 확인한다.
+- float32/float64, 세 LayerNorm ablation flag의 8개 조합, 노이즈를 끈 경로와 표준편차가 0인 Gaussian 경로의 일치를 검사한다. 노이즈가 있는 경로의 유한성, 고정 bounds, event/miss 처리는 별도로 검사한다.
+- [[scripts/verification/verify_layernorm_affine_bounds.py#verify_paired_bounds_and_parity]]의 최종 출력 범위 기대값은 log 상한에서 나온 값이 아니므로 유지한다. [[scripts/verification/verify_layernorm_affine_bounds.py#verify_cache_and_single_feature]]의 캐시 검사를 보존하고 margin 변경 후 refresh 조건을 확인한다.
+
+구현 후 위 두 검증 파일과 `verify_calibration.py`를 실행했다. 공통 연산자나 연산 수 정의는 바꾸지 않았으므로 새로운 연산 수 모델을 도입하지 않는다. 단위 검사만으로 모델 전체 성능을 주장하지 않으며, 후속 전체 결과는 [[conversion-comparison]]과 [[noise]]에서 따로 관리한다.
+
+#### Artifact And Manuscript Changes
+
+같은 theta와 clip_margin 숫자라도 상한의 의미가 달라지므로 구버전 calibration 표를 새 구현에서 조용히 재사용하지 않도록 한다.
+
+ViT/GPT-2 metadata의 [[utils/transforms/functions.py#OUTPUT_BOUNDS_VERSION]]을 2에서 3으로 올렸다. 파일 구조를 바꾸는 것이 아니므로 calibration의 `format_version`은 유지한다. 구버전 metadata 거부와 새 버전의 저장/복원 검증은 [[calibration#Layer-wise Calibration#Frozen Execution#LayerNorm Positive Input Range]]에서 관리한다.
+
+당시 별도 실행기는 source commit도 metadata에 넣었다. 기존 고정 source, calibration 표, 결과 파일은 수정하지 않았고, 후속 policy-2 및 timing-noise 캠페인은 별도 source와 결과 경로에서 calibration 표를 새로 수집했다.
+
+새 정의를 적용한 결과만 현행 설명에 사용한다. 기존 source 648af9bb 결과는 이전 상한을 사용한 역사 기록으로 유지한다. 현재 정의는 [[domain#Signed Values and Dual Rails]], [[domain#Scale Parameters]], [[bounds-audit#Fixed Range의 수식 계약#Layer Normalization]] 및 calibration 문서와 일치시키며 과거 결과를 소급 수정하지 않는다.
+
+#### Verification Already Performed
+
+변경 가능성을 확인하기 위해 source를 고치지 않고 새 구간을 기본 연산자에 직접 전달한 작은 CPU 검사만 수행했다.
+
+theta=40과 양의 하한 $10^{-5}$에서 float32/float64 모두 상한의 log 시각이 0이고, magnitude와 variance의 시간창이 일치하며, log 뒤 exponential difference가 기대한 나눗셈을 복원하고 제곱 연산이 상한을 처리하는 것을 확인했다. 이는 완성된 LayerNorm 클래스 변경, 모든 Gaussian 분기, 전체 모델 정확도 또는 기존 결과와의 동일성을 검증한 것이 아니다.
+
+#### Implementation Verification
+
+2026-09-14 코드 변경 직후 CPU 검증을 통과했다. 그 시점에는 전체 평가를 수행하지 않았지만, 이후 policy-2 비교와 calibrated timing-noise 캠페인이 새 정의로 완료됐다.
+
+- [x] 실제 magnitude와 log 입력의 상한 네 곳 및 유효성 검사 두 곳을 수정했다. 파생 분산·시간창 수식과 variance의 시간상수는 유지했다.
+- [x] [[scripts/verification/verify_layernorm_upper_endpoint.py#verify_upper_endpoint_and_ablations]]의 3개 검증 그룹을 통과했다. 8개 ablation, float32/float64, 시간상수 1과 0.75, 노이즈 유무 및 경계 입력을 포함한다.
+- [x] float32 직접 log 계산이 고정 시간창을 반올림 오차만큼 넘는 경우를 발견해 두 직접 log 분기에서 계산 시각을 기존 시간창 안으로 제한했다. 시간창을 넓히거나 기본 연산자 정의를 바꾸지 않았다.
+- [x] 기존 Gaussian 전체 검증, LayerNorm affine 4개 그룹, calibration 18개 그룹, GELU 4개 그룹 및 calibrated ViT evaluator 검증을 통과했다.
+- [x] ViT/GPT-2의 version 3 표 저장·복원과 적용, version 2 표의 validation/inference 적용 거부를 확인했다. 변경된 규칙과 검증을 [[calibration#Layer-wise Calibration#Frozen Execution#LayerNorm Positive Input Range]]에 연결했다.
+
+전체 모델의 정확도 변화는 이 검사로 주장하지 않는다. 이후 새 구현으로 평가할 때에만 별도 calibration 수집과 결과 경로를 사용한다.
+
+### Calibrated Three Sweep Execution
+
+2026-09-14 승인된 bound 실험은 source `f7b74c1aef38502caccf532d1e58a7cf321833d6`에서 완료되었고, threshold 선택과 두 noise 축의 최종 결과를 보존한다.
+
+- [x] 이전 threshold-40 실행기와 해당 evaluator만 중단했다. 완료·부분 로그는 삭제하거나 새 결과와 합치지 않았다.
+- [x] LayerNorm 상한 변경을 `c9f4e40`으로 별도 커밋하고 UBAI의 clean checkout에 동기화했다.
+- [x] [[evaluation#Calibrated Three Sweep Campaign]]에 71회 평가, 9회 calibration, training 선택과 validation 분리 및 경계 중단 규칙을 정의했다.
+- [x] [[evaluation#Calibrated Three Sweep Scheduling]]의 seed 0 전체 → seed 1 전체 → seed 2 전체 순서와 완료 결과 재사용을 구현했다.
+- [x] 실행기와 집계기를 `36615ab`으로 별도 커밋하고 양쪽 clean checkout을 같은 commit으로 고정했다. 기존 사용자 문서 변경은 포함하지 않았다.
+- [x] 새 계약 4그룹, 실행 순서 5그룹, 집계 4그룹, UBAI 안전성 19개 검증 및 관련 연산자·calibration·문서 검사를 통과했다.
+- [x] Slurm 준비 작업 `984373`에서 자산·의존성 해시와 Python 3.12.13을 확인했다. 첫 준비 작업 `984371`의 경로 연결 실패 로그는 보존했다.
+- [x] CPU 검증과 Slurm 자산 검증 후 양쪽의 짧은 clean/noisy prediction 일치를 확인했다.
+- [x] 아홉 threshold의 training/validation과 반대 환경 replay를 검증해 $\theta=20$을 `confirmed` 상태로 확정했다.
+- [x] 17조건씩 세 seed를 순서대로 완료하고 중간 snapshot과 최종 집계를 보존했다.
+- [x] 같은 identity에서 timing-noise 상단 네 점을 추가해 $r_t=10^{-3}$까지 정확도 붕괴 구간을 확인했다.
+
+완료된 본 캠페인은 50k validation과 추가 uncertainty axis를 포함하지 않는다. 로컬 GPU 0–3의 일시 허가는 종료되었으며 새 실험의 기본 허용 장치는 다시 GPU 4–7이다. UBAI runtime은 RAM disk가 아닌 `/enroot` 디스크를 사용한다.
+
+UBAI의 새 clean checkout에는 읽기 전용 source를 mount하기 전에 내부 연결 지점인 `artifacts/assets/theta-selection-v1`, 해당 실험의 `artifacts/logs/noise_scan` 하위 디렉터리, `src/transformers`, `src/spikingjelly`를 빈 디렉터리로 준비해야 한다. 이 경로 준비와 실패·재시도 이력은 실험의 `deployment-notes.json`에 기록했다.
+
+### ViT Calibration Policy 2 Shared Deadline
+
+공통 시간창 전달은 구현과 CPU 회귀 검증 뒤 실제 ViT 정책-2 캠페인에서 사용됐다. 수정 전 실패 기록과 calibration은 역사 자료로만 보존한다.
+
+- [x] LayerNorm의 세 log 인코딩에 동일하게 계산한 공통 시간창을 sampling 전에 적용했다. 이후 event의 domain만 바꾸는 처리는 하지 않는다.
+- [x] 일반 primitive의 deadline 검사를 유지했다. 상한 40.007과 반대 방향 반올림 사례, 8개 ablation, noise-off·Gaussian 표준편차 0·seeded 경로의 회귀 검증을 추가했다.
+- [x] 전역 threshold 초과와 선택된 범위의 실제 clipping을 구분하고, 새 source의 109-site ViT-B 수집과 평가로 실행 경로를 재검사했다.
+
+### 2026-08-31 Session Handoff
+
+This historical handoff records the fixed-domain state and GPT-2 precision evidence as of 2026-08-31. Current complete-run metrics and calibration contracts supersede its pending-work language.
+
+#### Established State
+
+The maintained implementation now uses static bounds throughout, limits calibration to necessary sites, retains observed min/max with a 5% margin, and uses operator-local GPT-2 attention timing scale.
+
+- Commit `44ddb0b` contains the merged text-model accuracy work: global GPT-2 $\theta=2000$, attention-local $\theta=100$, corresponding metadata identity, validation, and representative wrapper defaults.
+- Generated artifacts are deny-by-default. Only the reviewed ViT-S min/max-plus-5% table is whitelisted; alternate GPT-2 calibration and precision logs remain local outputs.
+- The simultaneous GPT-2 dense and mixed-window runs are 22.7076 and 22.8991 under the current batch-mean evaluator, a relative PPL increase of 0.843%; see [[evaluation#Fixed-Domain Text-Model Real-Data Audit]].
+- The fixed-score-rail sweep and float64 reference isolate the large shared-window attention degradation as predominantly numerical; see [[evaluation#Fixed-Domain Text-Model Real-Data Audit#GPT-2 Floating-Point Precision Control]].
+
+#### Delivery State
+
+The reviewed precision-control tooling, appendix note, and knowledge-graph updates are delivered together on top of `44ddb0b`; generated result artifacts remain local.
+
+- `main` contains `44ddb0b` plus the precision-control handoff commit. Their remote publication state must be checked explicitly before assuming they are pushed.
+- The requested `/root/.codex/worktrees/a4c5/delayed-temporal` worktree is removed. Other detached and EBRAINS/toy worktrees remain registered and were outside this session's scope.
+- The handoff commit adds GPT-2 dtype control, its float32-only calibration guard, verification, the precision sweep, the strict summarizer, and the updated evaluation graph.
+- The precision results and protocol are consolidated in [[deprecated#과거 실험과 범위 감사#GPT-2 정밀도 통제 실험]]; the former appendix note is preserved in [[deprecated#원본 복구]]. `artifacts/precision_gpt2/` remains ignored and contains the local raw logs and generated tables.
+- The calibration verifier passes all 18 groups, the float64 full-model smoke and held-out run complete, Python and shell syntax pass, `git diff --check` passes, and `lat check` passes. Ruff was unavailable in the active environment.
+- Importing custom Transformer families emits pre-existing auto-docstring diagnostics labeled `[ERROR]` for unregistered custom configs and undocumented parameters even though verification exits successfully. This noise should be cleaned or filtered so it cannot hide a real failure.
+
+#### Publication Risks
+
+The evidence supports a limited finite-precision claim, but several protocol and manuscript discrepancies remain publication blockers until explicitly resolved.
+
+- At this handoff, the GPT-2 metric was $\exp$ of an unweighted mean of 181 per-batch losses. The completed campaign now reports token-weighted corpus perplexity as primary and retains this aggregation only as a compatibility metric.
+- The float64 $\theta=2000$ reference also widens the softmin execution score radius from 40.242257 to 350.772, so it corroborates but does not independently prove a pure dtype intervention. The fixed-radius float32 window sweep is the primary causal control.
+- Attention-score clipping counts are recorded before causal-mask overwrite and include future positions. Their absolute rate is an upper-bound diagnostic; only like-for-like sweep comparisons are currently justified.
+- `paper/neurips_2026/neurips_2026.tex` still reports the old GPT-2 row 22.40 to 23.43 ($+1.03$) and presents one GPT-2 threshold, while the current representative run is 22.7076 to 22.8991 with global/attention thresholds 2,000/100.
+- Earlier GPT-2 reference values are retained in [[deprecated#과거 실험과 범위 감사#교차 모델 평가의 비교 한계]]; do not mix them with the simultaneous precision control.
+- “The entire conversion gap is caused by floating-point precision” is unsupported. The safe claim is that the additional degradation from sharing $\theta=2000$ with attention is predominantly a float32 timestamp-subtraction effect; roughly 0.81--0.84% relative PPL remains.
+
+#### Next Session
+
+The next session should resolve publication consistency without silently expanding the experiment matrix. Optional reruns are catalogued in [[deferred-experiments]].
+
+1. Historical action: preserve and disclose the batch-mean aggregation; the completed campaign now labels it only as a compatibility metric.
+2. Reconcile the manuscript and reviewer notes with one canonical simultaneous protocol, including separate global and attention thresholds; manuscript rewriting remains intentionally deferred until authorized.
+3. Decide whether the tracked appendix drafting note should be incorporated into the manuscript or retained as a separate internal record.
+4. Push `44ddb0b` and the precision-control handoff commit after confirming the intended remote branch.
+5. Do not use the present float64 reference as a pure dtype intervention; the optional control that holds the softmin score radius fixed is in [[deferred-experiments#Mechanism and Operator Ablations]].

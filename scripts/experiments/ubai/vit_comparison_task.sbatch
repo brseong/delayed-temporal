@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
-#SBATCH --time=03:00:00
+#SBATCH --time=18:00:00
 
 set -euo pipefail
 : "${SLURM_JOB_ID:?A Slurm allocation is required}"

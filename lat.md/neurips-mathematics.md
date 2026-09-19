@@ -27,15 +27,16 @@ $$
 
 따라서 시간상수와 관측 시각에 따른 고정 가중치로 앞의 배율을 제거해도 지수의 음수 부호는 남는다. 이 직접 합성을 양의 지수 mapping과 동일시할 수 없다.
 
-현재 원고의 Power Operator 절은 같은 인코더로 기준값 $1$을 발화 시각 $C$로 변환하고, 입력 시각을 첫 번째 인자로 넣는 다른 구성을 사용한다. 두 스파이크가 유효한 시간창 안에서 전달되는 이상적 경우, 정규화된 출력은
+현행 ICLR 부록의 Power Operator는 양의 입력 $v$, 기준값 $R>0$, 지수 $p>0$을 같은 logarithmic domain에서 인코딩한다. 두 spike가 유효한 time window 안에서 전달되는 noise-free 조건에서
 
 $$
-\psi_{\mathrm{ED}}(\phi_{\mathrm{NL}}(v),\phi_{\mathrm{NL}}(1))
-=\exp\!\left(\frac{C-(C-\tau_s\log v)}{\tau_m}\right)
-=v^{\tau_s/\tau_m}.
+\psi_{\mathrm{ED}}\!\left(
+\phi_{\mathrm{NL}}(v;p\tau_m),
+\phi_{\mathrm{NL}}(R;p\tau_m);\tau_m\right)
+=\left(\frac{v}{R}\right)^p.
 $$
 
-이 식은 공통 인코딩 상수와 양의 시간상수를 전제한다. 일반적인 양의 실수 지수는 양의 입력에서 성립하며, 원고의 음수 입력에 대한 양의 정수 거듭제곱은 별도의 두 부호 경로와 출력 결합을 사용한다. 유한 입력 범위와 clamp는 이 이상적 항등식과 별도로 다룬다. 구현의 관련 구성은 [[operators#Composed Functions#Activations]], 인코딩과 디코딩의 범위 계약은 [[domain#TTFS Encoding]]과 [[domain#Temporal-to-Potential Decoding]]에 있다.
+따라서 receiving synaptic gain $R^p$를 고정하면 $v^p$가 복원되고, Table의 normalized case는 $R=1$이다. 공통 관측 deadline과 양의 finite domain이 필요하며, log input floor나 clamp가 활성화되면 이 identity는 근사로 바뀐다. 일반적인 양의 실수 지수는 양의 입력에서 성립하며, 원고의 음수 입력에 대한 양의 정수 거듭제곱은 별도의 두 부호 경로와 출력 결합을 사용한다. 구현의 관련 구성은 [[operators#Composed Functions#Activations]], 인코딩과 디코딩의 범위 계약은 [[domain#TTFS Encoding]]과 [[domain#Temporal-to-Potential Decoding]]에 있다.
 
 ## 부호 있는 곱셈과 이벤트 도착 순서
 

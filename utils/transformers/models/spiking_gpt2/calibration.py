@@ -314,6 +314,7 @@ def build_gpt2_calibration_metadata(
     # Resolve the operator-local rail through the same validation used by model
     # construction, including the backward-compatible fallback to global theta.
     from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import (
+        resolve_gpt2_mlp_activation_implementation,
         resolve_gpt2_attention_theta,
     )
 
@@ -325,6 +326,10 @@ def build_gpt2_calibration_metadata(
         sorted(
             (
                 ("activation_function", str(getattr(config, "activation_function", ""))),
+                (
+                    "mlp_activation_implementation",
+                    resolve_gpt2_mlp_activation_implementation(config),
+                ),
                 ("checkpoint_sha256", checkpoint_sha256),
                 ("config_sha256", config_sha256),
                 (

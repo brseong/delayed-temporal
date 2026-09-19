@@ -14,12 +14,19 @@ from scripts.runtime import identity, local_gpu
 
 LEGACY_TAG = "vit_conversion_comparison_theta40_calibrated_float64_bounds3_v1"
 PREVIOUS_TAG = "vit_conversion_comparison_theta40_calibrated_float64_bounds3_v2"
-TAG = "conversion_comparison_theta40_calibrated_float64_bounds3_v3"
+FIXED_THETA_TAG = "conversion_comparison_theta40_calibrated_float64_bounds3_v3"
+TAG = "conversion_comparison_training_selected_theta_float64_bounds3_v4"
 MODEL_KEYS = ("cifar10_vit_small", "imagenet_vit_small", "imagenet_vit_base", "imagenet_vit_large")
-KINDS = {"collect", "dense", "spiking", "smoke_collect", "smoke_spiking", "environment_spiking"}
+KINDS = {"theta_collect", "theta_train", "dense", "spiking",
+         "smoke_collect", "smoke_spiking", "environment_spiking"}
 PYTHON = "/opt/conda/envs/dt/bin/python"
-SOURCE = "/data/delayed-temporal-worktrees/full-calibrated-comparison"
+SOURCE = "/data/delayed-temporal-worktrees/vit-comparison-training-theta-v4"
 DEFAULT_ROOT = "/data/delayed-temporal/artifacts/logs/conversion_comparison/" + TAG
+
+
+def theta_grid() -> tuple[float, ...]:
+    """Return the shared, predeclared per-model training-selection grid."""
+    return tuple(5.0 * 2.0 ** (index / 2.0) for index in range(11))
 
 
 def require_gpu(experiment: dict[str, Any], host_label: str) -> str:
@@ -72,7 +79,7 @@ def calibration_policy_version(experiment: dict) -> int:
     version = experiment.get("vit_calibration_policy_version")
     if experiment.get("tag") == LEGACY_TAG and version is None:
         return 1
-    if experiment.get("tag") in {PREVIOUS_TAG, TAG} and type(version) is int and version == 2:
+    if experiment.get("tag") in {PREVIOUS_TAG, FIXED_THETA_TAG, TAG} and type(version) is int and version == 2:
         return 2
     raise ValueError("Comparison tag and calibration policy differ")
 
@@ -116,11 +123,14 @@ def calibration_site_records(experiment: dict, model: dict) -> list[dict]:
 
 def validate_experiment(experiment: dict) -> None:
     version = calibration_policy_version(experiment)
-    for key, value in {"theta": 40.0, "precision": "float64",
+    for key, value in {"theta_candidates": list(theta_grid()), "precision": "float64",
                        "output_bounds_version": 3, "tau_s": 1.0,
-                       "local_gpu_ids": list(range(8)), "evaluation_count": 8,
-                       "campaign_extra_local_gpus": [0, 1, 2, 3],
-                       "calibration_count": 4, "tracking": "disabled"}.items():
+                       "local_gpu_ids": [4, 5, 6, 7], "evaluation_count": 52,
+                       "campaign_extra_local_gpus": [],
+                       "calibration_count": 44, "selection_tolerance_correct": 25,
+                       "selection_population": "training_seed0_5000",
+                       "validation_used_for_selection": False,
+                       "tracking": "disabled"}.items():
         if experiment.get(key) != value:
             raise ValueError(f"Experiment contract mismatch: {key}")
     rows = experiment.get("models", [])
@@ -161,6 +171,12 @@ def validate_experiment(experiment: dict) -> None:
                 raise ValueError("Dataset fingerprint is missing")
         if not re.fullmatch(r"[a-f0-9]{64}", row.get("preprocessing_sha256", "")):
             raise ValueError("Missing preprocessing hash")
+        preprocessing_config = row.get("image_preprocessing_config", "")
+        if cifar:
+            if preprocessing_config != "":
+                raise ValueError("CIFAR comparison must retain checkpoint preprocessing")
+        elif not Path(preprocessing_config).is_absolute():
+            raise ValueError("ImageNet comparison requires the frozen timm preprocessing config")
         config = row["checkpoint_config"]
         if len(config["id2label"]) != (10 if cifar else 1000):
             raise ValueError("Checkpoint class count differs")
@@ -187,30 +203,46 @@ def validate_experiment(experiment: dict) -> None:
 
 
 def make_task(experiment: dict, model_key: str, kind: str, batch_size: int,
-              *, calibration_sha256: str = "", host_label: str | None = None) -> dict:
+              *, theta_index: int | None = None, calibration_sha256: str = "",
+              host_label: str | None = None) -> dict:
     if kind not in KINDS or batch_size not in (32, 16, 8):
         raise ValueError("Unapproved task or batch size")
     model = model_by_key(experiment, model_key)
     smoke = kind in {"smoke_collect", "smoke_spiking", "environment_spiking"}
-    collect = kind in {"collect", "smoke_collect"}
+    collect = kind in {"theta_collect", "smoke_collect"}
     dense = kind == "dense"
-    run_id = f"{model_key}_{kind}" + (f"_bs{batch_size}" if smoke else "")
+    selection_task = kind in {"theta_collect", "theta_train", "dense", "spiking"}
+    if selection_task:
+        if type(theta_index) is not int or not 0 <= theta_index < len(theta_grid()):
+            raise ValueError("Selection and final tasks require a theta candidate index")
+        theta = theta_grid()[theta_index]
+    else:
+        if theta_index is not None:
+            raise ValueError("Smoke tasks do not accept a theta candidate index")
+        theta = 40.0
+    if kind in {"theta_collect", "theta_train"}:
+        run_id = f"{model_key}_theta_{theta_index:02d}_{kind.removeprefix('theta_')}"
+    elif kind in {"dense", "spiking"}:
+        run_id = f"{model_key}_{kind}_theta_{theta_index:02d}"
+    else:
+        run_id = f"{model_key}_{kind}_bs{batch_size}"
     if kind == "environment_spiking":
         if model_key != "imagenet_vit_base" or host_label != "ubai":
             raise ValueError("Environment replay is the UBAI ViT-B comparison")
         run_id += "_ubai"
     calibration_file = (f"smoke/{model_key}/bs{batch_size}/calibration.json" if smoke
-                        else f"calibration/{model_key}.json")
+                        else f"calibration/{model_key}/theta_{theta_index:02d}.json")
+    training = kind in {"theta_collect", "theta_train"}
     task = {"run_id": run_id, "model_key": model_key, "kind": kind,
             "backend": "hf" if dense else "spiking", "batch_size": batch_size,
-            "theta": 40.0, "precision": "float64", "seed": None,
-            "split": "train" if collect else model["evaluation_split"],
-            "expected_samples": 2 * batch_size if smoke else 5000 if collect else model["expected_samples"],
+            "theta": theta, "theta_index": theta_index, "precision": "float64", "seed": None,
+            "split": "train" if training else model["evaluation_split"],
+            "expected_samples": 2 * batch_size if smoke else 5000 if training else model["expected_samples"],
             "calibration_samples": 2 * batch_size if smoke else 5000,
             "calibration_file": "" if dense else calibration_file,
             "calibration_sha256": calibration_sha256,
             "log_file": f"logs/{run_id}.log", "result_file": f"results/{run_id}.json",
-            "dataset_fingerprint": model["calibration_dataset_fingerprint" if collect else "dataset_fingerprint"],
+            "dataset_fingerprint": model["calibration_dataset_fingerprint" if training else "dataset_fingerprint"],
             "calibration_dataset_fingerprint": model["calibration_dataset_fingerprint"],
             "checkpoint_sha256": model["checkpoint_sha256"], "gpu_family": "rtxa6000",
             "preprocessing_sha256": model["preprocessing_sha256"],
@@ -227,10 +259,11 @@ def make_task(experiment: dict, model_key: str, kind: str, batch_size: int,
 
 def validate_task(task: dict, experiment: dict) -> None:
     expected = make_task(experiment, task["model_key"], task["kind"], task["batch_size"],
+                         theta_index=task["theta_index"],
                          calibration_sha256=task["calibration_sha256"], host_label=task.get("host_label"))
     if task != expected:
         raise ValueError("Task differs from its frozen comparison contract")
-    if task["kind"] not in {"collect", "smoke_collect", "dense"}:
+    if task["kind"] not in {"theta_collect", "smoke_collect", "dense"}:
         if not re.fullmatch(r"[a-f0-9]{64}", task["calibration_sha256"]):
             raise ValueError("Evaluation requires an assigned calibration hash")
 
@@ -247,7 +280,7 @@ def validate_table(path: Path, task: dict, experiment: dict) -> dict:
     expected_names = {(r["module_name"], r["tensor_name"]) for r in records}
     if {(r["module_name"], r["tensor_name"]) for r in layers} != expected_names:
         raise ValueError("Calibration model sites differ")
-    for key, value in {"theta": 40.0, "dtype": "float64", "dataset_split": "train",
+    for key, value in {"theta": task["theta"], "dtype": "float64", "dataset_split": "train",
                        "model_id": model["checkpoint_path"], "tau_s": 1.0, "tau_m": 1.0,
                        "clip_margin": 1e-5, "dataset_id": model["task"]}.items():
         if metadata.get(key) != value:
@@ -280,6 +313,10 @@ def validate_table(path: Path, task: dict, experiment: dict) -> dict:
         raise ValueError("Calibration subset mismatch")
     if task["calibration_samples"] == 5000 and preprocessing.get("subset_fingerprint") != model["calibration_dataset_fingerprint"]:
         raise ValueError("Final calibration training fingerprint differs")
+    if model["task"] == "imagenet-1k":
+        if (preprocessing.get("preprocessing_backend") != "timm"
+                or preprocessing.get("preprocessing_config_sha256") != model["preprocessing_sha256"]):
+            raise ValueError("ImageNet calibration preprocessing differs from the timm contract")
     for layer in layers:
         low, high = layer["bounds"]["min"], layer["bounds"]["max"]
         if not all(math.isfinite(v) for v in (low, high)) or low >= high:
@@ -350,10 +387,10 @@ def validate_result(task: dict, result: dict, experiment: dict, root: Path) -> N
         table = runtime_files.safe_output(root, task["calibration_file"])
         if result.get("calibration_sha256") != identity.sha256_file(table):
             raise ValueError("Calibration artifact changed")
-        if task["kind"] not in {"collect", "smoke_collect"} and result["calibration_sha256"] != task["calibration_sha256"]:
+        if task["kind"] not in {"theta_collect", "smoke_collect"} and result["calibration_sha256"] != task["calibration_sha256"]:
             raise ValueError("Assigned calibration differs")
         validate_table(table, task, experiment)
-    if task["kind"] in {"collect", "smoke_collect"}:
+    if task["kind"] in {"theta_collect", "smoke_collect"}:
         expected = len(calibration_site_records(experiment, model_by_key(experiment, task["model_key"])))
         if result.get("sites") != expected:
             raise ValueError("Incomplete calibration collection")
@@ -381,7 +418,7 @@ def evaluator_command(experiment: dict, task: dict, root: Path) -> list[str]:
     model = model_by_key(experiment, task["model_key"])
     source = Path(experiment["source_root"])
     dense = task["kind"] == "dense"
-    collect = task["kind"] in {"collect", "smoke_collect"}
+    collect = task["kind"] in {"theta_collect", "smoke_collect"}
     smoke = task["kind"] in {"smoke_collect", "smoke_spiking", "environment_spiking"}
     command = [experiment["python_bin"], "-u", str(source / experiment["evaluator_path" if dense else "calibration_evaluator_path"])]
     if not dense:
@@ -390,10 +427,14 @@ def evaluator_command(experiment: dict, task: dict, root: Path) -> list[str]:
                     "--gelu-cubic-implementation", "phi_nl_psi_ed", "--gelu-cubic-floor", "1e-5"]
         if smoke:
             command += ["--calibration-smoke-samples", str(task["calibration_samples"])]
+    if model.get("image_preprocessing_config"):
+        command += ["--image-preprocessing-config", model["image_preprocessing_config"]]
+    evaluation_path = model["calibration_dataset_path"] if task["split"] == "train" else model["dataset_path"]
+    evaluation_split = "train" if task["split"] == "train" else model["evaluation_split"]
     command += ["--experiment_name", task["run_id"], "--device", "cuda", "--model_backend", task["backend"],
                 "--model_id", model["checkpoint_path"], "--dataset_id", model["task"],
-                "--evaluation-dataset-path", model["dataset_path"], "--evaluation-split", model["evaluation_split"],
-                "--batch_size", str(task["batch_size"]), "--theta", "40", "--precision", "float64",
+                "--evaluation-dataset-path", evaluation_path, "--evaluation-split", evaluation_split,
+                "--batch_size", str(task["batch_size"]), "--theta", repr(task["theta"]), "--precision", "float64",
                 "--source-commit", experiment["source_commit"], "--checkpoint-sha256", model["checkpoint_sha256"],
                 "--no-tensorboard", "--report-clamp-stats", "--spiking-layernorm", "--spiking-ln-mul",
                 "--spiking-ln-log", "--spiking-ln-expdiff", "--spiking-attention", "--spiking-mlp",
@@ -410,8 +451,61 @@ def evaluator_command(experiment: dict, task: dict, root: Path) -> list[str]:
             "--calibration-bins", "2048", "--calibration-lower-quantile", "0",
             "--calibration-upper-quantile", "1", "--calibration-margin-fraction", "0.05",
         ]
-    if model.get("evaluation_quick_test", model["task"] == "imagenet-1k"):
+    if task["split"] != "train" and model.get("evaluation_quick_test", model["task"] == "imagenet-1k"):
         command += ["--quick-test"]
     if smoke and not collect:
         command += ["--max_eval_batches", "2"]
     return command
+
+
+class ThetaRangeInsufficient(ValueError):
+    """The predeclared training-only grid does not bracket a model's choice."""
+
+
+def select_model_theta(experiment: dict, model_key: str,
+                       results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Select one model threshold from complete training-only evaluations."""
+    rows = [row for row in results
+            if row.get("model_key") == model_key and row.get("kind") == "theta_train"]
+    indexed = {row.get("theta_index"): row for row in rows}
+    if len(rows) != len(theta_grid()) or set(indexed) != set(range(len(theta_grid()))):
+        raise ValueError("Every theta candidate requires one complete training result")
+    model = model_by_key(experiment, model_key)
+    for index, row in indexed.items():
+        expected = {
+            "model_key": model_key, "kind": "theta_train", "theta": theta_grid()[index],
+            "theta_index": index, "split": "train", "expected_samples": 5000,
+            "dataset_fingerprint": model["calibration_dataset_fingerprint"],
+            "source_commit": experiment["source_commit"],
+            "checkpoint_sha256": model["checkpoint_sha256"], "precision": "float64",
+        }
+        for key, value in expected.items():
+            if row.get(key) != value:
+                raise ValueError(f"Theta training result identity mismatch: {key}")
+        if (row.get("success") is not True or row.get("samples") != 5000
+                or type(row.get("correct")) is not int or not 0 <= row["correct"] <= 5000):
+            raise ValueError("Theta training result is incomplete")
+    best = max(row["correct"] for row in rows)
+    selected_index = min(index for index, row in indexed.items()
+                         if row["correct"] >= best - experiment["selection_tolerance_correct"])
+    if selected_index == 0:
+        raise ThetaRangeInsufficient("Smallest theta candidate remains within the training tolerance")
+    if indexed[len(theta_grid()) - 1]["correct"] - indexed[len(theta_grid()) - 2]["correct"] > 5:
+        raise ThetaRangeInsufficient("Largest theta candidate is still improving by more than 0.1 percentage points")
+    selected = indexed[selected_index]
+    return {
+        "status": "selected_training_only", "model_key": model_key,
+        "theta": selected["theta"], "theta_index": selected_index,
+        "training_correct": selected["correct"], "training_samples": 5000,
+        "maximum_training_correct": best,
+        "selection_tolerance_correct": experiment["selection_tolerance_correct"],
+        "validation_used_for_selection": False,
+        "calibration_sha256": selected["calibration_sha256"],
+        "training_result_sha256": identity.json_sha256(selected),
+        "candidate_result_sha256": {
+            str(index): identity.json_sha256(indexed[index]) for index in range(len(theta_grid()))
+        },
+        "source_commit": selected["source_commit"],
+        "checkpoint_sha256": selected["checkpoint_sha256"],
+        "dataset_fingerprint": selected["dataset_fingerprint"],
+    }
