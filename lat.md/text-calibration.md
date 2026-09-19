@@ -22,7 +22,7 @@ BERT and RoBERTa discover sites from active modules, including embedding normali
 
 Softmax, Tanh, GELU and normalized outputs keep their fixed or input derived output bounds. Embedding lookup ranges remain parameter derived. Attention output projection is covered by the residual sum before the next normalization; it is not replaced with an unrelated independently selected range. Disabled temporal attention and fully dense normalization do not register unexecuted sites. Decoder or cross attention configurations are rejected rather than silently collecting incomplete tables.
 
-The existing composed encoder GELU remains distinct from ViT's configured construction. Its model threshold and time constant are forwarded explicitly; this calibration change does not claim identical GELU implementations across model families.
+The spiking MLPs in ViT, BERT, RoBERTa, and GPT-2 now resolve the same canonical Power cubic in [[utils/transforms/functions.py#gelu_approximation]]. Their model threshold and time constant are forwarded explicitly.
 
 BERT and RoBERTa cast the attention mask to the embedding dtype before constructing its additive values. With float64, subtracting an integer mask in float32 before multiplying by the float64 minimum could otherwise create nonfinite values at unmasked positions. This numerical correction also applies when temporal attention is disabled.
 
@@ -44,7 +44,7 @@ Collection uses one seeded training subset in two deterministic passes. Evaluati
 
 [[scripts/evaluation/text_calibration_runtime.py#run_text_calibration]] supplies the BERT/RoBERTa `collect`, `validate` and `inference` lifecycle. Collection exits before loading the held out split or reporting task accuracy. Existing tables are not overwritten. Loading rejects missing sites and mismatched family, version, checkpoint, configuration, dtype, preprocessing or collection controls. Historical files remain available for their original implementation but are not silently reused by the new evaluator.
 
-BERT/RoBERTa print flushed cumulative correct/total and accuracy after each evaluation batch, followed by a prediction digest. GPT-2 prints flushed batch mean loss and its exponent, preserving the existing metric rather than relabeling it as token weighted corpus perplexity. `--no-tensorboard` suppresses TensorBoard files. W&B can remain disabled without suppressing local metrics. Calibration also prints pass and sample progress immediately.
+BERT/RoBERTa print flushed cumulative correct/total and accuracy after each evaluation batch, followed by a prediction digest. GPT-2 prints batch loss during execution and records total negative log likelihood and valid-token count so the final token-weighted corpus perplexity is independent of batch partitioning. The historical mean-of-batch-loss perplexity remains a separately named compatibility metric. `--no-tensorboard` suppresses TensorBoard files. W&B can remain disabled without suppressing local metrics. Calibration also prints pass and sample progress immediately.
 
 [[utils/transformers/tokenizer_identity.py#tokenizer_backend_sha256]] hashes the tokenizer structure without its mutable padding and truncation state for each request. Those request settings, maximum length, sides and special token identifiers remain explicit metadata and must still match. Vocabulary, model, normalizer and other structural changes remain part of the hash. [[scripts/verification/verify_text_tokenizer_identity.py#verify_request_state_independence]] checks cached and newly encoded input paths against the same identity, while altered preprocessing settings or tokenization structure are rejected.
 
@@ -52,7 +52,7 @@ The first 256-example GPT-2 comparison at source `014f428` stopped before SNN in
 
 ## Complete Comparison Execution
 
-The complete comparison collects fresh ranges from 5,000 training examples and evaluates the complete evaluation population selected by the campaign.
+The completed comparison collected fresh ranges from 5,000 training examples per model and evaluated every example in each pinned held-out artifact.
 
 [[scripts/evaluation/text_calibration_runtime.py#load_text_dataset_artifact]] loads a single saved Dataset only when its stored fingerprint and exact sample count match the immutable model manifest. It does not replace the requested artifact with a network download or another cache entry.
 
@@ -62,7 +62,7 @@ GPT-2 progress validation extracts each JSON object after an optional progress-b
 
 [[scripts/experiments/run_full_calibrated_text_comparison.py#main]] runs collection, ANN evaluation and SNN evaluation sequentially on one GPU while allowing different models to run in parallel. It preserves each attempt log, reuses only hash-validated completed phases, and writes flushed progress records throughout evaluation.
 
-RoBERTa-L runs under the separate `roberta_large_theta40_calibrated_float64_bounds3_v1` tag with its own checkpoint and 218-site calibration table. This diagnostic does not reuse the RoBERTa-B table or imply that its checkpoint matches SpikeZIP-TF.
+RoBERTa-L completed under the separate `roberta_large_theta40_calibrated_float64_bounds3_v1` tag with its own checkpoint and 218-site calibration table. ANN and SNN both record 841/872, or 96.4450%, on SST-2 validation. This diagnostic does not reuse the RoBERTa-B table or imply that its checkpoint matches SpikeZIP-TF.
 
 [[scripts/analysis/summarize_full_calibrated_text_comparison.py#build]] authenticates every phase log and calibration table again before producing raw, summary, calibration-site and provenance artifacts. Partial model results may be inspected but cannot satisfy the complete campaign gate.
 
@@ -70,13 +70,15 @@ GPT-2 records token-weighted corpus perplexity as the primary complete-run metri
 
 The pinned WikiText-2 raw test revision contains 4,358 rows and 2,891 rows after excluding empty text. The complete campaign evaluates those 2,891 rows rather than padding the dataset to an assumed count.
 
+The completed results are BERT 806/872 for both ANN and SNN, RoBERTa 824/872 for ANN and 823/872 for SNN, and GPT-2 token-weighted corpus perplexity 21.984180 for ANN and 21.984387 for SNN over 204,257 valid tokens. GPT-2 compatibility perplexity is 23.253149 for ANN and 23.253467 for SNN. The GPT-2 result used a direct `gelu_new` activation and is retained as partial conversion evidence rather than reused by the composed rerun.
+
 ## GPT-2 Composed GELU Rerun
 
 The rerun replaces the direct GPT-2 block activation with the maintained composed GELU while preserving the checkpoint, data, calibration population and numerical settings.
 
-[[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2MLP]] selects `composed_gelu_new_v1` only when the spiking MLP and `gelu_new` selected by the checkpoint are active. Calibration metadata persists this identity, so the earlier direct activation table is incompatible even though both configurations use the same activation name and selected sites.
+[[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2MLP]] selects `composed_gelu_new_v1` only when the spiking MLP and `gelu_new` selected by the checkpoint are active. Calibration metadata persists this identity, so the earlier direct-activation table is incompatible even though both configurations use the same activation name and selected sites.
 
-The dedicated tag is `gpt2_theta40_calibrated_float64_bounds3_composed_gelu_v1`. It collected 109 ranges from the fixed training 5,000 artifact and evaluated all 2,891 nonempty fixed WikiText-2 test texts. No completed phase was imported from the earlier conversion tag.
+The dedicated tag is `gpt2_theta40_calibrated_float64_bounds3_composed_gelu_v1`. It collected 109 ranges from the fixed training 5,000 artifact and evaluated all 2,891 nonempty fixed WikiText-2 test texts. No completed phase was imported from the partial conversion tag.
 
 The generated summary records corpus perplexity, computed from total negative log likelihood and valid token count, as 21.9841797962 for the ANN and 21.9843868967 for the converted model over 204,257 valid tokens. Compatibility perplexity is 23.2531494262 and 23.2534667831. These values equal the archived direct activation run at recorded precision, but the new artifact independently executes the composed activation and carries its own source and calibration hashes.
 
@@ -84,9 +86,17 @@ The comparison manifest may admit local GPUs 0 through 3 without changing the re
 
 `scripts/experiments/ubai/full_calibrated_text_pair.sbatch` gives BERT and RoBERTa one GPU and four CPU cores each inside one two-GPU Slurm allocation. The portable environment and task scratch are expanded only below the node-local `/enroot` disk, and the exact job-owned directory is removed after both children terminate.
 
+## Shared Power Cubic Rerun
+
+The rerun reuses authenticated completed calibration tables while evaluating RoBERTa-B, RoBERTa-L, and GPT-2 with the same canonical Power cubic.
+
+Tag `text_power_gelu_theta40_float64_reused_calibration_v1` runs only ANN and SNN phases at source `0e4329945b255666e86b3313d2f88c21dfe5deb1`; no collection phase exists. Each manifest records the original completed calibration source, manifest, result, collection log, and calibration hashes. The copied tables contain 110, 218, and 109 sites.
+
+RoBERTa-B records 824/872 for ANN and 823/872 for SNN. RoBERTa-L records 841/872 for both. GPT-2 corpus perplexity is 21.9841797962 for ANN and 21.9843868967 for SNN over 204,257 valid tokens; compatibility perplexity is 23.2531494262 and 23.2534667831. These values match the preceding runs at recorded precision, so replacing the cubic built from two multiplication operators with the canonical Power path does not change these task metrics.
+
 ## Validation Scope
 
-Tests must establish executed site coverage, selected range consumption and strict persistence before reporting calibrated accuracy. Passing small checks does not establish full dataset performance or update the manuscript.
+Tests establish executed site coverage, selected range consumption and strict persistence; only the completed campaign above establishes its held-out metrics.
 
 Focused model tests exercise both dtypes, attention and normalization ablations, collection before clipping, identical inputs in both passes, frozen replay, save/load identity and rejection of missing tables. The existing ViT, shared LayerNorm, attention, Gaussian and calibration checks protect unaffected paths. Diagnostics with actual checkpoints use idle local GPUs 4–7 with shared device locks and runtime on disk under artifacts. Existing experiments and their frozen sources remain unchanged.
 

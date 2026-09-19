@@ -326,8 +326,8 @@ Bound 증폭은 operator contract 오류와 calibration 대상이 섞여 있으�
 | Partial validation | attention value integration | fixed ideal rail $S_{\max}\theta$가 sequence capacity와 함께 증가하고 one-sided miss는 raw positive excursion을 만들 수 있음 | ViT-S 5,000-image audit는 miss와 saturation 0; 다른 model family 검증 필요 |
 | Partial validation | affine, convolution, MLP projection | exact parameter-derived safety bound는 static하지만 activation distribution보다 넓을 수 있음 | ViT-S clean affine/embedding clamps와 Gaussian affine saturation은 0; 다른 family 검증 필요 |
 | Complete | ViT/GPT-2 residual | interval width가 block depth와 함께 누적됨 | block별 frozen calibration과 clamp 지원 구현 완료; 미사용 실행은 구간 합 유지 |
-| Open extension | BERT/RoBERTa residual and LayerNorm | post-norm analytic rail이 depth-independent하므로 static contract는 만족 | tighter artifact lifecycle이 필요하면 evaluator별 calibration을 별도 추가 |
-| Partial validation | dense LayerNorm, embeddings, task heads | finite하고 static하지만 model width 또는 parameter table extrema에 비해 넓을 수 있음 | ViT-S embedding rail은 clean excursion 0이고 conventional classifier는 80.54% task accuracy로 검증; 다른 family 검증 필요 |
+| Complete | BERT/RoBERTa residual and LayerNorm | post-norm analytic rail은 static하며 text policy 1은 Q/K/V, residual, centered LayerNorm input을 별도 수집 | 110-site artifact lifecycle과 SST-2 전체 validation 평가 완료 |
+| Partial validation | dense LayerNorm, embeddings, task heads | finite하고 static하지만 model width 또는 parameter table extrema에 비해 넓을 수 있음 | ViT 및 text complete comparison에서 검증; 평가하지 않은 family는 별도 근거 필요 |
 
 Constrained division은 $X\leq Y$를 public $[0,1]$ rail에 반영하고 Gaussian event-order inversion과 one-sided miss의 raw overflow를 clamp 전에 기록한다. Generic exponential-difference primitive에는 이 ordering을 적용하지 않으므로 LayerNorm의 두 positive rail은 1보다 큰 magnitude를 계속 표현할 수 있다.
 
@@ -467,8 +467,8 @@ Variable sequence length에서는 current $S$로 range를 바꾸면 같은 modul
 | 위치 | 현재 동작 | 판정 및 남은 범위 |
 |---|---|---|
 | [[scripts/evaluation/error_analysis_vit.py#evaluate_vit_model]] | clean training subset을 두 번 순차 replay해 stable module/site별 immutable artifact를 저장하거나 frozen artifact를 검증·적용 | 완료; absolute-quantile hook은 별도 진단 경로 |
-| [[scripts/evaluation/error_analysis_bert.py#evaluate_bert_model]] | configuration- 및 analytic-derived fixed range와 global diagnostic quantile을 사용 | static contract 완료; tighter task-specific artifact는 [[deferred-experiments#Scale and Generality]]에 보류 |
-| [[scripts/evaluation/error_analysis_roberta.py#evaluate_roberta_model]] | configuration- 및 analytic-derived fixed range와 global diagnostic quantile을 사용 | static contract 완료; tighter task-specific artifact는 [[deferred-experiments#Scale and Generality]]에 보류 |
+| [[scripts/evaluation/error_analysis_bert.py#evaluate_bert_model]] | training 5k의 text policy-1 table을 수집·검증하고 Q/K/V, score, residual, centered LayerNorm 및 nonlinear input에 적용 | 110-site lifecycle과 SST-2 validation 872개 평가 완료 |
+| [[scripts/evaluation/error_analysis_roberta.py#evaluate_roberta_model]] | training 5k의 text policy-1 table을 수집·검증하고 Q/K/V, score, residual, centered LayerNorm 및 nonlinear input에 적용 | 110-site lifecycle과 SST-2 validation 872개 평가 완료 |
 | [[scripts/evaluation/error_analysis_gpt2.py#evaluate_gpt2_model]] | 빈 문장을 제거한 clean WikiText training subset을 두 번 순차 replay하고 tokenizer, sequence capacity, model path를 고정한 artifact를 저장·검증·적용 | 완료; cache를 끈 fixed-length calibration이며 absolute-quantile hook은 별도 진단 경로 |
 
 Calibration은 Gaussian timing noise를 반드시 disable하고 `model.eval()`에서 수행해야 한다. ViT collection은 timing noise, mismatch, parameter perturbation, `DataParallel`을 거부하고 GPT-2 collection은 현재 존재하는 timing-noise axis와 `DataParallel`을 거부한다. Frozen validation과 inference는 clean artifact를 검증한 뒤 robustness axis를 독립적으로 적용한다.
@@ -527,12 +527,12 @@ Observed extrema와 margin도 calibration set 밖의 입력을 완전히 보장�
 Dependency 순서대로 fixed range를 도입하면 각 단계에서 current tensor extrema를 하나의 원인과 함께 제거할 수 있다.
 
 1. Common immutable calibration table, two-pass observers, frozen lookup, pre-clamp excursion counter, strict artifact validation은 완료되었다.
-2. ViT와 GPT-2 evaluator의 collection, frozen validation, inference lifecycle은 완료되었다. BERT와 RoBERTa는 static analytic contract를 만족하며 layer-wise artifact lifecycle은 optional tightening extension이다.
+2. ViT, BERT, RoBERTa와 GPT-2 evaluator의 collection, frozen validation, inference lifecycle은 완료되었다.
 3. Learned parameter와 embedding-table interval은 versioned freeze/cache 경로로 전환되었다. Linear, Conv2d, Conv1D와 ordinary/spiking LayerNorm은 repeated forward에서 parameter extrema를 다시 읽지 않는다.
 4. Attention score representability ceiling, frozen score calibration, mask cap, fixed value-output rail, four-family adapter propagation은 완료되었다.
-5. ViT/GPT-2 model entry는 analytic range를 유지하고 residual, ViT GELU 입력, spiking attention score에 선택적 층별 calibration을 지원한다. 미사용 실행은 해당 구간을 관측 분포로 교체하지 않는다. BERT/RoBERTa도 analytic/frozen interval을 전달한다.
+5. ViT policy 2와 text policy 1은 각 family의 Q/K/V, residual, LayerNorm 및 nonlinear boundary에 선택한 범위를 전달한다. Calibration 미사용 실행은 analytic range를 유지하며 현재 batch의 관측값으로 교체하지 않는다.
 6. Direct/local-alias live-extrema AST audit, representative batch order/partition invariance, Gaussian seed 및 noise-mode bound invariance verification은 permanent suite에 연결되었다.
-7. 남은 작업은 위 비-calibration contract 정리와 real checkpoint/dataset full evaluation이다.
+7. 현재 seven-model campaign의 real-checkpoint evaluation은 완료됐다. 평가하지 않은 model family나 새로운 robustness axis는 별도 계약과 artifact가 필요하다.
 
 ## 검증 기준
 
@@ -573,7 +573,7 @@ Migration 완료는 numerical output뿐 아니라 declared potential range의 �
 
 재검토 결과 maintained inference 구현은 fixed potential range contract의 핵심 조건인 live activation extrema 비의존성과 noise-independent declared bounds를 만족한다.
 
-Transform algebra, time window, attention, LayerNorm, affine, embedding, activation, residual의 maintained forward range는 모두 static하며 ViT와 GPT-2 artifact lifecycle, AST source audit, batch partition 및 Gaussian seed 불변성 검증이 연결되었다. 구현상 남은 calibration blocker는 없고 ViT-S, BERT, RoBERTa, GPT-2의 실제 checkpoint 및 held-out audit도 완료되었다. 남은 publication caveat와 handoff 상태는 [[todo#2026-08-31 Session Handoff]]에 기록한다.
+Transform algebra, time window, attention, LayerNorm, affine, embedding, activation, residual의 maintained forward range는 모두 static하며 ViT와 GPT-2 artifact lifecycle, AST source audit, batch partition 및 Gaussian seed 불변성 검증이 연결되었다. 구현상 남은 calibration blocker는 없고 ViT-S, BERT, RoBERTa, GPT-2의 실제 checkpoint 및 held-out audit도 완료되었다. 남은 publication caveat와 handoff 상태는 [[deprecated#완료된 TODO 기록#2026-08-31 Session Handoff]]에 기록한다.
 
 ## 2026-09-14 Output Bound Audit
 

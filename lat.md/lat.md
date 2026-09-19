@@ -6,15 +6,15 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[operators]] — Primitive temporal integration and the composite Transformer operator vocabulary.
 - [[models]] — Hugging Face model-family adapters, checkpoint compatibility, and ablation controls.
 - [[decisions]] — Rationale and trade-offs behind the project’s major architectural choices.
-- [[noise]] — Gaussian event timing, fixed-deadline potential readout, static non-idealities, and verification.
+- [[noise]] — Gaussian event timing, fixed-deadline potential readout, calibrated ViT-B/16 evidence, and verification.
 - [[calibration]] — Deterministic layer-wise collection, immutable ranges, clipping accounting, and strict persistence.
-- [[vit-calibration-policy2]] — ViT 범위 전달, LayerNorm 내부 calibration, 구버전 결과 보존과 짧은 실행 검증.
-- [[text-calibration]] — Complete BERT, RoBERTa and GPT-2 range collection, execution and evaluator lifecycle.
+- [[vit-calibration-policy2]] — Maintained ViT Q/K/V and LayerNorm range-transfer contract, persistence, and completed evidence.
+- [[text-calibration]] — Complete BERT, RoBERTa and GPT-2 range collection, held-out evaluation, and evaluator lifecycle.
 - [[evaluation]] — Experiment entry points, metrics, diagnostics, sweeps, and verification boundaries.
 - [[quick-family-checks]] — Small model comparisons and calibration requirements before language-model evaluation.
 - [[comparison-costs]] — ViT comparison SOP derivation and source audit.
-- [[conversion-comparison]] — Four-model calibrated ViT comparison and execution contract.
-- [[vit-calibration-audit]] — 현재 ViT hidden layer의 calibration 적용 범위, 내부 고정 제한과 GELU 시냅스 계수 확인.
+- [[conversion-comparison]] — Current calibrated ViT results, timm preprocessing, text companion results, and table contract.
+- [[vit-calibration-audit]] — Historical audit of the superseded 48/96-site ViT calibration path.
 - [[bounds-audit]] — Complete audit of fixed potential ranges, runtime extrema, calibration cases, and migration formulas.
 - [[neurips]] — NeurIPS 검토에서 현재도 유효한 지식과 현재 문서의 안내.
 - [[neurips-current]] — 전류, 시냅스 가중치, calibration과 실행 입력을 구분하는 원칙.

@@ -1,6 +1,6 @@
 # Comparison Costs and Source Audit
 
-The current ViT comparison estimates Data SOP and Global SOP under an explicit mapping. The archival NeurIPS calculation remains separate; no new accuracy or cost is inserted into the paper before result validation.
+The current ViT comparison estimates Data SOP and Global SOP under an explicit mapping. The archival NeurIPS calculation remains separate, and the completed accuracy results still require bundle validation before paper insertion.
 
 Experiment conditions and execution identities are defined in [[conversion-comparison]].
 
@@ -106,7 +106,7 @@ The existing general experiment prose separately needs review: its calibration p
 
 The corrected ImageNet rows must use the explicit timm evaluation transform recorded in [[conversion-comparison#ViT Conversion Comparison#ImageNet Preprocessing Correction]]. Their fixed validation 5k population remains distinct from full-validation literature results, so the table caption and discussion must identify that difference.
 
-The methodology table now writes the cubic term as $v^3$ and explicitly links it to the existing signed power construction in `sec:power-operator`. The $\phi_{\mathrm{NL}}$ encoding time constant is three times the $\psi_{\mathrm{ED}}$ decoding time constant; the established fixed synaptic-gain notation and final variable $f_{\mathrm{Mul}}$ product remain. No new operator name was introduced. This methodology correction is applied; the accuracy table remains unfilled until result validation.
+The methodology table writes the cubic term as $v^3$ and links it to the existing signed power construction in `sec:power-operator`. The $\phi_{\mathrm{NL}}$ encoding time constant is three times the $\psi_{\mathrm{ED}}$ decoding time constant; the established fixed synaptic-gain notation and final variable $f_{\mathrm{Mul}}$ product remain. The verified accuracy bundle is now available in [[conversion-comparison#Results]], but manuscript insertion remains a separate reviewed step.
 
 ## Verification
 
