@@ -482,7 +482,7 @@ The search minimizes the calibration timing noise ratio without changing the pri
 
 The search changes only the raw constant current code, threshold code, ramp stop time, and precharge input count and weight. The potential code, first spike readout, and fitted $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ equations remain unchanged.
 
-For static $\phi_{\mathrm{NP}}$ acquisition, the reset associated with each code is used only while loading the initial membrane state. Before the synchronized ramp begins, the reset potential changes to the configured minimum. This does not change the first threshold crossing and prevents later spikes from returning near the initial code during a long ramp.
+For static encoder acquisition, the reset associated with each code remains installed for the full trial. The refractory period covering the full window suppresses later spikes, while retaining the reset value avoids rewriting an analog parameter after the initial membrane state is loaded.
 
 All PyNN encoder acquisitions use the official Calix refractory period calculator with a target equal to the full repeated trial window. The observation deadline is followed by a quiet interval of the same duration. Calix resolves the backend clock scales and the selected circuit counters, so a circuit cannot emit a second spike within one trial; the next trial begins only when the configured refractory period has elapsed.
 
@@ -578,7 +578,7 @@ Verification also checks positive PyNN acquisition and process sizes, manifest p
 
 ### Static reset separation
 
-Verification checks scalar reset values and values for individual circuits. It requires the acquisition source to restore the initial state reset before each trial, then install the common minimum before the ramp.
+Verification checks scalar reset values and values for individual circuits. It requires static acquisition to retain the reset value associated with the input code while the ramp is active.
 
 Verification checks selection of the three resolved refractory parameters for scalar circuit coordinates, rejects incomplete settings for the 512 circuits, confirms that the target covers the full repeated trial window, and confirms that the quiet trial interval and first spike configuration are installed before acquisition.
 

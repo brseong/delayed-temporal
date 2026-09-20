@@ -1543,18 +1543,10 @@ class PrimitiveHardwareBackend:
                 append = pynn.RunCommand.APPEND
                 execute = pynn.RunCommand.EXECUTE
                 for trial in range(total_trials):
-                    # The code defines the initial membrane state, not the reset
-                    # state after a spike. Restore it before each injected reset,
-                    # then use the common minimum while the ramp is active. This
-                    # preserves the first crossing and suppresses code-dependent
-                    # repeated spikes during long timing windows.
-                    if stage == "static" and trial > 0:
-                        self._set_population_reset(population, resolved_reset_code)
+                    # The injected pulse loads the code-specific static state.
+                    # Keep that analog reset parameter unchanged during the ramp;
+                    # the full-window refractory period suppresses later spikes.
                     pynn.run(reference_ms, append)
-                    if stage == "static":
-                        self._set_population_reset(
-                            population, config.reset_code_minimum
-                        )
                     population.set(constant_current_enable=True)
                     pynn.run(ramp_stop_ms - reference_ms, append)
                     population.set(constant_current_enable=False)
@@ -1605,7 +1597,7 @@ class PrimitiveHardwareBackend:
                 "reset_release_ms": reset_release_ms,
                 "first_spike_refractory": refractory_metadata,
                 "static_reset_policy": (
-                    "initial state code during reset; configured minimum during ramp"
+                    "input code retained for the full trial"
                     if stage == "static"
                     else "configured minimum"
                 ),

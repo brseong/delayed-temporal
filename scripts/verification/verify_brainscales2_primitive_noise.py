@@ -922,14 +922,16 @@ def verify_static_reset_separation() -> None:
     source = inspect.getsource(
         PrimitiveHardwareBackend._run_pynn_code
     )
-    restore = source.index('if stage == "static" and trial > 0')
-    initial_run = source.index("pynn.run(reference_ms, append)", restore)
-    common_reset = source.index("config.reset_code_minimum", initial_run)
+    trial_loop = source.index("for trial in range(total_trials)")
+    initial_run = source.index("pynn.run(reference_ms, append)", trial_loop)
     ramp_enable = source.index(
-        "population.set(constant_current_enable=True)", common_reset
+        "population.set(constant_current_enable=True)", initial_run
     )
-    assert restore < initial_run < common_reset < ramp_enable
+    state_retention = source[trial_loop:ramp_enable]
+    assert "_set_population_reset" not in state_retention
+    assert "config.reset_code_minimum" not in state_retention
     assert '"static_reset_policy"' in source
+    assert '"input code retained for the full trial"' in source
     assert "2.0 * config.deadline_s" in source
     assert "_configure_first_spike_refractory" in source
 
