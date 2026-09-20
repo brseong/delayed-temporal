@@ -149,6 +149,23 @@ class PrimitiveNoiseConfig:
             raise ValueError("observation time must follow the input window")
         if self.dt_s <= 0 or self.tau_mem_s <= 0 or self.tau_syn_s <= 0:
             raise ValueError("time constants and dt must be positive")
+        for name, value in (
+            ("reset code minimum", self.reset_code_minimum),
+            ("reset code maximum", self.reset_code_maximum),
+            ("threshold code", self.threshold_code),
+            ("leak bias", self.leak_bias),
+            ("constant current code", self.constant_current_code),
+        ):
+            if not 0 <= value <= 1022:
+                raise ValueError(f"{name} must lie in [0, 1022]")
+        if self.reset_code_minimum > self.reset_code_maximum:
+            raise ValueError("reset code range must be increasing")
+        for name, value in (
+            ("precharge maximum weight", self.precharge_weight_maximum),
+            ("exponential input weight", self.exponential_input_weight),
+        ):
+            if not 0 <= value <= 63:
+                raise ValueError(f"{name} must lie in [0, 63]")
         if (
             self.precharge_input_fan_in <= 0
             or self.exponential_input_fan_in <= 0

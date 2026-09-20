@@ -37,11 +37,18 @@ from utils.hardware.brainscales2.primitive_noise import (
     default_primitive_coordinates,
     validate_primitive_observation,
 )
+from utils.hardware.brainscales2.primitive_optimization import (
+    build_encoder_operating_point_candidates,
+    parse_current_stop_pair,
+    parse_precharge_pair,
+    score_encoder_operating_point,
+)
 from scripts.evaluation.brainscales2_primitive_noise import (
     build_parser,
     collect_observations,
     make_config,
     parse_reset_code_table,
+    run,
 )
 
 
@@ -1113,6 +1120,137 @@ def verify_np_stage_gate() -> None:
     }
 
 
+# @lat: [[hardware#Independent Primitive Noise Verification#Encoder operating point score]]
+def verify_encoder_operating_point_score() -> None:
+    config = PrimitiveNoiseConfig(
+        repeats=32,
+        calibration_repeats=16,
+        device_count=4,
+        physical_coordinates=default_primitive_coordinates(4),
+    )
+    backend = MockPrimitiveNoiseBackend()
+    observations = [
+        backend.collect("phi-np", config, stage="static", quick=False),
+        backend.collect("phi-np", config, stage="dynamic", quick=False),
+    ]
+    validations = [
+        validate_primitive_observation(observation, config)
+        for observation in observations
+    ]
+    reference = score_encoder_operating_point(
+        observations, validations, config, primitive="phi-np"
+    )
+    assert reference["selection_eligible"]
+    assert reference["held_out_validated"]
+    assert reference["selection_objective_rt"] > 0
+    assert reference["validation_objective_rt"] > 0
+
+    changed_values = observations[1].observed.clone()
+    offsets = torch.tensor(
+        [1.0, -1.0] * (config.validation_repeats // 2),
+        dtype=changed_values.dtype,
+    ).reshape(-1, 1, 1)
+    changed_values[config.calibration_repeats :] += offsets * 1.0e-6
+    changed_dynamic = replace(observations[1], observed=changed_values)
+    changed_observations = [observations[0], changed_dynamic]
+    changed_validations = [
+        validations[0], validate_primitive_observation(changed_dynamic, config)
+    ]
+    changed = score_encoder_operating_point(
+        changed_observations,
+        changed_validations,
+        config,
+        primitive="phi-np",
+    )
+    assert changed["selection_objective_rt"] == reference["selection_objective_rt"]
+    assert changed["validation_objective_rt"] > reference["validation_objective_rt"]
+
+
+# @lat: [[hardware#Independent Primitive Noise Verification#Resumable operating point search]]
+def verify_resumable_operating_point_search() -> None:
+    config = PrimitiveNoiseConfig(
+        repeats=8,
+        calibration_repeats=4,
+        device_count=4,
+        physical_coordinates=default_primitive_coordinates(4),
+    )
+    assert parse_precharge_pair("2:31") == (2, 31)
+    rejects(lambda: parse_precharge_pair("2x31"), (ValueError,))
+    parsed_current, parsed_stop = parse_current_stop_pair("512:40")
+    assert parsed_current == 512
+    torch.testing.assert_close(
+        torch.tensor(parsed_stop), torch.tensor(40.0e-6), rtol=0.0, atol=1.0e-12
+    )
+    rejects(lambda: parse_current_stop_pair("512x40"), (ValueError,))
+    candidates = build_encoder_operating_point_candidates(
+        config,
+        constant_current_codes=(512, 1022),
+        threshold_codes=(600,),
+        ramp_stop_times_s=(25.0e-6,),
+        precharge_pairs=((1, 63),),
+    )
+    assert len(candidates) == 2
+    assert candidates[0].apply(config).observation_time_s == 42.5e-6
+    rejects(
+        lambda: build_encoder_operating_point_candidates(
+            config,
+            constant_current_codes=(1023,),
+            threshold_codes=(600,),
+            ramp_stop_times_s=(25.0e-6,),
+            precharge_pairs=((1, 63),),
+        ),
+        (ValueError,),
+    )
+    with tempfile.TemporaryDirectory() as temporary:
+        output = Path(temporary) / "search"
+        arguments = build_parser().parse_args(
+            [
+                "--phase",
+                "optimize",
+                "--primitive",
+                "phi-np",
+                "--backend",
+                "mock",
+                "--quick",
+                "--device-count",
+                "4",
+                "--search-current-stop-pairs",
+                "512:25",
+                "1022:25",
+                "--search-threshold-codes",
+                "600",
+                "--search-precharge-pairs",
+                "1:63",
+                "--output-dir",
+                str(output),
+            ]
+        )
+        run(arguments)
+        selection_path = output / "selected_operating_point.json"
+        first = selection_path.read_text(encoding="utf-8")
+        assert (output / "search_manifest.json").is_file()
+        assert (output / "operating_point_results.csv").is_file()
+        assert len(list((output / "candidates").glob("*/candidate_result.json"))) == 2
+        run(arguments)
+        assert selection_path.read_text(encoding="utf-8") == first
+
+    notebook = json.loads(
+        (
+            ROOT
+            / "scripts"
+            / "notebooks"
+            / "ebrains_brainscales2_primitive_noise.ipynb"
+        ).read_text(encoding="utf-8")
+    )
+    source = "\n".join(
+        "".join(cell.get("source", [])) for cell in notebook["cells"]
+    )
+    assert "RUN_OPERATING_POINT_SEARCH = False" in source
+    assert "'--phase', 'optimize'" in source
+    assert "selected_operating_point.json" in source
+    assert notebook["metadata"]["language_info"]["version"] == "3.11"
+
+
 # @lat: [[hardware#Independent Primitive Noise Verification#Artifact integrity]]
 def verify_artifact_integrity() -> None:
     config = PrimitiveNoiseConfig(repeats=8, calibration_repeats=4)
@@ -1247,6 +1385,8 @@ def main() -> None:
     verify_exponential_response_observation_time()
     verify_insufficient_fit_preservation()
     verify_np_stage_gate()
+    verify_encoder_operating_point_score()
+    verify_resumable_operating_point_search()
     verify_artifact_integrity()
     print("BrainScaleS-2 primitive-noise checks passed")
 

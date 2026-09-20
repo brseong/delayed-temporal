@@ -476,6 +476,22 @@ An observation with too few usable samples for one physical circuit remains writ
 
 The resulting distributions are independent primitive marginals for later sensitivity analysis. They do not represent the joint error distribution of a composed BSS-2 circuit and do not include Transformer forward evaluation.
 
+### Encoder Operating Point Search
+
+The search minimizes the calibration timing noise ratio without changing the primitive equations or pooling physical outputs.
+
+The search changes only the raw constant current code, threshold code, ramp stop time, and precharge input count and weight. The potential code, first spike readout, and fitted $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ equations remain unchanged.
+
+The coarse screen couples each constant current code to a ramp stop time. This lets weak currents use a longer physical interval without leaving strong currents active long enough to cause repeated spikes. Extending the physical deadline rescales the time axis but does not change the potential code or transfer equation.
+
+After the coarse screen, separate refinements for $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ vary threshold and precharge input count around each encoder's selected current and ramp duration. The result records the best held out timing noise ratio for each encoder.
+
+Each circuit's conditional timing deviation is divided by the $\phi_{\mathrm{NP}}$ signal span fitted on calibration repetitions. The same frozen span normalizes both encoders, so a candidate cannot improve its score only by redefining the denominator.
+
+Candidates are ranked only with calibration repetitions. Held out repetitions confirm the selected candidate and report whether the timing noise ratio reaches 0.001, 0.0001, or 0.00003.
+
+[[utils/hardware/brainscales2/primitive_optimization.py#score_encoder_operating_point]] scores one candidate, while [[scripts/evaluation/brainscales2_primitive_noise.py#optimize_encoder_operating_point]] owns enumeration and artifacts. The command writes a fixed search manifest, one standard primitive artifact per candidate, a result table, and a selected configuration. Finished candidates are reused only when the search manifest and candidate identity match.
+
 ### Formal physical result for five primitives
 
 The formal run stores 128 calibration and 128 validation repetitions for each primitive without pooling outputs across physical circuits.
@@ -575,3 +591,11 @@ Raw chunks must round-trip with their shapes and masks, reject checksum changes,
 ### Validated NP placement
 
 The default 16-circuit placement must retain the coordinate order that passed the full-code hardware sweep and must allocate four unique circuits to each quadrant.
+
+### Encoder operating point score
+
+The score must use calibration repetitions for selection and reserve held out repetitions for confirmation.
+
+### Resumable operating point search
+
+The search must enumerate the complete requested grid, reject invalid raw controls, and reuse only matching completed candidates.

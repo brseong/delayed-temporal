@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -34,6 +35,13 @@ from utils.hardware.brainscales2.primitive_noise import (
     PrimitiveValidation,
     default_primitive_coordinates,
     validate_primitive_observation,
+)
+from utils.hardware.brainscales2.primitive_optimization import (
+    build_encoder_operating_point_candidates,
+    calibration_transfer_gate,
+    parse_current_stop_pair,
+    parse_precharge_pair,
+    score_encoder_operating_point,
 )
 
 
@@ -67,12 +75,20 @@ def selected_primitives(value: str) -> tuple[PrimitiveKind, ...]:
 def make_config(args: argparse.Namespace) -> PrimitiveNoiseConfig:
     repeats = 8 if args.quick else args.repeats
     calibration_repeats = 4 if args.quick else args.calibration_repeats
+    coordinates = (
+        tuple(args.physical_coordinates)
+        if args.physical_coordinates is not None
+        else default_primitive_coordinates(args.device_count)
+    )
     return PrimitiveNoiseConfig(
         repeats=repeats,
         calibration_repeats=calibration_repeats,
         device_count=args.device_count,
         seed=args.seed,
+        input_early_s=args.input_early,
+        input_late_s=args.input_late,
         observation_time_s=args.observation_time,
+        deadline_s=args.deadline,
         spiking_calibration_path=(
             args.spiking_calibration.resolve()
             if args.spiking_calibration is not None
@@ -89,7 +105,7 @@ def make_config(args: argparse.Namespace) -> PrimitiveNoiseConfig:
             else None
         ),
         allow_environment_calibration=args.allow_environment_calibration,
-        physical_coordinates=default_primitive_coordinates(args.device_count),
+        physical_coordinates=coordinates,
         multiple_spike_rate_limit=args.multiple_spike_rate_limit,
         deadline_miss_rate_limit=args.deadline_miss_rate_limit,
         reset_code_minimum=args.reset_code_minimum,
@@ -236,10 +252,352 @@ def _write_probe(output_dir: Path, capabilities: dict[str, Any]) -> None:
     )
 
 
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, float) and not torch.isfinite(torch.tensor(value)):
+        return None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(child) for child in value]
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(_json_safe(payload), indent=2, sort_keys=True, allow_nan=False),
+        encoding="utf-8",
+    )
+
+
+def _collect_encoder_search_observations(
+    args: argparse.Namespace,
+    config: PrimitiveNoiseConfig,
+) -> tuple[list[PrimitiveObservation], list[PrimitiveValidation], str | None]:
+    backend: Any = (
+        MockPrimitiveNoiseBackend()
+        if args.backend == "mock"
+        else PrimitiveHardwareBackend()
+    )
+    observations: list[PrimitiveObservation] = []
+    validations: list[PrimitiveValidation] = []
+    static = backend.collect("phi-np", config, stage="static", quick=args.quick)
+    static_validation = validate_primitive_observation(static, config)
+    observations.append(static)
+    validations.append(static_validation)
+    if not calibration_transfer_gate(static, static_validation, config)["eligible"]:
+        return observations, validations, "phi-np/static calibration gate failed"
+
+    dynamic = backend.collect("phi-np", config, stage="dynamic", quick=args.quick)
+    dynamic_validation = validate_primitive_observation(dynamic, config)
+    observations.append(dynamic)
+    validations.append(dynamic_validation)
+    if not calibration_transfer_gate(dynamic, dynamic_validation, config)["eligible"]:
+        return observations, validations, "phi-np/dynamic calibration gate failed"
+
+    if args.primitive == "phi-nl":
+        nonlinear = backend.collect(
+            "phi-nl", config, stage="transfer", quick=args.quick
+        )
+        nonlinear_validation = validate_primitive_observation(nonlinear, config)
+        observations.append(nonlinear)
+        validations.append(nonlinear_validation)
+        if not calibration_transfer_gate(
+            nonlinear, nonlinear_validation, config
+        )["eligible"]:
+            return observations, validations, "phi-nl calibration gate failed"
+    return observations, validations, None
+
+
+def _search_result_row(payload: dict[str, Any]) -> dict[str, Any]:
+    candidate = payload["candidate"]
+    score = payload.get("score") or {}
+    primitive_scores = score.get("primitive_scores", {})
+    row: dict[str, Any] = {
+        "candidate_id": candidate["candidate_id"],
+        "status": payload["status"],
+        "constant_current_code": candidate["constant_current_code"],
+        "threshold_code": candidate["threshold_code"],
+        "ramp_stop_s": candidate["ramp_stop_s"],
+        "precharge_input_fan_in": candidate["precharge_input_fan_in"],
+        "precharge_weight_maximum": candidate["precharge_weight_maximum"],
+        "selection_eligible": score.get("selection_eligible"),
+        "held_out_validated": score.get("held_out_validated"),
+        "selection_objective_rt": score.get("selection_objective_rt"),
+        "validation_objective_rt": score.get("validation_objective_rt"),
+        "error_type": payload.get("error_type"),
+        "error": payload.get("error"),
+    }
+    for primitive in ("phi-np", "phi-nl"):
+        primitive_score = primitive_scores.get(primitive, {})
+        row[f"{primitive}_calibration_rt"] = (
+            primitive_score.get("calibration", {})
+            .get("summary", {})
+            .get("median")
+        )
+        row[f"{primitive}_held_out_rt"] = (
+            primitive_score.get("held_out", {})
+            .get("summary", {})
+            .get("median")
+        )
+    for target, reached in score.get("targets", {}).items():
+        row[target] = reached
+    return row
+
+
+def _write_search_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def optimize_encoder_operating_point(
+    args: argparse.Namespace,
+    base_config: PrimitiveNoiseConfig,
+) -> None:
+    if args.primitive not in ("phi-np", "phi-nl"):
+        raise ValueError("operating-point search requires phi-np or phi-nl")
+    if args.search_top_k <= 0 or args.search_max_candidates <= 0:
+        raise ValueError("search limits must be positive")
+    precharge_pairs = tuple(
+        parse_precharge_pair(value) for value in args.search_precharge_pairs
+    )
+    current_stop_pairs = (
+        tuple(
+            parse_current_stop_pair(value)
+            for value in args.search_current_stop_pairs
+        )
+        if args.search_current_stop_pairs is not None
+        else None
+    )
+    candidates = build_encoder_operating_point_candidates(
+        base_config,
+        constant_current_codes=args.search_constant_current_codes,
+        threshold_codes=args.search_threshold_codes,
+        ramp_stop_times_s=(value * 1.0e-6 for value in args.search_ramp_stop_us),
+        precharge_pairs=precharge_pairs,
+        current_stop_pairs=current_stop_pairs,
+    )
+    if len(candidates) > args.search_max_candidates:
+        raise ValueError(
+            f"search grid has {len(candidates)} candidates; "
+            f"limit is {args.search_max_candidates}"
+        )
+    output_dir = args.output_dir.resolve()
+    manifest_path = output_dir / "search_manifest.json"
+    manifest = {
+        "schema_version": 1,
+        "primitive": args.primitive,
+        "base_config": base_config.to_manifest_dict(),
+        "candidates": [candidate.to_dict() for candidate in candidates],
+        "selection_contract": {
+            "split": "calibration repetitions only",
+            "objective": "minimum requested primitive median conditional timing ratio",
+            "signal_span": "frozen phi-np calibration transfer span",
+            "held_out_role": "confirmation only",
+        },
+    }
+    if manifest_path.is_file():
+        previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if previous != _json_safe(manifest):
+            raise RuntimeError("existing search manifest does not match this grid")
+    else:
+        if output_dir.exists() and any(output_dir.iterdir()):
+            raise RuntimeError("search output directory is nonempty without a manifest")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(manifest_path, manifest)
+
+    results: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates, start=1):
+        candidate_dir = output_dir / "candidates" / candidate.candidate_id
+        result_path = candidate_dir / "candidate_result.json"
+        if result_path.is_file():
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            if result.get("candidate") != candidate.to_dict():
+                raise RuntimeError(
+                    f"candidate identity mismatch in {result_path}"
+                )
+            if result.get("status") == "complete":
+                print(
+                    f"Reusing candidate {index}/{len(candidates)} "
+                    f"{candidate.candidate_id}",
+                    flush=True,
+                )
+                results.append(result)
+                continue
+            print(
+                f"Retrying incomplete candidate {index}/{len(candidates)} "
+                f"{candidate.candidate_id}",
+                flush=True,
+            )
+
+        print(
+            f"Collecting candidate {index}/{len(candidates)} "
+            f"{candidate.candidate_id}",
+            flush=True,
+        )
+        candidate_config = candidate.apply(base_config)
+        result: dict[str, Any] = {
+            "schema_version": 1,
+            "candidate": candidate.to_dict(),
+            "config": candidate_config.to_manifest_dict(),
+            "status": "failed",
+        }
+        try:
+            observations, validations, failure = (
+                _collect_encoder_search_observations(args, candidate_config)
+            )
+            write_primitive_noise_artifacts(
+                candidate_dir,
+                config=candidate_config,
+                observations=observations,
+                validations=validations,
+                environment=environment_manifest("optimize", args.backend),
+            )
+            if failure is not None:
+                raise RuntimeError(failure)
+            result["score"] = score_encoder_operating_point(
+                observations,
+                validations,
+                candidate_config,
+                primitive=args.primitive,
+            )
+            result["status"] = "complete"
+        except Exception as error:
+            result["error_type"] = type(error).__name__
+            result["error"] = str(error)
+        _write_json(result_path, result)
+        results.append(result)
+        _write_search_csv(
+            output_dir / "operating_point_results.csv",
+            [_search_result_row(item) for item in results],
+        )
+
+    eligible = [
+        result
+        for result in results
+        if result.get("status") == "complete"
+        and result.get("score", {}).get("selection_eligible")
+        and result.get("score", {}).get("selection_objective_rt") is not None
+    ]
+    if not eligible:
+        raise RuntimeError("no operating-point candidate passed calibration gates")
+    ranked = sorted(
+        eligible,
+        key=lambda result: (
+            result["score"]["selection_objective_rt"],
+            result["candidate"]["candidate_id"],
+        ),
+    )
+    best_by_primitive: dict[str, Any] = {}
+    for primitive in ("phi-np", "phi-nl"):
+        primitive_ranked: list[tuple[float, dict[str, Any]]] = []
+        for result in results:
+            score = result.get("score", {})
+            primitive_score = score.get("primitive_scores", {}).get(primitive)
+            if result.get("status") != "complete" or not primitive_score:
+                continue
+            calibration_rt = (
+                primitive_score.get("calibration", {})
+                .get("summary", {})
+                .get("median")
+            )
+            if (
+                calibration_rt is None
+                or not primitive_score.get("calibration_transfer", {}).get(
+                    "eligible"
+                )
+                or not score.get("np_static", {})
+                .get("calibration_transfer", {})
+                .get("eligible")
+            ):
+                continue
+            primitive_ranked.append((float(calibration_rt), result))
+        if not primitive_ranked:
+            continue
+        primitive_ranked.sort(
+            key=lambda item: (item[0], item[1]["candidate"]["candidate_id"])
+        )
+        calibration_rt, result = primitive_ranked[0]
+        primitive_score = result["score"]["primitive_scores"][primitive]
+        held_out_rt = primitive_score["held_out"]["summary"]["median"]
+        held_out_validated = bool(primitive_score["held_out_validated"])
+        best_by_primitive[primitive] = {
+            "candidate": result["candidate"],
+            "calibration_rt": calibration_rt,
+            "held_out_rt": held_out_rt,
+            "held_out_validated": held_out_validated,
+            "targets": {
+                "hardware_feasibility_1e-3": (
+                    held_out_validated
+                    and held_out_rt is not None
+                    and held_out_rt <= 1.0e-3
+                ),
+                "meaningful_recovery_1e-4": (
+                    held_out_validated
+                    and held_out_rt is not None
+                    and held_out_rt <= 1.0e-4
+                ),
+                "near_clean_recovery_3e-5": (
+                    held_out_validated
+                    and held_out_rt is not None
+                    and held_out_rt <= 3.0e-5
+                ),
+            },
+        }
+    selection = {
+        "schema_version": 1,
+        "primitive": args.primitive,
+        "selected": ranked[0],
+        "top_candidates": ranked[: args.search_top_k],
+        "candidate_count": len(candidates),
+        "eligible_count": len(eligible),
+        "best_by_primitive": best_by_primitive,
+    }
+    _write_json(output_dir / "selected_operating_point.json", selection)
+    _write_search_csv(
+        output_dir / "operating_point_results.csv",
+        [_search_result_row(item) for item in results],
+    )
+    print(
+        json.dumps(
+            {
+                "output_dir": str(output_dir),
+                "candidate_count": len(candidates),
+                "eligible_count": len(eligible),
+                "selected_candidate": ranked[0]["candidate"],
+                "selection_objective_rt": ranked[0]["score"][
+                    "selection_objective_rt"
+                ],
+                "validation_objective_rt": ranked[0]["score"][
+                    "validation_objective_rt"
+                ],
+                "targets": ranked[0]["score"]["targets"],
+                "best_by_primitive": best_by_primitive,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
 def run(args: argparse.Namespace) -> None:
     output_dir = args.output_dir.resolve()
     config = make_config(args)
     environment = environment_manifest(args.phase, args.backend)
+
+    if args.phase == "optimize":
+        optimize_encoder_operating_point(args, config)
+        return
 
     if args.phase in ("probe", "all"):
         capabilities = probe_primitive_capabilities()
@@ -282,7 +640,9 @@ def run(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--phase", choices=("probe", "collect", "validate", "all"), default="all"
+        "--phase",
+        choices=("probe", "collect", "validate", "optimize", "all"),
+        default="all",
     )
     parser.add_argument("--primitive", choices=(*PRIMITIVES, "all"), default="all")
     parser.add_argument("--backend", choices=("mock", "hardware"), default="mock")
@@ -292,7 +652,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--calibration-repeats", type=int, default=128)
     parser.add_argument("--device-count", type=int, default=16)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--input-early", type=float, default=5.0e-6)
+    parser.add_argument("--input-late", type=float, default=25.0e-6)
     parser.add_argument("--observation-time", type=float, default=40.0e-6)
+    parser.add_argument("--deadline", type=float, default=60.0e-6)
+    parser.add_argument("--physical-coordinates", type=int, nargs="+")
     parser.add_argument("--spiking-calibration", type=Path)
     parser.add_argument("--hagen-calibration", type=Path)
     parser.add_argument("--correlation-calibration", type=Path)
@@ -334,6 +698,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hagen-num-sends", type=int, default=1024)
     parser.add_argument("--hagen-candidate-count", type=int, default=128)
     parser.add_argument("--hagen-chunk-repeats", type=int, default=16)
+    parser.add_argument(
+        "--search-constant-current-codes",
+        type=int,
+        nargs="+",
+        default=(256, 384, 512, 768, 1022),
+    )
+    parser.add_argument(
+        "--search-threshold-codes", type=int, nargs="+", default=(600,)
+    )
+    parser.add_argument(
+        "--search-ramp-stop-us", type=float, nargs="+", default=(25.0, 40.0, 55.0)
+    )
+    parser.add_argument(
+        "--search-precharge-pairs", nargs="+", default=("1:63",)
+    )
+    parser.add_argument("--search-current-stop-pairs", nargs="+")
+    parser.add_argument("--search-top-k", type=int, default=3)
+    parser.add_argument("--search-max-candidates", type=int, default=64)
     return parser
 
 
