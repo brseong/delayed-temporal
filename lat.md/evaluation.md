@@ -329,6 +329,12 @@ Central domain construction and tensor membership checks must fail consistently 
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_encoder_boundary]] enters through the decorated identity encoder to check noise-off tuples, zero-noise event parity, forced misses, and exact per-site event counters.
 
+### Measured Noise by Encoder
+
+Measured marginal timing scales may differ between the linear and logarithmic encodings while using the same seeded sampling stream.
+
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_encoder_specific_scales]] checks distinct empirical standard deviations, generator advance through both encoders, and fallback to the historical shared scale.
+
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_statistics_contract]] checks strict pre-clamp rail counters, repeated-site accumulation, detached snapshots, disabled instrumentation, and counter clearing without replacing replica RNG state.
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_static_mismatch_rng_contract]] checks dedicated-seed replay, seed independence, global-RNG preservation, frozen offsets across forwards, non-persistent buffers, and invalid-seed rejection.
