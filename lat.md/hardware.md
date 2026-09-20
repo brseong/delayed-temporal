@@ -484,7 +484,7 @@ The search changes only the raw constant current code, threshold code, ramp stop
 
 For static $\phi_{\mathrm{NP}}$ acquisition, the reset associated with each code is used only while loading the initial membrane state. Before the synchronized ramp begins, the reset potential changes to the configured minimum. This does not change the first threshold crossing and prevents later spikes from returning near the initial code during a long ramp.
 
-All PyNN encoder acquisitions use the official Calix refractory period calculator with a target equal to the observation deadline. A quiet interval of the same duration follows each trial. Calix resolves the backend clock scales and the selected circuit counters, so the first threshold crossing is unchanged while later spikes cannot enter the same trial or the next trial.
+All PyNN encoder acquisitions use the official Calix refractory period calculator with a target equal to the full repeated trial window. The observation deadline is followed by a quiet interval of the same duration. Calix resolves the backend clock scales and the selected circuit counters, so a circuit cannot emit a second spike within one trial; the next trial begins only when the configured refractory period has elapsed.
 
 The coarse screen couples each constant current code to a ramp stop time. This lets weak currents use a longer physical interval without leaving strong currents active long enough to cause repeated spikes. Extending the physical deadline rescales the time axis but does not change the potential code or transfer equation.
 
@@ -580,7 +580,7 @@ Verification also checks positive PyNN acquisition and process sizes, manifest p
 
 Verification checks scalar reset values and values for individual circuits. It requires the acquisition source to restore the initial state reset before each trial, then install the common minimum before the ramp.
 
-Verification checks selection of the three resolved refractory parameters for scalar circuit coordinates, rejects incomplete settings for the 512 circuits, and confirms that the quiet trial interval and first spike configuration are installed before acquisition.
+Verification checks selection of the three resolved refractory parameters for scalar circuit coordinates, rejects incomplete settings for the 512 circuits, confirms that the target covers the full repeated trial window, and confirms that the quiet trial interval and first spike configuration are installed before acquisition.
 
 ### Exponential response observation time
 

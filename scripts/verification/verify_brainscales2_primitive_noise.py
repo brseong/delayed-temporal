@@ -867,6 +867,58 @@ def verify_static_reset_separation() -> None:
         (RuntimeError,),
     )
 
+    applied: dict[str, object] = {}
+
+    class RefractorySettings:
+        refractory_counters = [31] * 512
+        reset_holdoff = [0] * 512
+        input_clock = [0] * 512
+        fast_clock = 9
+        slow_clock = 12
+
+        def apply_to_chip(self, chip: object) -> None:
+            applied["chip"] = chip
+
+    def calculate_settings(targets: torch.Tensor) -> RefractorySettings:
+        applied["targets"] = targets.clone()
+        return RefractorySettings()
+
+    original_import_module = primitive_backend_module.import_module
+
+    def fake_import_module(name: str):
+        if name == "numpy":
+            return SimpleNamespace(
+                full=lambda count, value: torch.full((count,), value)
+            )
+        if name == "quantities":
+            return SimpleNamespace(s=1.0)
+        if name == "calix.spiking.refractory_period":
+            return SimpleNamespace(calculate_settings=calculate_settings)
+        return original_import_module(name)
+
+    primitive_backend_module.import_module = fake_import_module
+    try:
+        refractory_config = PrimitiveNoiseConfig(
+            repeats=2,
+            calibration_repeats=1,
+            device_count=4,
+            physical_coordinates=(3, 134, 273, 390),
+            deadline_s=900.0e-6,
+        )
+        chip = object()
+        _, refractory_metadata = (
+            PrimitiveHardwareBackend._configure_first_spike_refractory(
+                chip, refractory_config
+            )
+        )
+    finally:
+        primitive_backend_module.import_module = original_import_module
+    assert applied["chip"] is chip
+    torch.testing.assert_close(
+        applied["targets"], torch.full((512,), 1.8e-3)
+    )
+    assert refractory_metadata["target_s"] == 1.8e-3
+
     source = inspect.getsource(
         PrimitiveHardwareBackend._run_pynn_code
     )

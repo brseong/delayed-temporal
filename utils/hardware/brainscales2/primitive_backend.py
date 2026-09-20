@@ -1337,14 +1337,18 @@ class PrimitiveHardwareBackend:
         numpy = import_module("numpy")
         quantities = import_module("quantities")
         refractory_period = import_module("calix.spiking.refractory_period")
-        targets = numpy.full(512, config.deadline_s) * quantities.s
+        # Acquisition retains one deadline of quiet time after the observation
+        # interval.  Cover the complete repeated-trial window so that an early
+        # first spike cannot be followed by another spike in the quiet interval.
+        refractory_target_s = 2.0 * config.deadline_s
+        targets = numpy.full(512, refractory_target_s) * quantities.s
         settings = refractory_period.calculate_settings(targets)
         settings.apply_to_chip(chip)
         parameters = cls._selected_refractory_parameters(
             settings, list(config.physical_coordinates)
         )
         metadata = {
-            "target_s": config.deadline_s,
+            "target_s": refractory_target_s,
             "fast_clock": int(settings.fast_clock),
             "slow_clock": int(settings.slow_clock),
             "selected_parameters": parameters,
