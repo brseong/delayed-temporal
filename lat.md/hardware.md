@@ -482,6 +482,8 @@ The search minimizes the calibration timing noise ratio without changing the pri
 
 The search changes only the raw constant current code, threshold code, ramp stop time, and precharge input count and weight. The potential code, first spike readout, and fitted $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ equations remain unchanged.
 
+For static $\phi_{\mathrm{NP}}$ acquisition, the reset associated with each code is used only while loading the initial membrane state. Before the synchronized ramp begins, the reset potential changes to the configured minimum. This does not change the first threshold crossing and prevents later spikes from returning near the initial code during a long ramp.
+
 The coarse screen couples each constant current code to a ramp stop time. This lets weak currents use a longer physical interval without leaving strong currents active long enough to cause repeated spikes. Extending the physical deadline rescales the time axis but does not change the potential code or transfer equation.
 
 After the coarse screen, separate refinements for $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ vary threshold and precharge input count around each encoder's selected current and ramp duration. The result records the best held out timing noise ratio for each encoder.
@@ -571,6 +573,10 @@ It preserves first-spike timestamps beyond the deadline as raw evidence, masks t
 The nonlinear drive configuration must reject a nonpositive input multiplicity and preserve its resolved value in the hardware metadata.
 
 Verification also checks positive PyNN acquisition and process sizes, manifest preservation, deterministic trial assignment, and child process dispatch.
+
+### Static reset separation
+
+Verification checks scalar reset values and values for individual circuits. It requires the acquisition source to restore the initial state reset before each trial, then install the common minimum before the ramp.
 
 ### Exponential response observation time
 

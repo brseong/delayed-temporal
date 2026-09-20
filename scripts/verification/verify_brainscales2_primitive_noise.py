@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from contextlib import nullcontext
+import inspect
 import json
 from pathlib import Path
 import sys
@@ -824,6 +825,36 @@ def verify_nonlinear_drive_configuration() -> None:
         torch.testing.assert_close(first[0], second[0])
 
 
+# @lat: [[hardware#Independent Primitive Noise Verification#Static reset separation]]
+def verify_static_reset_separation() -> None:
+    class Population:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def set(self, **parameters: object) -> None:
+            self.calls.append(parameters)
+
+    population = Population()
+    PrimitiveHardwareBackend._set_population_reset(population, 300)
+    PrimitiveHardwareBackend._set_population_reset(population, (301, 302))
+    assert population.calls == [
+        {"reset_v_reset": 300},
+        {"reset_v_reset": [301, 302]},
+    ]
+
+    source = inspect.getsource(
+        PrimitiveHardwareBackend._run_pynn_code
+    )
+    restore = source.index('if stage == "static" and trial > 0')
+    initial_run = source.index("pynn.run(reference_ms, append)", restore)
+    common_reset = source.index("config.reset_code_minimum", initial_run)
+    ramp_enable = source.index(
+        "population.set(constant_current_enable=True)", common_reset
+    )
+    assert restore < initial_run < common_reset < ramp_enable
+    assert '"static_reset_policy"' in source
+
+
 # @lat: [[hardware#Independent Primitive Noise Verification#Hagen output qualification]]
 def verify_hagen_output_qualification() -> None:
     parser = build_parser()
@@ -1405,6 +1436,7 @@ def main() -> None:
     verify_correlation_recording_decode()
     verify_correlation_worker_boundary()
     verify_nonlinear_drive_configuration()
+    verify_static_reset_separation()
     verify_hagen_output_qualification()
     verify_exponential_response_observation_time()
     verify_insufficient_fit_preservation()

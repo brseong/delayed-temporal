@@ -1297,6 +1297,17 @@ class PrimitiveHardwareBackend:
         )
 
     @staticmethod
+    def _set_population_reset(
+        population: Any, reset_code: int | tuple[int, ...]
+    ) -> None:
+        """Apply a scalar or per-device reset code through the PyNN API."""
+        population.set(
+            reset_v_reset=(
+                list(reset_code) if isinstance(reset_code, tuple) else reset_code
+            )
+        )
+
+    @staticmethod
     def _pynn_reset_injection(
         pynn: Any,
         chip: Any,
@@ -1424,10 +1435,8 @@ class PrimitiveHardwareBackend:
                 cell_type(**cell_parameters),
             )
             if isinstance(resolved_reset_code, tuple):
-                population.set(
-                    leak_v_leak=list(resolved_reset_code),
-                    reset_v_reset=list(resolved_reset_code),
-                )
+                population.set(leak_v_leak=list(resolved_reset_code))
+                self._set_population_reset(population, resolved_reset_code)
             uses_precharge = stage == "dynamic" or primitive == "phi-nl"
             record_variables: list[str] = ["spikes"]
             if uses_precharge:
@@ -1480,7 +1489,18 @@ class PrimitiveHardwareBackend:
                 append = pynn.RunCommand.APPEND
                 execute = pynn.RunCommand.EXECUTE
                 for trial in range(total_trials):
+                    # The code defines the initial membrane state, not the reset
+                    # state after a spike. Restore it before each injected reset,
+                    # then use the common minimum while the ramp is active. This
+                    # preserves the first crossing and suppresses code-dependent
+                    # repeated spikes during long timing windows.
+                    if stage == "static" and trial > 0:
+                        self._set_population_reset(population, resolved_reset_code)
                     pynn.run(reference_ms, append)
+                    if stage == "static":
+                        self._set_population_reset(
+                            population, config.reset_code_minimum
+                        )
                     population.set(constant_current_enable=True)
                     pynn.run(ramp_stop_ms - reference_ms, append)
                     population.set(constant_current_enable=False)
@@ -1528,6 +1548,11 @@ class PrimitiveHardwareBackend:
                 "window_ms": window_ms,
                 "reference_ms": reference_ms,
                 "reset_release_ms": reset_release_ms,
+                "static_reset_policy": (
+                    "initial state code during reset; configured minimum during ramp"
+                    if stage == "static"
+                    else "configured minimum"
+                ),
                 "discarded_warmup_trials": 1,
                 "precharge_cadc_acquisitions": 1 if uses_precharge else 0,
                 "exponential_input_fan_in": (
