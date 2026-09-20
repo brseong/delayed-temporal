@@ -217,6 +217,8 @@ def calibration_transfer_gate(
     observation: PrimitiveObservation,
     validation: PrimitiveValidation,
     config: PrimitiveNoiseConfig,
+    *,
+    screening: bool = False,
 ) -> dict[str, Any]:
     trial_slice = slice(0, config.calibration_repeats)
     usable = (
@@ -311,8 +313,22 @@ def calibration_transfer_gate(
             )
         ),
     }
+    required_gate_names = (
+        tuple(gates)
+        if not screening
+        else (
+            "enough_samples",
+            "negative_transfer_slope",
+            "deadline_miss_rate",
+            "multiple_spike_rate",
+            "saturation_rate",
+        )
+    )
     return {
-        "eligible": all(gates.values()),
+        "eligible": all(gates[name] for name in required_gate_names),
+        "strict_eligible": all(gates.values()),
+        "screening": screening,
+        "required_gates": list(required_gate_names),
         "gates": gates,
         "maximum_normalized_rmse": maximum_nrmse,
         "miss_rate": miss_rate,
@@ -379,6 +395,7 @@ def score_encoder_operating_point(
     config: PrimitiveNoiseConfig,
     *,
     primitive: SearchPrimitive,
+    screening: bool = False,
 ) -> dict[str, Any]:
     """Score one candidate without using held-out values for selection."""
     np_static_observation = _lookup_observation(observations, "phi-np", "static")
@@ -402,12 +419,17 @@ def score_encoder_operating_point(
         )
     primitive_scores: dict[str, Any] = {}
     static_calibration_gate = calibration_transfer_gate(
-        np_static_observation, np_static_validation, config
+        np_static_observation,
+        np_static_validation,
+        config,
+        screening=screening,
     )
     selection_gates: list[bool] = [bool(static_calibration_gate["eligible"])]
     held_out_gates: list[bool] = [np_static_validation.validated]
     for name, observation, validation in measured:
-        transfer_gate = calibration_transfer_gate(observation, validation, config)
+        transfer_gate = calibration_transfer_gate(
+            observation, validation, config, screening=screening
+        )
         calibration = _conditional_timing_ratio(
             observation,
             trial_slice=slice(0, config.calibration_repeats),
@@ -438,6 +460,7 @@ def score_encoder_operating_point(
     return {
         "schema_version": 1,
         "primitive": primitive,
+        "screening": screening,
         "selection_eligible": selection_eligible,
         "held_out_validated": held_out_validated,
         "selection_objective_rt": selection_objective,

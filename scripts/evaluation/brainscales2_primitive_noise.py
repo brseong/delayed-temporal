@@ -288,14 +288,24 @@ def _collect_encoder_search_observations(
     static_validation = validate_primitive_observation(static, config)
     observations.append(static)
     validations.append(static_validation)
-    if not calibration_transfer_gate(static, static_validation, config)["eligible"]:
+    if not calibration_transfer_gate(
+        static,
+        static_validation,
+        config,
+        screening=args.search_quick_codes,
+    )["eligible"]:
         return observations, validations, "phi-np/static calibration gate failed"
 
     dynamic = backend.collect("phi-np", config, stage="dynamic", quick=quick_codes)
     dynamic_validation = validate_primitive_observation(dynamic, config)
     observations.append(dynamic)
     validations.append(dynamic_validation)
-    if not calibration_transfer_gate(dynamic, dynamic_validation, config)["eligible"]:
+    if not calibration_transfer_gate(
+        dynamic,
+        dynamic_validation,
+        config,
+        screening=args.search_quick_codes,
+    )["eligible"]:
         return observations, validations, "phi-np/dynamic calibration gate failed"
 
     if args.primitive == "phi-nl":
@@ -306,7 +316,10 @@ def _collect_encoder_search_observations(
         observations.append(nonlinear)
         validations.append(nonlinear_validation)
         if not calibration_transfer_gate(
-            nonlinear, nonlinear_validation, config
+            nonlinear,
+            nonlinear_validation,
+            config,
+            screening=args.search_quick_codes,
         )["eligible"]:
             return observations, validations, "phi-nl calibration gate failed"
     return observations, validations, None
@@ -471,6 +484,7 @@ def optimize_encoder_operating_point(
                 validations,
                 candidate_config,
                 primitive=args.primitive,
+                screening=args.search_quick_codes,
             )
             result["status"] = "complete"
         except Exception as error:

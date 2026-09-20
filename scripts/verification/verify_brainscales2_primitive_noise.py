@@ -1165,6 +1165,30 @@ def verify_encoder_operating_point_score() -> None:
     assert changed["selection_objective_rt"] == reference["selection_objective_rt"]
     assert changed["validation_objective_rt"] > reference["validation_objective_rt"]
 
+    screened_values = observations[0].observed.clone()
+    screened_values[: config.calibration_repeats, 15, :] += 10.0e-6
+    screened_static = replace(observations[0], observed=screened_values)
+    screened_observations = [screened_static, observations[1]]
+    screened_validations = [
+        validate_primitive_observation(screened_static, config), validations[1]
+    ]
+    strict = score_encoder_operating_point(
+        screened_observations,
+        screened_validations,
+        config,
+        primitive="phi-np",
+    )
+    screening = score_encoder_operating_point(
+        screened_observations,
+        screened_validations,
+        config,
+        primitive="phi-np",
+        screening=True,
+    )
+    assert not strict["selection_eligible"]
+    assert screening["selection_eligible"]
+    assert not screening["np_static"]["calibration_transfer"]["strict_eligible"]
+
 
 # @lat: [[hardware#Independent Primitive Noise Verification#Resumable operating point search]]
 def verify_resumable_operating_point_search() -> None:

@@ -488,6 +488,8 @@ After the coarse screen, separate refinements for $\phi_{\mathrm{NP}}$ and $\phi
 
 Coarse and refinement screens use three representative potential codes with 32 repetitions split equally between calibration and held out data. Only the selected configuration for each encoder receives the full 32 code grid with 128 calibration and 128 held out repetitions.
 
+The representative code screen requires observed points, the declared transfer direction, bounded miss and repeated spike rates, and no saturation. Rank and normalized error remain diagnostics during screening; the full code confirmation must pass every original transfer gate before a target is reported as reached.
+
 Each circuit's conditional timing deviation is divided by the $\phi_{\mathrm{NP}}$ signal span fitted on calibration repetitions. The same frozen span normalizes both encoders, so a candidate cannot improve its score only by redefining the denominator.
 
 Candidates are ranked only with calibration repetitions. Held out repetitions confirm the selected candidate and report whether the timing noise ratio reaches 0.001, 0.0001, or 0.00003.
@@ -597,6 +599,8 @@ The default 16-circuit placement must retain the coordinate order that passed th
 ### Encoder operating point score
 
 The score must use calibration repetitions for selection and reserve held out repetitions for confirmation.
+
+Representative code screening may rank a candidate that fails a shape diagnostic, but the full code confirmation must retain the strict transfer gates.
 
 ### Resumable operating point search
 
