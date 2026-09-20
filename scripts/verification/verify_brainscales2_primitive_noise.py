@@ -842,6 +842,31 @@ def verify_static_reset_separation() -> None:
         {"reset_v_reset": [301, 302]},
     ]
 
+    settings = SimpleNamespace(
+        refractory_counters=list(range(512)),
+        reset_holdoff=[value + 1 for value in range(512)],
+        input_clock=[value % 2 for value in range(512)],
+    )
+    selected = PrimitiveHardwareBackend._selected_refractory_parameters(
+        settings, [3, 134, 273, 390]
+    )
+    assert selected == {
+        "refractory_period_refractory_time": [3, 134, 273, 390],
+        "refractory_period_reset_holdoff": [4, 135, 274, 391],
+        "refractory_period_input_clock": [1, 0, 1, 0],
+    }
+    malformed_settings = SimpleNamespace(
+        refractory_counters=[1],
+        reset_holdoff=settings.reset_holdoff,
+        input_clock=settings.input_clock,
+    )
+    rejects(
+        lambda: PrimitiveHardwareBackend._selected_refractory_parameters(
+            malformed_settings, [0]
+        ),
+        (RuntimeError,),
+    )
+
     source = inspect.getsource(
         PrimitiveHardwareBackend._run_pynn_code
     )
@@ -853,6 +878,8 @@ def verify_static_reset_separation() -> None:
     )
     assert restore < initial_run < common_reset < ramp_enable
     assert '"static_reset_policy"' in source
+    assert "2.0 * config.deadline_s" in source
+    assert "_configure_first_spike_refractory" in source
 
 
 # @lat: [[hardware#Independent Primitive Noise Verification#Hagen output qualification]]

@@ -1308,6 +1308,50 @@ class PrimitiveHardwareBackend:
         )
 
     @staticmethod
+    def _selected_refractory_parameters(
+        settings: Any, coordinates: list[int]
+    ) -> dict[str, list[int]]:
+        """Select per-circuit counter settings produced by Calix."""
+        fields = {
+            "refractory_period_refractory_time": "refractory_counters",
+            "refractory_period_reset_holdoff": "reset_holdoff",
+            "refractory_period_input_clock": "input_clock",
+        }
+        selected: dict[str, list[int]] = {}
+        for parameter, attribute in fields.items():
+            values = getattr(settings, attribute)
+            if len(values) != 512:
+                raise RuntimeError(
+                    f"Calix {attribute} does not cover all 512 circuits"
+                )
+            selected[parameter] = [int(values[index]) for index in coordinates]
+        return selected
+
+    @classmethod
+    def _configure_first_spike_refractory(
+        cls,
+        chip: Any,
+        config: PrimitiveNoiseConfig,
+    ) -> tuple[dict[str, list[int]], dict[str, Any]]:
+        """Keep each encoder circuit silent after its first recorded spike."""
+        numpy = import_module("numpy")
+        quantities = import_module("quantities")
+        refractory_period = import_module("calix.spiking.refractory_period")
+        targets = numpy.full(512, config.deadline_s) * quantities.s
+        settings = refractory_period.calculate_settings(targets)
+        settings.apply_to_chip(chip)
+        parameters = cls._selected_refractory_parameters(
+            settings, list(config.physical_coordinates)
+        )
+        metadata = {
+            "target_s": config.deadline_s,
+            "fast_clock": int(settings.fast_clock),
+            "slow_clock": int(settings.slow_clock),
+            "selected_parameters": parameters,
+        }
+        return parameters, metadata
+
+    @staticmethod
     def _pynn_reset_injection(
         pynn: Any,
         chip: Any,
@@ -1375,8 +1419,14 @@ class PrimitiveHardwareBackend:
         )
         chip = pynn.helper.chip_from_file(str(config.spiking_calibration_path))
         coordinates = self._pynn_coordinates(config)
+        refractory_parameters, refractory_metadata = (
+            self._configure_first_spike_refractory(chip, config)
+        )
         setup_complete = False
-        window_ms = config.deadline_s * 1.0e3
+        # A full-deadline quiet interval follows the observation deadline.  The
+        # Calix refractory target can therefore suppress every later spike without
+        # carrying state into the next repeated trial.
+        window_ms = 2.0 * config.deadline_s * 1.0e3
         reference_ms = config.input_early_s * 1.0e3
         ramp_stop_ms = config.input_late_s * 1.0e3
         precharge_ms = max(0.0005, reference_ms - 0.002)
@@ -1427,8 +1477,8 @@ class PrimitiveHardwareBackend:
                 "constant_current_i_offset": config.constant_current_code,
                 "reset_i_bias": 1022,
                 "reset_enable_multiplication": True,
-                "refractory_period_refractory_time": 255,
                 "refractory_period_enable_pause": True,
+                **refractory_parameters,
             }
             population = pynn.Population(
                 config.device_count,
@@ -1546,8 +1596,10 @@ class PrimitiveHardwareBackend:
                 ),
                 "resolved_cell_parameters": cell_parameters,
                 "window_ms": window_ms,
+                "observation_deadline_ms": config.deadline_s * 1.0e3,
                 "reference_ms": reference_ms,
                 "reset_release_ms": reset_release_ms,
+                "first_spike_refractory": refractory_metadata,
                 "static_reset_policy": (
                     "initial state code during reset; configured minimum during ramp"
                     if stage == "static"
