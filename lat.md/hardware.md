@@ -486,6 +486,8 @@ The coarse screen couples each constant current code to a ramp stop time. This l
 
 After the coarse screen, separate refinements for $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ vary threshold and precharge input count around each encoder's selected current and ramp duration. The result records the best held out timing noise ratio for each encoder.
 
+Coarse and refinement screens use three representative potential codes with 32 repetitions split equally between calibration and held out data. Only the selected configuration for each encoder receives the full 32 code grid with 128 calibration and 128 held out repetitions.
+
 Each circuit's conditional timing deviation is divided by the $\phi_{\mathrm{NP}}$ signal span fitted on calibration repetitions. The same frozen span normalizes both encoders, so a candidate cannot improve its score only by redefining the denominator.
 
 Candidates are ranked only with calibration repetitions. Held out repetitions confirm the selected candidate and report whether the timing noise ratio reaches 0.001, 0.0001, or 0.00003.

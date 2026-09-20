@@ -283,14 +283,15 @@ def _collect_encoder_search_observations(
     )
     observations: list[PrimitiveObservation] = []
     validations: list[PrimitiveValidation] = []
-    static = backend.collect("phi-np", config, stage="static", quick=args.quick)
+    quick_codes = args.quick or args.search_quick_codes
+    static = backend.collect("phi-np", config, stage="static", quick=quick_codes)
     static_validation = validate_primitive_observation(static, config)
     observations.append(static)
     validations.append(static_validation)
     if not calibration_transfer_gate(static, static_validation, config)["eligible"]:
         return observations, validations, "phi-np/static calibration gate failed"
 
-    dynamic = backend.collect("phi-np", config, stage="dynamic", quick=args.quick)
+    dynamic = backend.collect("phi-np", config, stage="dynamic", quick=quick_codes)
     dynamic_validation = validate_primitive_observation(dynamic, config)
     observations.append(dynamic)
     validations.append(dynamic_validation)
@@ -299,7 +300,7 @@ def _collect_encoder_search_observations(
 
     if args.primitive == "phi-nl":
         nonlinear = backend.collect(
-            "phi-nl", config, stage="transfer", quick=args.quick
+            "phi-nl", config, stage="transfer", quick=quick_codes
         )
         nonlinear_validation = validate_primitive_observation(nonlinear, config)
         observations.append(nonlinear)
@@ -403,6 +404,7 @@ def optimize_encoder_operating_point(
             "objective": "minimum requested primitive median conditional timing ratio",
             "signal_span": "frozen phi-np calibration transfer span",
             "held_out_role": "confirmation only",
+            "code_grid": "representative" if args.search_quick_codes else "full",
         },
     }
     if manifest_path.is_file():
@@ -714,6 +716,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--search-precharge-pairs", nargs="+", default=("1:63",)
     )
     parser.add_argument("--search-current-stop-pairs", nargs="+")
+    parser.add_argument("--search-quick-codes", action="store_true")
     parser.add_argument("--search-top-k", type=int, default=3)
     parser.add_argument("--search-max-candidates", type=int, default=64)
     return parser
