@@ -74,10 +74,10 @@ class Arguments:
     """Command-line configuration consumed by the ViT evaluator.
 
     Dynamic event noise is represented only by direct Gaussian spike-time error.
-    ``time_noise_std_frac`` is dimensionless and is converted later by the
-    evaluation function to an absolute standard deviation using the identity-code
-    window ``2 * theta``. Static threshold mismatch and learned-parameter
-    perturbations remain independent experiment axes.
+    Timing-noise fractions are dimensionless and are converted later by the
+    evaluation function using the identity-code window ``2 * theta``. Optional
+    linear and logarithmic values override the shared default without introducing
+    another sampling path. Static mismatch remains an independent experiment axis.
     """
 
     # Evaluation, backend, and model-conversion controls are independent of the
@@ -123,10 +123,12 @@ class Arguments:
     calibration_upper_quantile: float
     calibration_margin_fraction: float
 
-    # Direct Gaussian timing noise uses one relative input scale, one absolute mean,
-    # and one replica seed shared by every event-aware encoder.
+    # Direct Gaussian timing noise uses one relative default plus optional linear
+    # and logarithmic overrides, one absolute mean, and one shared replica seed.
     gaussian_time_noise: bool
     time_noise_std_frac: float
+    linear_time_noise_std_frac: float | None
+    log_time_noise_std_frac: float | None
     time_noise_mean: float
     time_noise_deadline_margin_std: float
     time_noise_seed: int
@@ -355,6 +357,24 @@ def parse_arguments() -> Arguments:
         help="Gaussian time std as a fraction of the identity window 2*theta.",
     )
     parser.add_argument(
+        "--linear-time-noise-std-frac",
+        type=float,
+        default=None,
+        help=(
+            "Optional linear-encoding Gaussian std fraction; defaults to "
+            "--time-noise-std-frac."
+        ),
+    )
+    parser.add_argument(
+        "--log-time-noise-std-frac",
+        type=float,
+        default=None,
+        help=(
+            "Optional logarithmic-encoding Gaussian std fraction; defaults to "
+            "--time-noise-std-frac."
+        ),
+    )
+    parser.add_argument(
         "--time-noise-mean",
         type=float,
         default=0.0,
@@ -463,6 +483,8 @@ def parse_arguments() -> Arguments:
         calibration_margin_fraction=args.calibration_margin_fraction,
         gaussian_time_noise=args.gaussian_time_noise,
         time_noise_std_frac=args.time_noise_std_frac,
+        linear_time_noise_std_frac=args.linear_time_noise_std_frac,
+        log_time_noise_std_frac=args.log_time_noise_std_frac,
         time_noise_mean=args.time_noise_mean,
         time_noise_deadline_margin_std=args.time_noise_deadline_margin_std,
         time_noise_seed=args.time_noise_seed,
@@ -630,6 +652,8 @@ def validate_vit_runtime_arguments(args: Arguments) -> None:
         if (
             args.gaussian_time_noise
             or args.time_noise_std_frac != 0.0
+            or args.linear_time_noise_std_frac is not None
+            or args.log_time_noise_std_frac is not None
             or args.time_noise_mean != 0.0
             or args.time_noise_deadline_margin_std != 0.0
         ):
@@ -964,12 +988,38 @@ def evaluate_vit_model(args: Arguments) -> None:
     # GPU 사용 가능 여부 확인
     device = torch.device(device_str)
 
-    # Convert the user-facing fraction exactly once from the default identity-code
-    # duration. Every decorated encoder then receives this same absolute sigma_t.
+    # Convert all user-facing fractions from the same identity-code duration. The
+    # measured hardware summaries use that shared normalization even though the two
+    # encoder families receive different absolute standard deviations.
     identity_time_window = 2.0 * float(args.theta)
     time_noise_std = float(args.time_noise_std_frac) * identity_time_window
+    linear_time_noise_std_frac = (
+        float(args.time_noise_std_frac)
+        if args.linear_time_noise_std_frac is None
+        else float(args.linear_time_noise_std_frac)
+    )
+    log_time_noise_std_frac = (
+        float(args.time_noise_std_frac)
+        if args.log_time_noise_std_frac is None
+        else float(args.log_time_noise_std_frac)
+    )
+    for name, value in (
+        ("time_noise_std_frac", float(args.time_noise_std_frac)),
+        ("linear_time_noise_std_frac", linear_time_noise_std_frac),
+        ("log_time_noise_std_frac", log_time_noise_std_frac),
+    ):
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"{name} must be finite and non-negative")
+    linear_time_noise_std = linear_time_noise_std_frac * identity_time_window
+    log_time_noise_std = log_time_noise_std_frac * identity_time_window
     time_noise_deadline_margin = (
         float(args.time_noise_deadline_margin_std) * time_noise_std
+    )
+    linear_time_noise_deadline_margin = (
+        float(args.time_noise_deadline_margin_std) * linear_time_noise_std
+    )
+    log_time_noise_deadline_margin = (
+        float(args.time_noise_deadline_margin_std) * log_time_noise_std
     )
     identity_deadline = torch.tensor(identity_time_window, dtype=dtype)
     identity_deadline_ulp = float(
@@ -1070,8 +1120,12 @@ def evaluate_vit_model(args: Arguments) -> None:
     set_gaussian_time_noise(
         enabled=gaussian_enabled,
         time_std=time_noise_std,
+        linear_time_std=linear_time_noise_std,
+        log_time_std=log_time_noise_std,
         time_mean=args.time_noise_mean,
         deadline_margin=time_noise_deadline_margin,
+        linear_deadline_margin=linear_time_noise_deadline_margin,
+        log_deadline_margin=log_time_noise_deadline_margin,
         seed=args.time_noise_seed,
         device=device,
     )
@@ -1090,7 +1144,13 @@ def evaluate_vit_model(args: Arguments) -> None:
         "gaussian_time_noise_effective": gaussian_enabled,
         "identity_time_window": identity_time_window,
         "time_noise_std": time_noise_std,
+        "linear_time_noise_std_frac_effective": linear_time_noise_std_frac,
+        "log_time_noise_std_frac_effective": log_time_noise_std_frac,
+        "linear_time_noise_std": linear_time_noise_std,
+        "log_time_noise_std": log_time_noise_std,
         "time_noise_deadline_margin": time_noise_deadline_margin,
+        "linear_time_noise_deadline_margin": linear_time_noise_deadline_margin,
+        "log_time_noise_deadline_margin": log_time_noise_deadline_margin,
         "identity_deadline_ulp": identity_deadline_ulp,
         "time_noise_std_to_identity_ulp": time_noise_std_to_identity_ulp,
         "mismatch_effective": mismatch_enabled,
@@ -1117,14 +1177,20 @@ def evaluate_vit_model(args: Arguments) -> None:
         "Gaussian time noise — "
         f"enabled: {gaussian_enabled}, "
         f"std_frac: {args.time_noise_std_frac}, "
+        f"linear_std_frac: {linear_time_noise_std_frac}, "
+        f"log_std_frac: {log_time_noise_std_frac}, "
         f"identity_window: {identity_time_window}, "
         f"std_abs: {time_noise_std}, "
+        f"linear_std_abs: {linear_time_noise_std}, "
+        f"log_std_abs: {log_time_noise_std}, "
         f"mean_abs: {args.time_noise_mean}, "
         f"seed: {args.time_noise_seed}, "
         f"identity_deadline_ulp: {identity_deadline_ulp}, "
         f"std_to_identity_ulp: {time_noise_std_to_identity_ulp}, "
         f"deadline_margin_std: {args.time_noise_deadline_margin_std}, "
-        f"deadline_margin_abs: {time_noise_deadline_margin}"
+        f"deadline_margin_abs: {time_noise_deadline_margin}, "
+        f"linear_deadline_margin_abs: {linear_time_noise_deadline_margin}, "
+        f"log_deadline_margin_abs: {log_time_noise_deadline_margin}"
     )
     print(
         "Static threshold mismatch — "

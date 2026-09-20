@@ -10,7 +10,7 @@ The process-wide configuration stores the absolute time mean and standard deviat
 
 The generator advances across forward calls. Reconfiguring it restarts a replica; an individual forward must not reseed it. Because this state is process-wide, the maintained path rejects `DataParallel` execution.
 
-Evaluation entry points expose a dimensionless standard-deviation fraction $r_t$ and convert it once using the base identity-code window, $\sigma_t=r_t(2\theta)$. Every encoder in that run then receives the same absolute $\sigma_t$.
+Evaluation entry points expose a dimensionless standard-deviation fraction $r_t$ and convert it once using the base identity-code window, $\sigma_t=r_t(2\theta)$. The shared value remains the default, while measured sensitivity runs may supply distinct linear and logarithmic encoding overrides normalized by the same window.
 
 ## Direct Gaussian Spike-Time Noise
 
@@ -106,7 +106,9 @@ The existing potential-to-spike decorator is the only production injection point
 
 [[utils/transforms/noise.py#inject_spike_time_noise]] first calls the deterministic encoder and then samples timing noise when the consumer requests `return_spike_sample=True`. Both [[utils/transforms/potential_to_spike.py#neg_linear_transform]] and [[utils/transforms/potential_to_spike.py#neg_log_transform]] carry this decorator.
 
-There is no separate Gaussian multiplication operator and no encoder-specific Gaussian helper. Event-aware consumers receive a time-and-delivery record, while noise-free callers preserve the deterministic `(time, bounds)` interface.
+There is no separate Gaussian multiplication operator or secondary sampling helper. Physical consumers receive a time-and-delivery record, while noise-free callers preserve the deterministic `(time, bounds)` interface. One configuration may select different standard deviations for the linear and logarithmic encodings while retaining one generator and one deadline rule.
+
+Measured encoder overrides support a marginal timing noise sensitivity test. They do not turn independently measured primitive statistics into a calibrated BrainScaleS-2 system prediction, and they do not model cross-primitive correlation or state coupling.
 
 ## Layer-Shared Reference Event
 

@@ -1246,6 +1246,76 @@ def verify_gaussian_encoder_boundary() -> None:
         set_gaussian_time_noise(enabled=False)
 
 
+# @lat: [[evaluation#Evaluation and Verification#Gaussian Spike-Time Verification#Measured Noise by Encoder]]
+def verify_gaussian_encoder_specific_scales() -> None:
+    """Verify distinct linear and logarithmic scales on one seeded stream.
+
+    Encoder-specific overrides must select the intended scale without creating a
+    second sampler or random generator. The historical shared scale remains the
+    fallback when an override is omitted.
+
+    Raises:
+        AssertionError: If an encoder ignores its override, the empirical scales
+            disagree, or the two encoders do not share one advancing generator.
+    """
+    sample_count = 4096
+    linear_domain = PotentialBounds(0.0, 4.0)
+    linear_input = torch.full((sample_count,), 2.0, dtype=torch.float64)
+    log_domain = PotentialBounds(math.exp(-4.0), 1.0)
+    log_input = torch.full((sample_count,), math.exp(-2.0), dtype=torch.float64)
+
+    set_gaussian_time_noise(
+        enabled=True,
+        time_std=0.5,
+        linear_time_std=0.1,
+        log_time_std=0.3,
+        seed=111,
+    )
+    try:
+        config = get_gaussian_time_noise()
+        generator = config.generator
+        assert generator is not None
+        assert config.time_std == 0.5
+        assert config.linear_time_std == 0.1
+        assert config.log_time_std == 0.3
+
+        initial_state = generator.get_state().clone()
+        linear = neg_linear_transform(
+            linear_input,
+            linear_domain,
+            window_length=4.0,
+            return_spike_sample=True,
+            noise_site="verification.linear_override",
+        )
+        assert isinstance(linear, SpikeSample)
+        after_linear = generator.get_state().clone()
+        assert not torch.equal(initial_state, after_linear)
+
+        logarithmic = neg_log_transform(
+            log_input,
+            log_domain,
+            tau_s=1.0,
+            return_spike_sample=True,
+            noise_site="verification.log_override",
+        )
+        assert isinstance(logarithmic, SpikeSample)
+        assert not torch.equal(after_linear, generator.get_state())
+
+        linear_std = float(linear.time.std(unbiased=True).item())
+        log_std = float(logarithmic.time.std(unbiased=True).item())
+        assert 0.09 < linear_std < 0.11
+        assert 0.27 < log_std < 0.33
+        assert log_std > 2.5 * linear_std
+
+        # Reconfiguration without overrides retains the prior public behavior.
+        set_gaussian_time_noise(enabled=True, time_std=0.2, seed=112)
+        fallback = get_gaussian_time_noise()
+        assert fallback.linear_time_std is None
+        assert fallback.log_time_std is None
+    finally:
+        set_gaussian_time_noise(enabled=False)
+
+
 def verify_gaussian_statistics_contract() -> None:
     """Verify output saturation counters, detached snapshots, and safe clearing.
 
@@ -3574,6 +3644,7 @@ if __name__ == "__main__":
     verify_gaussian_deadline_margin()
     verify_exponential_time_constant_scaling()
     verify_gaussian_encoder_boundary()
+    verify_gaussian_encoder_specific_scales()
     verify_gaussian_statistics_contract()
     verify_gaussian_multiplication_operator()
     verify_gaussian_exponential_function()

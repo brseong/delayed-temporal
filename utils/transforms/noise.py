@@ -19,7 +19,7 @@ run in one process without DataParallel replication.
 import math
 from dataclasses import dataclass
 from functools import wraps
-from typing import Callable, TypedDict
+from typing import Callable, Literal, TypedDict
 
 import torch
 from torch import Tensor
@@ -37,17 +37,21 @@ class GaussianTimeNoiseConfig:
     """Process-wide configuration for direct Gaussian spike-time noise.
 
     ``time_mean`` and ``time_std`` are absolute time quantities shared by every
-    event-aware encoder in one evaluation replica. ``generator`` is seeded once
-    during configuration and then advances across calls, making a seed identify a
-    complete replica rather than restarting the random sequence for each layer.
-    A disabled configuration holds no generator so accidental sampling cannot
-    silently consume an unrelated global RNG stream.
+    encoder unless the linear or logarithmic encoding has an explicit
+    override. ``generator`` is seeded once during configuration and then advances
+    across calls, making a seed identify a complete replica rather than restarting
+    the random sequence for each layer. A disabled configuration holds no generator
+    so accidental sampling cannot silently consume an unrelated global RNG stream.
     """
 
     enabled: bool = False  # Select the event-aware Gaussian path at encoder boundaries.
     time_std: float = 0.0  # Absolute standard deviation applied to every encoded time.
+    linear_time_std: float | None = None  # Optional linear-encoding override.
+    log_time_std: float | None = None  # Optional logarithmic-encoding override.
     time_mean: float = 0.0  # Absolute additive bias applied before deadline classification.
     deadline_margin: float = 0.0  # Absolute late-arrival grace before declaring a miss.
+    linear_deadline_margin: float | None = None  # Optional linear grace override.
+    log_deadline_margin: float | None = None  # Optional logarithmic grace override.
     seed: int = 0  # Replica seed used once when constructing the dedicated generator.
     generator: torch.Generator | None = None  # Stateful RNG owned by this configuration.
 
@@ -216,8 +220,12 @@ def set_gaussian_time_noise(
     *,
     enabled: bool,
     time_std: float = 0.0,
+    linear_time_std: float | None = None,
+    log_time_std: float | None = None,
     time_mean: float = 0.0,
     deadline_margin: float = 0.0,
+    linear_deadline_margin: float | None = None,
+    log_deadline_margin: float | None = None,
     seed: int = 0,
     device: torch.device | str = "cpu",
 ) -> None:
@@ -230,11 +238,13 @@ def set_gaussian_time_noise(
 
     Args:
         enabled: Whether event-aware encoders apply direct Gaussian timing noise.
-        time_std: Non-negative standard deviation in absolute time units.
+        time_std: Non-negative default standard deviation in absolute time units.
+        linear_time_std: Optional non-negative override for linear encoding.
+        log_time_std: Optional non-negative override for logarithmic encoding.
         time_mean: Additive Gaussian mean in absolute time units.
-        deadline_margin: Non-negative absolute late-arrival grace. Events inside
-            the grace interval are delivered at the upper code rail so existing
-            decoder bounds and clean arithmetic remain unchanged.
+        deadline_margin: Non-negative default absolute late-arrival grace.
+        linear_deadline_margin: Optional non-negative linear-encoding grace.
+        log_deadline_margin: Optional non-negative logarithmic-encoding grace.
         seed: Integer seed used once to initialize the replica generator.
         device: Device on which the encoder's spike-time samples will be drawn.
 
@@ -255,17 +265,47 @@ def set_gaussian_time_noise(
     # Normalize numeric inputs once, then require finite physical parameters before
     # creating random state or disturbing the currently installed configuration.
     normalized_std = float(time_std)
+    normalized_linear_std = (
+        None if linear_time_std is None else float(linear_time_std)
+    )
+    normalized_log_std = None if log_time_std is None else float(log_time_std)
     normalized_mean = float(time_mean)
     normalized_margin = float(deadline_margin)
+    normalized_linear_margin = (
+        None
+        if linear_deadline_margin is None
+        else float(linear_deadline_margin)
+    )
+    normalized_log_margin = (
+        None if log_deadline_margin is None else float(log_deadline_margin)
+    )
+    optional_values = (
+        normalized_linear_std,
+        normalized_log_std,
+        normalized_linear_margin,
+        normalized_log_margin,
+    )
     if not all(
         math.isfinite(value)
         for value in (normalized_std, normalized_mean, normalized_margin)
+    ) or not all(
+        value is None or math.isfinite(value) for value in optional_values
     ):
         raise ValueError("Gaussian time-noise parameters must be finite")
-    if normalized_std < 0.0:
-        raise ValueError("time_std must be non-negative")
-    if normalized_margin < 0.0:
-        raise ValueError("deadline_margin must be non-negative")
+    if any(
+        value is not None and value < 0.0
+        for value in (normalized_std, normalized_linear_std, normalized_log_std)
+    ):
+        raise ValueError("time standard deviations must be non-negative")
+    if any(
+        value is not None and value < 0.0
+        for value in (
+            normalized_margin,
+            normalized_linear_margin,
+            normalized_log_margin,
+        )
+    ):
+        raise ValueError("deadline margins must be non-negative")
 
     # A disabled configuration owns no generator. An enabled replica gets exactly
     # one device-matched stream seeded here and advanced later by encoder sampling.
@@ -279,8 +319,12 @@ def set_gaussian_time_noise(
     new_config = GaussianTimeNoiseConfig(
         enabled=enabled,
         time_std=normalized_std,
+        linear_time_std=normalized_linear_std,
+        log_time_std=normalized_log_std,
         time_mean=normalized_mean,
         deadline_margin=normalized_margin,
+        linear_deadline_margin=normalized_linear_margin,
+        log_deadline_margin=normalized_log_margin,
         seed=seed,
         generator=generator,
     )
@@ -536,8 +580,12 @@ def _sample_gaussian_spike_time(
 # ---------------------------------------------------------------------------
 
 def inject_spike_time_noise[**P, OutT: ClosedBounds](
-    func: Callable[P, tuple[Tensor, OutT]],
-) -> Callable[P, tuple[Tensor, OutT] | SpikeSample]:
+    *,
+    encoding: Literal["linear", "log"],
+) -> Callable[
+    [Callable[P, tuple[Tensor, OutT]]],
+    Callable[P, tuple[Tensor, OutT] | SpikeSample],
+]:
     """Decorate a deterministic encoder with event-aware Gaussian time noise.
 
     Ordinary calls preserve the encoder's ``(time, bounds)`` contract and never
@@ -546,12 +594,12 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
     configuration to return one finite timestamp and its deadline-delivery mask.
 
     Keeping sampling at this boundary makes linear and logarithmic encoders share
-    one absolute timing scale, one advancing generator, one inclusive deadline
-    rule, and one statistics schema. No alternate dynamic-noise branch is applied
-    at the encoder boundary.
+    one advancing generator, one inclusive deadline rule, and one statistics schema.
+    Their absolute standard deviations and deadline margins may be overridden in
+    the same configuration for measured marginal-noise sensitivity experiments.
 
     Args:
-        func: Deterministic encoder returning a time tensor and its declared bounds.
+        encoding: Encoding family selecting the optional configuration override.
 
     Returns:
         A wrapped encoder supporting deterministic tuples and explicit event-aware
@@ -563,104 +611,113 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
         TypeError: If an event-aware encoder does not declare ``TimeBounds``.
     """
 
-    @wraps(func)
-    def wrapper(
-        *args: P.args,
-        **kwargs: P.kwargs,
-    ) -> tuple[Tensor, OutT] | SpikeSample:
-        # Snapshot the process-wide Gaussian configuration once. The enabled flag,
-        # timing parameters, and generator therefore belong to the same replica for
-        # the entire encoder call even if external code later replaces the singleton.
-        gaussian_cfg = get_gaussian_time_noise()
-        return_spike_sample = bool(kwargs.get("return_spike_sample", False))
+    if encoding not in ("linear", "log"):
+        raise ValueError("encoding must be 'linear' or 'log'")
 
-        # Run the deterministic encoder exactly once before deciding whether a
-        # sample is needed. Gaussian error is defined in time space and therefore
-        # acts on the bounded nominal timestamp, never on the source potential.
-        output, out_domain = func(*args, **kwargs)
+    def decorator(
+        func: Callable[P, tuple[Tensor, OutT]],
+    ) -> Callable[P, tuple[Tensor, OutT] | SpikeSample]:
+        @wraps(func)
+        def wrapper(
+            *args: P.args,
+            **kwargs: P.kwargs,
+        ) -> tuple[Tensor, OutT] | SpikeSample:
+            # Snapshot the process-wide configuration once so the parameters and
+            # generator belong to the same replica for the complete encoder call.
+            gaussian_cfg = get_gaussian_time_noise()
+            return_spike_sample = bool(kwargs.get("return_spike_sample", False))
 
-        # A clock-driven encoder delivers each threshold crossing on the first
-        # non-earlier clock edge and places the observation deadline on the same
-        # global grid.  The user-approved clock-driven evaluation is a deterministic
-        # axis; combining it with continuous Gaussian timing error is intentionally
-        # rejected until that ordering is defined as a separate experiment.
-        clock_cfg = get_clock_driven()
-        if clock_cfg.enabled:
-            if gaussian_cfg.enabled or return_spike_sample:
+            # Run the deterministic encoder exactly once before deciding whether a
+            # sample is needed. Timing error acts on the bounded nominal timestamp.
+            output, out_domain = func(*args, **kwargs)
+
+            # Clock-driven execution and continuous timing noise are separate axes.
+            clock_cfg = get_clock_driven()
+            if clock_cfg.enabled:
+                if gaussian_cfg.enabled or return_spike_sample:
+                    raise RuntimeError(
+                        "clock-driven execution cannot be combined with Gaussian "
+                        "spike-time noise"
+                    )
+                if not isinstance(out_domain, TimeBounds):
+                    raise TypeError(
+                        "clock-driven spike encoders must return TimeBounds"
+                    )
+                site = kwargs.get("noise_site", func.__name__)
+                return quantize_encoder_output(output, out_domain, site=site)
+
+            # Tensor-only consumers cannot represent a missed event, so they retain
+            # the deterministic tuple even while a Gaussian replica is active.
+            if not return_spike_sample:
+                return out_domain.clamp(output), out_domain
+
+            if not gaussian_cfg.enabled:
                 raise RuntimeError(
-                    "clock-driven execution cannot be combined with Gaussian "
-                    "spike-time noise"
+                    "return_spike_sample requires enabled Gaussian time noise"
                 )
             if not isinstance(out_domain, TimeBounds):
-                raise TypeError("clock-driven spike encoders must return TimeBounds")
+                raise TypeError("sampled spike encoders must return TimeBounds")
+            if not isinstance(gaussian_cfg.generator, torch.Generator):
+                raise RuntimeError(
+                    "enabled Gaussian time noise requires a torch.Generator"
+                )
+
+            # An omitted override preserves the historical shared-parameter path.
+            if encoding == "linear":
+                time_std = gaussian_cfg.linear_time_std
+                deadline_margin = gaussian_cfg.linear_deadline_margin
+            else:
+                time_std = gaussian_cfg.log_time_std
+                deadline_margin = gaussian_cfg.log_deadline_margin
+            if time_std is None:
+                time_std = gaussian_cfg.time_std
+            if deadline_margin is None:
+                deadline_margin = gaussian_cfg.deadline_margin
+
+            nominal_time = out_domain.clamp(output)
+            sample = _sample_gaussian_spike_time(
+                nominal_time,
+                time_std=time_std,
+                domain=out_domain,
+                generator=gaussian_cfg.generator,
+                time_mean=gaussian_cfg.time_mean,
+                deadline_margin=deadline_margin,
+            )
+
+            # Attribute sampled events to the physical values consumed downstream.
             site = kwargs.get("noise_site", func.__name__)
-            return quantize_encoder_output(output, out_domain, site=site)
-
-        # Tensor-only consumers cannot represent a missed event, so they retain the
-        # deterministic tuple even while a Gaussian replica is active. Production
-        # physical readouts explicitly request the event-aware result instead.
-        if not return_spike_sample:
-            return out_domain.clamp(output), out_domain
-
-        # Refuse event-aware requests without a configured replica. Returning an
-        # implicit all-fired mask would hide a configuration error and would make
-        # noise-off behavior depend on which return type the caller requested.
-        if not gaussian_cfg.enabled:
-            raise RuntimeError(
-                "return_spike_sample requires enabled Gaussian time noise"
+            counts = _stats_for(site)
+            counts["events"] += sample.time.numel()
+            deadline = nominal_time.new_tensor(float(out_domain.max))
+            miss_and_endpoint_counts = torch.stack(
+                ((~sample.fired).sum(), (nominal_time == deadline).sum())
+            ).to(device="cpu")
+            counts["misses"] += int(miss_and_endpoint_counts[0].item())
+            counts["deadline_events"] += int(miss_and_endpoint_counts[1].item())
+            cpu_deadline = torch.tensor(
+                float(out_domain.max),
+                dtype=nominal_time.dtype,
+                device="cpu",
             )
-        if not isinstance(out_domain, TimeBounds):
-            raise TypeError("event-aware spike encoders must return TimeBounds")
-        if not isinstance(gaussian_cfg.generator, torch.Generator):
-            raise RuntimeError(
-                "enabled Gaussian time noise requires a torch.Generator"
+            deadline_ulp = float(
+                (
+                    torch.nextafter(
+                        cpu_deadline, cpu_deadline.new_tensor(math.inf)
+                    )
+                    - cpu_deadline
+                ).item()
             )
+            counts["deadline_ulp_min"] = min(
+                counts["deadline_ulp_min"], deadline_ulp
+            )
+            counts["deadline_ulp_max"] = max(
+                counts["deadline_ulp_max"], deadline_ulp
+            )
+            return sample
 
-        # Clamp only the nominal deterministic codeword before sampling. The sampled
-        # timestamp itself remains unbounded until the sampler classifies strict
-        # deadline exceedance and stores a finite deadline carrier for every miss.
-        nominal_time = out_domain.clamp(output)
-        sample = _sample_gaussian_spike_time(
-            nominal_time,
-            time_std=gaussian_cfg.time_std,
-            domain=out_domain,
-            generator=gaussian_cfg.generator,
-            time_mean=gaussian_cfg.time_mean,
-            deadline_margin=gaussian_cfg.deadline_margin,
-        )
+        return wrapper
 
-        # Attribute exactly the sampled events consumed by downstream readout. Event
-        # totals and strict deadline misses share the same mask, so reported rates
-        # cannot drift from the physical values used by the operator implementation.
-        site = kwargs.get("noise_site", func.__name__)
-        counts = _stats_for(site)
-        counts["events"] += sample.time.numel()
-        deadline = nominal_time.new_tensor(float(out_domain.max))
-        miss_and_endpoint_counts = torch.stack(
-            ((~sample.fired).sum(), (nominal_time == deadline).sum())
-        ).to(device="cpu")
-        counts["misses"] += int(miss_and_endpoint_counts[0].item())
-        counts["deadline_events"] += int(miss_and_endpoint_counts[1].item())
-        cpu_deadline = torch.tensor(
-            float(out_domain.max),
-            dtype=nominal_time.dtype,
-            device="cpu",
-        )
-        deadline_ulp = float(
-            (
-                torch.nextafter(cpu_deadline, cpu_deadline.new_tensor(math.inf))
-                - cpu_deadline
-            ).item()
-        )
-        counts["deadline_ulp_min"] = min(
-            counts["deadline_ulp_min"], deadline_ulp
-        )
-        counts["deadline_ulp_max"] = max(
-            counts["deadline_ulp_max"], deadline_ulp
-        )
-        return sample
-
-    return wrapper
+    return decorator
 
 
 # ---------------------------------------------------------------------------
