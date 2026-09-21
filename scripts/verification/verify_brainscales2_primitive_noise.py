@@ -45,6 +45,7 @@ from utils.hardware.brainscales2.primitive_optimization import (
     score_encoder_operating_point,
 )
 from scripts.evaluation.brainscales2_primitive_noise import (
+    _primitive_summary_prerequisites,
     build_parser,
     collect_observations,
     make_config,
@@ -1300,6 +1301,35 @@ def verify_encoder_operating_point_score() -> None:
     assert not strict["selection_eligible"]
     assert screening["selection_eligible"]
     assert not screening["np_static"]["calibration_transfer"]["strict_eligible"]
+
+    prerequisite_score = {
+        "np_static": {
+            "calibration_transfer": {"strict_eligible": True},
+            "held_out_validated": True,
+        },
+        "primitive_scores": {
+            "phi-np": {
+                "calibration_transfer": {"strict_eligible": True},
+                "held_out_validated": False,
+            },
+            "phi-nl": {
+                "calibration_transfer": {"strict_eligible": True},
+                "held_out_validated": True,
+            },
+        },
+    }
+    calibration_valid, held_out_valid = _primitive_summary_prerequisites(
+        prerequisite_score, "phi-nl"
+    )
+    assert calibration_valid
+    assert not held_out_valid
+    prerequisite_score["primitive_scores"]["phi-np"][
+        "calibration_transfer"
+    ]["strict_eligible"] = False
+    calibration_valid, _ = _primitive_summary_prerequisites(
+        prerequisite_score, "phi-nl"
+    )
+    assert not calibration_valid
 
 
 # @lat: [[hardware#Independent Primitive Noise Verification#Resumable operating point search]]

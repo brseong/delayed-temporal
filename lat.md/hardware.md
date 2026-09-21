@@ -498,6 +498,8 @@ Each circuit's conditional timing deviation is divided by the $\phi_{\mathrm{NP}
 
 Candidates are ranked only with calibration repetitions. Held out repetitions confirm the selected candidate and report whether the timing noise ratio reaches 0.001, 0.0001, or 0.00003.
 
+Each encoder summary reports the validation timing noise ratio only if all required stages pass validation. $\phi_{\mathrm{NL}}$ requires static and dynamic $\phi_{\mathrm{NP}}$ plus its own transfer; $\phi_{\mathrm{NP}}$ requires its static and dynamic stages.
+
 [[utils/hardware/brainscales2/primitive_optimization.py#score_encoder_operating_point]] scores one candidate, while [[scripts/evaluation/brainscales2_primitive_noise.py#optimize_encoder_operating_point]] owns enumeration and artifacts. The command writes a fixed search manifest, one standard primitive artifact per candidate, a result table, and a selected configuration. Finished candidates are reused only when the search manifest and candidate identity match.
 
 ### Formal physical result for five primitives

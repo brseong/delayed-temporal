@@ -373,6 +373,26 @@ def _write_search_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _primitive_summary_prerequisites(
+    score: dict[str, Any], primitive: str
+) -> tuple[bool, bool]:
+    """Return strict calibration and held-out prerequisite status."""
+    static = score.get("np_static", {})
+    primitive_scores = score.get("primitive_scores", {})
+    required = [static]
+    if primitive == "phi-nl":
+        required.append(primitive_scores.get("phi-np", {}))
+    required.append(primitive_scores.get(primitive, {}))
+    calibration_valid = all(
+        item.get("calibration_transfer", {}).get("strict_eligible", False)
+        for item in required
+    )
+    held_out_valid = all(
+        item.get("held_out_validated", False) for item in required
+    )
+    return calibration_valid, held_out_valid
+
+
 def optimize_encoder_operating_point(
     args: argparse.Namespace,
     base_config: PrimitiveNoiseConfig,
@@ -521,6 +541,9 @@ def optimize_encoder_operating_point(
             primitive_score = score.get("primitive_scores", {}).get(primitive)
             if result.get("status") != "complete" or not primitive_score:
                 continue
+            calibration_valid, _ = _primitive_summary_prerequisites(
+                score, primitive
+            )
             calibration_rt = (
                 primitive_score.get("calibration", {})
                 .get("summary", {})
@@ -528,12 +551,7 @@ def optimize_encoder_operating_point(
             )
             if (
                 calibration_rt is None
-                or not primitive_score.get("calibration_transfer", {}).get(
-                    "eligible"
-                )
-                or not score.get("np_static", {})
-                .get("calibration_transfer", {})
-                .get("eligible")
+                or not calibration_valid
             ):
                 continue
             primitive_ranked.append((float(calibration_rt), result))
@@ -543,9 +561,10 @@ def optimize_encoder_operating_point(
             key=lambda item: (item[0], item[1]["candidate"]["candidate_id"])
         )
         calibration_rt, result = primitive_ranked[0]
-        primitive_score = result["score"]["primitive_scores"][primitive]
+        score = result["score"]
+        primitive_score = score["primitive_scores"][primitive]
         held_out_rt = primitive_score["held_out"]["summary"]["median"]
-        held_out_validated = bool(primitive_score["held_out_validated"])
+        _, held_out_validated = _primitive_summary_prerequisites(score, primitive)
         best_by_primitive[primitive] = {
             "candidate": result["candidate"],
             "calibration_rt": calibration_rt,
