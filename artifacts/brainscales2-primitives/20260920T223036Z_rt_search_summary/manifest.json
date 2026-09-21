@@ -74,6 +74,8 @@
     "state": "unavailable_during_confirmation",
     "known_operating_point_timed_out": true,
     "official_single_neuron_run_timed_out": true,
+    "official_single_neuron_timeout_s": 600,
+    "official_single_neuron_log": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-primitives/official_probe_20260921T033132Z.log",
     "full_code_confirmation_pending": true
   },
   "source_checksums": {
@@ -81,6 +83,7 @@
     "per_device_results.csv": "02baea3279bcda1b6656984f30c384de85f406e5c44fc1c93aa3be7d6901cb5c",
     "simulator_base_summary.csv": "1776ce7f5256b4fb96f4f72f7d3c2c20e3017a6b7c61f34553cd11118c041129",
     "simulator_high_ratio_summary.csv": "dc92994d71d60967ceb5f7a29588a4f64ee0de312db2bc1dfdcc3e5cb8962748",
-    "per_device_selected_512_log": "21a3379f7043bc4d6425850586f039f252052fe5a1bba3bb14f22deb82364418"
+    "per_device_selected_512_log": "21a3379f7043bc4d6425850586f039f252052fe5a1bba3bb14f22deb82364418",
+    "official_single_neuron_timeout_log": "0ee4c41738ee7a25aea9182aa32ccce17be320043504e97d8717f1d8899084b5"
   }
 }
