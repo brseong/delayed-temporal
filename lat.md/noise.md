@@ -134,6 +134,14 @@ For $\phi_{\mathrm{NL}}$, all sixteen circuits have negative code-noise correlat
 
 The hardware-anchored experiment applies the two scales only to their corresponding encoder families. It remains a sensitivity experiment rather than a calibrated BrainScaleS-2 system prediction and must report both physical artifacts, the normalization rule, seeds, simulated miss rates, and output saturation. Measured $\Psi$ potential residuals remain separate because converting them depends on activation distributions, inverse transfers, clamps, saturation, and error dependence.
 
+### Hardware ratio and simulator recovery
+
+The measured encoder ratios and the simulator sweep answer separate questions: physical feasibility and model-level tolerance.
+
+At timing noise ratio 0.001 with deadline margin to noise standard deviation ratio 4, the fixed 5,000-sample ViT evaluation has mean top-1 accuracy 0.6867%, compared with 86.00% for the clean spiking reference. Reaching 0.001 would therefore not recover this simulator configuration.
+
+The largest tested ratio with an accuracy drop below one percentage point is $4.216965\times10^{-5}$, with 85.26% mean accuracy. At 0.0001 the mean is 79.8733%. The representative code hardware result in [[hardware#BrainScaleS-2 Hardware Validation#Independent Primitive Noise Characterization#Provisional encoder operating point result]] is therefore still orders of magnitude above the model-level recovery region.
+
 The superseded conversion proposal is retained in [[deprecated#Deferred Potential Residual Reduction]].
 
 ## Current Coverage and Resume Order

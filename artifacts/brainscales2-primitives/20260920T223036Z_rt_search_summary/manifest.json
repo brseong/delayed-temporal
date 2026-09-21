@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "status": "provisional",
+  "created_at": "2026-09-21T03:25:39Z",
+  "source_git_revision": "988acfc84a44153dc9d2e365e584fcba0b878206",
+  "chip_identifier": "hxcube7fpga0chip57_1",
+  "spiking_calibration_sha256": "16d57c10ba8490f01fe9532773b1afe6e63fc78cc15092c52469fa2ca4dd0ee4",
+  "remote_source_root": "/mnt/user/shared/AnalogAttention/artifacts/brainscales2-primitives/20260920T223036Z_rt_search",
+  "selection_protocol": {
+    "selection_split": "calibration",
+    "confirmation_split": "held_out",
+    "phi_np_codes": [0, 15, 30],
+    "phi_nl_codes": [1, 8, 31],
+    "calibration_repetitions": 16,
+    "held_out_repetitions": 16,
+    "calibration_selects_physical_coordinate": true,
+    "held_out_refitting": false,
+    "formal_confirmation_pending": true
+  },
+  "calibration_selected": {
+    "phi_np": {
+      "candidate_id": "cc1022_th0550_stop025.00us_fanin04_w56",
+      "physical_coordinate": 176,
+      "constant_current_code": 1022,
+      "threshold_code": 550,
+      "ramp_stop_s": 0.000025,
+      "precharge_input_fan_in": 4,
+      "precharge_weight_maximum": 56,
+      "calibration_timing_noise_ratio": 0.0213195737072351,
+      "held_out_timing_noise_ratio": 0.0238687106686803,
+      "held_out_validated": true,
+      "target_timing_noise_ratio": 0.001,
+      "target_reached": false
+    },
+    "phi_nl": {
+      "candidate_id": "cc1022_th0550_stop025.00us_fanin04_w63",
+      "physical_coordinate": 168,
+      "constant_current_code": 1022,
+      "threshold_code": 550,
+      "ramp_stop_s": 0.000025,
+      "precharge_input_fan_in": 4,
+      "precharge_weight_maximum": 63,
+      "calibration_timing_noise_ratio": 0.0106150247005845,
+      "held_out_timing_noise_ratio": 0.0115245693899879,
+      "held_out_validated": true,
+      "target_timing_noise_ratio": 0.001,
+      "target_reached": false
+    }
+  },
+  "post_hoc_observed_lower_bound": {
+    "selection_warning": "Held out values select these rows and therefore do not define a deployable estimate.",
+    "phi_np": {
+      "candidate_id": "cc1022_th0550_stop025.00us_fanin04_w63",
+      "physical_coordinate": 176,
+      "held_out_timing_noise_ratio": 0.0217843482374464
+    },
+    "phi_nl": {
+      "candidate_id": "cc1022_th0550_stop025.00us_fanin04_w56",
+      "physical_coordinate": 232,
+      "held_out_timing_noise_ratio": 0.0104026010556989
+    }
+  },
+  "target_assessment": {
+    "target_timing_noise_ratio": 0.001,
+    "phi_np_improvement_factor_required": 23.8687106686803,
+    "phi_nl_improvement_factor_required": 11.5245693899879,
+    "target_reached": false,
+    "simulator_accuracy_at_target": 0.006866666666666667,
+    "clean_spiking_accuracy": 0.86,
+    "target_recovers_accuracy": false,
+    "largest_tested_ratio_with_accuracy_drop_below_one_percentage_point": 0.00004216965034285822
+  },
+  "hardware_service_status": {
+    "state": "unavailable_during_confirmation",
+    "known_operating_point_timed_out": true,
+    "official_single_neuron_run_timed_out": true,
+    "full_code_confirmation_pending": true
+  },
+  "source_checksums": {
+    "candidate_results.csv": "4d5f5c73cd78dbde2b99896c4906ff3814f40a710411c2d7e4df551f694dd1f9",
+    "per_device_results.csv": "02baea3279bcda1b6656984f30c384de85f406e5c44fc1c93aa3be7d6901cb5c",
+    "simulator_base_summary.csv": "1776ce7f5256b4fb96f4f72f7d3c2c20e3017a6b7c61f34553cd11118c041129",
+    "simulator_high_ratio_summary.csv": "dc92994d71d60967ceb5f7a29588a4f64ee0de312db2bc1dfdcc3e5cb8962748",
+    "per_device_selected_512_log": "21a3379f7043bc4d6425850586f039f252052fe5a1bba3bb14f22deb82364418"
+  }
+}

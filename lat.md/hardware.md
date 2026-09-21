@@ -502,6 +502,20 @@ Each encoder summary reports the validation timing noise ratio only if all requi
 
 [[utils/hardware/brainscales2/primitive_optimization.py#score_encoder_operating_point]] scores one candidate, while [[scripts/evaluation/brainscales2_primitive_noise.py#optimize_encoder_operating_point]] owns enumeration and artifacts. The command writes a fixed search manifest, one standard primitive artifact per candidate, a result table, and a selected configuration. Finished candidates are reused only when the search manifest and candidate identity match.
 
+### Provisional encoder operating point result
+
+The current result selects one physical circuit on calibration repetitions and reports its held out timing noise ratio without refitting; it remains a representative code screen pending full code confirmation.
+
+For $\phi_{\mathrm{NP}}$, calibration selects current code 1022, threshold code 550, ramp stop $25\,\mu\mathrm{s}$, precharge fan in 4 with weight 56, and physical coordinate 176. Its calibration timing noise ratio is 0.02132 and its held out ratio is 0.02387.
+
+For $\phi_{\mathrm{NL}}$, calibration selects current code 1022, threshold code 550, ramp stop $25\,\mu\mathrm{s}$, precharge fan in 4 with weight 63, and physical coordinate 168. Its calibration timing noise ratio is 0.01062 and its held out ratio is 0.01152.
+
+Both selected circuits pass their per-circuit transfer gates on the held out split. Selecting the minimum held out row after observation gives lower values 0.02178 and 0.01040, but those values are post hoc lower bounds and are not deployment estimates.
+
+The target timing noise ratio 0.001 is not reached. The selected $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ ratios require 23.9-fold and 11.5-fold reductions, respectively. Extending the ramp stop to $850\,\mu\mathrm{s}$ did not help because the fitted signal span did not grow with runtime and conditional timing variation increased.
+
+Full code confirmation remains pending because both the known operating point and the official single-neuron PyNN example timed out at the hardware run after a complete Jupyter server restart. The frozen candidate tables and simulator comparison are stored under `artifacts/brainscales2-primitives/20260920T223036Z_rt_search_summary/`.
+
 ### Formal physical result for five primitives
 
 The formal run stores 128 calibration and 128 validation repetitions for each primitive without pooling outputs across physical circuits.
