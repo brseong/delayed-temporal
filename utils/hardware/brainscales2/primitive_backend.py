@@ -1524,9 +1524,15 @@ class PrimitiveHardwareBackend:
                 "refractory_period_enable_pause": True,
                 **refractory_parameters,
             }
-            if config.membrane_capacitance_code is not None:
+            # Fingerprinted workers can resume while a notebook updates the
+            # repository.  A config pickled before this field existed retains
+            # the calibration file setting, which is also the public default.
+            membrane_capacitance_code = getattr(
+                config, "membrane_capacitance_code", None
+            )
+            if membrane_capacitance_code is not None:
                 cell_parameters["membrane_capacitance_capacitance"] = (
-                    config.membrane_capacitance_code
+                    membrane_capacitance_code
                 )
             population = pynn.Population(
                 config.device_count,
