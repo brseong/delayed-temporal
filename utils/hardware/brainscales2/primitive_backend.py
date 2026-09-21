@@ -36,7 +36,6 @@ from .primitive_noise import (
 
 
 PYNN_BACKEND_MODULE = "pynn_brainscales.brainscales2"
-PYNN_WORKER_MAX_ATTEMPTS = 3
 _TRANSIENT_PYNN_WORKER_ERRORS = (
     "could not submit request",
     "name or service not known",
@@ -1082,6 +1081,8 @@ class PrimitiveHardwareBackend:
                 "constant_current_playback": primitive == "phi-np",
                 "chunk_repeats": config.pynn_chunk_repeats,
                 "process_repeats": config.pynn_process_repeats,
+                "worker_timeout_s": config.pynn_worker_timeout_s,
+                "worker_max_attempts": config.pynn_worker_max_attempts,
                 "calibration_acquisition_indices": list(
                     calibration_acquisition_indices
                 ),
@@ -1202,7 +1203,7 @@ class PrimitiveHardwareBackend:
             )
             completed: subprocess.CompletedProcess[str] | None = None
             worker_attempts = 0
-            for attempt in range(1, PYNN_WORKER_MAX_ATTEMPTS + 1):
+            for attempt in range(1, config.pynn_worker_max_attempts + 1):
                 worker_attempts = attempt
                 try:
                     completed = subprocess.run(
@@ -1218,7 +1219,7 @@ class PrimitiveHardwareBackend:
                         timeout=config.pynn_worker_timeout_s,
                     )
                 except subprocess.TimeoutExpired as error:
-                    if attempt == PYNN_WORKER_MAX_ATTEMPTS:
+                    if attempt == config.pynn_worker_max_attempts:
                         raise RuntimeError(
                             "PyNN worker timed out for "
                             f"{primitive}/{stage}/code={code} after {attempt} attempts"
@@ -1226,7 +1227,7 @@ class PrimitiveHardwareBackend:
                 except subprocess.CalledProcessError as error:
                     detail = (error.stderr or error.stdout or "").strip()
                     if (
-                        attempt == PYNN_WORKER_MAX_ATTEMPTS
+                        attempt == config.pynn_worker_max_attempts
                         or not _is_transient_pynn_worker_error(detail)
                     ):
                         raise RuntimeError(
@@ -1247,6 +1248,7 @@ class PrimitiveHardwareBackend:
         metadata = dict(response["metadata"])
         metadata["worker_stdout"] = completed.stdout.strip()
         metadata["worker_attempts"] = worker_attempts
+        metadata["worker_max_attempts"] = config.pynn_worker_max_attempts
         metadata["worker_cache_hit"] = False
         if cache_path is not None:
             cache_payload = {

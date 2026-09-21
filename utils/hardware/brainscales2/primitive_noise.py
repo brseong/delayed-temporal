@@ -118,6 +118,7 @@ class PrimitiveNoiseConfig:
     pynn_chunk_repeats: int = 8
     pynn_process_repeats: int | None = 32
     pynn_worker_timeout_s: float = 300.0
+    pynn_worker_max_attempts: int = 3
     pynn_worker_cache_dir: Path | None = None
     psi_ne_input_fan_in: int = 2
     psi_ne_chunk_repeats: int = 4
@@ -250,6 +251,8 @@ class PrimitiveNoiseConfig:
             raise ValueError("PyNN process repeats must be positive when specified")
         if self.pynn_worker_timeout_s <= 0:
             raise ValueError("PyNN worker timeout must be positive")
+        if self.pynn_worker_max_attempts <= 0:
+            raise ValueError("PyNN worker maximum attempts must be positive")
         if self.reset_code_table is not None:
             if len(self.reset_code_table) != 32:
                 raise ValueError("reset code table must contain 32 entries")

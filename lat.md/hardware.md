@@ -456,7 +456,7 @@ Formal PyNN collection partitions repeated trials for each input code into bound
 
 Formal child processes reuse a fully configured Quiggeldy endpoint inherited from the notebook kernel. They call the official setup helper only when either endpoint field is absent, avoiding a repeated dependency on the remote setup list lookup without changing hardware selection.
 
-Bounded child acquisition retries connection submission, endpoint resolution, and remote timeout failures up to three attempts. Successful cache writes remain atomic, while exhausted retries preserve the final worker error.
+PyNN worker attempts are configurable and default to three. For hardware notebook collection, use a 30--60 minute worker timeout with one outer attempt so one Quiggeldy session remains queued; inactive clients lose queued packages. Short timeouts with retries are reserved for explicit diagnostics. This setting changes only process retry behavior and does not change scientific eligibility or completed acquisition semantics.
 
 Formal PyNN collection isolates at most 32 repetitions of one input code in a child process. Each child retains hardware acquisitions of eight repetitions and returns raw timestamps and spike counts. Process exit bounds native memory use within the notebook memory limit.
 
@@ -687,3 +687,7 @@ The worker must reuse an inherited complete Quiggeldy endpoint and must fall bac
 ### Transient worker retry
 
 The worker boundary must retry only recognized connection failures for a bounded number of attempts and must preserve nonconnection failures without retrying them.
+
+### PyNN worker attempt budget
+
+The configuration must preserve the default of three attempts, reject nonpositive values, expose the command interface override, record it in the manifest and worker metadata, and stop after the configured number of attempts.

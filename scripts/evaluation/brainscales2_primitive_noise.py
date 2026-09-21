@@ -169,6 +169,7 @@ def make_config(args: argparse.Namespace) -> PrimitiveNoiseConfig:
         pynn_chunk_repeats=args.pynn_chunk_repeats,
         pynn_process_repeats=args.pynn_process_repeats,
         pynn_worker_timeout_s=args.pynn_worker_timeout,
+        pynn_worker_max_attempts=args.pynn_worker_max_attempts,
         pynn_worker_cache_dir=(
             args.pynn_worker_cache_dir.resolve()
             if args.pynn_worker_cache_dir is not None
@@ -897,6 +898,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pynn-chunk-repeats", type=int, default=8)
     parser.add_argument("--pynn-process-repeats", type=int, default=32)
     parser.add_argument("--pynn-worker-timeout", type=float, default=300.0)
+    parser.add_argument(
+        "--pynn-worker-max-attempts",
+        type=int,
+        default=PrimitiveNoiseConfig.pynn_worker_max_attempts,
+    )
     parser.add_argument("--pynn-worker-cache-dir", type=Path)
     parser.add_argument("--psi-ne-input-fan-in", type=int, default=2)
     parser.add_argument("--psi-ne-chunk-repeats", type=int, default=4)

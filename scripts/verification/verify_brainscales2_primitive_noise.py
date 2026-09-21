@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -108,6 +109,105 @@ def verify_transient_worker_error_classification() -> None:
     assert not primitive_backend_module._is_transient_pynn_worker_error(
         "ValueError: invalid physical coordinate"
     )
+
+
+# @lat: [[hardware#Independent Primitive Noise Verification#PyNN worker attempt budget]]
+def verify_pynn_worker_attempt_budget() -> None:
+    parser = build_parser()
+    default_config = make_config(
+        parser.parse_args(["--output-dir", "/tmp/primitive-output"])
+    )
+    assert default_config.pynn_worker_max_attempts == 3
+    assert default_config.to_manifest_dict()["pynn_worker_max_attempts"] == 3
+    explicit_config = make_config(
+        parser.parse_args(
+            [
+                "--output-dir",
+                "/tmp/primitive-output",
+                "--pynn-worker-max-attempts",
+                "1",
+            ]
+        )
+    )
+    assert explicit_config.pynn_worker_max_attempts == 1
+    rejects(lambda: PrimitiveNoiseConfig(pynn_worker_max_attempts=0))
+
+    backend = PrimitiveHardwareBackend()
+    original_subprocess_run = primitive_backend_module.subprocess.run
+    original_sleep = primitive_backend_module.time.sleep
+    attempts = 0
+
+    def timeout_then_succeed(command, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        response_path = Path(command[-1])
+        torch.save(
+            {
+                "first": torch.ones((2, 1), dtype=torch.float64),
+                "count": torch.ones((2, 1), dtype=torch.int64),
+                "precharge": None,
+                "metadata": {"chip_identifier": ["synthetic-chip"]},
+            },
+            response_path,
+        )
+        return SimpleNamespace(stdout="synthetic worker")
+
+    retry_config = PrimitiveNoiseConfig(
+        repeats=4,
+        calibration_repeats=2,
+        device_count=1,
+        physical_coordinates=(0,),
+        pynn_worker_timeout_s=10.0,
+        pynn_worker_max_attempts=2,
+    )
+    primitive_backend_module.subprocess.run = timeout_then_succeed
+    primitive_backend_module.time.sleep = lambda _seconds: None
+    try:
+        _, _, _, metadata = backend._run_pynn_code_process(
+            "phi-np",
+            "static",
+            15,
+            retry_config,
+            repeats=2,
+            trial_start=0,
+        )
+    finally:
+        primitive_backend_module.subprocess.run = original_subprocess_run
+        primitive_backend_module.time.sleep = original_sleep
+    assert attempts == 2
+    assert metadata["worker_attempts"] == 2
+    assert metadata["worker_max_attempts"] == 2
+
+    attempts = 0
+
+    def always_timeout(command, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    single_attempt_config = replace(retry_config, pynn_worker_max_attempts=1)
+    primitive_backend_module.subprocess.run = always_timeout
+    primitive_backend_module.time.sleep = lambda _seconds: None
+    try:
+        try:
+            backend._run_pynn_code_process(
+                "phi-np",
+                "static",
+                15,
+                single_attempt_config,
+                repeats=2,
+                trial_start=0,
+            )
+        except RuntimeError as error:
+            assert "after 1 attempts" in str(error)
+        else:
+            raise AssertionError("single-attempt timeout was accepted")
+    finally:
+        primitive_backend_module.subprocess.run = original_subprocess_run
+        primitive_backend_module.time.sleep = original_sleep
+    assert attempts == 1
 
 
 # @lat: [[hardware#Independent Primitive Noise Verification#Repeated acquisition timeout abort]]
@@ -963,7 +1063,11 @@ def verify_nonlinear_drive_configuration() -> None:
             primitive_backend_module.subprocess.run = original_subprocess_run
         assert len(worker_calls) == 1
         assert first[3]["worker_cache_hit"] is False
+        assert first[3]["worker_attempts"] == 1
+        assert first[3]["worker_max_attempts"] == 3
         assert second[3]["worker_cache_hit"] is True
+        assert second[3]["worker_attempts"] == 1
+        assert second[3]["worker_max_attempts"] == 3
         torch.testing.assert_close(first[0], second[0])
 
 
@@ -2038,6 +2142,7 @@ def verify_artifact_integrity() -> None:
 def main() -> None:
     verify_configured_hardware_endpoint_reuse()
     verify_transient_worker_error_classification()
+    verify_pynn_worker_attempt_budget()
     verify_repeated_acquisition_timeout_abort()
     verify_synthetic_transfer_recovery()
     verify_held_out_validation_isolation()
