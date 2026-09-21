@@ -480,7 +480,7 @@ The resulting distributions are independent primitive marginals for later sensit
 
 The search minimizes the calibration timing noise ratio without changing the primitive equations or pooling physical outputs.
 
-The search changes only the raw constant current code, threshold code, ramp stop time, and precharge input count and weight. The potential code, first spike readout, and fitted $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ equations remain unchanged.
+The search changes only the raw constant current code, threshold code, ramp stop time, precharge input count and weight, and exponential synaptic current input count and weight. The potential code, first spike readout, and fitted $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ equations remain unchanged.
 
 For static encoder acquisition, the reset associated with each code remains installed for the full trial. The refractory period covering the full window suppresses later spikes, while retaining the reset value avoids rewriting an analog parameter after the initial membrane state is loaded.
 
@@ -488,7 +488,7 @@ All PyNN encoder acquisitions use the official Calix refractory period calculato
 
 The coarse screen couples each constant current code to a ramp stop time. This lets weak currents use a longer physical interval without leaving strong currents active long enough to cause repeated spikes. Extending the physical deadline rescales the time axis but does not change the potential code or transfer equation.
 
-After the coarse screen, separate refinements for $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ vary threshold and precharge input count around each encoder's selected current and ramp duration. The result records the best held out timing noise ratio for each encoder.
+After the coarse screen, separate refinements vary threshold and precharge input count around each encoder's selected current and ramp duration. The $\phi_{\mathrm{NL}}$ refinement additionally varies the input count and weight of its exponential synaptic current. The result records the best held out timing noise ratio for each encoder.
 
 Coarse and refinement screens use three representative potential codes with 32 repetitions split equally between calibration and held out data. Only the selected configuration for each encoder receives the full 32 code grid with 128 calibration and 128 held out repetitions.
 

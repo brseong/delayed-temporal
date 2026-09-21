@@ -41,6 +41,7 @@ from utils.hardware.brainscales2.primitive_noise import (
 from utils.hardware.brainscales2.primitive_optimization import (
     build_encoder_operating_point_candidates,
     parse_current_stop_pair,
+    parse_exponential_pair,
     parse_precharge_pair,
     score_encoder_operating_point,
 )
@@ -1342,6 +1343,8 @@ def verify_resumable_operating_point_search() -> None:
     )
     assert parse_precharge_pair("2:31") == (2, 31)
     rejects(lambda: parse_precharge_pair("2x31"), (ValueError,))
+    assert parse_exponential_pair("4:48") == (4, 48)
+    rejects(lambda: parse_exponential_pair("4:0"), (ValueError,))
     parsed_current, parsed_stop = parse_current_stop_pair("512:40")
     assert parsed_current == 512
     torch.testing.assert_close(
@@ -1357,6 +1360,24 @@ def verify_resumable_operating_point_search() -> None:
     )
     assert len(candidates) == 2
     assert candidates[0].apply(config).observation_time_s == 42.5e-6
+    assert candidates[0].apply(config).exponential_input_fan_in == 8
+    assert candidates[0].apply(config).exponential_input_weight == 63
+    nonlinear_candidates = build_encoder_operating_point_candidates(
+        config,
+        constant_current_codes=(1022,),
+        threshold_codes=(600,),
+        ramp_stop_times_s=(25.0e-6,),
+        precharge_pairs=((1, 63),),
+        exponential_pairs=((2, 48), (4, 32)),
+    )
+    assert len(nonlinear_candidates) == 2
+    assert {
+        (
+            item.apply(config).exponential_input_fan_in,
+            item.apply(config).exponential_input_weight,
+        )
+        for item in nonlinear_candidates
+    } == {(2, 48), (4, 32)}
     rejects(
         lambda: build_encoder_operating_point_candidates(
             config,
@@ -1399,6 +1420,54 @@ def verify_resumable_operating_point_search() -> None:
         assert len(list((output / "candidates").glob("*/candidate_result.json"))) == 2
         run(arguments)
         assert selection_path.read_text(encoding="utf-8") == first
+
+        nonlinear_output = Path(temporary) / "nonlinear-search"
+        nonlinear_arguments = build_parser().parse_args(
+            [
+                "--phase",
+                "optimize",
+                "--primitive",
+                "phi-nl",
+                "--backend",
+                "mock",
+                "--quick",
+                "--device-count",
+                "4",
+                "--search-current-stop-pairs",
+                "1022:25",
+                "--search-threshold-codes",
+                "600",
+                "--search-precharge-pairs",
+                "1:63",
+                "--search-exponential-pairs",
+                "2:48",
+                "4:32",
+                "--search-max-candidates",
+                "2",
+                "--output-dir",
+                str(nonlinear_output),
+            ]
+        )
+        run(nonlinear_arguments)
+        nonlinear_manifest = json.loads(
+            (nonlinear_output / "search_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert {
+            (
+                item["exponential_input_fan_in"],
+                item["exponential_input_weight"],
+            )
+            for item in nonlinear_manifest["candidates"]
+        } == {(2, 48), (4, 32)}
+        assert len(
+            list(
+                (nonlinear_output / "candidates").glob(
+                    "*/candidate_result.json"
+                )
+            )
+        ) == 2
 
     notebook = json.loads(
         (

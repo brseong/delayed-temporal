@@ -33,6 +33,8 @@ class EncoderOperatingPointCandidate:
     ramp_stop_s: float
     precharge_input_fan_in: int
     precharge_weight_maximum: int
+    exponential_input_fan_in: int
+    exponential_input_weight: int
 
     def apply(self, base: PrimitiveNoiseConfig) -> PrimitiveNoiseConfig:
         observation_time_s = self.ramp_stop_s + (
@@ -46,27 +48,39 @@ class EncoderOperatingPointCandidate:
             observation_time_s=observation_time_s,
             precharge_input_fan_in=self.precharge_input_fan_in,
             precharge_weight_maximum=self.precharge_weight_maximum,
+            exponential_input_fan_in=self.exponential_input_fan_in,
+            exponential_input_weight=self.exponential_input_weight,
         )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def parse_precharge_pair(value: str) -> tuple[int, int]:
-    """Parse ``FAN_IN:MAXIMUM_WEIGHT`` without inferring hidden scaling."""
+def _parse_fan_in_weight_pair(
+    value: str, *, label: str
+) -> tuple[int, int]:
+    """Parse an explicit ``FAN_IN:WEIGHT`` physical input setting."""
     try:
         fan_in_text, weight_text = value.split(":", maxsplit=1)
         fan_in = int(fan_in_text)
         weight = int(weight_text)
     except (TypeError, ValueError) as error:
-        raise ValueError(
-            "precharge pair must use FAN_IN:MAXIMUM_WEIGHT"
-        ) from error
+        raise ValueError(f"{label} pair must use FAN_IN:WEIGHT") from error
     if fan_in <= 0 or not 1 <= weight <= 63:
         raise ValueError(
-            "precharge fan-in must be positive and weight must lie in [1, 63]"
+            f"{label} fan-in must be positive and weight must lie in [1, 63]"
         )
     return fan_in, weight
+
+
+def parse_precharge_pair(value: str) -> tuple[int, int]:
+    """Parse one precharge fan-in and maximum-weight pair."""
+    return _parse_fan_in_weight_pair(value, label="precharge")
+
+
+def parse_exponential_pair(value: str) -> tuple[int, int]:
+    """Parse one exponential-current fan-in and weight pair."""
+    return _parse_fan_in_weight_pair(value, label="exponential input")
 
 
 def parse_current_stop_pair(value: str) -> tuple[int, float]:
@@ -91,11 +105,17 @@ def build_encoder_operating_point_candidates(
     threshold_codes: Iterable[int],
     ramp_stop_times_s: Iterable[float],
     precharge_pairs: Iterable[tuple[int, int]],
+    exponential_pairs: Iterable[tuple[int, int]] | None = None,
     current_stop_pairs: Iterable[tuple[int, float]] | None = None,
 ) -> tuple[EncoderOperatingPointCandidate, ...]:
     """Create a deterministic grid of explicit physical controls."""
     thresholds = tuple(threshold_codes)
     resolved_precharge_pairs = tuple(precharge_pairs)
+    resolved_exponential_pairs = (
+        tuple(exponential_pairs)
+        if exponential_pairs is not None
+        else ((base.exponential_input_fan_in, base.exponential_input_weight),)
+    )
     if current_stop_pairs is None:
         currents = tuple(constant_current_codes)
         ramp_stops = tuple(ramp_stop_times_s)
@@ -111,32 +131,46 @@ def build_encoder_operating_point_candidates(
     for current, ramp_stop_s in current_stops:
         for threshold in thresholds:
             for fan_in, weight in resolved_precharge_pairs:
-                if not 0 <= current <= 1022:
-                    raise ValueError("constant-current code must lie in [0, 1022]")
-                if not 0 <= threshold <= 1022:
-                    raise ValueError("threshold code must lie in [0, 1022]")
-                if not base.input_early_s < ramp_stop_s < base.deadline_s:
-                    raise ValueError(
-                        "ramp stop must lie between input start and deadline"
+                for (
+                    exponential_fan_in,
+                    exponential_weight,
+                ) in resolved_exponential_pairs:
+                    if exponential_fan_in <= 0 or not 1 <= exponential_weight <= 63:
+                        raise ValueError(
+                            "exponential input fan-in must be positive and weight "
+                            "must lie in [1, 63]"
+                        )
+                    if not 0 <= current <= 1022:
+                        raise ValueError(
+                            "constant-current code must lie in [0, 1022]"
+                        )
+                    if not 0 <= threshold <= 1022:
+                        raise ValueError("threshold code must lie in [0, 1022]")
+                    if not base.input_early_s < ramp_stop_s < base.deadline_s:
+                        raise ValueError(
+                            "ramp stop must lie between input start and deadline"
+                        )
+                    candidate_id = (
+                        f"cc{current:04d}_th{threshold:04d}_"
+                        f"stop{ramp_stop_s * 1.0e6:06.2f}us_"
+                        f"fanin{fan_in:02d}_w{weight:02d}_"
+                        f"nlfanin{exponential_fan_in:02d}_nlw{exponential_weight:02d}"
                     )
-                candidate_id = (
-                    f"cc{current:04d}_th{threshold:04d}_"
-                    f"stop{ramp_stop_s * 1.0e6:06.2f}us_"
-                    f"fanin{fan_in:02d}_w{weight:02d}"
-                )
-                if candidate_id in seen:
-                    continue
-                seen.add(candidate_id)
-                candidates.append(
-                    EncoderOperatingPointCandidate(
-                        candidate_id=candidate_id,
-                        constant_current_code=current,
-                        threshold_code=threshold,
-                        ramp_stop_s=ramp_stop_s,
-                        precharge_input_fan_in=fan_in,
-                        precharge_weight_maximum=weight,
+                    if candidate_id in seen:
+                        continue
+                    seen.add(candidate_id)
+                    candidates.append(
+                        EncoderOperatingPointCandidate(
+                            candidate_id=candidate_id,
+                            constant_current_code=current,
+                            threshold_code=threshold,
+                            ramp_stop_s=ramp_stop_s,
+                            precharge_input_fan_in=fan_in,
+                            precharge_weight_maximum=weight,
+                            exponential_input_fan_in=exponential_fan_in,
+                            exponential_input_weight=exponential_weight,
+                        )
                     )
-                )
     if not candidates:
         raise ValueError("operating-point search grid is empty")
     return tuple(candidates)

@@ -40,6 +40,7 @@ from utils.hardware.brainscales2.primitive_optimization import (
     build_encoder_operating_point_candidates,
     calibration_transfer_gate,
     parse_current_stop_pair,
+    parse_exponential_pair,
     parse_precharge_pair,
     score_encoder_operating_point,
 )
@@ -337,6 +338,8 @@ def _search_result_row(payload: dict[str, Any]) -> dict[str, Any]:
         "ramp_stop_s": candidate["ramp_stop_s"],
         "precharge_input_fan_in": candidate["precharge_input_fan_in"],
         "precharge_weight_maximum": candidate["precharge_weight_maximum"],
+        "exponential_input_fan_in": candidate["exponential_input_fan_in"],
+        "exponential_input_weight": candidate["exponential_input_weight"],
         "selection_eligible": score.get("selection_eligible"),
         "held_out_validated": score.get("held_out_validated"),
         "selection_objective_rt": score.get("selection_objective_rt"),
@@ -404,6 +407,19 @@ def optimize_encoder_operating_point(
     precharge_pairs = tuple(
         parse_precharge_pair(value) for value in args.search_precharge_pairs
     )
+    exponential_pairs = (
+        tuple(
+            parse_exponential_pair(value)
+            for value in args.search_exponential_pairs
+        )
+        if args.primitive == "phi-nl"
+        else (
+            (
+                base_config.exponential_input_fan_in,
+                base_config.exponential_input_weight,
+            ),
+        )
+    )
     current_stop_pairs = (
         tuple(
             parse_current_stop_pair(value)
@@ -418,6 +434,7 @@ def optimize_encoder_operating_point(
         threshold_codes=args.search_threshold_codes,
         ramp_stop_times_s=(value * 1.0e-6 for value in args.search_ramp_stop_us),
         precharge_pairs=precharge_pairs,
+        exponential_pairs=exponential_pairs,
         current_stop_pairs=current_stop_pairs,
     )
     if len(candidates) > args.search_max_candidates:
@@ -747,6 +764,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--search-precharge-pairs", nargs="+", default=("1:63",)
+    )
+    parser.add_argument(
+        "--search-exponential-pairs", nargs="+", default=("8:63",)
     )
     parser.add_argument("--search-current-stop-pairs", nargs="+")
     parser.add_argument("--search-quick-codes", action="store_true")
