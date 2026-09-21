@@ -7,10 +7,12 @@ from dataclasses import replace
 from contextlib import nullcontext
 import inspect
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -30,6 +32,9 @@ from utils.hardware.brainscales2.primitive_correlation_worker import (
 )
 import utils.hardware.brainscales2.primitive_backend as primitive_backend_module
 import utils.hardware.brainscales2.primitive_noise as primitive_noise_module
+from utils.hardware.brainscales2.primitive_pynn_worker import (
+    _reuse_configured_hardware_endpoint,
+)
 from utils.hardware.brainscales2.primitive_noise import (
     MockPrimitiveNoiseBackend,
     PRIMITIVES,
@@ -62,6 +67,28 @@ def rejects(action, exceptions=(ValueError, RuntimeError)) -> None:
     except exceptions:
         return
     raise AssertionError("invalid primitive observation was accepted")
+
+
+# @lat: [[hardware#Independent Primitive Noise Verification#Configured hardware endpoint reuse]]
+def verify_configured_hardware_endpoint_reuse() -> None:
+    with patch.dict(
+        os.environ,
+        {
+            "QUIGGELDY_IP": "192.0.2.1",
+            "QUIGGELDY_PORT": "12345",
+            "JUPYTERHUB_USER": "hardware-user",
+        },
+        clear=True,
+    ):
+        assert _reuse_configured_hardware_endpoint()
+        assert os.environ["QUIGGELDY_ENABLED"] == "1"
+        assert os.environ["QUIGGELDY_USER_NO_MUNGE"] == "hardware-user"
+    with patch.dict(
+        os.environ,
+        {"QUIGGELDY_IP": "192.0.2.1"},
+        clear=True,
+    ):
+        assert not _reuse_configured_hardware_endpoint()
 
 
 # @lat: [[hardware#Independent Primitive Noise Verification#Synthetic transfer recovery]]
@@ -1706,6 +1733,7 @@ def verify_artifact_integrity() -> None:
 
 
 def main() -> None:
+    verify_configured_hardware_endpoint_reuse()
     verify_synthetic_transfer_recovery()
     verify_held_out_validation_isolation()
     verify_temporal_and_fixed_pattern_separation()

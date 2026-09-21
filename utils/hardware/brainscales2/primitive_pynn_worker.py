@@ -14,7 +14,23 @@ sys.path.insert(0, str(ROOT))
 from utils.hardware.brainscales2.primitive_backend import PrimitiveHardwareBackend
 
 
+def _reuse_configured_hardware_endpoint() -> bool:
+    """Keep a complete notebook-selected Quiggeldy endpoint in child workers."""
+    if not (
+        os.environ.get("QUIGGELDY_IP")
+        and os.environ.get("QUIGGELDY_PORT")
+    ):
+        return False
+    os.environ["QUIGGELDY_ENABLED"] = "1"
+    username = os.environ.get("JUPYTERHUB_USER") or os.environ.get("USER")
+    if username:
+        os.environ["QUIGGELDY_USER_NO_MUNGE"] = username
+    return True
+
+
 def _setup_hardware_client() -> None:
+    if _reuse_configured_hardware_endpoint():
+        return
     demos_root = Path(
         os.environ.get("BSS2_DEMOS_ROOT", "/tmp/brainscales2-demos")
     )
