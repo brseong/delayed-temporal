@@ -1290,6 +1290,23 @@ def verify_encoder_operating_point_score() -> None:
     )
     assert changed["validation_objective_rt"] > reference["validation_objective_rt"]
 
+    unrelated_device = (selected["device"] + 1) % config.device_count
+    unrelated_values = observations[1].observed.clone()
+    unrelated_values[
+        config.calibration_repeats :, :, unrelated_device
+    ] += offsets.reshape(-1, 1) * 5.0e-6
+    unrelated_dynamic = replace(observations[1], observed=unrelated_values)
+    unrelated = score_encoder_operating_point(
+        [observations[0], unrelated_dynamic],
+        [validations[0], validate_primitive_observation(unrelated_dynamic, config)],
+        config,
+        primitive="phi-np",
+    )
+    assert unrelated["held_out_validated"]
+    assert unrelated["validation_objective_rt"] == reference[
+        "validation_objective_rt"
+    ]
+
     screened_values = observations[0].observed.clone()
     screened_values[: config.calibration_repeats, 15, :] += 10.0e-6
     screened_static = replace(observations[0], observed=screened_values)
@@ -1322,17 +1339,13 @@ def verify_encoder_operating_point_score() -> None:
     assert spike_only.precharge_cadc is None
 
     prerequisite_score = {
-        "np_static": {
-            "calibration_transfer": {"strict_eligible": True},
-            "held_out_validated": True,
-        },
         "primitive_scores": {
             "phi-np": {
-                "calibration_transfer": {"strict_eligible": True},
+                "selection_eligible": True,
                 "held_out_validated": False,
             },
             "phi-nl": {
-                "calibration_transfer": {"strict_eligible": True},
+                "selection_eligible": True,
                 "held_out_validated": True,
             },
         },
@@ -1341,10 +1354,10 @@ def verify_encoder_operating_point_score() -> None:
         prerequisite_score, "phi-nl"
     )
     assert calibration_valid
-    assert not held_out_valid
-    prerequisite_score["primitive_scores"]["phi-np"][
-        "calibration_transfer"
-    ]["strict_eligible"] = False
+    assert held_out_valid
+    prerequisite_score["primitive_scores"]["phi-nl"][
+        "selection_eligible"
+    ] = False
     calibration_valid, _ = _primitive_summary_prerequisites(
         prerequisite_score, "phi-nl"
     )
@@ -1530,6 +1543,10 @@ def verify_resumable_operating_point_search() -> None:
     )
     assert "RUN_OPERATING_POINT_SEARCH = False" in source
     assert "'--phase', 'optimize'" in source
+    assert "'--search-spike-times-only'" in source
+    assert "'--device-count', 512" in source
+    assert "'--physical-coordinates', *range(512)" in source
+    assert "'--physical-coordinates', best['physical_coordinate']" in source
     assert "selected_operating_point.json" in source
     assert notebook["metadata"]["language_info"]["version"] == "3.11"
 

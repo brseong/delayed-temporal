@@ -494,6 +494,8 @@ Coarse and refinement screens use three representative potential codes with 32 r
 
 The calibration screen may record spike times without membrane potential observations so all 512 physical circuits can be ranked within the notebook memory limit. This mode is restricted to representative potential codes and cannot satisfy a declared $r_t$ threshold.
 
+Transfer prerequisites are evaluated for each physical circuit. A circuit that fails remains in the diagnostic statistics but cannot invalidate a different circuit selected from calibration data.
+
 The calibration-selected physical circuit is frozen before confirmation over all 32 potential codes. Confirmation restores membrane potential observations and uses an independent held out split before reporting whether an $r_t$ threshold is reached.
 
 The representative code screen requires observed points, the declared transfer direction, bounded miss and repeated spike rates, and no saturation. Rank and normalized error remain diagnostics during screening; the full code confirmation must pass every original transfer gate before a target is reported as reached.
@@ -633,6 +635,8 @@ The score must use calibration repetitions for selection and reserve held out re
 Representative code screening may rank a candidate that fails a shape diagnostic, but the full code confirmation must retain the strict transfer gates.
 
 Representative code screening must never mark an $r_t$ target as reached; only confirmation over all potential codes can do so.
+
+The selected circuit is confirmed on its own held out observations; failures of unselected circuits do not change that confirmation.
 
 ### Resumable operating point search
 

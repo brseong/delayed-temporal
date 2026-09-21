@@ -253,8 +253,20 @@ def calibration_transfer_gate(
     config: PrimitiveNoiseConfig,
     *,
     screening: bool = False,
+    trial_slice: slice | None = None,
+    device_indices: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
-    trial_slice = slice(0, config.calibration_repeats)
+    if trial_slice is None:
+        trial_slice = slice(0, config.calibration_repeats)
+    devices = (
+        tuple(range(observation.device_count))
+        if device_indices is None
+        else device_indices
+    )
+    if not devices or any(
+        device < 0 or device >= observation.device_count for device in devices
+    ):
+        raise ValueError("transfer gate device selection is invalid")
     usable = (
         observation.delivered[trial_slice]
         & ~observation.saturated[trial_slice]
@@ -269,7 +281,8 @@ def calibration_transfer_gate(
     slope_direction: list[bool] = []
     rank_monotonicity_values: list[float] = []
     enough_samples = True
-    for device, parameters in enumerate(validation.calibration_parameters):
+    for device in devices:
+        parameters = validation.calibration_parameters[device]
         try:
             predicted = _prediction(observation, parameters)
         except (KeyError, ValueError):
@@ -322,13 +335,14 @@ def calibration_transfer_gate(
             else parameters.get("log_slope_s")
         )
         slope_direction.append(slope is not None and math.isfinite(slope) and slope < 0)
-    miss_rate = float((~observation.delivered[trial_slice]).to(torch.float64).mean())
+    selected_delivery = observation.delivered[trial_slice, :, devices]
+    selected_spike_count = observation.spike_count[trial_slice, :, devices]
+    selected_saturation = observation.saturated[trial_slice, :, devices]
+    miss_rate = float((~selected_delivery).to(torch.float64).mean())
     multiple_rate = float(
-        (observation.spike_count[trial_slice] > 1).to(torch.float64).mean()
+        (selected_spike_count > 1).to(torch.float64).mean()
     )
-    saturation_rate = float(
-        observation.saturated[trial_slice].to(torch.float64).mean()
-    )
+    saturation_rate = float(selected_saturation.to(torch.float64).mean())
     maximum_nrmse = max(nrmse_values, default=float("inf"))
     gates = {
         "enough_samples": enough_samples,
@@ -362,6 +376,7 @@ def calibration_transfer_gate(
         "eligible": all(gates[name] for name in required_gate_names),
         "strict_eligible": all(gates.values()),
         "screening": screening,
+        "device_indices": list(devices),
         "required_gates": list(required_gate_names),
         "gates": gates,
         "maximum_normalized_rmse": maximum_nrmse,
@@ -370,6 +385,46 @@ def calibration_transfer_gate(
         "saturation_rate": saturation_rate,
         "minimum_rank_monotonicity": min(rank_monotonicity_values, default=None),
     }
+
+
+def _held_out_device_gate(
+    observation: PrimitiveObservation,
+    validation: PrimitiveValidation,
+    config: PrimitiveNoiseConfig,
+    *,
+    device: int,
+    screening: bool,
+) -> dict[str, Any]:
+    """Evaluate one frozen physical circuit without pooling other circuits."""
+    result = calibration_transfer_gate(
+        observation,
+        validation,
+        config,
+        screening=screening,
+        trial_slice=slice(config.calibration_repeats, config.repeats),
+        device_indices=(device,),
+    )
+    if screening:
+        return result
+    statistics = validation.device_statistics[device]
+    result["gates"]["fit_available"] = bool(statistics["fit_available"])
+    result["gates"]["parameter_drift"] = (
+        statistics["parameter_drift"] <= config.parameter_drift_limit
+    )
+    if observation.precharge_cadc is not None:
+        fit_points = (
+            observation.fit_point_mask.to(torch.bool)
+            if observation.fit_point_mask is not None
+            else torch.ones(observation.point_count, dtype=torch.bool)
+        )
+        recorded = torch.isfinite(
+            observation.precharge_cadc[:, fit_points, device]
+        ).any(dim=0)
+        result["gates"]["precharge_recorded"] = bool(recorded.all())
+    result["required_gates"] = list(result["gates"])
+    result["eligible"] = all(result["gates"].values())
+    result["strict_eligible"] = result["eligible"]
+    return result
 
 
 def _conditional_timing_ratio(
@@ -424,13 +479,20 @@ def _conditional_timing_ratio(
 
 
 def _select_calibration_device(
-    calibration: dict[str, Any], held_out: dict[str, Any]
+    calibration: dict[str, Any],
+    held_out: dict[str, Any],
+    *,
+    eligible_devices: set[int],
 ) -> dict[str, Any] | None:
     """Freeze the lowest-ratio physical circuit using calibration data only."""
     candidates = [
         row
         for row in calibration["devices"]
-        if row["complete"] and math.isfinite(row["r_t"])
+        if (
+            row["device"] in eligible_devices
+            and row["complete"]
+            and math.isfinite(row["r_t"])
+        )
     ]
     if not candidates:
         return None
@@ -472,9 +534,7 @@ def score_encoder_operating_point(
         abs(parameters.get("slope_s_per_code", float("nan"))) * 31.0
         for parameters in np_validation.calibration_parameters
     )
-    measured = [
-        ("phi-np", np_observation, np_validation),
-    ]
+    measured = [("phi-np", np_observation, np_validation)]
     if primitive == "phi-nl":
         measured.append(
             (
@@ -483,19 +543,46 @@ def score_encoder_operating_point(
                 _lookup_validation(validations, "phi-nl", "transfer"),
             )
         )
+    stages = {
+        "np_static": (np_static_observation, np_static_validation),
+        **{
+            name: (observation, validation)
+            for name, observation, validation in measured
+        },
+    }
+    stage_gates: dict[str, dict[str, Any]] = {}
+    for stage_name, (observation, validation) in stages.items():
+        stage_gates[stage_name] = {
+            "aggregate_calibration": calibration_transfer_gate(
+                observation,
+                validation,
+                config,
+                screening=screening,
+            ),
+            "calibration_by_device": tuple(
+                calibration_transfer_gate(
+                    observation,
+                    validation,
+                    config,
+                    screening=screening,
+                    device_indices=(device,),
+                )
+                for device in range(config.device_count)
+            ),
+            "held_out_by_device": tuple(
+                _held_out_device_gate(
+                    observation,
+                    validation,
+                    config,
+                    device=device,
+                    screening=screening,
+                )
+                for device in range(config.device_count)
+            ),
+        }
+
     primitive_scores: dict[str, Any] = {}
-    static_calibration_gate = calibration_transfer_gate(
-        np_static_observation,
-        np_static_validation,
-        config,
-        screening=screening,
-    )
-    selection_gates: list[bool] = [bool(static_calibration_gate["eligible"])]
-    held_out_gates: list[bool] = [np_static_validation.validated]
     for name, observation, validation in measured:
-        transfer_gate = calibration_transfer_gate(
-            observation, validation, config, screening=screening
-        )
         calibration = _conditional_timing_ratio(
             observation,
             trial_slice=slice(0, config.calibration_repeats),
@@ -506,15 +593,65 @@ def score_encoder_operating_point(
             trial_slice=slice(config.calibration_repeats, config.repeats),
             signal_spans_s=spans,
         )
-        selected_device = _select_calibration_device(calibration, held_out)
-        selection_gates.append(bool(transfer_gate["eligible"]))
-        held_out_gates.append(validation.validated)
+        required_stages = (
+            ("np_static", "phi-np")
+            if name == "phi-np"
+            else ("np_static", "phi-np", "phi-nl")
+        )
+        eligible_devices = {
+            device
+            for device in range(config.device_count)
+            if all(
+                stage_gates[stage_name]["calibration_by_device"][device][
+                    "eligible"
+                ]
+                for stage_name in required_stages
+            )
+        }
+        selected_device = _select_calibration_device(
+            calibration,
+            held_out,
+            eligible_devices=eligible_devices,
+        )
+        selected_index = (
+            selected_device["device"] if selected_device is not None else None
+        )
+        held_out_validated = bool(
+            selected_device is not None
+            and selected_device["held_out_rt"] is not None
+            and all(
+                stage_gates[stage_name]["held_out_by_device"][selected_index][
+                    "eligible"
+                ]
+                for stage_name in required_stages
+            )
+        )
+        selected_gates = (
+            {
+                stage_name: {
+                    "calibration": stage_gates[stage_name][
+                        "calibration_by_device"
+                    ][selected_index],
+                    "held_out": stage_gates[stage_name]["held_out_by_device"][
+                        selected_index
+                    ],
+                }
+                for stage_name in required_stages
+            }
+            if selected_index is not None
+            else None
+        )
         primitive_scores[name] = {
             "calibration": calibration,
             "held_out": held_out,
             "calibration_selected_device": selected_device,
-            "calibration_transfer": transfer_gate,
-            "held_out_validated": validation.validated,
+            "eligible_device_count": len(eligible_devices),
+            "selection_eligible": selected_device is not None,
+            "held_out_validated": held_out_validated,
+            "selected_device_gates": selected_gates,
+            "calibration_transfer": stage_gates[name][
+                "aggregate_calibration"
+            ],
         }
     target_score = primitive_scores[primitive]
     selected_device = target_score["calibration_selected_device"]
@@ -528,8 +665,8 @@ def score_encoder_operating_point(
         if selected_device is not None
         else None
     )
-    selection_eligible = all(selection_gates) and selection_objective is not None
-    held_out_validated = all(held_out_gates) and validation_objective is not None
+    selection_eligible = bool(target_score["selection_eligible"])
+    held_out_validated = bool(target_score["held_out_validated"])
     if not selection_eligible:
         selection_objective = None
     if not held_out_validated:
@@ -561,7 +698,9 @@ def score_encoder_operating_point(
             ),
         },
         "np_static": {
-            "calibration_transfer": static_calibration_gate,
+            "calibration_transfer": stage_gates["np_static"][
+                "aggregate_calibration"
+            ],
             "held_out_validated": np_static_validation.validated,
         },
         "primitive_scores": primitive_scores,

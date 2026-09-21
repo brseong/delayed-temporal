@@ -383,21 +383,12 @@ def _write_search_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def _primitive_summary_prerequisites(
     score: dict[str, Any], primitive: str
 ) -> tuple[bool, bool]:
-    """Return strict calibration and held-out prerequisite status."""
-    static = score.get("np_static", {})
-    primitive_scores = score.get("primitive_scores", {})
-    required = [static]
-    if primitive == "phi-nl":
-        required.append(primitive_scores.get("phi-np", {}))
-    required.append(primitive_scores.get(primitive, {}))
-    calibration_valid = all(
-        item.get("calibration_transfer", {}).get("strict_eligible", False)
-        for item in required
+    """Return selected-circuit calibration and held-out prerequisite status."""
+    primitive_score = score.get("primitive_scores", {}).get(primitive, {})
+    return (
+        bool(primitive_score.get("selection_eligible", False)),
+        bool(primitive_score.get("held_out_validated", False)),
     )
-    held_out_valid = all(
-        item.get("held_out_validated", False) for item in required
-    )
-    return calibration_valid, held_out_valid
 
 
 def optimize_encoder_operating_point(
