@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 from typing import Any
@@ -44,6 +45,39 @@ from utils.hardware.brainscales2.primitive_optimization import (
     parse_precharge_pair,
     score_encoder_operating_point,
 )
+
+
+_PYNN_WORKER_FAILURE = re.compile(
+    r"PyNN worker (?P<kind>timed out|failed) for "
+    r"(?P<primitive>phi-(?:np|nl))/(?P<stage>static|dynamic|transfer)/"
+    r"code=(?P<code>-?\d+) after \d+ attempts(?P<detail>.*)",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+class RepeatedPynnWorkerTimeoutError(RuntimeError):
+    """Stop one search attempt after repeated timeouts at one acquisition locus."""
+
+
+def _pynn_worker_timeout_locus(error: BaseException) -> dict[str, Any] | None:
+    """Return structured provenance only for exhausted PyNN worker timeouts."""
+    message = str(error)
+    match = _PYNN_WORKER_FAILURE.search(message)
+    if match is None:
+        return None
+    kind = match.group("kind").casefold()
+    detail = match.group("detail").casefold()
+    if kind != "timed out" and "remote call timeout exceeded" not in detail:
+        return None
+    primitive = match.group("primitive").casefold()
+    stage = match.group("stage").casefold()
+    code = int(match.group("code"))
+    return {
+        "primitive": primitive,
+        "stage": stage,
+        "code": code,
+        "locus": f"{primitive}/{stage}/code={code}",
+    }
 
 
 def _git_revision() -> str | None:
@@ -369,6 +403,8 @@ def _search_result_row(payload: dict[str, Any]) -> dict[str, Any]:
         ).get("physical_coordinate"),
         "error_type": payload.get("error_type"),
         "error": payload.get("error"),
+        "timeout_locus": payload.get("timeout_locus"),
+        "consecutive_timeout_count": payload.get("consecutive_timeout_count"),
     }
     for primitive in ("phi-np", "phi-nl"):
         primitive_score = primitive_scores.get(primitive, {})
@@ -418,6 +454,8 @@ def optimize_encoder_operating_point(
         raise ValueError("operating-point search requires phi-np or phi-nl")
     if args.search_top_k <= 0 or args.search_max_candidates <= 0:
         raise ValueError("search limits must be positive")
+    if args.search_timeout_abort_threshold < 0:
+        raise ValueError("search timeout abort threshold must be non-negative")
     precharge_pairs = tuple(
         parse_precharge_pair(value) for value in args.search_precharge_pairs
     )
@@ -498,6 +536,12 @@ def optimize_encoder_operating_point(
             "code_grid": "representative" if args.search_quick_codes else "full",
             "spike_times_only": args.search_spike_times_only,
             "formal_confirmation_required": args.search_quick_codes,
+            "timeout_abort": {
+                "consecutive_identical_locus_threshold": (
+                    args.search_timeout_abort_threshold
+                ),
+                "zero_disables": True,
+            },
         },
     }
     if manifest_path.is_file():
@@ -511,6 +555,7 @@ def optimize_encoder_operating_point(
         _write_json(manifest_path, manifest)
 
     results: list[dict[str, Any]] = []
+    consecutive_timeout_failures: list[dict[str, Any]] = []
     for index, candidate in enumerate(candidates, start=1):
         candidate_dir = output_dir / "candidates" / candidate.candidate_id
         result_path = candidate_dir / "candidate_result.json"
@@ -527,6 +572,7 @@ def optimize_encoder_operating_point(
                     flush=True,
                 )
                 results.append(result)
+                consecutive_timeout_failures = []
                 continue
             print(
                 f"Retrying incomplete candidate {index}/{len(candidates)} "
@@ -570,12 +616,65 @@ def optimize_encoder_operating_point(
         except Exception as error:
             result["error_type"] = type(error).__name__
             result["error"] = str(error)
+            timeout_locus = _pynn_worker_timeout_locus(error)
+            if timeout_locus is None:
+                consecutive_timeout_failures = []
+            else:
+                if (
+                    not consecutive_timeout_failures
+                    or consecutive_timeout_failures[-1]["timeout_locus"]
+                    != timeout_locus["locus"]
+                ):
+                    consecutive_timeout_failures = []
+                consecutive_timeout_failures.append(
+                    {
+                        "candidate_id": candidate.candidate_id,
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                        "timeout_locus": timeout_locus["locus"],
+                    }
+                )
+                result["timeout_locus"] = timeout_locus["locus"]
+                result["consecutive_timeout_count"] = len(
+                    consecutive_timeout_failures
+                )
         _write_json(result_path, result)
         results.append(result)
         _write_search_csv(
             output_dir / "operating_point_results.csv",
             [_search_result_row(item) for item in results],
         )
+        timeout_threshold = args.search_timeout_abort_threshold
+        if (
+            timeout_threshold > 0
+            and len(consecutive_timeout_failures) >= timeout_threshold
+        ):
+            timeout_locus = consecutive_timeout_failures[-1]["timeout_locus"]
+            infrastructure_error = {
+                "schema_version": 1,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "error_type": RepeatedPynnWorkerTimeoutError.__name__,
+                "timeout_locus": timeout_locus,
+                "consecutive_timeout_count": len(consecutive_timeout_failures),
+                "configured_threshold": timeout_threshold,
+                "trigger_candidate_ids": [
+                    item["candidate_id"]
+                    for item in consecutive_timeout_failures
+                ],
+                "candidate_failures": consecutive_timeout_failures,
+            }
+            message = (
+                "PyNN worker timeout repeated at the same acquisition locus "
+                f"{timeout_locus} for {len(consecutive_timeout_failures)} "
+                "consecutive candidates; aborting this search attempt so the "
+                "outer controller can retry"
+            )
+            infrastructure_error["error"] = message
+            _write_json(
+                output_dir / "infrastructure_error.json",
+                infrastructure_error,
+            )
+            raise RepeatedPynnWorkerTimeoutError(message)
 
     eligible = [
         result
@@ -864,6 +963,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--search-top-k", type=int, default=3)
     parser.add_argument("--search-max-candidates", type=int, default=64)
+    parser.add_argument(
+        "--search-timeout-abort-threshold",
+        type=int,
+        default=2,
+        help=(
+            "abort one optimizer attempt after this many consecutive candidates "
+            "time out at the same PyNN acquisition locus; zero disables"
+        ),
+    )
     return parser
 
 

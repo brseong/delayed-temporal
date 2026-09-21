@@ -32,6 +32,7 @@ from utils.hardware.brainscales2.primitive_correlation_worker import (
 )
 import utils.hardware.brainscales2.primitive_backend as primitive_backend_module
 import utils.hardware.brainscales2.primitive_noise as primitive_noise_module
+import scripts.evaluation.brainscales2_primitive_noise as primitive_runner_module
 from utils.hardware.brainscales2.primitive_pynn_worker import (
     _reuse_configured_hardware_endpoint,
 )
@@ -52,7 +53,9 @@ from utils.hardware.brainscales2.primitive_optimization import (
 )
 from scripts.evaluation.brainscales2_primitive_noise import (
     _collect_encoder_search_observations,
+    _pynn_worker_timeout_locus,
     _primitive_summary_prerequisites,
+    RepeatedPynnWorkerTimeoutError,
     build_parser,
     collect_observations,
     make_config,
@@ -104,6 +107,99 @@ def verify_transient_worker_error_classification() -> None:
     )
     assert not primitive_backend_module._is_transient_pynn_worker_error(
         "ValueError: invalid physical coordinate"
+    )
+
+
+# @lat: [[hardware#Independent Primitive Noise Verification#Repeated acquisition timeout abort]]
+def verify_repeated_acquisition_timeout_abort() -> None:
+    timeout = RuntimeError(
+        "PyNN worker timed out for phi-nl/static/code=0 after 3 attempts"
+    )
+    locus = _pynn_worker_timeout_locus(timeout)
+    assert locus == {
+        "primitive": "phi-nl",
+        "stage": "static",
+        "code": 0,
+        "locus": "phi-nl/static/code=0",
+    }
+    assert _pynn_worker_timeout_locus(
+        RuntimeError(
+            "PyNN worker failed for phi-nl/static/code=0 after 3 attempts: "
+            "Remote call timeout exceeded"
+        )
+    ) == locus
+    assert _pynn_worker_timeout_locus(
+        RuntimeError(
+            "PyNN worker failed for phi-nl/static/code=0 after 1 attempts: "
+            "ValueError: invalid physical coordinate"
+        )
+    ) is None
+
+    with tempfile.TemporaryDirectory() as temporary:
+        output = Path(temporary) / "repeated-timeout"
+        arguments = build_parser().parse_args(
+            [
+                "--phase",
+                "optimize",
+                "--primitive",
+                "phi-np",
+                "--backend",
+                "mock",
+                "--quick",
+                "--device-count",
+                "4",
+                "--search-current-stop-pairs",
+                "256:25",
+                "384:25",
+                "512:25",
+                "--search-threshold-codes",
+                "600",
+                "--search-precharge-pairs",
+                "1:63",
+                "--search-timeout-abort-threshold",
+                "2",
+                "--output-dir",
+                str(output),
+            ]
+        )
+        with patch.object(
+            primitive_runner_module,
+            "_collect_encoder_search_observations",
+            side_effect=timeout,
+        ) as collect:
+            try:
+                run(arguments)
+            except RepeatedPynnWorkerTimeoutError as error:
+                assert "phi-nl/static/code=0" in str(error)
+                assert "outer controller can retry" in str(error)
+            else:
+                raise AssertionError("repeated PyNN timeout did not abort search")
+        assert collect.call_count == 2
+        payload = json.loads(
+            (output / "infrastructure_error.json").read_text(encoding="utf-8")
+        )
+        assert payload["timeout_locus"] == "phi-nl/static/code=0"
+        assert payload["consecutive_timeout_count"] == 2
+        assert payload["configured_threshold"] == 2
+        assert len(payload["trigger_candidate_ids"]) == 2
+        candidate_results = sorted(
+            (output / "candidates").glob("*/candidate_result.json")
+        )
+        assert len(candidate_results) == 2
+        written = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in candidate_results
+        ]
+        trigger = next(
+            item for item in written if item["consecutive_timeout_count"] == 2
+        )
+        assert trigger["timeout_locus"] == "phi-nl/static/code=0"
+
+    assert (
+        build_parser().parse_args(
+            ["--output-dir", "."]
+        ).search_timeout_abort_threshold
+        == 2
     )
 
 
@@ -1942,6 +2038,7 @@ def verify_artifact_integrity() -> None:
 def main() -> None:
     verify_configured_hardware_endpoint_reuse()
     verify_transient_worker_error_classification()
+    verify_repeated_acquisition_timeout_abort()
     verify_synthetic_transfer_recovery()
     verify_held_out_validation_isolation()
     verify_temporal_and_fixed_pattern_separation()

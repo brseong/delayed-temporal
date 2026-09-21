@@ -522,6 +522,8 @@ Each encoder summary reports the validation timing noise ratio only if all requi
 
 [[utils/hardware/brainscales2/primitive_optimization.py#score_encoder_operating_point]] scores one candidate, while [[scripts/evaluation/brainscales2_primitive_noise.py#optimize_encoder_operating_point]] owns enumeration and artifacts. The command writes a fixed search manifest, one standard primitive artifact per candidate, a result table, and a selected configuration. Finished candidates are reused only when the search manifest and candidate identity match.
 
+The optimizer distinguishes an exhausted PyNN worker timeout from a physical candidate that completes acquisition but fails a scientific gate. Two consecutive candidates timing out at the same primitive, stage, and code abort only the current search attempt by default, allowing its outer controller to retry without spending the full grid on one infrastructure fault. The threshold is recorded in the immutable search manifest and may be changed or disabled explicitly. Each failed candidate remains recorded, and a triggered abort writes `infrastructure_error.json` with the acquisition locus, candidate identifiers, errors, count, and configured threshold. A completed candidate, a different timeout locus, or any non-timeout candidate failure resets the consecutive count; none changes scientific eligibility.
+
 ### Provisional encoder operating point result
 
 The current result selects one physical circuit on calibration repetitions and reports its held out timing noise ratio without refitting; it remains a representative code screen pending full code confirmation.
@@ -671,6 +673,12 @@ The notebook must scan all 512 physical circuits as eight 64 circuit graphs and 
 Every run may contribute scores to each encoder stage it measured, regardless of which encoder named that search pass.
 
 A representative code circuit scan may omit precharge membrane observations. Any use outside that screening mode is rejected, and the immutable search manifest records the omission.
+
+### Repeated acquisition timeout abort
+
+The optimizer must abort one search attempt only after the configured number of consecutive candidates exhaust PyNN worker retries at the same primitive, stage, and code.
+
+Verification confirms the conservative default of two, structured timeout classification, persisted candidate and search-level provenance, and early termination before a third candidate. A non-timeout worker failure must not be classified as an infrastructure timeout.
 
 ### Configured hardware endpoint reuse
 
