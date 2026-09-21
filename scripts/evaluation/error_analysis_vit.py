@@ -1400,7 +1400,7 @@ def evaluate_vit_model(args: Arguments) -> None:
 
     # Calibration and evaluation share exactly one immutable preprocessing path.
     processor = load_vit_image_processor(model_id, args.image_preprocessing_config)
-    print("Image preprocessing — " + json.dumps({
+    preprocessing_identity = {
         "backend": getattr(processor, "preprocessing_backend", "huggingface"),
         "config_sha256": getattr(processor, "preprocessing_config_sha256", None),
         "input_size": getattr(processor, "input_size", None),
@@ -1409,7 +1409,12 @@ def evaluate_vit_model(args: Arguments) -> None:
         "crop_mode": getattr(processor, "crop_mode", None),
         "mean": getattr(processor, "image_mean", None),
         "std": getattr(processor, "image_std", None),
-    }, sort_keys=True), flush=True)
+    }
+    print(
+        "Image preprocessing — "
+        + json.dumps(preprocessing_identity, sort_keys=True),
+        flush=True,
+    )
 
     # ---------------------------------------------------------
     # 3. 데이터 전처리 함수 정의
@@ -1607,6 +1612,7 @@ def evaluate_vit_model(args: Arguments) -> None:
             "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "checkpoint_sha256": args.checkpoint_sha256,
             "loaded_model_state_sha256": loaded_model_state_sha256,
+            "model_backend": model_backend,
             "model_id": model_id,
             "dataset_id": dataset_id,
             "evaluation_split": split,
@@ -1616,6 +1622,12 @@ def evaluate_vit_model(args: Arguments) -> None:
             "batch_size": batch_size,
             "precision": args.precision,
             "theta": float(args.theta),
+            "activation": args.activation,
+            "attention_implementation": effective_attn_impl,
+            "model_config_sha256": canonical_json_sha256(config.to_dict()),
+            "preprocessing_identity_sha256": canonical_json_sha256(
+                preprocessing_identity
+            ),
             "preprocessing_backend": getattr(
                 processor, "preprocessing_backend", "huggingface"
             ),
@@ -1632,14 +1644,32 @@ def evaluate_vit_model(args: Arguments) -> None:
             "spiking_mlp_exact_gelu_layers": list(
                 args.spiking_mlp_exact_gelu_layers
             ),
+            "weight_noise_std": float(args.weight_noise_std),
+            "bias_noise_std": float(args.bias_noise_std),
+            "collect_quantiles": args.collect_quantiles,
+            "report_clamp_stats": args.report_clamp_stats,
             "calibration_mode": args.calibration_mode,
             "calibration_sha256": calibration_sha256,
             "time_noise_seed": args.time_noise_seed,
             "time_noise_mean": float(args.time_noise_mean),
             "linear_time_noise_std": linear_time_noise_std,
             "log_time_noise_std": log_time_noise_std,
+            "time_noise_mean": float(args.time_noise_mean),
             "linear_time_noise_deadline_margin": linear_time_noise_deadline_margin,
             "log_time_noise_deadline_margin": log_time_noise_deadline_margin,
+            "clock_driven": args.clock_driven,
+            "clock_time_step": float(args.clock_time_step),
+            "clock_time_steps_per_window": args.clock_time_steps_per_window,
+            "calibration_samples": args.calibration_samples,
+            "calibration_seed": args.calibration_seed,
+            "calibration_bins": args.calibration_bins,
+            "calibration_lower_quantile": float(args.calibration_lower_quantile),
+            "calibration_upper_quantile": float(args.calibration_upper_quantile),
+            "calibration_margin_fraction": float(args.calibration_margin_fraction),
+            "quick_test": args.quick_test,
+            "max_eval_batches": args.max_eval_batches,
+            "benchmark_warmup_batches": args.benchmark_warmup_batches,
+            "benchmark_measure_batches": args.benchmark_measure_batches,
             "torch_version": torch.__version__,
             "cuda_version": torch.version.cuda,
             "gpu_model": torch.cuda.get_device_name(device),

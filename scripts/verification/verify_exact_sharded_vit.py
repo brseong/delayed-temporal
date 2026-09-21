@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Any
+from unittest.mock import patch
 
 import torch
 
@@ -30,8 +31,10 @@ from scripts.experiments.run_exact_sharded_vit import (
     noise_profile_fractions,
     forward_termination_signals,
     RunnerInterrupted,
+    _signal_process_groups,
     _spawn_managed,
     _terminate,
+    _wait_and_unregister,
     validate_local_checkpoint,
     verify_rng_batch_trace,
     write_shard_result,
@@ -55,6 +58,7 @@ RUN_IDENTITY = {
     "source_commit": "verification",
     "checkpoint_sha256": "1" * 64,
     "loaded_model_state_sha256": "2" * 64,
+    "activation": "gelu",
     "batch_size": BATCH_SIZE,
     "torch_version": torch.__version__,
     "cuda_version": torch.version.cuda,
@@ -360,12 +364,51 @@ def verify_merge_rejections_and_offset_guards() -> None:
             ("overlap", lambda payload: payload["interval"].update(sample_start=255)),
             ("identity", lambda payload: payload["run_identity"].update(model="other")),
             (
+                "activation",
+                lambda payload: payload["run_identity"].update(activation="relu"),
+            ),
+            (
                 "loaded-state",
                 lambda payload: payload["run_identity"].update(
                     loaded_model_state_sha256="3" * 64
                 ),
             ),
             ("rng", lambda payload: payload["rng_contract"].update(batch_stride=12)),
+            (
+                "gaussian-subset",
+                lambda payload: payload["gaussian_stats"].update(
+                    {next(iter(payload["gaussian_stats"])): {"events": 1}}
+                ),
+            ),
+            (
+                "gaussian-clamp-schema",
+                lambda payload: payload["gaussian_stats"].update(
+                    {
+                        next(iter(payload["gaussian_stats"])): {
+                            "values": 1,
+                            "underflows": 0,
+                            "overflows": 0,
+                        }
+                    }
+                ),
+            ),
+            (
+                "clamp-gaussian-schema",
+                lambda payload: payload["clamp_stats"].update(
+                    {
+                        next(iter(payload["clamp_stats"])): {
+                            "events": 1,
+                            "misses": 0,
+                            "deadline_events": 0,
+                            "deadline_ulp_min": 0.0,
+                            "deadline_ulp_max": 0.0,
+                            "outputs": 1,
+                            "output_underflows": 0,
+                            "output_overflows": 0,
+                        }
+                    }
+                ),
+            ),
         )
         for name, mutate in mutations:
             case = root / name
@@ -472,6 +515,42 @@ def verify_model_provenance_and_process_cleanup() -> None:
         )
         assert completed.returncode == 2
         assert not rejected_output.exists()
+
+    graceful_children: list[subprocess.Popen[Any]] = []
+    graceful = _spawn_managed(
+        graceful_children,
+        [
+            sys.executable,
+            "-c",
+            (
+                "import signal,sys,time; "
+                "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); "
+                "blocked=next(line.split()[1] for line in "
+                "open('/proc/self/status') if line.startswith('SigBlk:')); "
+                "print(blocked, flush=True); time.sleep(60)"
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert graceful.stdout is not None
+        blocked = int(graceful.stdout.readline().strip(), 16)
+        assert not blocked & (1 << (signal.SIGINT - 1))
+        assert not blocked & (1 << (signal.SIGTERM - 1))
+        _signal_process_groups(graceful_children, signal.SIGTERM)
+        assert _wait_and_unregister(graceful_children, graceful) == 0
+        assert graceful_children == []
+        with patch(
+            "scripts.experiments.run_exact_sharded_vit.os.killpg"
+        ) as killpg:
+            _signal_process_groups([graceful], signal.SIGTERM)
+            killpg.assert_not_called()
+    finally:
+        if graceful.poll() is None:
+            _terminate(graceful_children, grace_seconds=0.05)
+        if graceful.stdout is not None:
+            graceful.stdout.close()
 
     ignored_children: list[subprocess.Popen[Any]] = []
     ignored = _spawn_managed(

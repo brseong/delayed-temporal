@@ -31,7 +31,7 @@ SCHEMA_VERSION = 1
 SHARD_COUNT = 2
 DEFAULT_LINEAR_STD_FRAC = 0.03785
 DEFAULT_LOG_STD_FRAC = 0.02712
-SUM_FIELDS = frozenset(
+GAUSSIAN_INTEGER_FIELDS = frozenset(
     {
         "events",
         "misses",
@@ -39,13 +39,12 @@ SUM_FIELDS = frozenset(
         "outputs",
         "output_underflows",
         "output_overflows",
-        "values",
-        "underflows",
-        "overflows",
     }
 )
-MIN_FIELDS = frozenset({"deadline_ulp_min"})
-MAX_FIELDS = frozenset({"deadline_ulp_max"})
+GAUSSIAN_MIN_FIELDS = frozenset({"deadline_ulp_min"})
+GAUSSIAN_MAX_FIELDS = frozenset({"deadline_ulp_max"})
+GAUSSIAN_NUMBER_FIELDS = GAUSSIAN_MIN_FIELDS | GAUSSIAN_MAX_FIELDS
+CLAMP_STAT_FIELDS = frozenset({"values", "underflows", "overflows"})
 MAX_CUDA_OFFSET = 2**64 - 4
 MANAGED_EVALUATOR_OPTIONS = frozenset(
     {
@@ -418,8 +417,11 @@ def validated_counts(counts: Mapping[str, Any]) -> dict[str, int]:
 
 def validated_stats(
     stats: Mapping[str, Mapping[str, Any]],
+    *,
+    integer_fields: frozenset[str],
+    number_fields: frozenset[str] = frozenset(),
 ) -> dict[str, dict[str, int | float]]:
-    """Validate named integer counters and resolution statistics."""
+    """Validate every site against one complete counter schema."""
 
     if not isinstance(stats, Mapping):
         raise ValueError("statistics must be a mapping")
@@ -430,18 +432,19 @@ def validated_stats(
         values = stats[site]
         if not isinstance(values, Mapping):
             raise ValueError("statistic sites must name counter mappings")
+        expected_fields = integer_fields | number_fields
+        if set(values) != expected_fields:
+            raise ValueError(f"statistic schema differs at {site!r}")
         validated: dict[str, int | float] = {}
         for field, value in values.items():
-            if field in SUM_FIELDS:
+            if field in integer_fields:
                 validated[field] = exact_nonnegative_int(
                     value, name=f"statistic {site}/{field}"
                 )
-            elif field in MIN_FIELDS or field in MAX_FIELDS:
+            elif field in number_fields:
                 validated[field] = nonnegative_number(
                     value, name=f"statistic {site}/{field}"
                 )
-            else:
-                raise ValueError(f"unsupported counter field {field!r} at {site!r}")
         result[site] = validated
     return result
 
@@ -465,9 +468,17 @@ def write_shard_result(
     raw, prediction_count = prediction_bytes(predictions)
     checked_interval = validated_interval(interval)
     checked_counts = validated_counts(counts)
-    checked_gaussian_stats = validated_stats(gaussian_stats)
-    checked_clamp_stats = validated_stats(clamp_stats)
-    checked_calibration_stats = validated_stats(calibration_clamp_stats)
+    checked_gaussian_stats = validated_stats(
+        gaussian_stats,
+        integer_fields=GAUSSIAN_INTEGER_FIELDS,
+        number_fields=GAUSSIAN_NUMBER_FIELDS,
+    )
+    checked_clamp_stats = validated_stats(
+        clamp_stats, integer_fields=CLAMP_STAT_FIELDS
+    )
+    checked_calibration_stats = validated_stats(
+        calibration_clamp_stats, integer_fields=CLAMP_STAT_FIELDS
+    )
     sample_count = checked_interval["sample_stop"] - checked_interval["sample_start"]
     if sample_count <= 0 or prediction_count != sample_count:
         raise ValueError("prediction count must equal the nonempty shard interval")
@@ -540,18 +551,26 @@ def load_shard_result(path: Path) -> tuple[dict[str, Any], bytes]:
 
 def _aggregate_stats(
     records: Iterable[Mapping[str, Mapping[str, int | float]]],
+    *,
+    integer_fields: frozenset[str],
+    min_fields: frozenset[str] = frozenset(),
+    max_fields: frozenset[str] = frozenset(),
 ) -> dict[str, dict[str, int | float]]:
     aggregate: dict[str, dict[str, int | float]] = {}
     for unchecked_record in records:
-        record = validated_stats(unchecked_record)
+        record = validated_stats(
+            unchecked_record,
+            integer_fields=integer_fields,
+            number_fields=min_fields | max_fields,
+        )
         for site, values in record.items():
             target = aggregate.setdefault(site, {})
             for field, value in values.items():
-                if field in SUM_FIELDS:
+                if field in integer_fields:
                     target[field] = exact_nonnegative_int(
                         target.get(field, 0), name=f"aggregate {site}/{field}"
                     ) + exact_nonnegative_int(value, name=f"statistic {site}/{field}")
-                elif field in MIN_FIELDS:
+                elif field in min_fields:
                     numeric = nonnegative_number(value, name=f"statistic {site}/{field}")
                     previous = nonnegative_number(
                         target.get(field, 0.0), name=f"aggregate {site}/{field}"
@@ -560,15 +579,13 @@ def _aggregate_stats(
                         target[field] = numeric
                     else:
                         target.setdefault(field, previous)
-                elif field in MAX_FIELDS:
+                elif field in max_fields:
                     target[field] = max(
                         nonnegative_number(
                             target.get(field, 0.0), name=f"aggregate {site}/{field}"
                         ),
                         nonnegative_number(value, name=f"statistic {site}/{field}"),
                     )
-                else:
-                    raise ValueError(f"unsupported counter field {field!r} at {site!r}")
     return {site: aggregate[site] for site in sorted(aggregate)}
 
 
@@ -733,11 +750,18 @@ def merge_shard_results(
     if evaluated != population or not 0 <= correct <= evaluated:
         raise ValueError("merged task counts are inconsistent")
     gaussian_stats = _aggregate_stats(
-        item["gaussian_stats"] for item in payloads
+        (item["gaussian_stats"] for item in payloads),
+        integer_fields=GAUSSIAN_INTEGER_FIELDS,
+        min_fields=GAUSSIAN_MIN_FIELDS,
+        max_fields=GAUSSIAN_MAX_FIELDS,
     )
-    clamp_stats = _aggregate_stats(item["clamp_stats"] for item in payloads)
+    clamp_stats = _aggregate_stats(
+        (item["clamp_stats"] for item in payloads),
+        integer_fields=CLAMP_STAT_FIELDS,
+    )
     calibration_clamp_stats = _aggregate_stats(
-        item["calibration_clamp_stats"] for item in payloads
+        (item["calibration_clamp_stats"] for item in payloads),
+        integer_fields=CLAMP_STAT_FIELDS,
     )
 
     raw_path = output_path.with_suffix(".predictions.int64")
@@ -948,6 +972,8 @@ def _signal_process_groups(
     children: Iterable[subprocess.Popen[Any]], signum: int
 ) -> None:
     for child in children:
+        if child.poll() is not None:
+            continue
         try:
             os.killpg(child.pid, signum)
         except ProcessLookupError:
@@ -961,8 +987,17 @@ def _spawn_managed(
 ) -> subprocess.Popen[Any]:
     """Start and register one process group without a signal-forwarding race."""
 
-    forwarded = {signal.SIGTERM, signal.SIGINT}
-    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, forwarded)
+    forwarded = (signal.SIGTERM, signal.SIGINT)
+    previous_handlers = {signum: signal.getsignal(signum) for signum in forwarded}
+    pending: list[int] = []
+
+    def defer(signum: int, _frame: Any) -> None:
+        pending.append(signum)
+
+    for signum in forwarded:
+        signal.signal(signum, defer)
+    child: subprocess.Popen[Any] | None = None
+    failure: BaseException | None = None
     try:
         child = subprocess.Popen(
             command,
@@ -970,9 +1005,33 @@ def _spawn_managed(
             **kwargs,
         )
         children.append(child)
-        return child
+    except BaseException as error:
+        failure = error
     finally:
-        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, forwarded)
+        try:
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    if pending:
+        _signal_process_groups(children, pending[0])
+        raise RunnerInterrupted(pending[0])
+    if failure is not None:
+        raise failure
+    if child is None:
+        raise RuntimeError("managed evaluator process was not created")
+    return child
+
+
+def _wait_and_unregister(
+    children: list[subprocess.Popen[Any]], child: subprocess.Popen[Any]
+) -> int:
+    """Wait for one evaluator and remove its process group from the live registry."""
+
+    returncode = child.wait()
+    children.remove(child)
+    return returncode
 
 
 def _terminate(
@@ -1138,7 +1197,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
                 stdout=preflight_handle,
                 stderr=subprocess.STDOUT,
             )
-            preflight_code = preflight.wait()
+            preflight_code = _wait_and_unregister(children, preflight)
             if preflight_code:
                 raise RuntimeError(
                     f"random generator preflight failed with code {preflight_code}; "
