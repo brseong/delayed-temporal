@@ -1258,6 +1258,13 @@ def verify_encoder_operating_point_score() -> None:
     assert reference["held_out_validated"]
     assert reference["selection_objective_rt"] > 0
     assert reference["validation_objective_rt"] > 0
+    selected = reference["calibration_selected_device"]
+    calibration_devices = reference["primitive_scores"]["phi-np"][
+        "calibration"
+    ]["devices"]
+    assert selected["calibration_rt"] == min(
+        row["r_t"] for row in calibration_devices if row["complete"]
+    )
 
     changed_values = observations[1].observed.clone()
     offsets = torch.tensor(
@@ -1277,6 +1284,10 @@ def verify_encoder_operating_point_score() -> None:
         primitive="phi-np",
     )
     assert changed["selection_objective_rt"] == reference["selection_objective_rt"]
+    assert (
+        changed["calibration_selected_device"]["physical_coordinate"]
+        == selected["physical_coordinate"]
+    )
     assert changed["validation_objective_rt"] > reference["validation_objective_rt"]
 
     screened_values = observations[0].observed.clone()

@@ -423,6 +423,38 @@ def _conditional_timing_ratio(
     return {"summary": _summary(ratios), "devices": rows}
 
 
+def _select_calibration_device(
+    calibration: dict[str, Any], held_out: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Freeze the lowest-ratio physical circuit using calibration data only."""
+    candidates = [
+        row
+        for row in calibration["devices"]
+        if row["complete"] and math.isfinite(row["r_t"])
+    ]
+    if not candidates:
+        return None
+    selected = min(
+        candidates,
+        key=lambda row: (row["r_t"], row["physical_coordinate"]),
+    )
+    held_out_by_device = {
+        row["device"]: row for row in held_out["devices"]
+    }
+    confirmation = held_out_by_device[selected["device"]]
+    return {
+        "device": selected["device"],
+        "physical_coordinate": selected["physical_coordinate"],
+        "calibration_rt": selected["r_t"],
+        "held_out_rt": (
+            confirmation["r_t"]
+            if confirmation["complete"]
+            and math.isfinite(confirmation["r_t"])
+            else None
+        ),
+    }
+
+
 def score_encoder_operating_point(
     observations: list[PrimitiveObservation],
     validations: list[PrimitiveValidation],
@@ -474,17 +506,28 @@ def score_encoder_operating_point(
             trial_slice=slice(config.calibration_repeats, config.repeats),
             signal_spans_s=spans,
         )
+        selected_device = _select_calibration_device(calibration, held_out)
         selection_gates.append(bool(transfer_gate["eligible"]))
         held_out_gates.append(validation.validated)
         primitive_scores[name] = {
             "calibration": calibration,
             "held_out": held_out,
+            "calibration_selected_device": selected_device,
             "calibration_transfer": transfer_gate,
             "held_out_validated": validation.validated,
         }
     target_score = primitive_scores[primitive]
-    selection_objective = target_score["calibration"]["summary"]["median"]
-    validation_objective = target_score["held_out"]["summary"]["median"]
+    selected_device = target_score["calibration_selected_device"]
+    selection_objective = (
+        selected_device["calibration_rt"]
+        if selected_device is not None
+        else None
+    )
+    validation_objective = (
+        selected_device["held_out_rt"]
+        if selected_device is not None
+        else None
+    )
     selection_eligible = all(selection_gates) and selection_objective is not None
     held_out_validated = all(held_out_gates) and validation_objective is not None
     if not selection_eligible:
@@ -499,6 +542,7 @@ def score_encoder_operating_point(
         "held_out_validated": held_out_validated,
         "selection_objective_rt": selection_objective,
         "validation_objective_rt": validation_objective,
+        "calibration_selected_device": selected_device,
         "targets": {
             "hardware_feasibility_1e-3": (
                 validation_objective is not None

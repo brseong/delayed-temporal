@@ -496,7 +496,7 @@ The representative code screen requires observed points, the declared transfer d
 
 Each circuit's conditional timing deviation is divided by the $\phi_{\mathrm{NP}}$ signal span fitted on calibration repetitions. The same frozen span normalizes both encoders, so a candidate cannot improve its score only by redefining the denominator.
 
-Candidates are ranked only with calibration repetitions. Held out repetitions confirm the selected candidate and report whether the timing noise ratio reaches 0.001, 0.0001, or 0.00003.
+Candidates are ranked only with calibration repetitions. For each candidate, the physical circuit with the minimum calibration timing noise ratio is selected and its coordinate is frozen. Held out repetitions from that same circuit confirm whether the timing noise ratio reaches 0.001, 0.0001, or 0.00003. The median across measured circuits remains a fixed-pattern robustness diagnostic rather than the optimization objective.
 
 Each encoder summary reports the validation timing noise ratio only if all required stages pass validation. $\phi_{\mathrm{NL}}$ requires static and dynamic $\phi_{\mathrm{NP}}$ plus its own transfer; $\phi_{\mathrm{NP}}$ requires its static and dynamic stages.
 

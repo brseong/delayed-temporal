@@ -344,6 +344,9 @@ def _search_result_row(payload: dict[str, Any]) -> dict[str, Any]:
         "held_out_validated": score.get("held_out_validated"),
         "selection_objective_rt": score.get("selection_objective_rt"),
         "validation_objective_rt": score.get("validation_objective_rt"),
+        "selected_physical_coordinate": (
+            score.get("calibration_selected_device") or {}
+        ).get("physical_coordinate"),
         "error_type": payload.get("error_type"),
         "error": payload.get("error"),
     }
@@ -451,9 +454,15 @@ def optimize_encoder_operating_point(
         "candidates": [candidate.to_dict() for candidate in candidates],
         "selection_contract": {
             "split": "calibration repetitions only",
-            "objective": "minimum requested primitive median conditional timing ratio",
+            "objective": (
+                "minimum requested primitive conditional timing ratio after "
+                "calibration-only physical-circuit selection"
+            ),
             "signal_span": "frozen phi-np calibration transfer span",
             "held_out_role": "confirmation only",
+            "circuit_selection": (
+                "minimum calibration ratio; coordinate frozen for held-out data"
+            ),
             "code_grid": "representative" if args.search_quick_codes else "full",
         },
     }
@@ -561,10 +570,13 @@ def optimize_encoder_operating_point(
             calibration_valid, _ = _primitive_summary_prerequisites(
                 score, primitive
             )
+            selected_device = primitive_score.get(
+                "calibration_selected_device"
+            )
             calibration_rt = (
-                primitive_score.get("calibration", {})
-                .get("summary", {})
-                .get("median")
+                selected_device.get("calibration_rt")
+                if selected_device is not None
+                else None
             )
             if (
                 calibration_rt is None
@@ -580,10 +592,12 @@ def optimize_encoder_operating_point(
         calibration_rt, result = primitive_ranked[0]
         score = result["score"]
         primitive_score = score["primitive_scores"][primitive]
-        held_out_rt = primitive_score["held_out"]["summary"]["median"]
+        selected_device = primitive_score["calibration_selected_device"]
+        held_out_rt = selected_device["held_out_rt"]
         _, held_out_validated = _primitive_summary_prerequisites(score, primitive)
         best_by_primitive[primitive] = {
             "candidate": result["candidate"],
+            "physical_coordinate": selected_device["physical_coordinate"],
             "calibration_rt": calibration_rt,
             "held_out_rt": held_out_rt,
             "held_out_validated": held_out_validated,
