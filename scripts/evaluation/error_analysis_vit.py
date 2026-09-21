@@ -65,6 +65,7 @@ from scripts.experiments.run_exact_sharded_vit import (
     write_shard_result,
 )
 from scripts.runtime import files as runtime_files
+from scripts.runtime import identity as runtime_identity
 from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
 from utils.transformers.calibration import bind_model_calibration, clear_model_calibration
 from utils.transformers.models.spiking_vit.calibration import (
@@ -701,6 +702,10 @@ def validate_vit_runtime_arguments(args: Arguments) -> None:
             raise ValueError("exact Gaussian evaluation requires a contract path")
         if args.evaluation_prefix_samples <= 0:
             raise ValueError("exact Gaussian evaluation requires an explicit prefix")
+        if args.evaluation_prefix_samples < 2 * args.batch_size:
+            raise ValueError(
+                "exact Gaussian evaluation requires two full prefix batches"
+            )
         if args.quick_test or args.max_eval_batches or args.benchmark_measure_batches:
             raise ValueError("exact Gaussian evaluation owns its complete batch interval")
         if exact_preflight and (
@@ -1140,6 +1145,8 @@ def evaluate_vit_model(args: Arguments) -> None:
         raise ValueError(
             "exact Gaussian evaluation requires the spiking backend, CUDA, and timing noise"
         )
+    if exact_gaussian_mode:
+        runtime_identity.checked_hash(args.checkpoint_sha256)
 
     if gaussian_enabled and mismatch_enabled:
         raise ValueError(
@@ -1497,6 +1504,15 @@ def evaluate_vit_model(args: Arguments) -> None:
     if calibration_mode is not CalibrationMode.COLLECT:
         apply_parameter_noise(model, args.weight_noise_std, args.bias_noise_std)
 
+    loaded_model_state_sha256 = None
+    if exact_gaussian_mode:
+        loaded_model_state_sha256 = runtime_identity.model_state_sha256(model)
+        print(
+            "Loaded model state — "
+            f"sha256: {loaded_model_state_sha256}",
+            flush=True,
+        )
+
     model.to(device)
     model.eval()
 
@@ -1590,6 +1606,7 @@ def evaluate_vit_model(args: Arguments) -> None:
             "source_commit": args.source_commit,
             "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "checkpoint_sha256": args.checkpoint_sha256,
+            "loaded_model_state_sha256": loaded_model_state_sha256,
             "model_id": model_id,
             "dataset_id": dataset_id,
             "evaluation_split": split,
@@ -1647,10 +1664,10 @@ def evaluate_vit_model(args: Arguments) -> None:
             exact_rng_contract = load_rng_contract(
                 contract_path, run_identity=exact_run_identity
             )
-            if int(exact_rng_contract["batch_size"]) != batch_size:
+            if exact_rng_contract["batch_size"] != batch_size:
                 raise ValueError("Gaussian generator contract batch size differs")
             exact_rng_start_offset = checked_batch_offset(
-                shard_batch_start, int(exact_rng_contract["batch_stride"])
+                shard_batch_start, exact_rng_contract["batch_stride"]
             )
             gaussian_generator.set_offset(exact_rng_start_offset)
             if int(gaussian_generator.get_offset()) != exact_rng_start_offset:
@@ -1800,7 +1817,7 @@ def evaluate_vit_model(args: Arguments) -> None:
             if exact_rng_contract is not None:
                 global_batch_index = shard_batch_start + batch_index
                 expected_offset = checked_batch_offset(
-                    global_batch_index, int(exact_rng_contract["batch_stride"])
+                    global_batch_index, exact_rng_contract["batch_stride"]
                 )
                 generator = get_gaussian_time_noise().generator
                 if (
@@ -2126,7 +2143,7 @@ def evaluate_vit_model(args: Arguments) -> None:
         if not isinstance(generator, torch.Generator):
             raise RuntimeError("exact shard lost its Gaussian generator")
         expected_end_offset = checked_batch_offset(
-            shard_batch_stop, int(exact_rng_contract["batch_stride"])
+            shard_batch_stop, exact_rng_contract["batch_stride"]
         )
         actual_end_offset = int(generator.get_offset())
         if actual_end_offset != expected_end_offset:

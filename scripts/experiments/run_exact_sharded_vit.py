@@ -4,16 +4,18 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import signal
 import struct
 import subprocess
 import sys
 import time
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
 
 SOURCE = Path(__file__).resolve().parents[2]
@@ -72,6 +74,44 @@ MANAGED_EVALUATOR_OPTIONS = frozenset(
         "--no-report-clamp-stats",
     }
 )
+INTERVAL_FIELDS = (
+    "shard_index",
+    "shard_count",
+    "sample_start",
+    "sample_stop",
+    "batch_start",
+    "batch_stop",
+    "population",
+    "batch_size",
+)
+
+
+def exact_nonnegative_int(value: Any, *, name: str) -> int:
+    """Accept only a native nonnegative integer without lossy coercion."""
+
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{name} must be a nonnegative integer")
+    return value
+
+
+def exact_positive_int(value: Any, *, name: str) -> int:
+    """Accept only a native positive integer without lossy coercion."""
+
+    result = exact_nonnegative_int(value, name=name)
+    if result == 0:
+        raise ValueError(f"{name} must be positive")
+    return result
+
+
+def nonnegative_number(value: Any, *, name: str) -> int | float:
+    """Accept a finite nonnegative integer or real statistic, excluding booleans."""
+
+    if type(value) is int:
+        if value >= 0:
+            return value
+    elif type(value) is float and math.isfinite(value) and value >= 0.0:
+        return value
+    raise ValueError(f"{name} must be a finite nonnegative number")
 
 
 def exact_batch_shard_bounds(
@@ -82,11 +122,10 @@ def exact_batch_shard_bounds(
 ) -> tuple[int, int, int, int]:
     """Return sample and batch bounds without splitting a global batch."""
 
-    values = (population, batch_size, shard_count, shard_index)
-    if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
-        raise TypeError("population, batch size, shard count, and index must be integers")
-    if population <= 0 or batch_size <= 0 or shard_count <= 0:
-        raise ValueError("population, batch size, and shard count must be positive")
+    population = exact_positive_int(population, name="population")
+    batch_size = exact_positive_int(batch_size, name="batch size")
+    shard_count = exact_positive_int(shard_count, name="shard count")
+    shard_index = exact_nonnegative_int(shard_index, name="shard index")
     if not 0 <= shard_index < shard_count:
         raise ValueError("shard index must be inside shard count")
 
@@ -95,7 +134,7 @@ def exact_batch_shard_bounds(
         raise ValueError("each exact shard must contain at least one global batch")
     base, remainder = divmod(global_batches, shard_count)
     batch_start = shard_index * base + min(shard_index, remainder)
-    batch_stop = batch_start + base + int(shard_index < remainder)
+    batch_stop = batch_start + base + (1 if shard_index < remainder else 0)
     sample_start = min(batch_start * batch_size, population)
     sample_stop = min(batch_stop * batch_size, population)
     return sample_start, sample_stop, batch_start, batch_stop
@@ -113,9 +152,8 @@ def canonical_json_sha256(value: Any) -> str:
 def validate_cuda_offset(offset: int, *, name: str) -> int:
     """Reject offsets that cannot be represented by CUDA's opaque Philox state."""
 
-    if isinstance(offset, bool) or not isinstance(offset, int):
-        raise TypeError(f"{name} must be an integer")
-    if offset < 0 or offset > MAX_CUDA_OFFSET:
+    offset = exact_nonnegative_int(offset, name=name)
+    if offset > MAX_CUDA_OFFSET:
         raise ValueError(f"{name} is outside the supported CUDA offset range")
     if offset % 4:
         raise ValueError(f"{name} must be aligned to four Philox units")
@@ -125,10 +163,7 @@ def validate_cuda_offset(offset: int, *, name: str) -> int:
 def checked_batch_offset(batch_index: int, batch_stride: int) -> int:
     """Multiply a global batch index and stride without unsigned wraparound."""
 
-    if isinstance(batch_index, bool) or not isinstance(batch_index, int):
-        raise TypeError("global batch index must be an integer")
-    if batch_index < 0:
-        raise ValueError("global batch index must be non-negative")
+    batch_index = exact_nonnegative_int(batch_index, name="global batch index")
     validate_cuda_offset(batch_stride, name="batch stride")
     if batch_stride and batch_index > MAX_CUDA_OFFSET // batch_stride:
         raise OverflowError("global batch offset exceeds the CUDA generator range")
@@ -146,17 +181,28 @@ def _relative_trace(
     relative: list[dict[str, Any]] = []
     previous = batch_start_offset
     for call in trace:
-        before = validate_cuda_offset(int(call["before_offset"]), name="call before offset")
-        after = validate_cuda_offset(int(call["after_offset"]), name="call after offset")
+        if (
+            not isinstance(call.get("site"), str)
+            or call.get("encoding") not in ("linear", "log")
+            or not isinstance(call.get("dtype"), str)
+            or type(call.get("sampled")) is not bool
+            or not isinstance(call.get("shape"), list)
+        ):
+            raise ValueError("Gaussian call trace contains malformed fields")
+        before = validate_cuda_offset(call["before_offset"], name="call before offset")
+        after = validate_cuda_offset(call["after_offset"], name="call after offset")
         if before != previous or after < before:
             raise ValueError("Gaussian call offsets are not contiguous and monotone")
         relative.append(
             {
-                "site": str(call["site"]),
-                "encoding": str(call["encoding"]),
-                "shape": [int(value) for value in call["shape"]],
-                "dtype": str(call["dtype"]),
-                "sampled": bool(call["sampled"]),
+                "site": call["site"],
+                "encoding": call["encoding"],
+                "shape": [
+                    exact_nonnegative_int(value, name="Gaussian call shape")
+                    for value in call["shape"]
+                ],
+                "dtype": call["dtype"],
+                "sampled": call["sampled"],
                 "before_offset": before - batch_start_offset,
                 "after_offset": after - batch_start_offset,
             }
@@ -175,14 +221,15 @@ def build_rng_preflight_contract(
 ) -> dict[str, Any]:
     """Validate two distinct full batches before allowing offset extrapolation."""
 
+    batch_size = exact_positive_int(batch_size, name="preflight batch size")
     observed = list(batches)
     if len(observed) != 2:
         raise ValueError("random generator preflight requires exactly two batches")
     normalized: list[list[dict[str, Any]]] = []
     strides: list[int] = []
     for start, stop, trace in observed:
-        validate_cuda_offset(start, name="batch start offset")
-        validate_cuda_offset(stop, name="batch stop offset")
+        start = validate_cuda_offset(start, name="batch start offset")
+        stop = validate_cuda_offset(stop, name="batch stop offset")
         if stop < start:
             raise ValueError("batch random generator offsets are reversed")
         normalized.append(
@@ -227,8 +274,12 @@ def verify_rng_batch_trace(
     """Require one actual shard batch to satisfy the preflight stride and trace."""
 
     expected_stride = validate_cuda_offset(
-        int(contract["batch_stride"]), name="contract batch stride"
+        contract["batch_stride"], name="contract batch stride"
     )
+    contract_batch_size = exact_positive_int(
+        contract["batch_size"], name="contract batch size"
+    )
+    sample_count = exact_positive_int(sample_count, name="sample count")
     validate_cuda_offset(start_offset, name="batch start offset")
     validate_cuda_offset(stop_offset, name="batch stop offset")
     if stop_offset - start_offset != expected_stride:
@@ -241,11 +292,11 @@ def verify_rng_batch_trace(
         batch_stop_offset=stop_offset,
     )
     expected = contract["trace"]
-    if sample_count == int(contract["batch_size"]):
+    if sample_count == contract_batch_size:
         if actual != expected:
             raise RuntimeError("full batch Gaussian call trace differs from preflight")
         return
-    if not 0 < sample_count < int(contract["batch_size"]):
+    if sample_count >= contract_batch_size:
         raise ValueError("partial batch size is invalid")
     if len(actual) != len(expected):
         raise RuntimeError("partial batch Gaussian call count differs from preflight")
@@ -269,7 +320,7 @@ def verify_rng_batch_trace(
         if (
             not expected_shape
             or len(expected_shape) != len(actual_shape)
-            or expected_shape[0] != int(contract["batch_size"])
+            or expected_shape[0] != contract_batch_size
             or actual_shape[0] != sample_count
             or expected_shape[1:] != actual_shape[1:]
         ):
@@ -285,13 +336,23 @@ def load_rng_contract(
 
     payload = json.loads(path.read_text())
     if (
-        payload.get("schema_version") != SCHEMA_VERSION
+        exact_nonnegative_int(
+            payload.get("schema_version"), name="contract schema version"
+        )
+        != SCHEMA_VERSION
         or payload.get("algorithm") != "torch_cuda_generator_philox_offset"
         or payload.get("identity_sha256") != canonical_json_sha256(run_identity)
     ):
         raise ValueError("Gaussian random generator preflight identity differs")
-    validate_cuda_offset(int(payload["batch_stride"]), name="contract batch stride")
-    if payload.get("preflight_batches") != 2 or not isinstance(payload.get("trace"), list):
+    validate_cuda_offset(payload["batch_stride"], name="contract batch stride")
+    exact_positive_int(payload.get("batch_size"), name="contract batch size")
+    if (
+        exact_positive_int(
+            payload.get("preflight_batches"), name="contract preflight batches"
+        )
+        != 2
+        or not isinstance(payload.get("trace"), list)
+    ):
         raise ValueError("Gaussian random generator preflight is incomplete")
     return payload
 
@@ -329,6 +390,62 @@ def decode_predictions(data: bytes) -> tuple[int, ...]:
     return tuple(item[0] for item in struct.iter_unpack("<q", data))
 
 
+def validated_interval(interval: Mapping[str, Any]) -> dict[str, int]:
+    """Validate the complete exact shard interval representation."""
+
+    if not isinstance(interval, Mapping):
+        raise ValueError("shard interval must be a mapping")
+    result = {
+        field: exact_nonnegative_int(interval.get(field), name=f"interval {field}")
+        for field in INTERVAL_FIELDS
+    }
+    exact_positive_int(result["shard_count"], name="interval shard count")
+    exact_positive_int(result["population"], name="interval population")
+    exact_positive_int(result["batch_size"], name="interval batch size")
+    return result
+
+
+def validated_counts(counts: Mapping[str, Any]) -> dict[str, int]:
+    """Validate exact task counters without accepting numeric lookalikes."""
+
+    if not isinstance(counts, Mapping):
+        raise ValueError("task counts must be a mapping")
+    return {
+        field: exact_nonnegative_int(counts.get(field), name=f"task count {field}")
+        for field in ("correct", "evaluated")
+    }
+
+
+def validated_stats(
+    stats: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, int | float]]:
+    """Validate named integer counters and resolution statistics."""
+
+    if not isinstance(stats, Mapping):
+        raise ValueError("statistics must be a mapping")
+    if any(not isinstance(site, str) or not site for site in stats):
+        raise ValueError("statistic sites must be nonempty strings")
+    result: dict[str, dict[str, int | float]] = {}
+    for site in sorted(stats):
+        values = stats[site]
+        if not isinstance(values, Mapping):
+            raise ValueError("statistic sites must name counter mappings")
+        validated: dict[str, int | float] = {}
+        for field, value in values.items():
+            if field in SUM_FIELDS:
+                validated[field] = exact_nonnegative_int(
+                    value, name=f"statistic {site}/{field}"
+                )
+            elif field in MIN_FIELDS or field in MAX_FIELDS:
+                validated[field] = nonnegative_number(
+                    value, name=f"statistic {site}/{field}"
+                )
+            else:
+                raise ValueError(f"unsupported counter field {field!r} at {site!r}")
+        result[site] = validated
+    return result
+
+
 def write_shard_result(
     result_path: Path,
     *,
@@ -346,12 +463,17 @@ def write_shard_result(
     if result_path.exists():
         raise FileExistsError(result_path)
     raw, prediction_count = prediction_bytes(predictions)
-    sample_count = int(interval["sample_stop"]) - int(interval["sample_start"])
+    checked_interval = validated_interval(interval)
+    checked_counts = validated_counts(counts)
+    checked_gaussian_stats = validated_stats(gaussian_stats)
+    checked_clamp_stats = validated_stats(clamp_stats)
+    checked_calibration_stats = validated_stats(calibration_clamp_stats)
+    sample_count = checked_interval["sample_stop"] - checked_interval["sample_start"]
     if sample_count <= 0 or prediction_count != sample_count:
         raise ValueError("prediction count must equal the nonempty shard interval")
-    if int(counts.get("evaluated", -1)) != sample_count:
+    if checked_counts["evaluated"] != sample_count:
         raise ValueError("evaluated count must equal the shard interval")
-    if not 0 <= int(counts.get("correct", -1)) <= sample_count:
+    if checked_counts["correct"] > sample_count:
         raise ValueError("correct count must lie inside the evaluated count")
 
     predictions_path = result_path.with_suffix(".predictions.int64")
@@ -360,10 +482,10 @@ def write_shard_result(
     _atomic_bytes(predictions_path, raw)
     payload = {
         "schema_version": SCHEMA_VERSION,
-        "shard_index": int(interval["shard_index"]),
-        "shard_count": int(interval["shard_count"]),
-        "interval": dict(interval),
-        "counts": dict(counts),
+        "shard_index": checked_interval["shard_index"],
+        "shard_count": checked_interval["shard_count"],
+        "interval": checked_interval,
+        "counts": checked_counts,
         "predictions": {
             "path": predictions_path.name,
             "dtype": "int64",
@@ -371,16 +493,9 @@ def write_shard_result(
             "count": prediction_count,
             "sha256": hashlib.sha256(raw).hexdigest(),
         },
-        "gaussian_stats": {
-            site: dict(values) for site, values in sorted(gaussian_stats.items())
-        },
-        "clamp_stats": {
-            site: dict(values) for site, values in sorted(clamp_stats.items())
-        },
-        "calibration_clamp_stats": {
-            site: dict(values)
-            for site, values in sorted(calibration_clamp_stats.items())
-        },
+        "gaussian_stats": checked_gaussian_stats,
+        "clamp_stats": checked_clamp_stats,
+        "calibration_clamp_stats": checked_calibration_stats,
         "run_identity": dict(run_identity),
         "rng_contract": dict(rng_contract),
     }
@@ -392,7 +507,12 @@ def load_shard_result(path: Path) -> tuple[dict[str, Any], bytes]:
     """Load and validate one shard result plus its external raw predictions."""
 
     payload = json.loads(path.read_text())
-    if payload.get("schema_version") != SCHEMA_VERSION:
+    if (
+        exact_nonnegative_int(
+            payload.get("schema_version"), name="shard schema version"
+        )
+        != SCHEMA_VERSION
+    ):
         raise ValueError(f"unsupported shard result schema: {path}")
     prediction = payload.get("predictions")
     if not isinstance(prediction, dict) or set(
@@ -401,11 +521,16 @@ def load_shard_result(path: Path) -> tuple[dict[str, Any], bytes]:
         raise ValueError(f"incomplete prediction metadata: {path}")
     if prediction["dtype"] != "int64" or prediction["byte_order"] != "little":
         raise ValueError(f"unsupported prediction representation: {path}")
+    prediction_count = exact_nonnegative_int(
+        prediction["count"], name="prediction count"
+    )
+    if not isinstance(prediction["path"], str):
+        raise ValueError(f"prediction path must be a string: {path}")
     relative = Path(prediction["path"])
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError(f"prediction path must be local to its shard result: {path}")
     raw = (path.parent / relative).read_bytes()
-    if len(raw) != int(prediction["count"]) * 8:
+    if len(raw) != prediction_count * 8:
         raise ValueError(f"prediction byte count mismatch: {path}")
     if hashlib.sha256(raw).hexdigest() != prediction["sha256"]:
         raise ValueError(f"prediction digest mismatch: {path}")
@@ -417,21 +542,31 @@ def _aggregate_stats(
     records: Iterable[Mapping[str, Mapping[str, int | float]]],
 ) -> dict[str, dict[str, int | float]]:
     aggregate: dict[str, dict[str, int | float]] = {}
-    for record in records:
+    for unchecked_record in records:
+        record = validated_stats(unchecked_record)
         for site, values in record.items():
             target = aggregate.setdefault(site, {})
             for field, value in values.items():
                 if field in SUM_FIELDS:
-                    target[field] = int(target.get(field, 0)) + int(value)
+                    target[field] = exact_nonnegative_int(
+                        target.get(field, 0), name=f"aggregate {site}/{field}"
+                    ) + exact_nonnegative_int(value, name=f"statistic {site}/{field}")
                 elif field in MIN_FIELDS:
-                    numeric = float(value)
-                    previous = float(target.get(field, 0.0))
+                    numeric = nonnegative_number(value, name=f"statistic {site}/{field}")
+                    previous = nonnegative_number(
+                        target.get(field, 0.0), name=f"aggregate {site}/{field}"
+                    )
                     if numeric > 0.0 and (previous == 0.0 or numeric < previous):
                         target[field] = numeric
                     else:
                         target.setdefault(field, previous)
                 elif field in MAX_FIELDS:
-                    target[field] = max(float(target.get(field, 0.0)), float(value))
+                    target[field] = max(
+                        nonnegative_number(
+                            target.get(field, 0.0), name=f"aggregate {site}/{field}"
+                        ),
+                        nonnegative_number(value, name=f"statistic {site}/{field}"),
+                    )
                 else:
                     raise ValueError(f"unsupported counter field {field!r} at {site!r}")
     return {site: aggregate[site] for site in sorted(aggregate)}
@@ -458,54 +593,75 @@ def merge_shard_results(
     loaded = [(*load_shard_result(path), path) for path in paths]
     if len(loaded) != SHARD_COUNT:
         raise ValueError("exact ViT merging requires exactly two shard results")
-    loaded.sort(key=lambda item: int(item[0]["shard_index"]))
+    for payload, _raw, _path in loaded:
+        exact_nonnegative_int(payload.get("shard_index"), name="shard index")
+        exact_positive_int(payload.get("shard_count"), name="shard count")
+    loaded.sort(key=lambda item: item[0]["shard_index"])
     payloads = [item[0] for item in loaded]
     if [item["shard_index"] for item in payloads] != [0, 1]:
         raise ValueError("shard indices must be exactly zero and one")
     if any(item.get("shard_count") != SHARD_COUNT for item in payloads):
         raise ValueError("shard count mismatch")
+    for payload in payloads:
+        run_identity = payload.get("run_identity")
+        if not isinstance(run_identity, Mapping):
+            raise ValueError("shard run identity must be a mapping")
+        identity.checked_hash(run_identity.get("checkpoint_sha256"))
+        identity.checked_hash(run_identity.get("loaded_model_state_sha256"))
     if payloads[0]["run_identity"] != payloads[1]["run_identity"]:
         raise ValueError("shard run identities differ")
+    if any(not isinstance(item.get("rng_contract"), Mapping) for item in payloads):
+        raise ValueError("shard random generator contract must be a mapping")
     shared_rng = _shared_rng_identity(payloads[0]["rng_contract"])
     if shared_rng != _shared_rng_identity(payloads[1]["rng_contract"]):
         raise ValueError("shard random generator contracts differ")
-    trace_sha256 = str(shared_rng.get("trace_sha256", ""))
+    trace_sha256 = shared_rng.get("trace_sha256")
     if (
-        shared_rng.get("schema_version") != SCHEMA_VERSION
+        exact_nonnegative_int(
+            shared_rng.get("schema_version"), name="contract schema version"
+        )
+        != SCHEMA_VERSION
         or shared_rng.get("algorithm") != "torch_cuda_generator_philox_offset"
-        or shared_rng.get("preflight_batches") != 2
+        or exact_positive_int(
+            shared_rng.get("preflight_batches"), name="contract preflight batches"
+        )
+        != 2
         or shared_rng.get("identity_sha256")
         != canonical_json_sha256(payloads[0]["run_identity"])
+        or not isinstance(trace_sha256, str)
         or len(trace_sha256) != 64
         or any(character not in "0123456789abcdef" for character in trace_sha256)
     ):
         raise ValueError("shard random generator contract is incomplete or unbound")
 
     first_interval, second_interval = (
-        payloads[0]["interval"], payloads[1]["interval"]
+        validated_interval(payloads[0].get("interval")),
+        validated_interval(payloads[1].get("interval")),
     )
-    if int(first_interval["sample_start"]) != 0:
+    if first_interval["sample_start"] != 0:
         raise ValueError("shard coverage must start at sample zero")
-    if int(first_interval["sample_stop"]) != int(second_interval["sample_start"]):
+    if first_interval["sample_stop"] != second_interval["sample_start"]:
         raise ValueError("shard sample intervals have a gap or overlap")
-    if int(first_interval["batch_stop"]) != int(second_interval["batch_start"]):
+    if first_interval["batch_stop"] != second_interval["batch_start"]:
         raise ValueError("shard batch intervals have a gap or overlap")
-    population = int(first_interval["population"])
-    if int(second_interval["sample_stop"]) != population:
+    population = first_interval["population"]
+    if second_interval["sample_stop"] != population:
         raise ValueError("shard coverage does not end at the selected population")
-    if any(int(item["interval"]["population"]) != population for item in payloads):
+    if second_interval["population"] != population:
         raise ValueError("shard populations differ")
-    batch_size = int(first_interval["batch_size"])
-    if int(shared_rng.get("batch_size", -1)) != batch_size:
+    batch_size = first_interval["batch_size"]
+    if exact_positive_int(
+        shared_rng.get("batch_size"), name="contract batch size"
+    ) != batch_size:
         raise ValueError("shard random generator batch size differs")
     for index, (payload, raw, _path) in enumerate(loaded):
-        interval = payload["interval"]
+        interval = (first_interval, second_interval)[index]
         if (
-            int(interval["shard_index"]) != index
-            or int(interval["shard_count"]) != SHARD_COUNT
-            or int(interval["batch_size"]) != batch_size
+            interval["shard_index"] != index
+            or interval["shard_count"] != SHARD_COUNT
+            or interval["batch_size"] != batch_size
             or tuple(
-                int(interval[field])
+                interval[field]
                 for field in (
                     "sample_start",
                     "sample_stop",
@@ -516,35 +672,54 @@ def merge_shard_results(
             != exact_batch_shard_bounds(population, batch_size, SHARD_COUNT, index)
         ):
             raise ValueError("shard interval differs from the canonical batch partition")
-        sample_count = int(interval["sample_stop"]) - int(interval["sample_start"])
+        sample_count = interval["sample_stop"] - interval["sample_start"]
+        prediction_count = exact_nonnegative_int(
+            payload["predictions"].get("count"), name="prediction count"
+        )
+        counts = validated_counts(payload.get("counts"))
         if (
             len(raw) != sample_count * 8
-            or int(payload["predictions"]["count"]) != sample_count
-            or int(payload["counts"]["evaluated"]) != sample_count
+            or prediction_count != sample_count
+            or counts["evaluated"] != sample_count
+            or counts["correct"] > counts["evaluated"]
         ):
             raise ValueError("shard prediction or task count differs from its interval")
 
     stride = validate_cuda_offset(
-        int(payloads[0]["rng_contract"]["batch_stride"]),
+        payloads[0]["rng_contract"]["batch_stride"],
         name="shard batch stride",
     )
-    for payload in payloads:
-        interval = payload["interval"]
+    for index, payload in enumerate(payloads):
+        interval = (first_interval, second_interval)[index]
         contract = payload["rng_contract"]
-        batch_start = int(interval["batch_start"])
-        batch_stop = int(interval["batch_stop"])
+        batch_start = interval["batch_start"]
+        batch_stop = interval["batch_stop"]
         if (
-            int(contract["global_batch_start"]) != batch_start
-            or int(contract["global_batch_stop"]) != batch_stop
-            or int(contract["start_offset"])
+            exact_nonnegative_int(
+                contract.get("global_batch_start"), name="contract batch start"
+            )
+            != batch_start
+            or exact_nonnegative_int(
+                contract.get("global_batch_stop"), name="contract batch stop"
+            )
+            != batch_stop
+            or validate_cuda_offset(
+                contract.get("start_offset"), name="contract start offset"
+            )
             != checked_batch_offset(batch_start, stride)
-            or int(contract["end_offset"])
+            or validate_cuda_offset(
+                contract.get("end_offset"), name="contract end offset"
+            )
             != checked_batch_offset(batch_stop, stride)
-            or int(contract["observed_batches"]) != batch_stop - batch_start
+            or exact_nonnegative_int(
+                contract.get("observed_batches"), name="contract observed batches"
+            )
+            != batch_stop - batch_start
         ):
             raise ValueError("shard random generator offset continuity failed")
-    if int(payloads[0]["rng_contract"]["end_offset"]) != int(
-        payloads[1]["rng_contract"]["start_offset"]
+    if (
+        payloads[0]["rng_contract"]["end_offset"]
+        != payloads[1]["rng_contract"]["start_offset"]
     ):
         raise ValueError("random generator offsets have a gap or overlap")
 
@@ -552,10 +727,18 @@ def merge_shard_results(
     predictions = decode_predictions(raw)
     if len(predictions) != population:
         raise ValueError("merged prediction count differs from the population")
-    correct = sum(int(item["counts"]["correct"]) for item in payloads)
-    evaluated = sum(int(item["counts"]["evaluated"]) for item in payloads)
+    checked_counts = [validated_counts(item.get("counts")) for item in payloads]
+    correct = sum(item["correct"] for item in checked_counts)
+    evaluated = sum(item["evaluated"] for item in checked_counts)
     if evaluated != population or not 0 <= correct <= evaluated:
         raise ValueError("merged task counts are inconsistent")
+    gaussian_stats = _aggregate_stats(
+        item["gaussian_stats"] for item in payloads
+    )
+    clamp_stats = _aggregate_stats(item["clamp_stats"] for item in payloads)
+    calibration_clamp_stats = _aggregate_stats(
+        item["calibration_clamp_stats"] for item in payloads
+    )
 
     raw_path = output_path.with_suffix(".predictions.int64")
     if output_path.exists() or raw_path.exists():
@@ -568,9 +751,9 @@ def merge_shard_results(
             "sample_start": 0,
             "sample_stop": population,
             "batch_start": 0,
-            "batch_stop": int(second_interval["batch_stop"]),
+            "batch_stop": second_interval["batch_stop"],
             "population": population,
-            "batch_size": int(first_interval["batch_size"]),
+            "batch_size": first_interval["batch_size"],
         },
         "counts": {
             "correct": correct,
@@ -584,21 +767,17 @@ def merge_shard_results(
             "count": len(predictions),
             "sha256": hashlib.sha256(raw).hexdigest(),
         },
-        "gaussian_stats": _aggregate_stats(
-            item["gaussian_stats"] for item in payloads
-        ),
-        "clamp_stats": _aggregate_stats(item["clamp_stats"] for item in payloads),
-        "calibration_clamp_stats": _aggregate_stats(
-            item["calibration_clamp_stats"] for item in payloads
-        ),
+        "gaussian_stats": gaussian_stats,
+        "clamp_stats": clamp_stats,
+        "calibration_clamp_stats": calibration_clamp_stats,
         "run_identity": payloads[0]["run_identity"],
         "rng_contract": {
             **shared_rng,
             "global_batch_start": 0,
-            "global_batch_stop": int(second_interval["batch_stop"]),
+            "global_batch_stop": second_interval["batch_stop"],
             "start_offset": 0,
-            "end_offset": int(payloads[1]["rng_contract"]["end_offset"]),
-            "observed_batches": int(second_interval["batch_stop"]),
+            "end_offset": payloads[1]["rng_contract"]["end_offset"],
+            "observed_batches": second_interval["batch_stop"],
         },
         "shards": [
             {
@@ -641,6 +820,52 @@ def _has_option(arguments: Iterable[str], option: str) -> bool:
     return any(argument == option or argument.startswith(option + "=") for argument in arguments)
 
 
+def evaluator_arguments(args: argparse.Namespace) -> list[str]:
+    """Return evaluator arguments after rejecting runner-owned controls."""
+
+    arguments = list(args.evaluator_args)
+    if arguments[:1] == ["--"]:
+        arguments = arguments[1:]
+    conflicts = sorted(
+        option for option in MANAGED_EVALUATOR_OPTIONS if _has_option(arguments, option)
+    )
+    if conflicts:
+        raise ValueError(f"runner-owned evaluator options were supplied: {conflicts}")
+    return arguments
+
+
+def evaluator_option(arguments: list[str], option: str) -> str:
+    """Read one required evaluator option and reject missing or duplicate values."""
+
+    values: list[str] = []
+    for index, argument in enumerate(arguments):
+        if argument.startswith(option + "="):
+            values.append(argument.partition("=")[2])
+        elif argument == option:
+            if index + 1 >= len(arguments) or arguments[index + 1].startswith("--"):
+                raise ValueError(f"evaluator option has no value: {option}")
+            values.append(arguments[index + 1])
+    if len(values) != 1 or not values[0]:
+        raise ValueError(f"evaluator arguments require exactly one {option}")
+    return values[0]
+
+
+def validate_local_checkpoint(arguments: list[str]) -> dict[str, Any] | None:
+    """Bind an explicit local model path to its supplied artifact identity."""
+
+    expected = identity.checked_hash(evaluator_option(arguments, "--checkpoint-sha256"))
+    model_id = evaluator_option(arguments, "--model_id")
+    path = Path(model_id).expanduser()
+    if not path.exists():
+        if path.is_absolute():
+            raise FileNotFoundError(path)
+        return None
+    artifact = identity.artifact_identity(path)
+    if artifact["aggregate_sha256"] != expected:
+        raise ValueError("local checkpoint artifact differs from checkpoint SHA-256")
+    return artifact
+
+
 def build_shard_command(
     args: argparse.Namespace,
     *,
@@ -652,18 +877,9 @@ def build_shard_command(
 ) -> list[str]:
     """Build one evaluator command with all exact-sharding controls owned here."""
 
-    evaluator_args = list(args.evaluator_args)
-    if evaluator_args[:1] == ["--"]:
-        evaluator_args = evaluator_args[1:]
-    conflicts = sorted(
-        option
-        for option in MANAGED_EVALUATOR_OPTIONS
-        if _has_option(evaluator_args, option)
-    )
-    if conflicts:
-        raise ValueError(f"runner-owned evaluator options were supplied: {conflicts}")
-    if not _has_option(evaluator_args, "--checkpoint-sha256"):
-        raise ValueError("evaluator arguments must include --checkpoint-sha256")
+    evaluator_args = evaluator_arguments(args)
+    evaluator_option(evaluator_args, "--checkpoint-sha256")
+    evaluator_option(evaluator_args, "--model_id")
     linear, logarithmic = noise_profile_fractions(
         args.noise_profile,
         linear_std_frac=args.linear_std_frac,
@@ -720,29 +936,98 @@ def build_shard_command(
     return command
 
 
-def _terminate(children: Iterable[subprocess.Popen[Any]]) -> None:
+class RunnerInterrupted(Exception):
+    """Record a termination signal forwarded to managed evaluator groups."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"runner received signal {signum}")
+        self.signum = signum
+
+
+def _signal_process_groups(
+    children: Iterable[subprocess.Popen[Any]], signum: int
+) -> None:
     for child in children:
-        if child.poll() is None:
-            child.terminate()
-    deadline = time.monotonic() + 15.0
-    for child in children:
-        if child.poll() is None:
-            try:
-                child.wait(timeout=max(0.0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                child.kill()
+        try:
+            os.killpg(child.pid, signum)
+        except ProcessLookupError:
+            pass
 
 
-def execute(args: argparse.Namespace) -> dict[str, Any]:
-    """Launch two admitted GPU workers and merge only fully verified results."""
+def _spawn_managed(
+    children: list[subprocess.Popen[Any]],
+    command: list[str],
+    **kwargs: Any,
+) -> subprocess.Popen[Any]:
+    """Start and register one process group without a signal-forwarding race."""
 
-    args.source_root = args.source_root.resolve()
-    args.output_dir = args.output_dir.resolve()
-    if args.output_dir.exists():
-        raise FileExistsError("output directory already exists")
-    if len(set(args.gpus)) != SHARD_COUNT:
-        raise ValueError("exact evaluation requires two distinct physical GPUs")
-    activity = local_gpu.gpu_activity(gpu_ids=tuple(args.gpus))
+    forwarded = {signal.SIGTERM, signal.SIGINT}
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, forwarded)
+    try:
+        child = subprocess.Popen(
+            command,
+            start_new_session=True,
+            **kwargs,
+        )
+        children.append(child)
+        return child
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+def _terminate(
+    children: Iterable[subprocess.Popen[Any]], *, grace_seconds: float = 15.0
+) -> None:
+    """Terminate complete evaluator groups and reap every direct child."""
+
+    processes = list(children)
+    forwarded = {signal.SIGTERM, signal.SIGINT}
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, forwarded)
+    try:
+        _signal_process_groups(processes, signal.SIGTERM)
+        deadline = time.monotonic() + grace_seconds
+        for child in processes:
+            if child.poll() is None:
+                try:
+                    child.wait(timeout=max(0.0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    pass
+        survivors = [child for child in processes if child.poll() is None]
+        _signal_process_groups(survivors, signal.SIGKILL)
+        for child in processes:
+            child.wait()
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+@contextmanager
+def forward_termination_signals(
+    children: list[subprocess.Popen[Any]],
+) -> Iterator[None]:
+    """Forward SIGTERM and SIGINT to evaluator groups during supervision."""
+
+    previous = {
+        signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)
+    }
+
+    def forward(signum: int, _frame: Any) -> None:
+        _signal_process_groups(children, signum)
+        raise RunnerInterrupted(signum)
+
+    for signum in previous:
+        signal.signal(signum, forward)
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def require_available_gpus(gpus: Iterable[int]) -> dict[int, dict[str, Any]]:
+    """Sample and require idle physical GPUs at one launch boundary."""
+
+    requested = tuple(gpus)
+    activity = local_gpu.gpu_activity(gpu_ids=requested)
     unavailable = {
         gpu: sample
         for gpu, sample in activity.items()
@@ -750,6 +1035,32 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     }
     if unavailable:
         raise RuntimeError(f"requested physical GPUs are not available: {unavailable}")
+    return activity
+
+
+def execute(args: argparse.Namespace) -> dict[str, Any]:
+    """Launch two admitted GPU workers and merge only fully verified results."""
+
+    args.source_root = args.source_root.resolve()
+    args.output_dir = args.output_dir.resolve()
+    args.prefix_samples = exact_positive_int(
+        args.prefix_samples, name="evaluation prefix samples"
+    )
+    args.batch_size = exact_positive_int(args.batch_size, name="batch size")
+    if args.prefix_samples < 2 * args.batch_size:
+        raise ValueError("evaluation prefix must contain at least two full batches")
+    if args.output_dir.exists():
+        raise FileExistsError("output directory already exists")
+    if not isinstance(args.gpus, (list, tuple)) or len(args.gpus) != SHARD_COUNT:
+        raise ValueError("exact evaluation requires exactly two physical GPUs")
+    args.gpus = tuple(
+        exact_nonnegative_int(gpu, name="physical GPU index") for gpu in args.gpus
+    )
+    if len(set(args.gpus)) != SHARD_COUNT:
+        raise ValueError("exact evaluation requires two distinct physical GPUs")
+    evaluator_args = evaluator_arguments(args)
+    checkpoint_artifact = validate_local_checkpoint(evaluator_args)
+    activity = require_available_gpus(args.gpus)
 
     source_commit = subprocess.check_output(
         ["git", "-C", str(args.source_root), "rev-parse", "HEAD"], text=True
@@ -788,6 +1099,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         ),
         "gpus": args.gpus,
         "gpu_activity": activity,
+        "checkpoint_artifact": checkpoint_artifact,
         "prefix_samples": args.prefix_samples,
         "batch_size": args.batch_size,
         "noise_profile": args.noise_profile,
@@ -812,63 +1124,79 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             )
         ),
     )
-    with preflight_log.open("xb") as handle:
-        completed = subprocess.run(
-            preflight_command,
-            cwd=args.source_root,
-            env=preflight_environment,
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-    if completed.returncode:
-        raise RuntimeError(
-            f"random generator preflight failed with code {completed.returncode}; "
-            f"see {preflight_log}"
-        )
-    if not contract_path.is_file():
-        raise RuntimeError("random generator preflight did not publish its contract")
-
     children: list[subprocess.Popen[Any]] = []
     handles = []
     try:
-        for index, command in enumerate(commands):
-            environment = os.environ.copy()
-            environment.update(
-                CUDA_VISIBLE_DEVICES=str(args.gpus[index]),
-                WANDB_MODE="disabled",
-                PYTHONUNBUFFERED="1",
-                PYTHONPATH=os.pathsep.join(
-                    str(path)
-                    for path in (
-                        args.source_root,
-                        args.source_root / "src/transformers/src",
-                        args.source_root / "src/spikingjelly",
-                    )
-                ),
+        with forward_termination_signals(children):
+            preflight_handle = preflight_log.open("xb")
+            handles.append(preflight_handle)
+            preflight = _spawn_managed(
+                children,
+                preflight_command,
+                cwd=args.source_root,
+                env=preflight_environment,
+                stdout=preflight_handle,
+                stderr=subprocess.STDOUT,
             )
-            handle = log_paths[index].open("xb")
-            handles.append(handle)
-            children.append(
-                subprocess.Popen(
+            preflight_code = preflight.wait()
+            if preflight_code:
+                raise RuntimeError(
+                    f"random generator preflight failed with code {preflight_code}; "
+                    f"see {preflight_log}"
+                )
+            if not contract_path.is_file():
+                raise RuntimeError(
+                    "random generator preflight did not publish its contract"
+                )
+
+            post_preflight_activity = require_available_gpus(args.gpus)
+            if validate_local_checkpoint(evaluator_args) != checkpoint_artifact:
+                raise RuntimeError("local checkpoint artifact changed during preflight")
+            runtime_files.new_json(
+                args.output_dir / "post-preflight-admission.json",
+                {
+                    "gpu_activity": post_preflight_activity,
+                    "checkpoint_artifact": checkpoint_artifact,
+                },
+            )
+
+            shard_children: list[subprocess.Popen[Any]] = []
+            for index, command in enumerate(commands):
+                environment = os.environ.copy()
+                environment.update(
+                    CUDA_VISIBLE_DEVICES=str(args.gpus[index]),
+                    WANDB_MODE="disabled",
+                    PYTHONUNBUFFERED="1",
+                    PYTHONPATH=os.pathsep.join(
+                        str(path)
+                        for path in (
+                            args.source_root,
+                            args.source_root / "src/transformers/src",
+                            args.source_root / "src/spikingjelly",
+                        )
+                    ),
+                )
+                handle = log_paths[index].open("xb")
+                handles.append(handle)
+                child = _spawn_managed(
+                    children,
                     command,
                     cwd=args.source_root,
                     env=environment,
                     stdout=handle,
                     stderr=subprocess.STDOUT,
                 )
-            )
-        while True:
-            codes = [child.poll() for child in children]
-            failures = [code for code in codes if code not in (None, 0)]
-            if failures:
-                _terminate(children)
-                raise RuntimeError(
-                    f"shard process failed with codes {codes}; see {log_paths}"
-                )
-            if all(code == 0 for code in codes):
-                break
-            time.sleep(2.0)
+                shard_children.append(child)
+            while True:
+                codes = [child.poll() for child in shard_children]
+                failures = [code for code in codes if code not in (None, 0)]
+                if failures:
+                    raise RuntimeError(
+                        f"shard process failed with codes {codes}; see {log_paths}"
+                    )
+                if all(code == 0 for code in codes):
+                    break
+                time.sleep(2.0)
     except BaseException:
         _terminate(children)
         raise
@@ -912,6 +1240,8 @@ def parse_arguments() -> argparse.Namespace:
     args = parser.parse_args()
     if args.prefix_samples <= 0 or args.batch_size <= 0:
         parser.error("prefix samples and batch size must be positive")
+    if args.prefix_samples < 2 * args.batch_size:
+        parser.error("prefix samples must contain at least two full batches")
     if args.seed < 0:
         parser.error("seed must be non-negative")
     if (
@@ -926,7 +1256,10 @@ def parse_arguments() -> argparse.Namespace:
 
 # @lat: [[evaluation#Evaluation and Verification#Exact ViT Timing Noise Shards]]
 def main() -> None:
-    execute(parse_arguments())
+    try:
+        execute(parse_arguments())
+    except RunnerInterrupted as error:
+        raise SystemExit(128 + error.signum) from None
 
 
 if __name__ == "__main__":

@@ -38,6 +38,40 @@ def json_sha256(value: Any) -> str:
     return hashlib.sha256(content.encode()).hexdigest()
 
 
+def model_state_sha256(model: Any) -> str:
+    """Hash the exact named tensor state loaded into one PyTorch model."""
+
+    import torch
+
+    state = model.state_dict()
+    if not isinstance(state, dict):
+        raise TypeError("model state must be a dictionary")
+    digest = hashlib.sha256()
+    for name in sorted(state):
+        tensor = state[name]
+        if not isinstance(name, str) or not isinstance(tensor, torch.Tensor):
+            raise TypeError("model state names and values must be strings and tensors")
+        if tensor.layout is not torch.strided or tensor.device.type == "meta":
+            raise ValueError("model state hash requires materialized strided tensors")
+        value = tensor.detach().cpu().contiguous()
+        descriptor = json.dumps(
+            {
+                "name": name,
+                "shape": list(value.shape),
+                "dtype": str(value.dtype).removeprefix("torch."),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+        raw = value.reshape(-1).view(torch.uint8).numpy().tobytes()
+        digest.update(len(descriptor).to_bytes(8, "little"))
+        digest.update(descriptor)
+        digest.update(len(raw).to_bytes(8, "little"))
+        digest.update(raw)
+    return digest.hexdigest()
+
+
 def artifact_identity(path: Path) -> dict[str, Any]:
     """Hash relative path names, sizes, and contents in deterministic order."""
     resolved = path.resolve()

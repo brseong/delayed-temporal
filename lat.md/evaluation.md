@@ -82,13 +82,19 @@ The exact shard path preserves one seeded CUDA timing noise stream while two GPU
 
 A separate process evaluates two distinct full batches and records each ordered Gaussian encoder call with its site, encoding, shape, dtype, and generator offsets through [[utils/transforms/noise.py#begin_gaussian_rng_trace]]. [[scripts/experiments/run_exact_sharded_vit.py#build_rng_preflight_contract]] requires equal traces and strides before accepting the opaque CUDA offset contract. Negative, unaligned, or overflowing offsets and any later full batch trace or stride change stop the run. Calls with zero standard deviation remain in the trace without consuming generator state.
 
-Each shard writes raw signed 64-bit predictions with a fixed byte order, its exact sample and batch interval, task counts, Gaussian and clamp statistics, run identity, and verified generator contract. [[scripts/experiments/run_exact_sharded_vit.py#merge_shard_results]] rejects coverage gaps, overlaps, identity differences, prediction corruption, and generator discontinuities before concatenating predictions in global order and reconstructing accuracy, digest, and counters. [[scripts/experiments/run_exact_sharded_vit.py#main]] is the canonical launch and merge entry point.
+The evaluator uses [[scripts/runtime/identity.py#model_state_sha256]] after configured parameter perturbations and includes that digest in the run identity. A local checkpoint path is hashed before preflight and checked again before workers start, so file or loaded state changes cannot cross the contract boundary.
+
+Each shard writes raw signed 64-bit predictions with a fixed byte order, its exact sample and batch interval, task counts, Gaussian and clamp statistics, run identity, and verified generator contract. [[scripts/experiments/run_exact_sharded_vit.py#merge_shard_results]] rejects coverage gaps, overlaps, identity differences, prediction corruption, and generator discontinuities before concatenating predictions in global order and reconstructing accuracy, digest, and counters. Interval values, task counts, and integer statistics must be exact nonnegative integers; numeric lookalikes are rejected.
+
+[[scripts/experiments/run_exact_sharded_vit.py#main]] is the canonical launch and merge entry point. The prefix must contain two full batches, GPU availability is checked before and after preflight, and every evaluator runs in an isolated process group with forwarded termination signals and bounded cleanup.
 
 ### Synthetic Verification
 
 The CUDA verification covers 512 and 5,000 samples for linear, logarithmic, and joint timing noise, plus zero standard deviation, generator nonconsumption, and invalid contract rejection.
 
 [[scripts/verification/verify_exact_sharded_vit.py#verify_serial_and_merged_cuda_streams]] requires every merged prediction byte sequence and aggregate counter to match its serial reference.
+
+[[scripts/verification/verify_exact_sharded_vit.py#verify_model_provenance_and_process_cleanup]] checks loaded model state changes, local checkpoint mutation, short prefix rejection, isolated process groups, signal forwarding, forced termination, and child reaping without loading ViT.
 
 ## Fixed-Domain ViT-S Real-Data Audit
 

@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
 import tempfile
 from typing import Any
@@ -22,11 +25,18 @@ from scripts.experiments.run_exact_sharded_vit import (
     checked_batch_offset,
     decode_predictions,
     exact_batch_shard_bounds,
+    load_rng_contract,
     merge_shard_results,
     noise_profile_fractions,
+    forward_termination_signals,
+    RunnerInterrupted,
+    _spawn_managed,
+    _terminate,
+    validate_local_checkpoint,
     verify_rng_batch_trace,
     write_shard_result,
 )
+from scripts.runtime import identity
 from utils.transforms.noise import (
     begin_gaussian_rng_trace,
     end_gaussian_rng_trace,
@@ -43,6 +53,8 @@ SEED = 1701
 RUN_IDENTITY = {
     "model": "synthetic-vit",
     "source_commit": "verification",
+    "checkpoint_sha256": "1" * 64,
+    "loaded_model_state_sha256": "2" * 64,
     "batch_size": BATCH_SIZE,
     "torch_version": torch.__version__,
     "cuda_version": torch.version.cuda,
@@ -327,6 +339,18 @@ def verify_merge_rejections_and_offset_guards() -> None:
     with tempfile.TemporaryDirectory(prefix="verify-exact-vit-rejections-") as temporary:
         root = Path(temporary)
         serial = serial_result(512, "joint")
+        contract_path = root / "preflight-contract.json"
+        contract_path.write_text(json.dumps(serial["contract"]))
+        changed_identity = {
+            **RUN_IDENTITY,
+            "loaded_model_state_sha256": "3" * 64,
+        }
+        try:
+            load_rng_contract(contract_path, run_identity=changed_identity)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("preflight accepted a changed loaded model state")
         base = root / "base"
         base.mkdir()
         sharded_result(base, 512, "joint", serial)
@@ -335,6 +359,12 @@ def verify_merge_rejections_and_offset_guards() -> None:
             ("gap", lambda payload: payload["interval"].update(sample_start=257)),
             ("overlap", lambda payload: payload["interval"].update(sample_start=255)),
             ("identity", lambda payload: payload["run_identity"].update(model="other")),
+            (
+                "loaded-state",
+                lambda payload: payload["run_identity"].update(
+                    loaded_model_state_sha256="3" * 64
+                ),
+            ),
             ("rng", lambda payload: payload["rng_contract"].update(batch_stride=12)),
         )
         for name, mutate in mutations:
@@ -357,12 +387,157 @@ def verify_merge_rejections_and_offset_guards() -> None:
             else:
                 raise AssertionError(f"merge accepted {name}")
 
+        malformed = (
+            ("interval", lambda payload, value: payload["interval"].update(sample_start=value)),
+            ("count", lambda payload, value: payload["counts"].update(correct=value)),
+            (
+                "statistic",
+                lambda payload, value: next(iter(payload["gaussian_stats"].values())).update(
+                    events=value
+                ),
+            ),
+        )
+        for field, mutate in malformed:
+            for value in (True, 1.0, "1", -1):
+                case = root / f"malformed-{field}-{type(value).__name__}-{value}"
+                case.mkdir()
+                paths = []
+                for index, original in enumerate(originals):
+                    payload = json.loads(original.read_text())
+                    raw_name = payload["predictions"]["path"]
+                    (case / raw_name).write_bytes((base / raw_name).read_bytes())
+                    if index == 1:
+                        mutate(payload, value)
+                    path = case / original.name
+                    path.write_text(json.dumps(payload))
+                    paths.append(path)
+                try:
+                    merge_shard_results(paths, case / "aggregate.json")
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError(
+                        f"merge accepted malformed {field}: {value!r}"
+                    )
+
+
+def verify_model_provenance_and_process_cleanup() -> None:
+    first = torch.nn.Sequential(torch.nn.Linear(3, 2), torch.nn.LayerNorm(2))
+    first.register_buffer("scalar_fixture", torch.tensor(1.0))
+    second = copy.deepcopy(first)
+    first_digest = identity.model_state_sha256(first)
+    assert first_digest == identity.model_state_sha256(second)
+    with torch.no_grad():
+        second[0].weight[0, 0].add_(1.0)
+    assert first_digest != identity.model_state_sha256(second)
+
+    with tempfile.TemporaryDirectory(prefix="verify-exact-provenance-") as temporary:
+        root = Path(temporary)
+        checkpoint = root / "checkpoint"
+        checkpoint.mkdir()
+        (checkpoint / "weights.bin").write_bytes(b"loaded model fixture")
+        digest = identity.artifact_identity(checkpoint)["aggregate_sha256"]
+        arguments = [
+            "--model_id",
+            str(checkpoint),
+            "--checkpoint-sha256",
+            digest,
+        ]
+        assert validate_local_checkpoint(arguments)["aggregate_sha256"] == digest
+        (checkpoint / "weights.bin").write_bytes(b"mutated model fixture")
+        try:
+            validate_local_checkpoint(arguments)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("mutated local checkpoint was accepted")
+
+        rejected_output = root / "too-short"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/experiments/run_exact_sharded_vit.py"),
+                "--output-dir",
+                str(rejected_output),
+                "--prefix-samples",
+                "63",
+                "--batch-size",
+                "32",
+                "--noise-profile",
+                "np",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode == 2
+        assert not rejected_output.exists()
+
+    ignored_children: list[subprocess.Popen[Any]] = []
+    ignored = _spawn_managed(
+        ignored_children,
+        [
+            sys.executable,
+            "-c",
+            (
+                "import signal,time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "print('ready', flush=True); time.sleep(60)"
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert ignored.stdout is not None
+        assert ignored.stdout.readline().strip() == "ready"
+        assert os.getpgid(ignored.pid) == ignored.pid
+        assert ignored_children == [ignored]
+        _terminate(ignored_children, grace_seconds=0.05)
+    finally:
+        if ignored.poll() is None:
+            _terminate(ignored_children, grace_seconds=0.05)
+        if ignored.stdout is not None:
+            ignored.stdout.close()
+    assert ignored.returncode == -signal.SIGKILL
+    try:
+        os.killpg(ignored.pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError("terminated evaluator process group still exists")
+
+    children: list[subprocess.Popen[Any]] = []
+    forwarded = _spawn_managed(
+        children,
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+    )
+    prior = signal.getsignal(signal.SIGINT)
+    try:
+        with forward_termination_signals(children):
+            handler = signal.getsignal(signal.SIGINT)
+            assert callable(handler) and handler is not prior
+            try:
+                handler(signal.SIGINT, None)
+            except RunnerInterrupted as error:
+                assert error.signum == signal.SIGINT
+            else:
+                raise AssertionError(
+                    "runner signal handler did not interrupt supervision"
+                )
+    finally:
+        _terminate(children, grace_seconds=0.05)
+    assert forwarded.returncode is not None
+    assert signal.getsignal(signal.SIGINT) is prior
+
 
 def main() -> None:
     verify_serial_and_merged_cuda_streams()
     print("PASS verify_serial_and_merged_cuda_streams")
     verify_merge_rejections_and_offset_guards()
     print("PASS verify_merge_rejections_and_offset_guards")
+    verify_model_provenance_and_process_cleanup()
+    print("PASS verify_model_provenance_and_process_cleanup")
     print("Exact sharded ViT verification passed")
 
 
