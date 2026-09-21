@@ -1313,6 +1313,13 @@ def verify_encoder_operating_point_score() -> None:
     assert not strict["selection_eligible"]
     assert screening["selection_eligible"]
     assert not screening["np_static"]["calibration_transfer"]["strict_eligible"]
+    assert not any(screening["targets"].values())
+
+    spike_only_config = replace(config, record_precharge_cadc=False)
+    spike_only = backend.collect(
+        "phi-np", spike_only_config, stage="dynamic", quick=True
+    )
+    assert spike_only.precharge_cadc is None
 
     prerequisite_score = {
         "np_static": {
@@ -1410,6 +1417,8 @@ def verify_resumable_operating_point_search() -> None:
                 "--backend",
                 "mock",
                 "--quick",
+                "--search-quick-codes",
+                "--search-spike-times-only",
                 "--device-count",
                 "4",
                 "--search-current-stop-pairs",
@@ -1428,6 +1437,19 @@ def verify_resumable_operating_point_search() -> None:
         first = selection_path.read_text(encoding="utf-8")
         assert (output / "search_manifest.json").is_file()
         assert (output / "operating_point_results.csv").is_file()
+        search_manifest = json.loads(
+            (output / "search_manifest.json").read_text(encoding="utf-8")
+        )
+        assert not search_manifest["base_config"]["record_precharge_cadc"]
+        assert search_manifest["selection_contract"]["spike_times_only"]
+        assert search_manifest["selection_contract"][
+            "formal_confirmation_required"
+        ]
+        selected = json.loads(first)
+        assert all(
+            not any(item["targets"].values())
+            for item in selected["best_by_primitive"].values()
+        )
         assert len(list((output / "candidates").glob("*/candidate_result.json"))) == 2
         run(arguments)
         assert selection_path.read_text(encoding="utf-8") == first
@@ -1479,6 +1501,21 @@ def verify_resumable_operating_point_search() -> None:
                 )
             )
         ) == 2
+
+        invalid_arguments = build_parser().parse_args(
+            [
+                "--phase",
+                "optimize",
+                "--primitive",
+                "phi-np",
+                "--backend",
+                "mock",
+                "--search-spike-times-only",
+                "--output-dir",
+                str(Path(temporary) / "invalid-spike-only-search"),
+            ]
+        )
+        rejects(lambda: run(invalid_arguments), (ValueError,))
 
     notebook = json.loads(
         (

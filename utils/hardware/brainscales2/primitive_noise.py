@@ -104,6 +104,7 @@ class PrimitiveNoiseConfig:
     constant_current_code: int = 1022
     precharge_weight_maximum: int = 63
     precharge_input_fan_in: int = 1
+    record_precharge_cadc: bool = True
     exponential_input_weight: int = 63
     exponential_input_fan_in: int = 8
     phi_nl_lower_bound_minimum_code: float = -128.0
@@ -1352,8 +1353,10 @@ class MockPrimitiveNoiseBackend:
         observed = observed.clone()
         observed[~delivered] = float("nan")
         precharge_cadc = None
-        if primitive in ("phi-np", "phi-nl") and (
-            stage == "dynamic" or primitive == "phi-nl"
+        if (
+            primitive in ("phi-np", "phi-nl")
+            and (stage == "dynamic" or primitive == "phi-nl")
+            and config.record_precharge_cadc
         ):
             precharge_cadc = codes[None, :, None] * 2.0 + 0.05 * torch.randn(
                 trials,

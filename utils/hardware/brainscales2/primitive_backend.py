@@ -954,7 +954,10 @@ class PrimitiveHardwareBackend:
         spike_count = torch.zeros_like(observed, dtype=torch.int64)
         precharge_cadc = (
             torch.full_like(observed, torch.nan)
-            if stage == "dynamic" or primitive == "phi-nl"
+            if (
+                (stage == "dynamic" or primitive == "phi-nl")
+                and config.record_precharge_cadc
+            )
             else None
         )
         (
@@ -1492,10 +1495,11 @@ class PrimitiveHardwareBackend:
                 population.set(leak_v_leak=list(resolved_reset_code))
                 self._set_population_reset(population, resolved_reset_code)
             uses_precharge = stage == "dynamic" or primitive == "phi-nl"
+            record_precharge = uses_precharge and config.record_precharge_cadc
             record_variables: list[str] = ["spikes"]
-            if uses_precharge:
+            if record_precharge:
                 record_variables.append("v")
-            self._record_pynn_population(population, membrane=uses_precharge)
+            self._record_pynn_population(population, membrane=record_precharge)
 
             if uses_precharge:
                 precharge_times = [
@@ -1562,7 +1566,7 @@ class PrimitiveHardwareBackend:
                 window_ms=window_ms,
             )
             precharge = None
-            if uses_precharge:
+            if record_precharge:
                 precharge_probe = self._decode_pynn_precharge(
                     segment,
                     devices=config.device_count,
@@ -1570,7 +1574,7 @@ class PrimitiveHardwareBackend:
                 )
             first = first[1:]
             count = count[1:]
-            if uses_precharge:
+            if record_precharge:
                 precharge = torch.full(
                     (resolved_repeats, config.device_count),
                     torch.nan,
@@ -1602,7 +1606,8 @@ class PrimitiveHardwareBackend:
                     else "configured minimum"
                 ),
                 "discarded_warmup_trials": 1,
-                "precharge_cadc_acquisitions": 1 if uses_precharge else 0,
+                "precharge_cadc_acquisitions": 1 if record_precharge else 0,
+                "precharge_cadc_recorded": record_precharge,
                 "exponential_input_fan_in": (
                     config.exponential_input_fan_in
                     if primitive == "phi-nl"

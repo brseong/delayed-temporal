@@ -119,6 +119,7 @@ def make_config(args: argparse.Namespace) -> PrimitiveNoiseConfig:
         constant_current_code=args.constant_current_code,
         precharge_weight_maximum=args.precharge_weight_maximum,
         precharge_input_fan_in=args.precharge_input_fan_in,
+        record_precharge_cadc=not args.search_spike_times_only,
         exponential_input_weight=args.exponential_input_weight,
         exponential_input_fan_in=args.exponential_input_fan_in,
         phi_nl_lower_bound_minimum_code=args.phi_nl_lower_bound_minimum_code,
@@ -464,6 +465,8 @@ def optimize_encoder_operating_point(
                 "minimum calibration ratio; coordinate frozen for held-out data"
             ),
             "code_grid": "representative" if args.search_quick_codes else "full",
+            "spike_times_only": args.search_spike_times_only,
+            "formal_confirmation_required": args.search_quick_codes,
         },
     }
     if manifest_path.is_file():
@@ -603,17 +606,20 @@ def optimize_encoder_operating_point(
             "held_out_validated": held_out_validated,
             "targets": {
                 "hardware_feasibility_1e-3": (
-                    held_out_validated
+                    not args.search_quick_codes
+                    and held_out_validated
                     and held_out_rt is not None
                     and held_out_rt <= 1.0e-3
                 ),
                 "meaningful_recovery_1e-4": (
-                    held_out_validated
+                    not args.search_quick_codes
+                    and held_out_validated
                     and held_out_rt is not None
                     and held_out_rt <= 1.0e-4
                 ),
                 "near_clean_recovery_3e-5": (
-                    held_out_validated
+                    not args.search_quick_codes
+                    and held_out_validated
                     and held_out_rt is not None
                     and held_out_rt <= 3.0e-5
                 ),
@@ -657,6 +663,13 @@ def optimize_encoder_operating_point(
 
 
 def run(args: argparse.Namespace) -> None:
+    if args.search_spike_times_only and not (
+        args.phase == "optimize" and args.search_quick_codes
+    ):
+        raise ValueError(
+            "--search-spike-times-only requires optimize with "
+            "--search-quick-codes"
+        )
     output_dir = args.output_dir.resolve()
     config = make_config(args)
     environment = environment_manifest(args.phase, args.backend)
@@ -784,6 +797,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--search-current-stop-pairs", nargs="+")
     parser.add_argument("--search-quick-codes", action="store_true")
+    parser.add_argument(
+        "--search-spike-times-only",
+        action="store_true",
+        help=(
+            "omit the precharge membrane trace during a representative-code "
+            "circuit screen; a full confirmation must restore it"
+        ),
+    )
     parser.add_argument("--search-top-k", type=int, default=3)
     parser.add_argument("--search-max-candidates", type=int, default=64)
     return parser

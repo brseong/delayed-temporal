@@ -492,6 +492,10 @@ After the coarse screen, separate refinements vary threshold and precharge input
 
 Coarse and refinement screens use three representative potential codes with 32 repetitions split equally between calibration and held out data. Only the selected configuration for each encoder receives the full 32 code grid with 128 calibration and 128 held out repetitions.
 
+The calibration screen may record spike times without membrane potential observations so all 512 physical circuits can be ranked within the notebook memory limit. This mode is restricted to representative potential codes and cannot satisfy a declared $r_t$ threshold.
+
+The calibration-selected physical circuit is frozen before confirmation over all 32 potential codes. Confirmation restores membrane potential observations and uses an independent held out split before reporting whether an $r_t$ threshold is reached.
+
 The representative code screen requires observed points, the declared transfer direction, bounded miss and repeated spike rates, and no saturation. Rank and normalized error remain diagnostics during screening; the full code confirmation must pass every original transfer gate before a target is reported as reached.
 
 Each circuit's conditional timing deviation is divided by the $\phi_{\mathrm{NP}}$ signal span fitted on calibration repetitions. The same frozen span normalizes both encoders, so a candidate cannot improve its score only by redefining the denominator.
@@ -628,6 +632,10 @@ The score must use calibration repetitions for selection and reserve held out re
 
 Representative code screening may rank a candidate that fails a shape diagnostic, but the full code confirmation must retain the strict transfer gates.
 
+Representative code screening must never mark an $r_t$ target as reached; only confirmation over all potential codes can do so.
+
 ### Resumable operating point search
 
 The search must enumerate the complete requested grid, reject invalid raw controls, and reuse only matching completed candidates.
+
+A representative code circuit scan may omit precharge membrane observations. Any use outside that screening mode is rejected, and the immutable search manifest records the omission.

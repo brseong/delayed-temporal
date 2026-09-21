@@ -545,15 +545,18 @@ def score_encoder_operating_point(
         "calibration_selected_device": selected_device,
         "targets": {
             "hardware_feasibility_1e-3": (
-                validation_objective is not None
+                not screening
+                and validation_objective is not None
                 and validation_objective <= 1.0e-3
             ),
             "meaningful_recovery_1e-4": (
-                validation_objective is not None
+                not screening
+                and validation_objective is not None
                 and validation_objective <= 1.0e-4
             ),
             "near_clean_recovery_3e-5": (
-                validation_objective is not None
+                not screening
+                and validation_objective is not None
                 and validation_objective <= 3.0e-5
             ),
         },
