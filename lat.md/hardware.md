@@ -500,6 +500,8 @@ Transfer prerequisites are evaluated for each physical circuit. A circuit that f
 
 The calibration-selected physical circuit is frozen before confirmation over all 32 potential codes. Confirmation restores membrane potential observations and uses an independent held out split before reporting whether an $r_t$ threshold is reached.
 
+Single circuit confirmation keeps all 256 repetitions for one input code in one worker process and sends them to hardware in groups of 32. This changes process setup frequency without changing the physical circuit, repetitions, or calibration split.
+
 The representative code screen requires observed points, the declared transfer direction, bounded miss and repeated spike rates, and no saturation. Rank and normalized error remain diagnostics during screening; the full code confirmation must pass every original transfer gate before a target is reported as reached.
 
 Each circuit's conditional timing deviation is divided by the $\phi_{\mathrm{NP}}$ signal span fitted on calibration repetitions. The same frozen span normalizes both encoders, so a candidate cannot improve its score only by redefining the denominator.

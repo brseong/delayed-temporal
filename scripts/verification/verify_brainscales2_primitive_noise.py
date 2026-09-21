@@ -1583,6 +1583,8 @@ def verify_resumable_operating_point_search() -> None:
     assert "screened[name].append(item)" in source
     assert "item['calibration_rt']" in source
     assert "'--deadline', 60e-6" in source
+    assert "'--pynn-process-repeats', 256" in source
+    assert "'--pynn-chunk-repeats', 32" in source
     assert "'--physical-coordinates', best['physical_coordinate']" in source
     assert "selected_operating_point.json" in source
     assert notebook["metadata"]["language_info"]["version"] == "3.11"
