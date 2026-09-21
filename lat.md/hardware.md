@@ -486,13 +486,15 @@ For static encoder acquisition, the reset associated with each code remains inst
 
 All PyNN encoder acquisitions use the official Calix refractory period calculator with a target equal to the full repeated trial window. The observation deadline is followed by a quiet interval of the same duration. Calix resolves the backend clock scales and the selected circuit counters, so a circuit cannot emit a second spike within one trial; the next trial begins only when the configured refractory period has elapsed.
 
-The coarse screen couples each constant current code to a ramp stop time. This lets weak currents use a longer physical interval without leaving strong currents active long enough to cause repeated spikes. Extending the physical deadline rescales the time axis but does not change the potential code or transfer equation.
+The search compatible with the operator assumptions keeps the synchronized ramp stop at 25 microseconds and the observation deadline at 60 microseconds. Longer ramps are not eligible merely because increasing the signal span can lower the normalized ratio.
 
 After the coarse screen, separate refinements vary threshold and precharge input count around each encoder's selected current and ramp duration. The $\phi_{\mathrm{NL}}$ refinement additionally varies the input count and weight of its exponential synaptic current. The result records the best held out timing noise ratio for each encoder.
 
 Coarse and refinement screens use three representative potential codes with 32 repetitions split equally between calibration and held out data. Only the selected configuration for each encoder receives the full 32 code grid with 128 calibration and 128 held out repetitions.
 
-The calibration screen may record spike times without membrane potential observations so all 512 physical circuits can be ranked within the notebook memory limit. This mode is restricted to representative potential codes and cannot satisfy a declared $r_t$ threshold.
+The calibration screen may record spike times without membrane potential observations. This mode is restricted to representative potential codes and cannot satisfy a declared $r_t$ threshold.
+
+The physical circuit screen runs 64 circuits per hardware graph because a 512 circuit graph changes input delivery and produces widespread deadline misses. Eight disjoint batches cover all 512 coordinates. The globally selected circuit minimizes the calibration timing noise ratio across the selections from each batch, after which the coordinate is frozen for confirmation over all 32 potential codes with held out repetitions.
 
 Transfer prerequisites are evaluated for each physical circuit. A circuit that fails remains in the diagnostic statistics but cannot invalidate a different circuit selected from calibration data.
 
@@ -643,5 +645,7 @@ The selected circuit is confirmed on its own held out observations; failures of 
 ### Resumable operating point search
 
 The search must enumerate the complete requested grid, reject invalid raw controls, and reuse only matching completed candidates.
+
+The notebook must scan all 512 physical circuits as eight 64 circuit graphs and select across batches using calibration repetitions only.
 
 A representative code circuit scan may omit precharge membrane observations. Any use outside that screening mode is rejected, and the immutable search manifest records the omission.

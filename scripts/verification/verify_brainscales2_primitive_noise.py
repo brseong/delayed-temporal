@@ -1576,8 +1576,11 @@ def verify_resumable_operating_point_search() -> None:
     assert "RUN_OPERATING_POINT_SEARCH = False" in source
     assert "'--phase', 'optimize'" in source
     assert "'--search-spike-times-only'" in source
-    assert "'--device-count', 512" in source
-    assert "'--physical-coordinates', *range(512)" in source
+    assert "for start in range(0, 512, 64):" in source
+    assert "'--device-count', 64" in source
+    assert "'--physical-coordinates', *range(start, stop)" in source
+    assert "item['calibration_rt']" in source
+    assert "'--deadline', 60e-6" in source
     assert "'--physical-coordinates', best['physical_coordinate']" in source
     assert "selected_operating_point.json" in source
     assert notebook["metadata"]["language_info"]["version"] == "3.11"
