@@ -1579,6 +1579,8 @@ def verify_resumable_operating_point_search() -> None:
     assert "for start in range(0, 512, 64):" in source
     assert "'--device-count', 64" in source
     assert "'--physical-coordinates', *range(start, stop)" in source
+    assert "for name, item in circuit_screen['best_by_primitive'].items()" in source
+    assert "screened[name].append(item)" in source
     assert "item['calibration_rt']" in source
     assert "'--deadline', 60e-6" in source
     assert "'--physical-coordinates', best['physical_coordinate']" in source

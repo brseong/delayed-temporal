@@ -648,4 +648,6 @@ The search must enumerate the complete requested grid, reject invalid raw contro
 
 The notebook must scan all 512 physical circuits as eight 64 circuit graphs and select across batches using calibration repetitions only.
 
+Every run may contribute scores to each encoder stage it measured, regardless of which encoder named that search pass.
+
 A representative code circuit scan may omit precharge membrane observations. Any use outside that screening mode is rejected, and the immutable search manifest records the omission.
