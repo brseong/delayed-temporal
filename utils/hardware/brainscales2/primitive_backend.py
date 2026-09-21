@@ -1549,7 +1549,9 @@ class PrimitiveHardwareBackend:
                 "constant_current_enable": False,
                 "constant_current_i_offset": config.constant_current_code,
                 "reset_i_bias": getattr(config, "reset_current_code", 1022),
-                "reset_enable_multiplication": True,
+                "reset_enable_multiplication": getattr(
+                    config, "reset_current_enable_multiplication", True
+                ),
                 "refractory_period_enable_pause": True,
                 **refractory_parameters,
             }

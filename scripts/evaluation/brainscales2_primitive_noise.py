@@ -118,6 +118,9 @@ def make_config(args: argparse.Namespace) -> PrimitiveNoiseConfig:
         leak_bias=args.leak_bias,
         constant_current_code=args.constant_current_code,
         reset_current_code=args.reset_current_code,
+        reset_current_enable_multiplication=(
+            args.reset_current_enable_multiplication
+        ),
         static_reset_release_s=args.static_reset_release,
         dynamic_reset_release_s=args.dynamic_reset_release,
         membrane_capacitance_code=args.membrane_capacitance_code,
@@ -343,6 +346,9 @@ def _search_result_row(payload: dict[str, Any]) -> dict[str, Any]:
         "constant_current_code": candidate["constant_current_code"],
         "threshold_code": candidate["threshold_code"],
         "reset_current_code": candidate["reset_current_code"],
+        "reset_current_enable_multiplication": candidate[
+            "reset_current_enable_multiplication"
+        ],
         "static_reset_release_s": candidate["static_reset_release_s"],
         "dynamic_reset_release_s": candidate["dynamic_reset_release_s"],
         "membrane_capacitance_code": candidate["membrane_capacitance_code"],
@@ -445,6 +451,12 @@ def optimize_encoder_operating_point(
         exponential_pairs=exponential_pairs,
         current_stop_pairs=current_stop_pairs,
         reset_current_codes=args.search_reset_current_codes,
+        reset_current_multiplication_modes=(
+            value == "enabled"
+            for value in args.search_reset_current_multiplication_modes
+        )
+        if args.search_reset_current_multiplication_modes is not None
+        else None,
         static_reset_release_times_s=(
             value * 1.0e-6 for value in args.search_static_reset_release_us
         )
@@ -768,6 +780,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--leak-bias", type=int, default=0)
     parser.add_argument("--constant-current-code", type=int, default=1022)
     parser.add_argument("--reset-current-code", type=int, default=1022)
+    parser.add_argument(
+        "--reset-current-enable-multiplication",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--static-reset-release", type=float, default=4.0e-6)
     parser.add_argument("--dynamic-reset-release", type=float, default=2.0e-6)
     parser.add_argument("--membrane-capacitance-code", type=int)
@@ -815,6 +832,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--search-threshold-comparator-bias-codes", type=int, nargs="+"
     )
     parser.add_argument("--search-reset-current-codes", type=int, nargs="+")
+    parser.add_argument(
+        "--search-reset-current-multiplication-modes",
+        choices=("enabled", "disabled"),
+        nargs="+",
+    )
     parser.add_argument(
         "--search-static-reset-release-us", type=float, nargs="+"
     )

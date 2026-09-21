@@ -1534,6 +1534,7 @@ def verify_resumable_operating_point_search() -> None:
     assert candidates[0].apply(config).membrane_capacitance_code is None
     assert candidates[0].apply(config).threshold_comparator_bias_code is None
     assert candidates[0].apply(config).reset_current_code == 1022
+    assert candidates[0].apply(config).reset_current_enable_multiplication is True
     assert candidates[0].apply(config).static_reset_release_s == 4.0e-6
     assert candidates[0].apply(config).dynamic_reset_release_s == 2.0e-6
     capacitance_candidates = build_encoder_operating_point_candidates(
@@ -1586,6 +1587,30 @@ def verify_resumable_operating_point_search() -> None:
         for static_release in (3.5e-6, 4.5e-6)
         for dynamic_release in (1.0e-6, 2.5e-6)
     }
+    reset_mode_candidates = build_encoder_operating_point_candidates(
+        config,
+        constant_current_codes=(1022,),
+        threshold_codes=(600,),
+        ramp_stop_times_s=(25.0e-6,),
+        precharge_pairs=((1, 63),),
+        reset_current_multiplication_modes=(True, False),
+    )
+    assert len(reset_mode_candidates) == 2
+    assert {
+        item.apply(config).reset_current_enable_multiplication
+        for item in reset_mode_candidates
+    } == {True, False}
+    rejects(
+        lambda: build_encoder_operating_point_candidates(
+            config,
+            constant_current_codes=(1022,),
+            threshold_codes=(600,),
+            ramp_stop_times_s=(25.0e-6,),
+            precharge_pairs=((1, 63),),
+            reset_current_multiplication_modes=(1,),
+        ),
+        (TypeError,),
+    )
     rejects(
         lambda: build_encoder_operating_point_candidates(
             config,
@@ -1780,6 +1805,7 @@ def verify_artifact_integrity() -> None:
     assert config.reset_code_maximum == 900
     assert config.constant_current_code == 1022
     assert config.reset_current_code == 1022
+    assert config.reset_current_enable_multiplication is True
     assert config.static_reset_release_s == 4.0e-6
     assert config.dynamic_reset_release_s == 2.0e-6
     assert config.membrane_capacitance_code is None
@@ -1793,10 +1819,17 @@ def verify_artifact_integrity() -> None:
         (ValueError,),
     )
     rejects(lambda: PrimitiveNoiseConfig(reset_current_code=1023), (ValueError,))
+    rejects(
+        lambda: PrimitiveNoiseConfig(
+            reset_current_enable_multiplication=1  # type: ignore[arg-type]
+        ),
+        (TypeError,),
+    )
     rejects(lambda: PrimitiveNoiseConfig(static_reset_release_s=5.0e-6), (ValueError,))
     rejects(lambda: PrimitiveNoiseConfig(dynamic_reset_release_s=3.0e-6), (ValueError,))
     parser_defaults = build_parser().parse_args(["--output-dir", "unused"])
     assert parser_defaults.search_ramp_stop_us == (25.0,)
+    assert parser_defaults.reset_current_enable_multiplication is True
     observation = MockPrimitiveNoiseBackend().collect(
         "psi-int", config, stage="transfer", quick=True
     )

@@ -103,6 +103,7 @@ class PrimitiveNoiseConfig:
     leak_bias: int = 0
     constant_current_code: int = 1022
     reset_current_code: int = 1022
+    reset_current_enable_multiplication: bool = True
     static_reset_release_s: float = 4.0e-6
     dynamic_reset_release_s: float = 2.0e-6
     membrane_capacitance_code: int | None = None
@@ -165,6 +166,8 @@ class PrimitiveNoiseConfig:
         ):
             if not 0 <= value <= 1022:
                 raise ValueError(f"{name} must lie in [0, 1022]")
+        if not isinstance(self.reset_current_enable_multiplication, bool):
+            raise TypeError("reset current multiplication flag must be a bool")
         if not 0.0 < self.static_reset_release_s < self.input_early_s:
             raise ValueError(
                 "static reset release must lie between zero and the ramp start"

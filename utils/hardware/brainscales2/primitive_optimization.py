@@ -31,6 +31,7 @@ class EncoderOperatingPointCandidate:
     constant_current_code: int
     threshold_code: int
     reset_current_code: int
+    reset_current_enable_multiplication: bool
     static_reset_release_s: float
     dynamic_reset_release_s: float
     membrane_capacitance_code: int | None
@@ -50,6 +51,9 @@ class EncoderOperatingPointCandidate:
             constant_current_code=self.constant_current_code,
             threshold_code=self.threshold_code,
             reset_current_code=self.reset_current_code,
+            reset_current_enable_multiplication=(
+                self.reset_current_enable_multiplication
+            ),
             static_reset_release_s=self.static_reset_release_s,
             dynamic_reset_release_s=self.dynamic_reset_release_s,
             membrane_capacitance_code=self.membrane_capacitance_code,
@@ -118,6 +122,7 @@ def build_encoder_operating_point_candidates(
     exponential_pairs: Iterable[tuple[int, int]] | None = None,
     current_stop_pairs: Iterable[tuple[int, float]] | None = None,
     reset_current_codes: Iterable[int] | None = None,
+    reset_current_multiplication_modes: Iterable[bool] | None = None,
     static_reset_release_times_s: Iterable[float] | None = None,
     dynamic_reset_release_times_s: Iterable[float] | None = None,
     membrane_capacitance_codes: Iterable[int | None] | None = None,
@@ -156,6 +161,11 @@ def build_encoder_operating_point_candidates(
         if reset_current_codes is not None
         else (base.reset_current_code,)
     )
+    reset_multiplication_modes = (
+        tuple(reset_current_multiplication_modes)
+        if reset_current_multiplication_modes is not None
+        else (base.reset_current_enable_multiplication,)
+    )
     static_reset_releases = (
         tuple(static_reset_release_times_s)
         if static_reset_release_times_s is not None
@@ -173,63 +183,78 @@ def build_encoder_operating_point_candidates(
             for capacitance_code in capacitance_codes:
                 for comparator_bias_code in comparator_bias_codes:
                     for reset_current in reset_currents:
-                        for static_release_s in static_reset_releases:
-                            for dynamic_release_s in dynamic_reset_releases:
-                                for fan_in, weight in resolved_precharge_pairs:
-                                    for (
-                                        exponential_fan_in,
-                                        exponential_weight,
-                                    ) in resolved_exponential_pairs:
-                                        if not 0 <= reset_current <= 1022:
-                                            raise ValueError(
-                                                "reset current code must lie in "
-                                                "[0, 1022]"
+                        for reset_multiplication in reset_multiplication_modes:
+                            if not isinstance(reset_multiplication, bool):
+                                raise TypeError(
+                                    "reset current multiplication mode must be a bool"
+                                )
+                            for static_release_s in static_reset_releases:
+                                for dynamic_release_s in dynamic_reset_releases:
+                                    for fan_in, weight in resolved_precharge_pairs:
+                                        for (
+                                            exponential_fan_in,
+                                            exponential_weight,
+                                        ) in resolved_exponential_pairs:
+                                            if not 0 <= reset_current <= 1022:
+                                                raise ValueError(
+                                                    "reset current code must lie in "
+                                                    "[0, 1022]"
+                                                )
+                                            if not (
+                                                0.0
+                                                < static_release_s
+                                                < base.input_early_s
+                                            ):
+                                                raise ValueError(
+                                                    "static reset release must "
+                                                    "precede the ramp"
+                                                )
+                                            precharge_time_s = max(
+                                                0.5e-6,
+                                                base.input_early_s - 2.0e-6,
                                             )
-                                        if not (
-                                            0.0
-                                            < static_release_s
-                                            < base.input_early_s
-                                        ):
-                                            raise ValueError(
-                                                "static reset release must "
-                                                "precede the ramp"
+                                            if (
+                                                not 0.0
+                                                < dynamic_release_s
+                                                < precharge_time_s
+                                                or math.isclose(
+                                                    dynamic_release_s,
+                                                    precharge_time_s,
+                                                    rel_tol=0.0,
+                                                    abs_tol=1.0e-12,
+                                                )
+                                            ):
+                                                raise ValueError(
+                                                    "dynamic reset release must "
+                                                    "precede precharge"
+                                                )
+                                            candidate = _build_encoder_candidate(
+                                                base=base,
+                                                seen=seen,
+                                                current=current,
+                                                ramp_stop_s=ramp_stop_s,
+                                                threshold=threshold,
+                                                reset_current=reset_current,
+                                                reset_multiplication=(
+                                                    reset_multiplication
+                                                ),
+                                                static_release_s=static_release_s,
+                                                dynamic_release_s=dynamic_release_s,
+                                                capacitance_code=capacitance_code,
+                                                comparator_bias_code=(
+                                                    comparator_bias_code
+                                                ),
+                                                fan_in=fan_in,
+                                                weight=weight,
+                                                exponential_fan_in=(
+                                                    exponential_fan_in
+                                                ),
+                                                exponential_weight=(
+                                                    exponential_weight
+                                                ),
                                             )
-                                        precharge_time_s = max(
-                                            0.5e-6, base.input_early_s - 2.0e-6
-                                        )
-                                        if (
-                                            not 0.0
-                                            < dynamic_release_s
-                                            < precharge_time_s
-                                            or math.isclose(
-                                                dynamic_release_s,
-                                                precharge_time_s,
-                                                rel_tol=0.0,
-                                                abs_tol=1.0e-12,
-                                            )
-                                        ):
-                                            raise ValueError(
-                                                "dynamic reset release must "
-                                                "precede precharge"
-                                            )
-                                        candidate = _build_encoder_candidate(
-                                            base=base,
-                                            seen=seen,
-                                            current=current,
-                                            ramp_stop_s=ramp_stop_s,
-                                            threshold=threshold,
-                                            reset_current=reset_current,
-                                            static_release_s=static_release_s,
-                                            dynamic_release_s=dynamic_release_s,
-                                            capacitance_code=capacitance_code,
-                                            comparator_bias_code=comparator_bias_code,
-                                            fan_in=fan_in,
-                                            weight=weight,
-                                            exponential_fan_in=exponential_fan_in,
-                                            exponential_weight=exponential_weight,
-                                        )
-                                        if candidate is not None:
-                                            candidates.append(candidate)
+                                            if candidate is not None:
+                                                candidates.append(candidate)
     if not candidates:
         raise ValueError("operating-point search grid is empty")
     return tuple(candidates)
@@ -243,6 +268,7 @@ def _build_encoder_candidate(
     ramp_stop_s: float,
     threshold: int,
     reset_current: int,
+    reset_multiplication: bool,
     static_release_s: float,
     dynamic_release_s: float,
     capacitance_code: int | None,
@@ -280,6 +306,7 @@ def _build_encoder_candidate(
     candidate_id = (
         f"cc{current:04d}_th{threshold:04d}_"
         f"rsti{reset_current:04d}_"
+        f"rstm{int(reset_multiplication)}_"
         f"rs{static_release_us:04.1f}us_"
         f"rd{dynamic_release_us:04.1f}us_"
         f"{capacitance_id}_{comparator_id}_"
@@ -296,6 +323,7 @@ def _build_encoder_candidate(
         constant_current_code=current,
         threshold_code=threshold,
         reset_current_code=reset_current,
+        reset_current_enable_multiplication=reset_multiplication,
         static_reset_release_s=static_release_s,
         dynamic_reset_release_s=dynamic_release_s,
         membrane_capacitance_code=capacitance_code,
