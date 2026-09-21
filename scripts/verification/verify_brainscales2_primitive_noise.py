@@ -210,6 +210,135 @@ def verify_pynn_worker_attempt_budget() -> None:
     assert attempts == 1
 
 
+# @lat: [[hardware#Independent Primitive Noise Verification#PyNN worker cache identity]]
+def verify_pynn_worker_cache_identity() -> None:
+    backend = PrimitiveHardwareBackend()
+    original_subprocess_run = primitive_backend_module.subprocess.run
+    worker_calls: list[list[str]] = []
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = PrimitiveNoiseConfig(
+            repeats=4,
+            calibration_repeats=2,
+            device_count=1,
+            physical_coordinates=(0,),
+            pynn_worker_cache_dir=root / "canonical",
+        )
+
+        def fake_subprocess_run(command, **_kwargs):
+            worker_calls.append(command)
+            response_path = Path(command[-1])
+            torch.save(
+                {
+                    "first": torch.ones((2, 1), dtype=torch.float64),
+                    "count": torch.ones((2, 1), dtype=torch.int64),
+                    "precharge": None,
+                    "metadata": {"chip_identifier": ["synthetic-chip"]},
+                },
+                response_path,
+            )
+            return SimpleNamespace(stdout="synthetic worker")
+
+        primitive_backend_module.subprocess.run = fake_subprocess_run
+        try:
+            first = backend._run_pynn_code_process(
+                "phi-np",
+                "static",
+                15,
+                config,
+                repeats=2,
+                trial_start=0,
+            )
+            operational_change = replace(
+                config,
+                pynn_worker_timeout_s=3600.0,
+                pynn_worker_max_attempts=1,
+            )
+            second = backend._run_pynn_code_process(
+                "phi-np",
+                "static",
+                15,
+                operational_change,
+                repeats=2,
+                trial_start=0,
+            )
+        finally:
+            primitive_backend_module.subprocess.run = original_subprocess_run
+        assert len(worker_calls) == 1
+        assert first[3]["worker_cache_hit"] is False
+        assert first[3]["worker_cache_identity"] == "canonical-v1"
+        assert second[3]["worker_cache_hit"] is True
+        assert second[3]["worker_cache_identity"] == "canonical-v1"
+        assert second[3]["worker_max_attempts"] == 3
+
+        fingerprint = primitive_backend_module._pynn_cache_fingerprint
+        canonical = fingerprint(
+            "phi-np", "static", 15, config, repeats=2, trial_start=0
+        )
+        assert canonical == fingerprint(
+            "phi-np",
+            "static",
+            15,
+            operational_change,
+            repeats=2,
+            trial_start=0,
+        )
+        moved_cache = replace(config, pynn_worker_cache_dir=root / "moved")
+        assert canonical == fingerprint(
+            "phi-np", "static", 15, moved_cache, repeats=2, trial_start=0
+        )
+        changed_chunks = replace(config, pynn_chunk_repeats=4)
+        assert canonical != fingerprint(
+            "phi-np", "static", 15, changed_chunks, repeats=2, trial_start=0
+        )
+
+        for legacy in ("full-config", "before-attempt-budget"):
+            legacy_config = replace(
+                config, pynn_worker_cache_dir=root / legacy
+            )
+            legacy_config.pynn_worker_cache_dir.mkdir(parents=True)
+            legacy_fingerprint = fingerprint(
+                "phi-np",
+                "static",
+                15,
+                legacy_config,
+                repeats=2,
+                trial_start=0,
+                legacy=legacy,
+            )
+            cache_path = legacy_config.pynn_worker_cache_dir / (
+                "phi-np_static_code15_trials0-2_"
+                f"{legacy_fingerprint[:16]}.pt"
+            )
+            legacy_metadata = {
+                "chip_identifier": ["synthetic-chip"],
+                "worker_attempts": 1,
+            }
+            if legacy == "full-config":
+                legacy_metadata["worker_max_attempts"] = 3
+            torch.save(
+                {
+                    "fingerprint": legacy_fingerprint,
+                    "first": torch.ones((2, 1), dtype=torch.float64),
+                    "count": torch.ones((2, 1), dtype=torch.int64),
+                    "precharge": None,
+                    "metadata": legacy_metadata,
+                },
+                cache_path,
+            )
+            _, _, _, metadata = backend._run_pynn_code_process(
+                "phi-np",
+                "static",
+                15,
+                legacy_config,
+                repeats=2,
+                trial_start=0,
+            )
+            assert metadata["worker_cache_hit"] is True
+            assert metadata["worker_cache_identity"] == legacy
+            assert metadata["worker_max_attempts"] == 3
+
+
 # @lat: [[hardware#Independent Primitive Noise Verification#Repeated acquisition timeout abort]]
 def verify_repeated_acquisition_timeout_abort() -> None:
     timeout = RuntimeError(
@@ -2143,6 +2272,7 @@ def main() -> None:
     verify_configured_hardware_endpoint_reuse()
     verify_transient_worker_error_classification()
     verify_pynn_worker_attempt_budget()
+    verify_pynn_worker_cache_identity()
     verify_repeated_acquisition_timeout_abort()
     verify_synthetic_transfer_recovery()
     verify_held_out_validation_isolation()

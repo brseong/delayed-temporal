@@ -36,6 +36,13 @@ from .primitive_noise import (
 
 
 PYNN_BACKEND_MODULE = "pynn_brainscales.brainscales2"
+_PYNN_CACHE_OPERATIONAL_CONFIG_FIELDS = frozenset(
+    {
+        "pynn_worker_cache_dir",
+        "pynn_worker_max_attempts",
+        "pynn_worker_timeout_s",
+    }
+)
 _TRANSIENT_PYNN_WORKER_ERRORS = (
     "could not submit request",
     "name or service not known",
@@ -52,6 +59,45 @@ class PrimitiveCapabilityError(RuntimeError):
 def _is_transient_pynn_worker_error(detail: str) -> bool:
     normalized = detail.casefold()
     return any(pattern in normalized for pattern in _TRANSIENT_PYNN_WORKER_ERRORS)
+
+
+def _pynn_cache_fingerprint(
+    primitive: PrimitiveKind,
+    stage: PrimitiveStage,
+    code: int,
+    config: PrimitiveNoiseConfig,
+    *,
+    repeats: int,
+    trial_start: int,
+    legacy: str | None = None,
+) -> str:
+    """Return the canonical or a supported legacy worker-cache identity."""
+    config_payload = config.to_manifest_dict()
+    if legacy is None:
+        for field in _PYNN_CACHE_OPERATIONAL_CONFIG_FIELDS:
+            config_payload.pop(field, None)
+    elif legacy == "full-config":
+        pass
+    elif legacy == "before-attempt-budget":
+        config_payload.pop("pynn_worker_max_attempts", None)
+    else:
+        raise ValueError(f"unknown PyNN cache identity variant: {legacy}")
+    fingerprint_payload = {
+        "primitive": primitive,
+        "stage": stage,
+        "code": code,
+        "trial_start": trial_start,
+        "trial_stop": trial_start + repeats,
+        "config": config_payload,
+    }
+    return sha256(
+        json.dumps(
+            fingerprint_payload,
+            default=str,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _module_version(module: Any) -> str:
@@ -1149,37 +1195,57 @@ class PrimitiveHardwareBackend:
         trial_start: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, dict[str, Any]]:
         """Isolate PyNN native allocations in a bounded child process."""
-        fingerprint_payload = {
-            "primitive": primitive,
-            "stage": stage,
-            "code": code,
-            "trial_start": trial_start,
-            "trial_stop": trial_start + repeats,
-            "config": config.to_manifest_dict(),
-        }
-        fingerprint = sha256(
-            json.dumps(
-                fingerprint_payload,
-                default=str,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
+        fingerprint = _pynn_cache_fingerprint(
+            primitive,
+            stage,
+            code,
+            config,
+            repeats=repeats,
+            trial_start=trial_start,
+        )
         cache_path: Path | None = None
         if config.pynn_worker_cache_dir is not None:
             config.pynn_worker_cache_dir.mkdir(parents=True, exist_ok=True)
-            cache_path = config.pynn_worker_cache_dir / (
+            cache_stem = (
                 f"{primitive}_{stage}_code{code}_trials"
-                f"{trial_start}-{trial_start + repeats}_{fingerprint[:16]}.pt"
+                f"{trial_start}-{trial_start + repeats}"
             )
-            if cache_path.is_file():
-                cached = torch.load(
-                    cache_path, map_location="cpu", weights_only=False
+            cache_path = config.pynn_worker_cache_dir / (
+                f"{cache_stem}_{fingerprint[:16]}.pt"
+            )
+            cache_candidates = [(cache_path, fingerprint, "canonical-v1")]
+            for legacy in ("full-config", "before-attempt-budget"):
+                legacy_fingerprint = _pynn_cache_fingerprint(
+                    primitive,
+                    stage,
+                    code,
+                    config,
+                    repeats=repeats,
+                    trial_start=trial_start,
+                    legacy=legacy,
                 )
-                if cached.get("fingerprint") != fingerprint:
-                    raise RuntimeError(f"PyNN worker cache mismatch: {cache_path}")
+                legacy_path = config.pynn_worker_cache_dir / (
+                    f"{cache_stem}_{legacy_fingerprint[:16]}.pt"
+                )
+                if legacy_path != cache_path:
+                    cache_candidates.append(
+                        (legacy_path, legacy_fingerprint, legacy)
+                    )
+            for candidate_path, expected_fingerprint, identity in cache_candidates:
+                if not candidate_path.is_file():
+                    continue
+                cached = torch.load(
+                    candidate_path, map_location="cpu", weights_only=False
+                )
+                if cached.get("fingerprint") != expected_fingerprint:
+                    raise RuntimeError(
+                        f"PyNN worker cache mismatch: {candidate_path}"
+                    )
                 metadata = dict(cached["metadata"])
+                if identity == "before-attempt-budget":
+                    metadata.setdefault("worker_max_attempts", 3)
                 metadata["worker_cache_hit"] = True
+                metadata["worker_cache_identity"] = identity
                 return (
                     cached["first"],
                     cached["count"],
@@ -1250,6 +1316,7 @@ class PrimitiveHardwareBackend:
         metadata["worker_attempts"] = worker_attempts
         metadata["worker_max_attempts"] = config.pynn_worker_max_attempts
         metadata["worker_cache_hit"] = False
+        metadata["worker_cache_identity"] = "canonical-v1"
         if cache_path is not None:
             cache_payload = {
                 "fingerprint": fingerprint,

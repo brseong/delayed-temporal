@@ -691,3 +691,9 @@ The worker boundary must retry only recognized connection failures for a bounded
 ### PyNN worker attempt budget
 
 The configuration must preserve the default of three attempts, reject nonpositive values, expose the command interface override, record it in the manifest and worker metadata, and stop after the configured number of attempts.
+
+### PyNN worker cache identity
+
+Operational retry controls do not invalidate a completed acquisition.
+
+The cache identity excludes the retry timeout, attempt limit, and cache directory. It retains chunk and process boundaries and accepts legacy fingerprints without changing the recorded result.
