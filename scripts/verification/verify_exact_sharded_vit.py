@@ -359,6 +359,43 @@ def verify_merge_rejections_and_offset_guards() -> None:
         base.mkdir()
         sharded_result(base, 512, "joint", serial)
         originals = [base / f"512-joint-shard-{index}.json" for index in range(2)]
+        first_payload = json.loads(originals[0].read_text())
+        for name, statistic_key in (
+            ("Gaussian", "gaussian_stats"),
+            ("clamp", "clamp_stats"),
+        ):
+            impossible_stats = copy.deepcopy(first_payload[statistic_key])
+            site_counts = next(iter(impossible_stats.values()))
+            if statistic_key == "gaussian_stats":
+                site_counts.update(events=0, misses=1)
+            else:
+                site_counts.update(values=0, underflows=1)
+            arguments = {
+                "gaussian_stats": first_payload["gaussian_stats"],
+                "clamp_stats": first_payload["clamp_stats"],
+                "calibration_clamp_stats": first_payload[
+                    "calibration_clamp_stats"
+                ],
+            }
+            arguments[statistic_key] = impossible_stats
+            rejected_path = root / f"write-impossible-{name}.json"
+            try:
+                write_shard_result(
+                    rejected_path,
+                    predictions=range(first_payload["predictions"]["count"]),
+                    interval=first_payload["interval"],
+                    counts=first_payload["counts"],
+                    run_identity=first_payload["run_identity"],
+                    rng_contract=first_payload["rng_contract"],
+                    **arguments,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"shard writer accepted impossible {name} counters")
+            assert not rejected_path.exists()
+            assert not rejected_path.with_suffix(".predictions.int64").exists()
+
         mutations = (
             ("gap", lambda payload: payload["interval"].update(sample_start=257)),
             ("overlap", lambda payload: payload["interval"].update(sample_start=255)),
@@ -407,6 +444,66 @@ def verify_merge_rejections_and_offset_guards() -> None:
                             "output_overflows": 0,
                         }
                     }
+                ),
+            ),
+            (
+                "gaussian-site-omitted",
+                lambda payload: payload["gaussian_stats"].pop(
+                    next(iter(payload["gaussian_stats"]))
+                ),
+            ),
+            (
+                "clamp-site-omitted",
+                lambda payload: payload["clamp_stats"].pop(
+                    next(iter(payload["clamp_stats"]))
+                ),
+            ),
+            (
+                "gaussian-misses-exceed-events",
+                lambda payload: next(
+                    iter(payload["gaussian_stats"].values())
+                ).update(events=0, misses=1),
+            ),
+            (
+                "gaussian-deadline-events-exceed-events",
+                lambda payload: next(
+                    iter(payload["gaussian_stats"].values())
+                ).update(events=0, deadline_events=1),
+            ),
+            (
+                "gaussian-output-underflows-exceed-outputs",
+                lambda payload: next(
+                    iter(payload["gaussian_stats"].values())
+                ).update(outputs=0, output_underflows=1),
+            ),
+            (
+                "gaussian-output-overflows-exceed-outputs",
+                lambda payload: next(
+                    iter(payload["gaussian_stats"].values())
+                ).update(outputs=0, output_overflows=1),
+            ),
+            (
+                "gaussian-output-saturation-counts-exceed-outputs",
+                lambda payload: next(
+                    iter(payload["gaussian_stats"].values())
+                ).update(outputs=1, output_underflows=1, output_overflows=1),
+            ),
+            (
+                "clamp-underflows-exceed-values",
+                lambda payload: next(iter(payload["clamp_stats"].values())).update(
+                    values=0, underflows=1
+                ),
+            ),
+            (
+                "clamp-overflows-exceed-values",
+                lambda payload: next(iter(payload["clamp_stats"].values())).update(
+                    values=0, overflows=1
+                ),
+            ),
+            (
+                "clamp-saturation-counts-exceed-values",
+                lambda payload: next(iter(payload["clamp_stats"].values())).update(
+                    values=1, underflows=1, overflows=1
                 ),
             ),
         )

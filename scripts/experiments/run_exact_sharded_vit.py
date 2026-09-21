@@ -15,7 +15,7 @@ import struct
 import subprocess
 import sys
 import time
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
 
 SOURCE = Path(__file__).resolve().parents[2]
@@ -415,11 +415,45 @@ def validated_counts(counts: Mapping[str, Any]) -> dict[str, int]:
     }
 
 
+def _validate_gaussian_site(
+    site: str, values: Mapping[str, int | float]
+) -> None:
+    """Reject Gaussian counters that the instrumentation cannot produce."""
+
+    events = values["events"]
+    outputs = values["outputs"]
+    if values["misses"] > events:
+        raise ValueError(f"Gaussian misses exceed events at {site!r}")
+    if values["deadline_events"] > events:
+        raise ValueError(f"Gaussian deadline events exceed events at {site!r}")
+    if values["output_underflows"] > outputs:
+        raise ValueError(f"Gaussian output underflows exceed outputs at {site!r}")
+    if values["output_overflows"] > outputs:
+        raise ValueError(f"Gaussian output overflows exceed outputs at {site!r}")
+    if values["output_underflows"] + values["output_overflows"] > outputs:
+        raise ValueError(
+            f"Gaussian output saturation counts exceed outputs at {site!r}"
+        )
+
+
+def _validate_clamp_site(site: str, values: Mapping[str, int | float]) -> None:
+    """Reject clamp counters that the instrumentation cannot produce."""
+
+    total = values["values"]
+    if values["underflows"] > total:
+        raise ValueError(f"clamp underflows exceed values at {site!r}")
+    if values["overflows"] > total:
+        raise ValueError(f"clamp overflows exceed values at {site!r}")
+    if values["underflows"] + values["overflows"] > total:
+        raise ValueError(f"clamp saturation counts exceed values at {site!r}")
+
+
 def validated_stats(
     stats: Mapping[str, Mapping[str, Any]],
     *,
     integer_fields: frozenset[str],
     number_fields: frozenset[str] = frozenset(),
+    validate_site: Callable[[str, Mapping[str, int | float]], None] | None = None,
 ) -> dict[str, dict[str, int | float]]:
     """Validate every site against one complete counter schema."""
 
@@ -445,6 +479,8 @@ def validated_stats(
                 validated[field] = nonnegative_number(
                     value, name=f"statistic {site}/{field}"
                 )
+        if validate_site is not None:
+            validate_site(site, validated)
         result[site] = validated
     return result
 
@@ -472,12 +508,17 @@ def write_shard_result(
         gaussian_stats,
         integer_fields=GAUSSIAN_INTEGER_FIELDS,
         number_fields=GAUSSIAN_NUMBER_FIELDS,
+        validate_site=_validate_gaussian_site,
     )
     checked_clamp_stats = validated_stats(
-        clamp_stats, integer_fields=CLAMP_STAT_FIELDS
+        clamp_stats,
+        integer_fields=CLAMP_STAT_FIELDS,
+        validate_site=_validate_clamp_site,
     )
     checked_calibration_stats = validated_stats(
-        calibration_clamp_stats, integer_fields=CLAMP_STAT_FIELDS
+        calibration_clamp_stats,
+        integer_fields=CLAMP_STAT_FIELDS,
+        validate_site=_validate_clamp_site,
     )
     sample_count = checked_interval["sample_stop"] - checked_interval["sample_start"]
     if sample_count <= 0 or prediction_count != sample_count:
@@ -555,14 +596,25 @@ def _aggregate_stats(
     integer_fields: frozenset[str],
     min_fields: frozenset[str] = frozenset(),
     max_fields: frozenset[str] = frozenset(),
+    statistic_name: str,
+    validate_site: Callable[[str, Mapping[str, int | float]], None],
 ) -> dict[str, dict[str, int | float]]:
-    aggregate: dict[str, dict[str, int | float]] = {}
-    for unchecked_record in records:
-        record = validated_stats(
+    validated_records = [
+        validated_stats(
             unchecked_record,
             integer_fields=integer_fields,
             number_fields=min_fields | max_fields,
+            validate_site=validate_site,
         )
+        for unchecked_record in records
+    ]
+    if validated_records:
+        expected_sites = set(validated_records[0])
+        if any(set(record) != expected_sites for record in validated_records[1:]):
+            raise ValueError(f"{statistic_name} statistic sites differ across shards")
+
+    aggregate: dict[str, dict[str, int | float]] = {}
+    for record in validated_records:
         for site, values in record.items():
             target = aggregate.setdefault(site, {})
             for field, value in values.items():
@@ -754,14 +806,20 @@ def merge_shard_results(
         integer_fields=GAUSSIAN_INTEGER_FIELDS,
         min_fields=GAUSSIAN_MIN_FIELDS,
         max_fields=GAUSSIAN_MAX_FIELDS,
+        statistic_name="Gaussian",
+        validate_site=_validate_gaussian_site,
     )
     clamp_stats = _aggregate_stats(
         (item["clamp_stats"] for item in payloads),
         integer_fields=CLAMP_STAT_FIELDS,
+        statistic_name="clamp",
+        validate_site=_validate_clamp_site,
     )
     calibration_clamp_stats = _aggregate_stats(
         (item["calibration_clamp_stats"] for item in payloads),
         integer_fields=CLAMP_STAT_FIELDS,
+        statistic_name="calibration clamp",
+        validate_site=_validate_clamp_site,
     )
 
     raw_path = output_path.with_suffix(".predictions.int64")
