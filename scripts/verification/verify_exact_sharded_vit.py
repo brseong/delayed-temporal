@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -22,10 +23,13 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.experiments.run_exact_sharded_vit import (
     build_rng_preflight_contract,
+    build_shard_command,
+    calibration_compatibility_identity,
     canonical_json_sha256,
     checked_batch_offset,
     decode_predictions,
     exact_batch_shard_bounds,
+    evaluation_entrypoint,
     load_rng_contract,
     merge_shard_results,
     noise_profile_fractions,
@@ -592,6 +596,99 @@ def verify_model_provenance_and_process_cleanup() -> None:
         else:
             raise AssertionError("mutated local checkpoint was accepted")
 
+        calibrated_arguments = [
+            "--model_id",
+            str(checkpoint),
+            "--checkpoint-sha256",
+            digest,
+            "--calibration-mode",
+            "validate",
+            "--calibration-dataset-path",
+            str(root / "train"),
+            "--calibration-dataset-fingerprint",
+            "fixture-fingerprint",
+        ]
+        assert evaluation_entrypoint(ROOT, calibrated_arguments) == (
+            ROOT / "scripts/analysis/evaluate_calibrated_vit.py"
+        )
+        command = build_shard_command(
+            SimpleNamespace(
+                source_root=ROOT,
+                python_bin=sys.executable,
+                evaluator_args=calibrated_arguments,
+                linear_std_frac=0.1,
+                log_std_frac=0.2,
+                noise_profile="joint",
+                output_dir=root / "run",
+                batch_size=32,
+                prefix_samples=64,
+                contract_timeout_seconds=60.0,
+                seed=0,
+                deadline_margin_std=0.0,
+            ),
+            shard_index=0,
+            source_commit="a" * 40,
+            contract_path=root / "contract.json",
+            result_path=root / "result.json",
+        )
+        assert command[1] == str(ROOT / "scripts/analysis/evaluate_calibrated_vit.py")
+        assert command[2:4] == ["--source-root", str(ROOT)]
+        assert command.count("--source-root") == 1
+        try:
+            build_shard_command(
+                SimpleNamespace(
+                    source_root=ROOT,
+                    python_bin=sys.executable,
+                    evaluator_args=[*calibrated_arguments, "--source-root", str(root)],
+                    linear_std_frac=0.1,
+                    log_std_frac=0.2,
+                    noise_profile="joint",
+                    output_dir=root / "run",
+                    batch_size=32,
+                    prefix_samples=64,
+                    contract_timeout_seconds=60.0,
+                    seed=0,
+                    deadline_margin_std=0.0,
+                ),
+                shard_index=0,
+                source_commit="a" * 40,
+                contract_path=root / "contract.json",
+                result_path=root / "result.json",
+            )
+        except ValueError as error:
+            assert "runner-owned" in str(error)
+        else:
+            raise AssertionError("calibrated evaluation accepted a second source root")
+        try:
+            evaluation_entrypoint(
+                ROOT,
+                ["--calibration-mode", "validate"],
+            )
+        except ValueError as error:
+            assert "calibration-dataset-path" in str(error)
+        else:
+            raise AssertionError("calibrated evaluation accepted missing dataset identity")
+
+        for mode_arguments in ([], ["--calibration-mode", "none"]):
+            try:
+                evaluation_entrypoint(ROOT, mode_arguments)
+            except ValueError as error:
+                assert "requires calibration mode" in str(error)
+            else:
+                raise AssertionError(
+                    f"exact evaluation accepted calibration arguments {mode_arguments}"
+                )
+
+        compatibility_environment = {
+            "DT_CALIBRATION_COMPATIBLE_SOURCE_COMMIT": "b" * 40,
+            "DT_CALIBRATION_COMPATIBLE_VIT_EVALUATOR_SHA256": "c" * 64,
+        }
+        with patch.dict(os.environ, compatibility_environment, clear=False):
+            assert calibration_compatibility_identity(calibrated_arguments) == {
+                "source_commit": "b" * 40,
+                "vit_evaluator_sha256": "c" * 64,
+            }
+
         rejected_output = root / "too-short"
         completed = subprocess.run(
             [
@@ -612,6 +709,33 @@ def verify_model_provenance_and_process_cleanup() -> None:
         )
         assert completed.returncode == 2
         assert not rejected_output.exists()
+
+        for name, extra in (
+            ("missing-calibration-mode", []),
+            ("disabled-calibration", ["--", "--calibration-mode", "none"]),
+        ):
+            rejected_output = root / name
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/experiments/run_exact_sharded_vit.py"),
+                    "--output-dir",
+                    str(rejected_output),
+                    "--prefix-samples",
+                    "64",
+                    "--batch-size",
+                    "32",
+                    "--noise-profile",
+                    "np",
+                    *extra,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            assert completed.returncode != 0
+            assert "requires calibration mode" in completed.stderr
+            assert not rejected_output.exists()
 
     graceful_children: list[subprocess.Popen[Any]] = []
     graceful = _spawn_managed(

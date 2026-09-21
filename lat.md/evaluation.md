@@ -88,6 +88,8 @@ Each shard writes raw signed 64-bit predictions with a fixed byte order, its exa
 
 [[scripts/experiments/run_exact_sharded_vit.py#main]] is the canonical launch and merge entry point. The prefix must contain two full batches, GPU availability is checked before and after preflight, and every evaluator runs in an isolated process group with forwarded termination signals and bounded cleanup. Managed children inherit an unblocked termination signal mask; completed processes leave the live registry immediately, and signaling skips every child that has exited.
 
+The runner requires `--calibration-mode validate` or `inference`, selects [[scripts/analysis/evaluate_calibrated_vit.py#main]], and requires the calibration dataset path and fingerprint. It rejects disabled or omitted calibration before GPU admission. This preserves the full per-layer calibration identity check instead of calling the base evaluator directly. An active source/evaluator compatibility gate is validated by the calibration owner, inherited unchanged by preflight and both shards, and recorded in the run manifest.
+
 ### Synthetic Verification
 
 The CUDA verification covers 512 and 5,000 samples for linear, logarithmic, and joint timing noise, plus zero standard deviation, generator nonconsumption, and invalid contract rejection.

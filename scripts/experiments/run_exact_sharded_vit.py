@@ -25,6 +25,10 @@ if str(SOURCE) not in sys.path:
 from scripts.runtime import files as runtime_files
 from scripts.runtime import identity
 from scripts.runtime import local_gpu
+from utils.transforms.calibration import (
+    CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV,
+    CALIBRATION_COMPATIBLE_VIT_EVALUATOR_SHA256_ENV,
+)
 
 
 SCHEMA_VERSION = 1
@@ -66,6 +70,7 @@ MANAGED_EVALUATOR_OPTIONS = frozenset(
         "--log-time-noise-std-frac",
         "--time-noise-seed",
         "--time-noise-deadline-margin-std",
+        "--source-root",
         "--source-commit",
         "--tensorboard",
         "--no-tensorboard",
@@ -932,6 +937,53 @@ def evaluator_option(arguments: list[str], option: str) -> str:
     return values[0]
 
 
+def optional_evaluator_option(arguments: list[str], option: str) -> str | None:
+    """Read one optional evaluator option while rejecting duplicate values."""
+
+    values: list[str] = []
+    for index, argument in enumerate(arguments):
+        if argument.startswith(option + "="):
+            values.append(argument.partition("=")[2])
+        elif argument == option:
+            if index + 1 >= len(arguments) or arguments[index + 1].startswith("--"):
+                raise ValueError(f"evaluator option has no value: {option}")
+            values.append(arguments[index + 1])
+    if len(values) > 1:
+        raise ValueError(f"evaluator arguments contain duplicate {option}")
+    if values and not values[0]:
+        raise ValueError(f"evaluator option has no value: {option}")
+    return values[0] if values else None
+
+
+def evaluation_entrypoint(source_root: Path, arguments: list[str]) -> Path:
+    """Select the sole evaluator entrypoint required by the calibration mode."""
+
+    mode = optional_evaluator_option(arguments, "--calibration-mode")
+    if mode not in {"validate", "inference"}:
+        raise ValueError(
+            "exact evaluation requires calibration mode validate or inference"
+        )
+    evaluator_option(arguments, "--calibration-dataset-path")
+    evaluator_option(arguments, "--calibration-dataset-fingerprint")
+    return source_root / "scripts/analysis/evaluate_calibrated_vit.py"
+
+
+def calibration_compatibility_identity(arguments: list[str]) -> dict[str, str] | None:
+    """Record an active frozen-calibration compatibility gate without interpreting it."""
+
+    mode = optional_evaluator_option(arguments, "--calibration-mode")
+    if mode not in {"validate", "inference"}:
+        return None
+    values = {
+        "source_commit": os.environ.get(CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV),
+        "vit_evaluator_sha256": os.environ.get(
+            CALIBRATION_COMPATIBLE_VIT_EVALUATOR_SHA256_ENV
+        ),
+    }
+    recorded = {key: value for key, value in values.items() if value is not None}
+    return recorded or None
+
+
 def validate_local_checkpoint(arguments: list[str]) -> dict[str, Any] | None:
     """Bind an explicit local model path to its supplied artifact identity."""
 
@@ -967,9 +1019,14 @@ def build_shard_command(
         linear_std_frac=args.linear_std_frac,
         log_std_frac=args.log_std_frac,
     )
+    entrypoint = evaluation_entrypoint(args.source_root, evaluator_args)
     command = [
         args.python_bin,
-        str(args.source_root / "scripts/evaluation/error_analysis_vit.py"),
+        str(entrypoint),
+    ]
+    if entrypoint.name == "evaluate_calibrated_vit.py":
+        command.extend(("--source-root", str(args.source_root)))
+    command.extend([
         *evaluator_args,
         "--device",
         "cuda",
@@ -1008,7 +1065,7 @@ def build_shard_command(
         source_commit,
         "--no-tensorboard",
         "--report-clamp-stats",
-    ]
+    ])
     if preflight:
         command.extend(("--gaussian-rng-preflight-path", str(contract_path)))
     else:
@@ -1176,6 +1233,8 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     if len(set(args.gpus)) != SHARD_COUNT:
         raise ValueError("exact evaluation requires two distinct physical GPUs")
     evaluator_args = evaluator_arguments(args)
+    entrypoint = evaluation_entrypoint(args.source_root, evaluator_args)
+    calibration_compatibility = calibration_compatibility_identity(evaluator_args)
     checkpoint_artifact = validate_local_checkpoint(evaluator_args)
     activity = require_available_gpus(args.gpus)
 
@@ -1211,9 +1270,12 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         "source_root": str(args.source_root),
         "source_commit": source_commit,
         "runner_sha256": identity.sha256_file(Path(__file__)),
+        "evaluation_entrypoint": str(entrypoint.relative_to(args.source_root)),
+        "evaluation_entrypoint_sha256": identity.sha256_file(entrypoint),
         "evaluator_sha256": identity.sha256_file(
             args.source_root / "scripts/evaluation/error_analysis_vit.py"
         ),
+        "calibration_compatibility": calibration_compatibility,
         "gpus": args.gpus,
         "gpu_activity": activity,
         "checkpoint_artifact": checkpoint_artifact,
