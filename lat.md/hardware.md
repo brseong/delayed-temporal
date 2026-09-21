@@ -620,6 +620,8 @@ An observation with too few usable samples for one physical circuit remains writ
 
 A static-only NP artifact is diagnostic-only and cannot enter the validated five-primitive calibration.
 
+An operating point screen advances when at least one physical circuit passes the current stage; a failed circuit cannot suppress later acquisition for other circuits.
+
 ### Artifact integrity
 
 Raw chunks must round-trip with their shapes and masks, reject checksum changes, and reject duplicate or out-of-range physical coordinates.

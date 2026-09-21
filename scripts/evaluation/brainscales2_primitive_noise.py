@@ -286,28 +286,34 @@ def _collect_encoder_search_observations(
     observations: list[PrimitiveObservation] = []
     validations: list[PrimitiveValidation] = []
     quick_codes = args.quick or args.search_quick_codes
+
+    def any_device_eligible(
+        observation: PrimitiveObservation,
+        validation: PrimitiveValidation,
+    ) -> bool:
+        return any(
+            calibration_transfer_gate(
+                observation,
+                validation,
+                config,
+                screening=args.search_quick_codes,
+                device_indices=(device,),
+            )["eligible"]
+            for device in range(config.device_count)
+        )
+
     static = backend.collect("phi-np", config, stage="static", quick=quick_codes)
     static_validation = validate_primitive_observation(static, config)
     observations.append(static)
     validations.append(static_validation)
-    if not calibration_transfer_gate(
-        static,
-        static_validation,
-        config,
-        screening=args.search_quick_codes,
-    )["eligible"]:
+    if not any_device_eligible(static, static_validation):
         return observations, validations, "phi-np/static calibration gate failed"
 
     dynamic = backend.collect("phi-np", config, stage="dynamic", quick=quick_codes)
     dynamic_validation = validate_primitive_observation(dynamic, config)
     observations.append(dynamic)
     validations.append(dynamic_validation)
-    if not calibration_transfer_gate(
-        dynamic,
-        dynamic_validation,
-        config,
-        screening=args.search_quick_codes,
-    )["eligible"]:
+    if not any_device_eligible(dynamic, dynamic_validation):
         return observations, validations, "phi-np/dynamic calibration gate failed"
 
     if args.primitive == "phi-nl":
@@ -317,12 +323,7 @@ def _collect_encoder_search_observations(
         nonlinear_validation = validate_primitive_observation(nonlinear, config)
         observations.append(nonlinear)
         validations.append(nonlinear_validation)
-        if not calibration_transfer_gate(
-            nonlinear,
-            nonlinear_validation,
-            config,
-            screening=args.search_quick_codes,
-        )["eligible"]:
+        if not any_device_eligible(nonlinear, nonlinear_validation):
             return observations, validations, "phi-nl calibration gate failed"
     return observations, validations, None
 

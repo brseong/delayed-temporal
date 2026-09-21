@@ -46,6 +46,7 @@ from utils.hardware.brainscales2.primitive_optimization import (
     score_encoder_operating_point,
 )
 from scripts.evaluation.brainscales2_primitive_noise import (
+    _collect_encoder_search_observations,
     _primitive_summary_prerequisites,
     build_parser,
     collect_observations,
@@ -1243,6 +1244,37 @@ def verify_encoder_operating_point_score() -> None:
         physical_coordinates=default_primitive_coordinates(4),
     )
     backend = MockPrimitiveNoiseBackend()
+
+    original_collect = MockPrimitiveNoiseBackend.collect
+
+    def one_bad_static(self, primitive, run_config, *, stage="transfer", quick=False):
+        result = original_collect(
+            self, primitive, run_config, stage=stage, quick=quick
+        )
+        if primitive == "phi-np" and stage == "static":
+            spike_count = result.spike_count.clone()
+            spike_count[:, :, 0] = 2
+            return replace(result, spike_count=spike_count)
+        return result
+
+    MockPrimitiveNoiseBackend.collect = one_bad_static
+    try:
+        screened_observations, _, failure = _collect_encoder_search_observations(
+            SimpleNamespace(
+                backend="mock",
+                primitive="phi-np",
+                quick=False,
+                search_quick_codes=True,
+            ),
+            config,
+        )
+    finally:
+        MockPrimitiveNoiseBackend.collect = original_collect
+    assert failure is None
+    assert any(
+        observation.stage == "dynamic" for observation in screened_observations
+    )
+
     observations = [
         backend.collect("phi-np", config, stage="static", quick=False),
         backend.collect("phi-np", config, stage="dynamic", quick=False),
