@@ -1468,6 +1468,31 @@ def verify_resumable_operating_point_search() -> None:
     assert candidates[0].apply(config).observation_time_s == 42.5e-6
     assert candidates[0].apply(config).exponential_input_fan_in == 8
     assert candidates[0].apply(config).exponential_input_weight == 63
+    assert candidates[0].apply(config).membrane_capacitance_code is None
+    capacitance_candidates = build_encoder_operating_point_candidates(
+        config,
+        constant_current_codes=(1022,),
+        threshold_codes=(600,),
+        ramp_stop_times_s=(25.0e-6,),
+        precharge_pairs=((1, 63),),
+        membrane_capacitance_codes=(16, 63),
+    )
+    assert len(capacitance_candidates) == 2
+    assert {
+        item.apply(config).membrane_capacitance_code
+        for item in capacitance_candidates
+    } == {16, 63}
+    rejects(
+        lambda: build_encoder_operating_point_candidates(
+            config,
+            constant_current_codes=(1022,),
+            threshold_codes=(600,),
+            ramp_stop_times_s=(25.0e-6,),
+            precharge_pairs=((1, 63),),
+            membrane_capacitance_codes=(64,),
+        ),
+        (ValueError,),
+    )
     nonlinear_candidates = build_encoder_operating_point_candidates(
         config,
         constant_current_codes=(1022,),
@@ -1639,6 +1664,11 @@ def verify_artifact_integrity() -> None:
     assert config.reset_code_minimum == 300
     assert config.reset_code_maximum == 900
     assert config.constant_current_code == 1022
+    assert config.membrane_capacitance_code is None
+    rejects(
+        lambda: PrimitiveNoiseConfig(membrane_capacitance_code=64),
+        (ValueError,),
+    )
     observation = MockPrimitiveNoiseBackend().collect(
         "psi-int", config, stage="transfer", quick=True
     )

@@ -30,6 +30,7 @@ class EncoderOperatingPointCandidate:
     candidate_id: str
     constant_current_code: int
     threshold_code: int
+    membrane_capacitance_code: int | None
     ramp_stop_s: float
     precharge_input_fan_in: int
     precharge_weight_maximum: int
@@ -44,6 +45,7 @@ class EncoderOperatingPointCandidate:
             base,
             constant_current_code=self.constant_current_code,
             threshold_code=self.threshold_code,
+            membrane_capacitance_code=self.membrane_capacitance_code,
             input_late_s=self.ramp_stop_s,
             observation_time_s=observation_time_s,
             precharge_input_fan_in=self.precharge_input_fan_in,
@@ -107,6 +109,7 @@ def build_encoder_operating_point_candidates(
     precharge_pairs: Iterable[tuple[int, int]],
     exponential_pairs: Iterable[tuple[int, int]] | None = None,
     current_stop_pairs: Iterable[tuple[int, float]] | None = None,
+    membrane_capacitance_codes: Iterable[int | None] | None = None,
 ) -> tuple[EncoderOperatingPointCandidate, ...]:
     """Create a deterministic grid of explicit physical controls."""
     thresholds = tuple(threshold_codes)
@@ -126,51 +129,72 @@ def build_encoder_operating_point_candidates(
         )
     else:
         current_stops = tuple(current_stop_pairs)
+    capacitance_codes = (
+        tuple(membrane_capacitance_codes)
+        if membrane_capacitance_codes is not None
+        else (base.membrane_capacitance_code,)
+    )
     candidates: list[EncoderOperatingPointCandidate] = []
     seen: set[str] = set()
     for current, ramp_stop_s in current_stops:
         for threshold in thresholds:
-            for fan_in, weight in resolved_precharge_pairs:
-                for (
-                    exponential_fan_in,
-                    exponential_weight,
-                ) in resolved_exponential_pairs:
-                    if exponential_fan_in <= 0 or not 1 <= exponential_weight <= 63:
-                        raise ValueError(
-                            "exponential input fan-in must be positive and weight "
-                            "must lie in [1, 63]"
+            for capacitance_code in capacitance_codes:
+                for fan_in, weight in resolved_precharge_pairs:
+                    for (
+                        exponential_fan_in,
+                        exponential_weight,
+                    ) in resolved_exponential_pairs:
+                        if (
+                            exponential_fan_in <= 0
+                            or not 1 <= exponential_weight <= 63
+                        ):
+                            raise ValueError(
+                                "exponential input fan-in must be positive and weight "
+                                "must lie in [1, 63]"
+                            )
+                        if not 0 <= current <= 1022:
+                            raise ValueError(
+                                "constant-current code must lie in [0, 1022]"
+                            )
+                        if not 0 <= threshold <= 1022:
+                            raise ValueError("threshold code must lie in [0, 1022]")
+                        if capacitance_code is not None and not (
+                            0 <= capacitance_code <= 63
+                        ):
+                            raise ValueError(
+                                "membrane capacitance code must lie in [0, 63]"
+                            )
+                        if not base.input_early_s < ramp_stop_s < base.deadline_s:
+                            raise ValueError(
+                                "ramp stop must lie between input start and deadline"
+                            )
+                        capacitance_id = (
+                            "capkeep"
+                            if capacitance_code is None
+                            else f"cap{capacitance_code:02d}"
                         )
-                    if not 0 <= current <= 1022:
-                        raise ValueError(
-                            "constant-current code must lie in [0, 1022]"
+                        candidate_id = (
+                            f"cc{current:04d}_th{threshold:04d}_{capacitance_id}_"
+                            f"stop{ramp_stop_s * 1.0e6:06.2f}us_"
+                            f"fanin{fan_in:02d}_w{weight:02d}_"
+                            f"nlfanin{exponential_fan_in:02d}_nlw{exponential_weight:02d}"
                         )
-                    if not 0 <= threshold <= 1022:
-                        raise ValueError("threshold code must lie in [0, 1022]")
-                    if not base.input_early_s < ramp_stop_s < base.deadline_s:
-                        raise ValueError(
-                            "ramp stop must lie between input start and deadline"
+                        if candidate_id in seen:
+                            continue
+                        seen.add(candidate_id)
+                        candidates.append(
+                            EncoderOperatingPointCandidate(
+                                candidate_id=candidate_id,
+                                constant_current_code=current,
+                                threshold_code=threshold,
+                                membrane_capacitance_code=capacitance_code,
+                                ramp_stop_s=ramp_stop_s,
+                                precharge_input_fan_in=fan_in,
+                                precharge_weight_maximum=weight,
+                                exponential_input_fan_in=exponential_fan_in,
+                                exponential_input_weight=exponential_weight,
+                            )
                         )
-                    candidate_id = (
-                        f"cc{current:04d}_th{threshold:04d}_"
-                        f"stop{ramp_stop_s * 1.0e6:06.2f}us_"
-                        f"fanin{fan_in:02d}_w{weight:02d}_"
-                        f"nlfanin{exponential_fan_in:02d}_nlw{exponential_weight:02d}"
-                    )
-                    if candidate_id in seen:
-                        continue
-                    seen.add(candidate_id)
-                    candidates.append(
-                        EncoderOperatingPointCandidate(
-                            candidate_id=candidate_id,
-                            constant_current_code=current,
-                            threshold_code=threshold,
-                            ramp_stop_s=ramp_stop_s,
-                            precharge_input_fan_in=fan_in,
-                            precharge_weight_maximum=weight,
-                            exponential_input_fan_in=exponential_fan_in,
-                            exponential_input_weight=exponential_weight,
-                        )
-                    )
     if not candidates:
         raise ValueError("operating-point search grid is empty")
     return tuple(candidates)

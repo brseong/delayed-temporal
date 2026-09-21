@@ -1524,6 +1524,10 @@ class PrimitiveHardwareBackend:
                 "refractory_period_enable_pause": True,
                 **refractory_parameters,
             }
+            if config.membrane_capacitance_code is not None:
+                cell_parameters["membrane_capacitance_capacitance"] = (
+                    config.membrane_capacitance_code
+                )
             population = pynn.Population(
                 config.device_count,
                 cell_type(**cell_parameters),
