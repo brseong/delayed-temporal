@@ -129,6 +129,7 @@ def verify_batch_limits_and_terminal_output() -> None:
     ):
         namespace = {
             "dataloader": Loader(samples), "batch_size": 32, "benchmark_enabled": False,
+            "exact_preflight": False,
             "args": SimpleNamespace(max_eval_batches=cap),
             "time": SimpleNamespace(monotonic=lambda: 123.0),
         }
@@ -203,6 +204,7 @@ def verify_final_parser_requires_final_records() -> None:
         experiment = experiment_fixture(root)
         for kind in ("dense", "spiking"):
             task = contract.make_task(experiment, "cifar10_vit_small", kind, 32,
+                                      theta_index=4,
                                       calibration_sha256="c" * 64 if kind == "spiking" else "")
             log = root / task["log_file"]
             log.parent.mkdir(parents=True, exist_ok=True)

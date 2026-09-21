@@ -74,6 +74,22 @@ Redirected evaluation logs disable the terminal progress bar so records occupy c
 
 [[scripts/verification/verify_vit_evaluation_progress.py#verify_cumulative_accuracy_and_flush]] checks cumulative counts, uneven batches, immediate flushing and invalid input rejection. Other checks cover integration without tracking services, bounded evaluation length, benchmark exclusion and the final parser rejecting logs containing only progress records.
 
+## Exact ViT Timing Noise Shards
+
+The exact shard path preserves one seeded CUDA timing noise stream while two GPU processes evaluate disjoint original ViT batches.
+
+[[scripts/experiments/run_exact_sharded_vit.py#exact_batch_shard_bounds]] selects an explicit evaluation prefix before partitioning it. It balances complete global batches, so 5,000 samples at batch size 32 become 79 batches (2,528 samples) followed by 78 batches (2,472 samples); only the second shard owns the final partial batch.
+
+A separate process evaluates two distinct full batches and records each ordered Gaussian encoder call with its site, encoding, shape, dtype, and generator offsets through [[utils/transforms/noise.py#begin_gaussian_rng_trace]]. [[scripts/experiments/run_exact_sharded_vit.py#build_rng_preflight_contract]] requires equal traces and strides before accepting the opaque CUDA offset contract. Negative, unaligned, or overflowing offsets and any later full batch trace or stride change stop the run. Calls with zero standard deviation remain in the trace without consuming generator state.
+
+Each shard writes raw signed 64-bit predictions with a fixed byte order, its exact sample and batch interval, task counts, Gaussian and clamp statistics, run identity, and verified generator contract. [[scripts/experiments/run_exact_sharded_vit.py#merge_shard_results]] rejects coverage gaps, overlaps, identity differences, prediction corruption, and generator discontinuities before concatenating predictions in global order and reconstructing accuracy, digest, and counters. [[scripts/experiments/run_exact_sharded_vit.py#main]] is the canonical launch and merge entry point.
+
+### Synthetic Verification
+
+The CUDA verification covers 512 and 5,000 samples for linear, logarithmic, and joint timing noise, plus zero standard deviation, generator nonconsumption, and invalid contract rejection.
+
+[[scripts/verification/verify_exact_sharded_vit.py#verify_serial_and_merged_cuda_streams]] requires every merged prediction byte sequence and aggregate counter to match its serial reference.
+
 ## Fixed-Domain ViT-S Real-Data Audit
 
 The fixed-domain audit measures one cached pretrained ViT-S checkpoint on the same 5,000-image ImageNet-1k validation subset and separates analytic rails, residual calibration, and Gaussian event effects.

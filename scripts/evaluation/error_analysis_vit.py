@@ -46,10 +46,25 @@ from utils.transforms.calibration import (
     validate_calibration_table_specs,
 )
 from utils.transforms.noise import (
+    begin_gaussian_rng_trace,
+    cancel_gaussian_rng_trace,
+    end_gaussian_rng_trace,
     get_gaussian_noise_stats,
+    get_gaussian_time_noise,
     install_device_mismatch,
     set_gaussian_time_noise,
 )
+from scripts.experiments.run_exact_sharded_vit import (
+    build_rng_preflight_contract,
+    canonical_json_sha256,
+    checked_batch_offset,
+    exact_batch_shard_bounds,
+    load_rng_contract,
+    prediction_bytes,
+    verify_rng_batch_trace,
+    write_shard_result,
+)
+from scripts.runtime import files as runtime_files
 from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
 from utils.transformers.calibration import bind_model_calibration, clear_model_calibration
 from utils.transformers.models.spiking_vit.calibration import (
@@ -90,6 +105,11 @@ class Arguments:
     evaluation_split: str
     evaluation_shard_count: int
     evaluation_shard_index: int
+    evaluation_prefix_samples: int
+    shard_result_path: str
+    gaussian_rng_preflight_path: str
+    gaussian_rng_contract_path: str
+    gaussian_rng_contract_timeout_seconds: float
     image_preprocessing_config: str
     batch_size: int
     device: Literal["cuda", "cpu"]
@@ -289,6 +309,36 @@ def parse_arguments() -> Arguments:
         default=0,
         help="Zero-based contiguous evaluation shard index (default: 0).",
     )
+    parser.add_argument(
+        "--evaluation-prefix-samples",
+        type=int,
+        default=0,
+        help="Select this many leading evaluation samples before sharding; zero uses all.",
+    )
+    parser.add_argument(
+        "--shard-result-path",
+        type=str,
+        default="",
+        help="Write exact shard metadata and raw int64 predictions to this path.",
+    )
+    parser.add_argument(
+        "--gaussian-rng-preflight-path",
+        type=str,
+        default="",
+        help="Verify two full batches and write their CUDA generator offset contract.",
+    )
+    parser.add_argument(
+        "--gaussian-rng-contract-path",
+        type=str,
+        default="",
+        help="Preflight contract required by exact Gaussian evaluation shards.",
+    )
+    parser.add_argument(
+        "--gaussian-rng-contract-timeout-seconds",
+        type=float,
+        default=1800.0,
+        help="Maximum wait for an externally produced Gaussian generator contract.",
+    )
 
     # Layer-wise calibration is intentionally separate from the old diagnostic
     # quantile hook. Collection writes one reusable artifact from a deterministic
@@ -453,6 +503,11 @@ def parse_arguments() -> Arguments:
         evaluation_split=args.evaluation_split,
         evaluation_shard_count=args.evaluation_shard_count,
         evaluation_shard_index=args.evaluation_shard_index,
+        evaluation_prefix_samples=args.evaluation_prefix_samples,
+        shard_result_path=args.shard_result_path,
+        gaussian_rng_preflight_path=args.gaussian_rng_preflight_path,
+        gaussian_rng_contract_path=args.gaussian_rng_contract_path,
+        gaussian_rng_contract_timeout_seconds=args.gaussian_rng_contract_timeout_seconds,
         image_preprocessing_config=args.image_preprocessing_config,
         batch_size=args.batch_size,
         device=args.device,
@@ -631,6 +686,34 @@ def validate_vit_runtime_arguments(args: Arguments) -> None:
         raise ValueError(
             "evaluation_shard_index must be inside evaluation_shard_count"
         )
+    if (
+        isinstance(args.evaluation_prefix_samples, bool)
+        or not isinstance(args.evaluation_prefix_samples, int)
+        or args.evaluation_prefix_samples < 0
+    ):
+        raise ValueError("evaluation_prefix_samples must be a non-negative integer")
+    exact_preflight = bool(args.gaussian_rng_preflight_path)
+    exact_shard = bool(args.shard_result_path)
+    if exact_preflight and exact_shard:
+        raise ValueError("random generator preflight and shard output are distinct modes")
+    if exact_preflight or exact_shard:
+        if not args.gaussian_rng_contract_path:
+            raise ValueError("exact Gaussian evaluation requires a contract path")
+        if args.evaluation_prefix_samples <= 0:
+            raise ValueError("exact Gaussian evaluation requires an explicit prefix")
+        if args.quick_test or args.max_eval_batches or args.benchmark_measure_batches:
+            raise ValueError("exact Gaussian evaluation owns its complete batch interval")
+        if exact_preflight and (
+            args.evaluation_shard_count != 1 or args.evaluation_shard_index != 0
+        ):
+            raise ValueError("random generator preflight uses the unsharded prefix")
+        if exact_shard and args.evaluation_shard_count not in (1, 2):
+            raise ValueError("exact Gaussian evaluation supports one or two shards")
+    elif args.gaussian_rng_contract_path:
+        raise ValueError("a Gaussian generator contract requires preflight or shard output")
+    timeout = float(args.gaussian_rng_contract_timeout_seconds)
+    if not math.isfinite(timeout) or timeout <= 0.0:
+        raise ValueError("Gaussian generator contract timeout must be finite and positive")
     if not isinstance(args.clock_driven, bool):
         raise TypeError("clock_driven must be a bool")
     clock_time_step = float(args.clock_time_step)
@@ -1047,6 +1130,16 @@ def evaluate_vit_model(args: Arguments) -> None:
         and args.mismatch_enabled
         and args.mismatch_theta_std > 0.0
     )
+    exact_preflight = bool(args.gaussian_rng_preflight_path)
+    exact_shard = bool(args.shard_result_path)
+    exact_gaussian_mode = exact_preflight or exact_shard
+
+    if exact_gaussian_mode and (
+        not gaussian_enabled or device.type != "cuda" or model_backend != "spiking"
+    ):
+        raise ValueError(
+            "exact Gaussian evaluation requires the spiking backend, CUDA, and timing noise"
+        )
 
     if gaussian_enabled and mismatch_enabled:
         raise ValueError(
@@ -1224,20 +1317,43 @@ def evaluate_vit_model(args: Arguments) -> None:
     # evaluation split used for task accuracy and clipping reports.
     dataset = None
     dataset_source = "none"
+    evaluation_population = 0
+    evaluation_prefix_fingerprint = "none"
+    shard_start = shard_stop = shard_batch_start = shard_batch_stop = 0
     if calibration_mode is not CalibrationMode.COLLECT:
         print(f"Loading evaluation dataset: {dataset_id} ({split})...")
         dataset, split, dataset_source = load_evaluation_dataset(
             args,
             configured_split=ds_config["split"],
         )
-        if args.quick_test:
+        if args.evaluation_prefix_samples:
+            if args.evaluation_prefix_samples > len(dataset):
+                raise ValueError("evaluation prefix exceeds the loaded dataset")
+            dataset = dataset.select(range(args.evaluation_prefix_samples))
+        elif args.quick_test:
             dataset = dataset.select(range(min(5000, len(dataset))))
         evaluation_population = len(dataset)
-        shard_start, shard_stop = evaluation_shard_bounds(
-            evaluation_population,
-            args.evaluation_shard_count,
-            args.evaluation_shard_index,
-        )
+        evaluation_prefix_fingerprint = dataset._fingerprint
+        if exact_gaussian_mode:
+            (
+                shard_start,
+                shard_stop,
+                shard_batch_start,
+                shard_batch_stop,
+            ) = exact_batch_shard_bounds(
+                evaluation_population,
+                batch_size,
+                args.evaluation_shard_count,
+                args.evaluation_shard_index,
+            )
+        else:
+            shard_start, shard_stop = evaluation_shard_bounds(
+                evaluation_population,
+                args.evaluation_shard_count,
+                args.evaluation_shard_index,
+            )
+            shard_batch_start = shard_start // batch_size
+            shard_batch_stop = math.ceil(shard_stop / batch_size)
         if args.evaluation_shard_count > 1:
             dataset = dataset.select(range(shard_start, shard_stop))
         print(
@@ -1245,7 +1361,9 @@ def evaluate_vit_model(args: Arguments) -> None:
             f"index: {args.evaluation_shard_index}, "
             f"count: {args.evaluation_shard_count}, "
             f"start: {shard_start}, stop: {shard_stop}, "
-            f"population: {evaluation_population}",
+            f"batch_start: {shard_batch_start}, batch_stop: {shard_batch_stop}, "
+            f"population: {evaluation_population}, "
+            f"prefix_fingerprint: {evaluation_prefix_fingerprint}",
             flush=True,
         )
         print(
@@ -1457,6 +1575,87 @@ def evaluate_vit_model(args: Arguments) -> None:
         )
         bind_model_calibration(model, calibration_state)
 
+    exact_run_identity = None
+    exact_rng_contract = None
+    exact_rng_batches = []
+    exact_rng_start_offset = 0
+    if exact_gaussian_mode:
+        calibration_sha256 = None
+        if calibration_mode is not None:
+            calibration_sha256 = hashlib.sha256(
+                Path(args.calibration_path).read_bytes()
+            ).hexdigest()
+        exact_run_identity = {
+            "schema_version": 1,
+            "source_commit": args.source_commit,
+            "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "checkpoint_sha256": args.checkpoint_sha256,
+            "model_id": model_id,
+            "dataset_id": dataset_id,
+            "evaluation_split": split,
+            "evaluation_dataset_source": dataset_source,
+            "evaluation_prefix_samples": evaluation_population,
+            "evaluation_prefix_fingerprint": evaluation_prefix_fingerprint,
+            "batch_size": batch_size,
+            "precision": args.precision,
+            "theta": float(args.theta),
+            "preprocessing_backend": getattr(
+                processor, "preprocessing_backend", "huggingface"
+            ),
+            "preprocessing_config_sha256": getattr(
+                processor, "preprocessing_config_sha256", None
+            ),
+            "spiking_layernorm": args.spiking_layernorm,
+            "spiking_attention": args.spiking_attention,
+            "spiking_ln_mul": args.spiking_ln_mul,
+            "spiking_ln_log": args.spiking_ln_log,
+            "spiking_ln_expdiff": args.spiking_ln_expdiff,
+            "spiking_mlp": args.spiking_mlp,
+            "spiking_mlp_exact_gelu": args.spiking_mlp_exact_gelu,
+            "spiking_mlp_exact_gelu_layers": list(
+                args.spiking_mlp_exact_gelu_layers
+            ),
+            "calibration_mode": args.calibration_mode,
+            "calibration_sha256": calibration_sha256,
+            "time_noise_seed": args.time_noise_seed,
+            "time_noise_mean": float(args.time_noise_mean),
+            "linear_time_noise_std": linear_time_noise_std,
+            "log_time_noise_std": log_time_noise_std,
+            "linear_time_noise_deadline_margin": linear_time_noise_deadline_margin,
+            "log_time_noise_deadline_margin": log_time_noise_deadline_margin,
+            "torch_version": torch.__version__,
+            "cuda_version": torch.version.cuda,
+            "gpu_model": torch.cuda.get_device_name(device),
+        }
+        gaussian_generator = get_gaussian_time_noise().generator
+        if not isinstance(gaussian_generator, torch.Generator):
+            raise RuntimeError("exact Gaussian evaluation has no configured generator")
+        initial_offset = int(gaussian_generator.get_offset())
+        if initial_offset != 0:
+            raise RuntimeError("seeded CUDA Gaussian generator did not start at offset zero")
+        if exact_preflight:
+            preflight_path = Path(args.gaussian_rng_preflight_path)
+            if preflight_path.exists():
+                raise FileExistsError(preflight_path)
+        else:
+            contract_path = Path(args.gaussian_rng_contract_path)
+            deadline = time.monotonic() + args.gaussian_rng_contract_timeout_seconds
+            while not contract_path.is_file():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Gaussian random generator contract was not published")
+                time.sleep(0.1)
+            exact_rng_contract = load_rng_contract(
+                contract_path, run_identity=exact_run_identity
+            )
+            if int(exact_rng_contract["batch_size"]) != batch_size:
+                raise ValueError("Gaussian generator contract batch size differs")
+            exact_rng_start_offset = checked_batch_offset(
+                shard_batch_start, int(exact_rng_contract["batch_stride"])
+            )
+            gaussian_generator.set_offset(exact_rng_start_offset)
+            if int(gaussian_generator.get_offset()) != exact_rng_start_offset:
+                raise RuntimeError("CUDA Gaussian generator rejected the shard offset")
+
     # GPU 병렬화 (DataParallel) 설정
     if use_data_parallel:
         print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
@@ -1563,6 +1762,7 @@ def evaluate_vit_model(args: Arguments) -> None:
     correct_count = 0
     evaluated_count = 0
     prediction_digest = hashlib.sha256()
+    prediction_values = []
     benchmark_enabled = args.benchmark_measure_batches > 0
     benchmark_started_at: float | None = None
     benchmark_seconds: float | None = None
@@ -1571,6 +1771,10 @@ def evaluate_vit_model(args: Arguments) -> None:
         raise ValueError("benchmark measurement requires a CUDA device")
 
     evaluation_total_batches = len(dataloader)
+    if exact_preflight:
+        if evaluation_total_batches < 2:
+            raise ValueError("Gaussian generator preflight requires two full batches")
+        evaluation_total_batches = 2
     if not benchmark_enabled and args.max_eval_batches > 0:
         evaluation_total_batches = min(evaluation_total_batches, args.max_eval_batches)
     evaluation_expected_samples = min(
@@ -1589,8 +1793,51 @@ def evaluate_vit_model(args: Arguments) -> None:
         # 예측 (Gradients 계산 불필요)
         if model_backend == "spiking" and args.report_clamp_stats:
             transform_types.clear_clamp_stats()
-        with torch.no_grad():
-            outputs = model(pixel_values)
+        trace_start_offset = None
+        trace_stop_offset = None
+        batch_rng_trace = ()
+        if exact_gaussian_mode:
+            if exact_rng_contract is not None:
+                global_batch_index = shard_batch_start + batch_index
+                expected_offset = checked_batch_offset(
+                    global_batch_index, int(exact_rng_contract["batch_stride"])
+                )
+                generator = get_gaussian_time_noise().generator
+                if (
+                    not isinstance(generator, torch.Generator)
+                    or int(generator.get_offset()) != expected_offset
+                ):
+                    raise RuntimeError(
+                        "CUDA Gaussian generator is not at the expected batch offset"
+                    )
+            trace_start_offset = begin_gaussian_rng_trace()
+        try:
+            with torch.no_grad():
+                outputs = model(pixel_values)
+        except BaseException:
+            if exact_gaussian_mode:
+                cancel_gaussian_rng_trace()
+            raise
+        if exact_gaussian_mode:
+            trace_stop_offset, batch_rng_trace = end_gaussian_rng_trace()
+            if trace_start_offset is None:
+                raise RuntimeError("Gaussian batch trace did not record its start")
+            if exact_preflight:
+                if int(labels.numel()) != batch_size:
+                    raise RuntimeError("Gaussian preflight batches must be full")
+                exact_rng_batches.append(
+                    (trace_start_offset, trace_stop_offset, batch_rng_trace)
+                )
+            else:
+                if exact_rng_contract is None:
+                    raise RuntimeError("exact shard has no Gaussian generator contract")
+                verify_rng_batch_trace(
+                    exact_rng_contract,
+                    start_offset=trace_start_offset,
+                    stop_offset=trace_stop_offset,
+                    trace=batch_rng_trace,
+                    sample_count=int(labels.numel()),
+                )
 
         if model_backend == "spiking" and args.report_clamp_stats:
             for tag, stats in transform_types.get_clamp_stats().items():
@@ -1621,7 +1868,10 @@ def evaluate_vit_model(args: Arguments) -> None:
             labels_cpu = labels.detach().to("cpu", dtype=torch.int64)
             correct_count += int((predictions_cpu == labels_cpu).sum().item())
             evaluated_count += int(labels_cpu.numel())
-            prediction_digest.update(predictions_cpu.contiguous().numpy().tobytes())
+            prediction_list = predictions_cpu.tolist()
+            raw_predictions, _ = prediction_bytes(prediction_list)
+            prediction_values.extend(prediction_list)
+            prediction_digest.update(raw_predictions)
             if benchmark_enabled:
                 benchmark_images += int(labels_cpu.numel())
 
@@ -1651,6 +1901,8 @@ def evaluate_vit_model(args: Arguments) -> None:
                 raise RuntimeError("benchmark timer was not initialized")
             benchmark_seconds = time.perf_counter() - benchmark_started_at
             break
+        if exact_preflight and batch_index + 1 >= 2:
+            break
         if not benchmark_enabled and args.max_eval_batches > 0 and log_step[0] >= args.max_eval_batches:
             break
 
@@ -1667,6 +1919,34 @@ def evaluate_vit_model(args: Arguments) -> None:
         _QUANTILE_DIR.mkdir(parents=True, exist_ok=True)
         with (_QUANTILE_DIR / f"quantile_vit_{args.model_id.replace('/', '_')}.txt").open("w") as f:
             f.write(str(max_q))
+
+    if exact_preflight:
+        if exact_run_identity is None:
+            raise RuntimeError("Gaussian preflight has no run identity")
+        contract = build_rng_preflight_contract(
+            run_identity=exact_run_identity,
+            batch_size=batch_size,
+            batches=exact_rng_batches,
+        )
+        contract.update(
+            {
+                "time_noise_seed": args.time_noise_seed,
+                "torch_version": torch.__version__,
+                "cuda_version": torch.version.cuda,
+                "gpu_model": torch.cuda.get_device_name(device),
+            }
+        )
+        runtime_files.new_json(Path(args.gaussian_rng_preflight_path), contract)
+        if calibration_state is not None:
+            clear_model_calibration(model, expected_state=calibration_state)
+        print(
+            "Gaussian random generator preflight — "
+            f"batches: 2, batch_stride: {contract['batch_stride']}, "
+            f"calls_per_batch: {len(contract['trace'])}",
+            flush=True,
+        )
+        wandb.finish()
+        return
 
     # ---------------------------------------------------------
     # 6. 최종 결과 계산 및 출력
@@ -1727,8 +2007,10 @@ def evaluate_vit_model(args: Arguments) -> None:
 
     # Report event delivery, nominal endpoint occupancy, numerical resolution, and
     # physical rail saturation with their own denominators.
+    gaussian_snapshot = get_gaussian_noise_stats() if gaussian_enabled else {}
+    normalized_gaussian_snapshot = {}
     if gaussian_enabled:
-        for site, counts in sorted(get_gaussian_noise_stats().items()):
+        for site, counts in sorted(gaussian_snapshot.items()):
             events = counts["events"]
             outputs = counts["outputs"]
             miss_rate = counts["misses"] / events if events else 0.0
@@ -1744,6 +2026,10 @@ def evaluate_vit_model(args: Arguments) -> None:
             ulp_min = counts["deadline_ulp_min"]
             if not math.isfinite(ulp_min):
                 ulp_min = 0.0
+            normalized_gaussian_snapshot[site] = {
+                **counts,
+                "deadline_ulp_min": ulp_min,
+            }
             ulp_max = counts["deadline_ulp_max"]
             std_to_ulp_min = time_noise_std / ulp_max if ulp_max > 0.0 else math.inf
             std_to_ulp_max = time_noise_std / ulp_min if ulp_min > 0.0 else math.inf
@@ -1781,11 +2067,17 @@ def evaluate_vit_model(args: Arguments) -> None:
     # Analytic and calibrated rails use the same count schema. Conventional dense
     # classifier outputs have no declared TTFS rail and are represented by accuracy,
     # not by a fabricated clipping denominator.
+    shard_clamp_stats = {}
     for (module_name, clamp_name), stats in sorted(clamp_totals.items()):
         total = stats["total"]
         underflow_rate = stats["underflow"] / total if total else 0.0
         overflow_rate = stats["overflow"] / total if total else 0.0
         site = f"{module_name}/{clamp_name}"
+        shard_clamp_stats[site] = {
+            "values": total,
+            "underflows": stats["underflow"],
+            "overflows": stats["overflow"],
+        }
         print(
             f"Clamp[{site}] values={total}, underflows={stats['underflow']} "
             f"(rate={underflow_rate:.6g}), overflows={stats['overflow']} "
@@ -1802,9 +2094,15 @@ def evaluate_vit_model(args: Arguments) -> None:
     # Layer-wise clipping uses the number of tensor elements at each residual as its
     # denominator. Report both counts and rates without changing the frozen table,
     # then remove only model bindings while preserving the completed runtime snapshot.
+    shard_calibration_clamp_stats = {}
     if calibration_state is not None:
         for item in get_calibration_clipping_report(calibration_state):
             site = f"{item.module_name}/{item.tensor_name}"
+            shard_calibration_clamp_stats[site] = {
+                "values": item.num_values,
+                "underflows": item.underflows,
+                "overflows": item.overflows,
+            }
             print(
                 f"Calibration[{site}] values={item.num_values}, "
                 f"underflows={item.underflows} "
@@ -1820,6 +2118,55 @@ def evaluate_vit_model(args: Arguments) -> None:
                 f"Calibration/{site}/overflow_rate": item.overflow_rate,
             })
         clear_model_calibration(model, expected_state=calibration_state)
+
+    if exact_shard:
+        if exact_run_identity is None or exact_rng_contract is None:
+            raise RuntimeError("exact shard is missing its identity or RNG contract")
+        generator = get_gaussian_time_noise().generator
+        if not isinstance(generator, torch.Generator):
+            raise RuntimeError("exact shard lost its Gaussian generator")
+        expected_end_offset = checked_batch_offset(
+            shard_batch_stop, int(exact_rng_contract["batch_stride"])
+        )
+        actual_end_offset = int(generator.get_offset())
+        if actual_end_offset != expected_end_offset:
+            raise RuntimeError("exact shard ended at an unexpected CUDA generator offset")
+        rng_contract = {
+            key: value
+            for key, value in exact_rng_contract.items()
+            if key != "trace"
+        }
+        rng_contract.update(
+            {
+                "trace_sha256": canonical_json_sha256(exact_rng_contract["trace"]),
+                "global_batch_start": shard_batch_start,
+                "global_batch_stop": shard_batch_stop,
+                "start_offset": exact_rng_start_offset,
+                "end_offset": actual_end_offset,
+                "observed_batches": shard_batch_stop - shard_batch_start,
+            }
+        )
+        write_shard_result(
+            Path(args.shard_result_path),
+            predictions=prediction_values,
+            interval={
+                "shard_index": args.evaluation_shard_index,
+                "shard_count": args.evaluation_shard_count,
+                "sample_start": shard_start,
+                "sample_stop": shard_stop,
+                "batch_start": shard_batch_start,
+                "batch_stop": shard_batch_stop,
+                "population": evaluation_population,
+                "batch_size": batch_size,
+            },
+            counts={"correct": correct_count, "evaluated": evaluated_count},
+            gaussian_stats=normalized_gaussian_snapshot,
+            clamp_stats=shard_clamp_stats,
+            calibration_clamp_stats=shard_calibration_clamp_stats,
+            run_identity=exact_run_identity,
+            rng_contract=rng_contract,
+        )
+        print(f"Shard result: {args.shard_result_path}", flush=True)
 
     print("-" * 30)
     wandb.finish()

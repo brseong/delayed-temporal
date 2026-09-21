@@ -74,6 +74,18 @@ class GaussianNoiseCounts(TypedDict):
     output_overflows: int  # Readouts strictly above the declared output maximum.
 
 
+class GaussianRngTraceEntry(TypedDict):
+    """One ordered encoder sampling call in a CUDA generator batch trace."""
+
+    site: str
+    encoding: Literal["linear", "log"]
+    shape: list[int]
+    dtype: str
+    sampled: bool
+    before_offset: int
+    after_offset: int
+
+
 # The direct timing model has one process-wide configuration so every decorated
 # encoder in a replica consumes the same stateful random stream. Configuration is
 # replaced atomically by the setter instead of mutating its fields across calls.
@@ -83,6 +95,49 @@ _GLOBAL_GAUSSIAN_TIME_CONFIG = GaussianTimeNoiseConfig()
 # Keeping this store separate from the configuration lets a new replica clear its
 # measurements without coupling counter mutation to dataclass replacement.
 _GAUSSIAN_NOISE_STATS: dict[str, GaussianNoiseCounts] = {}
+
+# Exact sharded evaluation enables this list only around one model forward. The
+# ordinary noise path pays no offset-query cost and retains its existing behavior.
+_GAUSSIAN_RNG_TRACE: list[GaussianRngTraceEntry] | None = None
+
+
+def begin_gaussian_rng_trace() -> int:
+    """Begin one CUDA Gaussian call trace and return its initial opaque offset."""
+
+    global _GAUSSIAN_RNG_TRACE
+    if _GAUSSIAN_RNG_TRACE is not None:
+        raise RuntimeError("a Gaussian random generator trace is already active")
+    config = get_gaussian_time_noise()
+    if not config.enabled or not isinstance(config.generator, torch.Generator):
+        raise RuntimeError("Gaussian random generator tracing requires enabled noise")
+    if config.generator.device.type != "cuda":
+        raise RuntimeError("Gaussian random generator tracing requires CUDA")
+    offset = int(config.generator.get_offset())
+    _GAUSSIAN_RNG_TRACE = []
+    return offset
+
+
+def end_gaussian_rng_trace() -> tuple[int, tuple[GaussianRngTraceEntry, ...]]:
+    """Finish the active batch trace and return its final offset and calls."""
+
+    global _GAUSSIAN_RNG_TRACE
+    if _GAUSSIAN_RNG_TRACE is None:
+        raise RuntimeError("no Gaussian random generator trace is active")
+    config = get_gaussian_time_noise()
+    if not isinstance(config.generator, torch.Generator):
+        _GAUSSIAN_RNG_TRACE = None
+        raise RuntimeError("active Gaussian trace lost its configured generator")
+    offset = int(config.generator.get_offset())
+    trace = tuple(entry.copy() for entry in _GAUSSIAN_RNG_TRACE)
+    _GAUSSIAN_RNG_TRACE = None
+    return offset, trace
+
+
+def cancel_gaussian_rng_trace() -> None:
+    """Discard an active trace after a failed forward without changing RNG state."""
+
+    global _GAUSSIAN_RNG_TRACE
+    _GAUSSIAN_RNG_TRACE = None
 
 
 def clear_gaussian_noise_stats() -> None:
@@ -675,6 +730,11 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
                 deadline_margin = gaussian_cfg.deadline_margin
 
             nominal_time = out_domain.clamp(output)
+            trace_before = (
+                int(gaussian_cfg.generator.get_offset())
+                if _GAUSSIAN_RNG_TRACE is not None
+                else 0
+            )
             sample = _sample_gaussian_spike_time(
                 nominal_time,
                 time_std=time_std,
@@ -683,6 +743,28 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
                 time_mean=gaussian_cfg.time_mean,
                 deadline_margin=deadline_margin,
             )
+
+            # Record every encoder call, including calls with zero standard
+            # deviation. This distinguishes a deliberately inactive encoder family
+            # from a missing call while proving exact generator nonconsumption.
+            if _GAUSSIAN_RNG_TRACE is not None:
+                trace_after = int(gaussian_cfg.generator.get_offset())
+                std_tensor = torch.as_tensor(
+                    time_std,
+                    dtype=nominal_time.dtype,
+                    device=nominal_time.device,
+                )
+                _GAUSSIAN_RNG_TRACE.append(
+                    {
+                        "site": str(kwargs.get("noise_site", func.__name__)),
+                        "encoding": encoding,
+                        "shape": list(nominal_time.shape),
+                        "dtype": str(nominal_time.dtype).removeprefix("torch."),
+                        "sampled": not bool((std_tensor == 0.0).all()),
+                        "before_offset": trace_before,
+                        "after_offset": trace_after,
+                    }
+                )
 
             # Attribute sampled events to the physical values consumed downstream.
             site = kwargs.get("noise_site", func.__name__)
