@@ -91,6 +91,22 @@ def verify_configured_hardware_endpoint_reuse() -> None:
         assert not _reuse_configured_hardware_endpoint()
 
 
+# @lat: [[hardware#Independent Primitive Noise Verification#Transient worker retry]]
+def verify_transient_worker_error_classification() -> None:
+    assert primitive_backend_module._is_transient_pynn_worker_error(
+        "RuntimeError: Could not submit request."
+    )
+    assert primitive_backend_module._is_transient_pynn_worker_error(
+        "socket.gaierror: Name or service not known"
+    )
+    assert primitive_backend_module._is_transient_pynn_worker_error(
+        "Remote call timeout exceeded"
+    )
+    assert not primitive_backend_module._is_transient_pynn_worker_error(
+        "ValueError: invalid physical coordinate"
+    )
+
+
 # @lat: [[hardware#Independent Primitive Noise Verification#Synthetic transfer recovery]]
 def verify_synthetic_transfer_recovery() -> None:
     config = PrimitiveNoiseConfig(repeats=32, calibration_repeats=16)
@@ -1734,6 +1750,7 @@ def verify_artifact_integrity() -> None:
 
 def main() -> None:
     verify_configured_hardware_endpoint_reuse()
+    verify_transient_worker_error_classification()
     verify_synthetic_transfer_recovery()
     verify_held_out_validation_isolation()
     verify_temporal_and_fixed_pattern_separation()

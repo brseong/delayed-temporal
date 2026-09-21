@@ -17,6 +17,7 @@ import math
 import subprocess
 import sys
 import tempfile
+import time
 
 import torch
 
@@ -35,10 +36,23 @@ from .primitive_noise import (
 
 
 PYNN_BACKEND_MODULE = "pynn_brainscales.brainscales2"
+PYNN_WORKER_MAX_ATTEMPTS = 3
+_TRANSIENT_PYNN_WORKER_ERRORS = (
+    "could not submit request",
+    "name or service not known",
+    "remote call timeout exceeded",
+    "connection refused",
+    "temporary failure in name resolution",
+)
 
 
 class PrimitiveCapabilityError(RuntimeError):
     """Raised when the installed release cannot implement a physical primitive."""
+
+
+def _is_transient_pynn_worker_error(detail: str) -> bool:
+    normalized = detail.casefold()
+    return any(pattern in normalized for pattern in _TRANSIENT_PYNN_WORKER_ERRORS)
 
 
 def _module_version(module: Any) -> str:
@@ -1186,23 +1200,45 @@ class PrimitiveHardwareBackend:
                 },
                 request_path,
             )
-            try:
-                completed = subprocess.run(
-                    [sys.executable, str(worker), str(request_path), str(response_path)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=config.pynn_worker_timeout_s,
-                )
-            except subprocess.TimeoutExpired as error:
-                raise RuntimeError(
-                    f"PyNN worker timed out for {primitive}/{stage}/code={code}"
-                ) from error
-            except subprocess.CalledProcessError as error:
-                detail = (error.stderr or error.stdout or "").strip()
-                raise RuntimeError(
-                    f"PyNN worker failed for {primitive}/{stage}/code={code}: {detail}"
-                ) from error
+            completed: subprocess.CompletedProcess[str] | None = None
+            worker_attempts = 0
+            for attempt in range(1, PYNN_WORKER_MAX_ATTEMPTS + 1):
+                worker_attempts = attempt
+                try:
+                    completed = subprocess.run(
+                        [
+                            sys.executable,
+                            str(worker),
+                            str(request_path),
+                            str(response_path),
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=config.pynn_worker_timeout_s,
+                    )
+                except subprocess.TimeoutExpired as error:
+                    if attempt == PYNN_WORKER_MAX_ATTEMPTS:
+                        raise RuntimeError(
+                            "PyNN worker timed out for "
+                            f"{primitive}/{stage}/code={code} after {attempt} attempts"
+                        ) from error
+                except subprocess.CalledProcessError as error:
+                    detail = (error.stderr or error.stdout or "").strip()
+                    if (
+                        attempt == PYNN_WORKER_MAX_ATTEMPTS
+                        or not _is_transient_pynn_worker_error(detail)
+                    ):
+                        raise RuntimeError(
+                            "PyNN worker failed for "
+                            f"{primitive}/{stage}/code={code} after {attempt} attempts: "
+                            f"{detail}"
+                        ) from error
+                else:
+                    break
+                time.sleep(5.0 * attempt)
+            if completed is None:
+                raise AssertionError("PyNN worker retry loop completed without a result")
             if not response_path.is_file():
                 raise RuntimeError("PyNN worker did not write its response")
             response = torch.load(
@@ -1210,6 +1246,7 @@ class PrimitiveHardwareBackend:
             )
         metadata = dict(response["metadata"])
         metadata["worker_stdout"] = completed.stdout.strip()
+        metadata["worker_attempts"] = worker_attempts
         metadata["worker_cache_hit"] = False
         if cache_path is not None:
             cache_payload = {
