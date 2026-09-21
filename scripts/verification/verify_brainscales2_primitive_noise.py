@@ -887,6 +887,19 @@ def verify_static_reset_separation() -> None:
         {"reset_v_reset": 300},
         {"reset_v_reset": [301, 302]},
     ]
+    release_config = PrimitiveNoiseConfig(
+        static_reset_release_s=4.5e-6,
+        dynamic_reset_release_s=2.5e-6,
+    )
+    assert PrimitiveHardwareBackend._reset_release_s(
+        "phi-np", "static", release_config
+    ) == 4.5e-6
+    assert PrimitiveHardwareBackend._reset_release_s(
+        "phi-np", "dynamic", release_config
+    ) == 2.5e-6
+    assert PrimitiveHardwareBackend._reset_release_s(
+        "phi-nl", "transfer", release_config
+    ) == 2.5e-6
 
     class FakeEnum(int):
         pass
@@ -1520,6 +1533,9 @@ def verify_resumable_operating_point_search() -> None:
     assert candidates[0].apply(config).exponential_input_weight == 63
     assert candidates[0].apply(config).membrane_capacitance_code is None
     assert candidates[0].apply(config).threshold_comparator_bias_code is None
+    assert candidates[0].apply(config).reset_current_code == 1022
+    assert candidates[0].apply(config).static_reset_release_s == 4.0e-6
+    assert candidates[0].apply(config).dynamic_reset_release_s == 2.0e-6
     capacitance_candidates = build_encoder_operating_point_candidates(
         config,
         constant_current_codes=(1022,),
@@ -1546,6 +1562,30 @@ def verify_resumable_operating_point_search() -> None:
         item.apply(config).threshold_comparator_bias_code
         for item in comparator_candidates
     } == {200, 800}
+    reset_candidates = build_encoder_operating_point_candidates(
+        config,
+        constant_current_codes=(1022,),
+        threshold_codes=(600,),
+        ramp_stop_times_s=(25.0e-6,),
+        precharge_pairs=((1, 63),),
+        reset_current_codes=(512, 1022),
+        static_reset_release_times_s=(3.5e-6, 4.5e-6),
+        dynamic_reset_release_times_s=(1.0e-6, 2.5e-6),
+    )
+    assert len(reset_candidates) == 8
+    assert {
+        (
+            item.apply(config).reset_current_code,
+            item.apply(config).static_reset_release_s,
+            item.apply(config).dynamic_reset_release_s,
+        )
+        for item in reset_candidates
+    } == {
+        (current, static_release, dynamic_release)
+        for current in (512, 1022)
+        for static_release in (3.5e-6, 4.5e-6)
+        for dynamic_release in (1.0e-6, 2.5e-6)
+    }
     rejects(
         lambda: build_encoder_operating_point_candidates(
             config,
@@ -1739,6 +1779,9 @@ def verify_artifact_integrity() -> None:
     assert config.reset_code_minimum == 300
     assert config.reset_code_maximum == 900
     assert config.constant_current_code == 1022
+    assert config.reset_current_code == 1022
+    assert config.static_reset_release_s == 4.0e-6
+    assert config.dynamic_reset_release_s == 2.0e-6
     assert config.membrane_capacitance_code is None
     assert config.threshold_comparator_bias_code is None
     rejects(
@@ -1749,6 +1792,11 @@ def verify_artifact_integrity() -> None:
         lambda: PrimitiveNoiseConfig(threshold_comparator_bias_code=1023),
         (ValueError,),
     )
+    rejects(lambda: PrimitiveNoiseConfig(reset_current_code=1023), (ValueError,))
+    rejects(lambda: PrimitiveNoiseConfig(static_reset_release_s=5.0e-6), (ValueError,))
+    rejects(lambda: PrimitiveNoiseConfig(dynamic_reset_release_s=3.0e-6), (ValueError,))
+    parser_defaults = build_parser().parse_args(["--output-dir", "unused"])
+    assert parser_defaults.search_ramp_stop_us == (25.0,)
     observation = MockPrimitiveNoiseBackend().collect(
         "psi-int", config, stage="transfer", quick=True
     )

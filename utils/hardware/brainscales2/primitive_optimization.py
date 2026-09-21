@@ -30,6 +30,9 @@ class EncoderOperatingPointCandidate:
     candidate_id: str
     constant_current_code: int
     threshold_code: int
+    reset_current_code: int
+    static_reset_release_s: float
+    dynamic_reset_release_s: float
     membrane_capacitance_code: int | None
     threshold_comparator_bias_code: int | None
     ramp_stop_s: float
@@ -46,6 +49,9 @@ class EncoderOperatingPointCandidate:
             base,
             constant_current_code=self.constant_current_code,
             threshold_code=self.threshold_code,
+            reset_current_code=self.reset_current_code,
+            static_reset_release_s=self.static_reset_release_s,
+            dynamic_reset_release_s=self.dynamic_reset_release_s,
             membrane_capacitance_code=self.membrane_capacitance_code,
             threshold_comparator_bias_code=self.threshold_comparator_bias_code,
             input_late_s=self.ramp_stop_s,
@@ -111,6 +117,9 @@ def build_encoder_operating_point_candidates(
     precharge_pairs: Iterable[tuple[int, int]],
     exponential_pairs: Iterable[tuple[int, int]] | None = None,
     current_stop_pairs: Iterable[tuple[int, float]] | None = None,
+    reset_current_codes: Iterable[int] | None = None,
+    static_reset_release_times_s: Iterable[float] | None = None,
+    dynamic_reset_release_times_s: Iterable[float] | None = None,
     membrane_capacitance_codes: Iterable[int | None] | None = None,
     threshold_comparator_bias_codes: Iterable[int | None] | None = None,
 ) -> tuple[EncoderOperatingPointCandidate, ...]:
@@ -142,90 +151,161 @@ def build_encoder_operating_point_candidates(
         if threshold_comparator_bias_codes is not None
         else (base.threshold_comparator_bias_code,)
     )
+    reset_currents = (
+        tuple(reset_current_codes)
+        if reset_current_codes is not None
+        else (base.reset_current_code,)
+    )
+    static_reset_releases = (
+        tuple(static_reset_release_times_s)
+        if static_reset_release_times_s is not None
+        else (base.static_reset_release_s,)
+    )
+    dynamic_reset_releases = (
+        tuple(dynamic_reset_release_times_s)
+        if dynamic_reset_release_times_s is not None
+        else (base.dynamic_reset_release_s,)
+    )
     candidates: list[EncoderOperatingPointCandidate] = []
     seen: set[str] = set()
     for current, ramp_stop_s in current_stops:
         for threshold in thresholds:
             for capacitance_code in capacitance_codes:
                 for comparator_bias_code in comparator_bias_codes:
-                    for fan_in, weight in resolved_precharge_pairs:
-                        for (
-                            exponential_fan_in,
-                            exponential_weight,
-                        ) in resolved_exponential_pairs:
-                            if (
-                                exponential_fan_in <= 0
-                                or not 1 <= exponential_weight <= 63
-                            ):
-                                raise ValueError(
-                                    "exponential input fan-in must be positive and "
-                                    "weight must lie in [1, 63]"
-                                )
-                            if not 0 <= current <= 1022:
-                                raise ValueError(
-                                    "constant-current code must lie in [0, 1022]"
-                                )
-                            if not 0 <= threshold <= 1022:
-                                raise ValueError(
-                                    "threshold code must lie in [0, 1022]"
-                                )
-                            if capacitance_code is not None and not (
-                                0 <= capacitance_code <= 63
-                            ):
-                                raise ValueError(
-                                    "membrane capacitance code must lie in [0, 63]"
-                                )
-                            if comparator_bias_code is not None and not (
-                                0 <= comparator_bias_code <= 1022
-                            ):
-                                raise ValueError(
-                                    "threshold comparator bias code must lie in "
-                                    "[0, 1022]"
-                                )
-                            if not base.input_early_s < ramp_stop_s < base.deadline_s:
-                                raise ValueError(
-                                    "ramp stop must lie between input start and deadline"
-                                )
-                            capacitance_id = (
-                                "capkeep"
-                                if capacitance_code is None
-                                else f"cap{capacitance_code:02d}"
-                            )
-                            comparator_id = (
-                                "cmpkeep"
-                                if comparator_bias_code is None
-                                else f"cmp{comparator_bias_code:04d}"
-                            )
-                            candidate_id = (
-                                f"cc{current:04d}_th{threshold:04d}_"
-                                f"{capacitance_id}_{comparator_id}_"
-                                f"stop{ramp_stop_s * 1.0e6:06.2f}us_"
-                                f"fanin{fan_in:02d}_w{weight:02d}_"
-                                f"nlfanin{exponential_fan_in:02d}_"
-                                f"nlw{exponential_weight:02d}"
-                            )
-                            if candidate_id in seen:
-                                continue
-                            seen.add(candidate_id)
-                            candidates.append(
-                                EncoderOperatingPointCandidate(
-                                    candidate_id=candidate_id,
-                                    constant_current_code=current,
-                                    threshold_code=threshold,
-                                    membrane_capacitance_code=capacitance_code,
-                                    threshold_comparator_bias_code=(
-                                        comparator_bias_code
-                                    ),
-                                    ramp_stop_s=ramp_stop_s,
-                                    precharge_input_fan_in=fan_in,
-                                    precharge_weight_maximum=weight,
-                                    exponential_input_fan_in=exponential_fan_in,
-                                    exponential_input_weight=exponential_weight,
-                                )
-                            )
+                    for reset_current in reset_currents:
+                        for static_release_s in static_reset_releases:
+                            for dynamic_release_s in dynamic_reset_releases:
+                                for fan_in, weight in resolved_precharge_pairs:
+                                    for (
+                                        exponential_fan_in,
+                                        exponential_weight,
+                                    ) in resolved_exponential_pairs:
+                                        if not 0 <= reset_current <= 1022:
+                                            raise ValueError(
+                                                "reset current code must lie in "
+                                                "[0, 1022]"
+                                            )
+                                        if not (
+                                            0.0
+                                            < static_release_s
+                                            < base.input_early_s
+                                        ):
+                                            raise ValueError(
+                                                "static reset release must "
+                                                "precede the ramp"
+                                            )
+                                        precharge_time_s = max(
+                                            0.5e-6, base.input_early_s - 2.0e-6
+                                        )
+                                        if (
+                                            not 0.0
+                                            < dynamic_release_s
+                                            < precharge_time_s
+                                            or math.isclose(
+                                                dynamic_release_s,
+                                                precharge_time_s,
+                                                rel_tol=0.0,
+                                                abs_tol=1.0e-12,
+                                            )
+                                        ):
+                                            raise ValueError(
+                                                "dynamic reset release must "
+                                                "precede precharge"
+                                            )
+                                        candidate = _build_encoder_candidate(
+                                            base=base,
+                                            seen=seen,
+                                            current=current,
+                                            ramp_stop_s=ramp_stop_s,
+                                            threshold=threshold,
+                                            reset_current=reset_current,
+                                            static_release_s=static_release_s,
+                                            dynamic_release_s=dynamic_release_s,
+                                            capacitance_code=capacitance_code,
+                                            comparator_bias_code=comparator_bias_code,
+                                            fan_in=fan_in,
+                                            weight=weight,
+                                            exponential_fan_in=exponential_fan_in,
+                                            exponential_weight=exponential_weight,
+                                        )
+                                        if candidate is not None:
+                                            candidates.append(candidate)
     if not candidates:
         raise ValueError("operating-point search grid is empty")
     return tuple(candidates)
+
+
+def _build_encoder_candidate(
+    *,
+    base: PrimitiveNoiseConfig,
+    seen: set[str],
+    current: int,
+    ramp_stop_s: float,
+    threshold: int,
+    reset_current: int,
+    static_release_s: float,
+    dynamic_release_s: float,
+    capacitance_code: int | None,
+    comparator_bias_code: int | None,
+    fan_in: int,
+    weight: int,
+    exponential_fan_in: int,
+    exponential_weight: int,
+) -> EncoderOperatingPointCandidate | None:
+    """Validate and materialize one deterministic search-grid point."""
+    if exponential_fan_in <= 0 or not 1 <= exponential_weight <= 63:
+        raise ValueError(
+            "exponential input fan-in must be positive and weight must lie in [1, 63]"
+        )
+    if not 0 <= current <= 1022:
+        raise ValueError("constant-current code must lie in [0, 1022]")
+    if not 0 <= threshold <= 1022:
+        raise ValueError("threshold code must lie in [0, 1022]")
+    if capacitance_code is not None and not 0 <= capacitance_code <= 63:
+        raise ValueError("membrane capacitance code must lie in [0, 63]")
+    if comparator_bias_code is not None and not 0 <= comparator_bias_code <= 1022:
+        raise ValueError("threshold comparator bias code must lie in [0, 1022]")
+    if not base.input_early_s < ramp_stop_s < base.deadline_s:
+        raise ValueError("ramp stop must lie between input start and deadline")
+    capacitance_id = (
+        "capkeep" if capacitance_code is None else f"cap{capacitance_code:02d}"
+    )
+    comparator_id = (
+        "cmpkeep"
+        if comparator_bias_code is None
+        else f"cmp{comparator_bias_code:04d}"
+    )
+    static_release_us = static_release_s * 1.0e6
+    dynamic_release_us = dynamic_release_s * 1.0e6
+    candidate_id = (
+        f"cc{current:04d}_th{threshold:04d}_"
+        f"rsti{reset_current:04d}_"
+        f"rs{static_release_us:04.1f}us_"
+        f"rd{dynamic_release_us:04.1f}us_"
+        f"{capacitance_id}_{comparator_id}_"
+        f"stop{ramp_stop_s * 1.0e6:06.2f}us_"
+        f"fanin{fan_in:02d}_w{weight:02d}_"
+        f"nlfanin{exponential_fan_in:02d}_"
+        f"nlw{exponential_weight:02d}"
+    )
+    if candidate_id in seen:
+        return None
+    seen.add(candidate_id)
+    return EncoderOperatingPointCandidate(
+        candidate_id=candidate_id,
+        constant_current_code=current,
+        threshold_code=threshold,
+        reset_current_code=reset_current,
+        static_reset_release_s=static_release_s,
+        dynamic_reset_release_s=dynamic_release_s,
+        membrane_capacitance_code=capacitance_code,
+        threshold_comparator_bias_code=comparator_bias_code,
+        ramp_stop_s=ramp_stop_s,
+        precharge_input_fan_in=fan_in,
+        precharge_weight_maximum=weight,
+        exponential_input_fan_in=exponential_fan_in,
+        exponential_input_weight=exponential_weight,
+    )
 
 
 def _lookup_observation(

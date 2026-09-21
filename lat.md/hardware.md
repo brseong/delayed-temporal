@@ -488,7 +488,9 @@ The resulting distributions are independent primitive marginals for later sensit
 
 The search minimizes the calibration timing noise ratio without changing the primitive equations or pooling physical outputs.
 
-The search changes only the raw constant current code, threshold code, ramp stop time, precharge input count and weight, and exponential synaptic current input count and weight. The potential code, first spike readout, and fitted $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ equations remain unchanged.
+The search changes only physical operating-point controls: raw constant current, threshold, reset current, stage-specific reset release time, membrane capacitance, threshold comparator bias, precharge drive, and exponential synaptic drive. The potential code, first spike readout, and fitted $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ equations remain unchanged.
+
+Static reset must be released after initialization and before the synchronized ramp. Dynamic reset must be released strictly before the precharge event. Reset current and both release times are recorded in candidate identity and artifacts, so resumed searches cannot reuse a physically different setting.
 
 For static encoder acquisition, the reset associated with each code remains installed for the full trial. The refractory period covering the full window suppresses later spikes, while retaining the reset value avoids rewriting an analog parameter after the initial membrane state is loaded.
 
@@ -614,6 +616,8 @@ Verification also checks positive PyNN acquisition and process sizes, manifest p
 
 Verification checks scalar reset values and values for individual circuits. It requires static acquisition to retain the reset value associated with the input code while the ramp is active.
 
+Verification checks stage-specific reset release selection and preservation of the reset current. It rejects a static release at or after the ramp and a dynamic release at or after precharge.
+
 Verification checks selection of the three resolved refractory parameters for scalar circuit coordinates, rejects incomplete settings for the 512 circuits, confirms that the target covers the full repeated trial window, and confirms that the quiet trial interval and first spike configuration are installed before acquisition.
 
 ### Exponential response observation time
@@ -659,6 +663,8 @@ The search must enumerate the complete requested grid, reject invalid raw contro
 The grid may include explicit membrane capacitance codes, and candidate identity must preserve the selected code without creating a second hardware configuration path.
 
 The grid may also include explicit threshold comparator bias codes, which remain part of the same candidate identity and hardware configuration path.
+
+The grid may include reset current and stage-specific reset release times. Candidate identity and resumed artifact matching must preserve all three controls.
 
 The notebook must scan all 512 physical circuits as eight 64 circuit graphs and select across batches using calibration repetitions only.
 

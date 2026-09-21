@@ -1435,6 +1435,17 @@ class PrimitiveHardwareBackend:
         return injection
 
     @staticmethod
+    def _reset_release_s(
+        primitive: PrimitiveKind,
+        stage: PrimitiveStage,
+        config: PrimitiveNoiseConfig,
+    ) -> float:
+        """Resolve the stage-specific end of the initialization pulse."""
+        if stage == "dynamic" or primitive == "phi-nl":
+            return getattr(config, "dynamic_reset_release_s", 2.0e-6)
+        return getattr(config, "static_reset_release_s", 4.0e-6)
+
+    @staticmethod
     def _configure_threshold_comparator_bias(
         chip: Any, bias_code: int | None
     ) -> None:
@@ -1494,9 +1505,8 @@ class PrimitiveHardwareBackend:
         ramp_stop_ms = config.input_late_s * 1.0e3
         precharge_ms = max(0.0005, reference_ms - 0.002)
         total_trials = resolved_repeats + 1
-        reset_release_ms = (
-            0.002 if stage == "dynamic" or primitive == "phi-nl" else 0.004
-        )
+        reset_release_s = self._reset_release_s(primitive, stage, config)
+        reset_release_ms = reset_release_s * 1.0e3
         injection = self._pynn_reset_injection(
             pynn,
             chip,
@@ -1538,7 +1548,7 @@ class PrimitiveHardwareBackend:
                 ),
                 "constant_current_enable": False,
                 "constant_current_i_offset": config.constant_current_code,
-                "reset_i_bias": 1022,
+                "reset_i_bias": getattr(config, "reset_current_code", 1022),
                 "reset_enable_multiplication": True,
                 "refractory_period_enable_pause": True,
                 **refractory_parameters,

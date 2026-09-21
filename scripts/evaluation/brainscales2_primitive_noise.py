@@ -117,6 +117,9 @@ def make_config(args: argparse.Namespace) -> PrimitiveNoiseConfig:
         threshold_code=args.threshold_code,
         leak_bias=args.leak_bias,
         constant_current_code=args.constant_current_code,
+        reset_current_code=args.reset_current_code,
+        static_reset_release_s=args.static_reset_release,
+        dynamic_reset_release_s=args.dynamic_reset_release,
         membrane_capacitance_code=args.membrane_capacitance_code,
         threshold_comparator_bias_code=args.threshold_comparator_bias_code,
         precharge_weight_maximum=args.precharge_weight_maximum,
@@ -339,6 +342,9 @@ def _search_result_row(payload: dict[str, Any]) -> dict[str, Any]:
         "status": payload["status"],
         "constant_current_code": candidate["constant_current_code"],
         "threshold_code": candidate["threshold_code"],
+        "reset_current_code": candidate["reset_current_code"],
+        "static_reset_release_s": candidate["static_reset_release_s"],
+        "dynamic_reset_release_s": candidate["dynamic_reset_release_s"],
         "membrane_capacitance_code": candidate["membrane_capacitance_code"],
         "threshold_comparator_bias_code": candidate[
             "threshold_comparator_bias_code"
@@ -438,6 +444,17 @@ def optimize_encoder_operating_point(
         precharge_pairs=precharge_pairs,
         exponential_pairs=exponential_pairs,
         current_stop_pairs=current_stop_pairs,
+        reset_current_codes=args.search_reset_current_codes,
+        static_reset_release_times_s=(
+            value * 1.0e-6 for value in args.search_static_reset_release_us
+        )
+        if args.search_static_reset_release_us is not None
+        else None,
+        dynamic_reset_release_times_s=(
+            value * 1.0e-6 for value in args.search_dynamic_reset_release_us
+        )
+        if args.search_dynamic_reset_release_us is not None
+        else None,
         membrane_capacitance_codes=args.search_membrane_capacitance_codes,
         threshold_comparator_bias_codes=(
             args.search_threshold_comparator_bias_codes
@@ -750,6 +767,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--threshold-code", type=int, default=600)
     parser.add_argument("--leak-bias", type=int, default=0)
     parser.add_argument("--constant-current-code", type=int, default=1022)
+    parser.add_argument("--reset-current-code", type=int, default=1022)
+    parser.add_argument("--static-reset-release", type=float, default=4.0e-6)
+    parser.add_argument("--dynamic-reset-release", type=float, default=2.0e-6)
     parser.add_argument("--membrane-capacitance-code", type=int)
     parser.add_argument("--threshold-comparator-bias-code", type=int)
     parser.add_argument("--precharge-weight-maximum", type=int, default=63)
@@ -794,8 +814,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--search-threshold-comparator-bias-codes", type=int, nargs="+"
     )
+    parser.add_argument("--search-reset-current-codes", type=int, nargs="+")
     parser.add_argument(
-        "--search-ramp-stop-us", type=float, nargs="+", default=(25.0, 40.0, 55.0)
+        "--search-static-reset-release-us", type=float, nargs="+"
+    )
+    parser.add_argument(
+        "--search-dynamic-reset-release-us", type=float, nargs="+"
+    )
+    parser.add_argument(
+        "--search-ramp-stop-us", type=float, nargs="+", default=(25.0,)
     )
     parser.add_argument(
         "--search-precharge-pairs", nargs="+", default=("1:63",)
