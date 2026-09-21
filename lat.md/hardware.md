@@ -406,6 +406,8 @@ The dynamic operating point records the number of coincident precharge input cha
 
 The encoder search may explicitly sweep the raw membrane capacitance code from 0 through 63. An unset value retains the calibration file configuration; a selected value is applied through the same `HXNeuron` configuration and recorded in the candidate manifest.
 
+The same search may override the block-level threshold comparator bias code from 0 through 1022. An unset value retains the calibration file bias, and every explicit override is applied uniformly to all four neuron blocks before hardware setup.
+
 Every input code and physical neuron must retain a CADC precharge observation. Its rank statistic remains diagnostic because sparse absolute CADC samples can cross the signed readout boundary; dynamic acceptance uses the independently recorded first-spike transfer.
 
 The hardware adapter resolves input spike sources and static synapses from the namespaces exported by the installed backend instead of assuming that every component is also exported at module level.
@@ -655,6 +657,8 @@ The selected circuit is confirmed on its own held out observations; failures of 
 The search must enumerate the complete requested grid, reject invalid raw controls, and reuse only matching completed candidates.
 
 The grid may include explicit membrane capacitance codes, and candidate identity must preserve the selected code without creating a second hardware configuration path.
+
+The grid may also include explicit threshold comparator bias codes, which remain part of the same candidate identity and hardware configuration path.
 
 The notebook must scan all 512 physical circuits as eight 64 circuit graphs and select across batches using calibration repetitions only.
 

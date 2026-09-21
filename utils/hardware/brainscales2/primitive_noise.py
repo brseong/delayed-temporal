@@ -103,6 +103,7 @@ class PrimitiveNoiseConfig:
     leak_bias: int = 0
     constant_current_code: int = 1022
     membrane_capacitance_code: int | None = None
+    threshold_comparator_bias_code: int | None = None
     precharge_weight_maximum: int = 63
     precharge_input_fan_in: int = 1
     record_precharge_cadc: bool = True
@@ -164,6 +165,12 @@ class PrimitiveNoiseConfig:
             0 <= self.membrane_capacitance_code <= 63
         ):
             raise ValueError("membrane capacitance code must lie in [0, 63]")
+        if self.threshold_comparator_bias_code is not None and not (
+            0 <= self.threshold_comparator_bias_code <= 1022
+        ):
+            raise ValueError(
+                "threshold comparator bias code must lie in [0, 1022]"
+            )
         if self.reset_code_minimum > self.reset_code_maximum:
             raise ValueError("reset code range must be increasing")
         for name, value in (

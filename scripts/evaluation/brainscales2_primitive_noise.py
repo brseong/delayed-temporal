@@ -118,6 +118,7 @@ def make_config(args: argparse.Namespace) -> PrimitiveNoiseConfig:
         leak_bias=args.leak_bias,
         constant_current_code=args.constant_current_code,
         membrane_capacitance_code=args.membrane_capacitance_code,
+        threshold_comparator_bias_code=args.threshold_comparator_bias_code,
         precharge_weight_maximum=args.precharge_weight_maximum,
         precharge_input_fan_in=args.precharge_input_fan_in,
         record_precharge_cadc=not args.search_spike_times_only,
@@ -339,6 +340,9 @@ def _search_result_row(payload: dict[str, Any]) -> dict[str, Any]:
         "constant_current_code": candidate["constant_current_code"],
         "threshold_code": candidate["threshold_code"],
         "membrane_capacitance_code": candidate["membrane_capacitance_code"],
+        "threshold_comparator_bias_code": candidate[
+            "threshold_comparator_bias_code"
+        ],
         "ramp_stop_s": candidate["ramp_stop_s"],
         "precharge_input_fan_in": candidate["precharge_input_fan_in"],
         "precharge_weight_maximum": candidate["precharge_weight_maximum"],
@@ -435,6 +439,9 @@ def optimize_encoder_operating_point(
         exponential_pairs=exponential_pairs,
         current_stop_pairs=current_stop_pairs,
         membrane_capacitance_codes=args.search_membrane_capacitance_codes,
+        threshold_comparator_bias_codes=(
+            args.search_threshold_comparator_bias_codes
+        ),
     )
     if len(candidates) > args.search_max_candidates:
         raise ValueError(
@@ -744,6 +751,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--leak-bias", type=int, default=0)
     parser.add_argument("--constant-current-code", type=int, default=1022)
     parser.add_argument("--membrane-capacitance-code", type=int)
+    parser.add_argument("--threshold-comparator-bias-code", type=int)
     parser.add_argument("--precharge-weight-maximum", type=int, default=63)
     parser.add_argument("--precharge-input-fan-in", type=int, default=1)
     parser.add_argument("--exponential-input-weight", type=int, default=63)
@@ -783,6 +791,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--search-threshold-codes", type=int, nargs="+", default=(600,)
     )
     parser.add_argument("--search-membrane-capacitance-codes", type=int, nargs="+")
+    parser.add_argument(
+        "--search-threshold-comparator-bias-codes", type=int, nargs="+"
+    )
     parser.add_argument(
         "--search-ramp-stop-us", type=float, nargs="+", default=(25.0, 40.0, 55.0)
     )

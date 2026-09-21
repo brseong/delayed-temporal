@@ -888,6 +888,56 @@ def verify_static_reset_separation() -> None:
         {"reset_v_reset": [301, 302]},
     ]
 
+    class FakeEnum(int):
+        pass
+
+    class FakeBlock:
+        size = 4
+
+        def __init__(self, value: int) -> None:
+            self.value = int(value)
+
+        def __hash__(self) -> int:
+            return hash(self.value)
+
+        def __eq__(self, other: object) -> bool:
+            return isinstance(other, FakeBlock) and self.value == other.value
+
+    class FakeValue(int):
+        pass
+
+    comparator_values = {
+        FakeBlock(index): FakeValue(200) for index in range(FakeBlock.size)
+    }
+    comparator_chip = SimpleNamespace(
+        neuron_block=SimpleNamespace(
+            i_bias_threshold_comparator=comparator_values
+        )
+    )
+    fake_vx = SimpleNamespace(
+        halco=SimpleNamespace(
+            CapMemBlockOnDLS=FakeBlock,
+            common=SimpleNamespace(Enum=FakeEnum),
+        )
+    )
+    original_import_module = primitive_backend_module.import_module
+    primitive_backend_module.import_module = (
+        lambda name: fake_vx
+        if name == "dlens_vx_v3"
+        else original_import_module(name)
+    )
+    try:
+        PrimitiveHardwareBackend._configure_threshold_comparator_bias(
+            comparator_chip, None
+        )
+        assert {int(value) for value in comparator_values.values()} == {200}
+        PrimitiveHardwareBackend._configure_threshold_comparator_bias(
+            comparator_chip, 800
+        )
+    finally:
+        primitive_backend_module.import_module = original_import_module
+    assert {int(value) for value in comparator_values.values()} == {800}
+
     settings = SimpleNamespace(
         refractory_counters=list(range(512)),
         reset_holdoff=[value + 1 for value in range(512)],
@@ -1469,6 +1519,7 @@ def verify_resumable_operating_point_search() -> None:
     assert candidates[0].apply(config).exponential_input_fan_in == 8
     assert candidates[0].apply(config).exponential_input_weight == 63
     assert candidates[0].apply(config).membrane_capacitance_code is None
+    assert candidates[0].apply(config).threshold_comparator_bias_code is None
     capacitance_candidates = build_encoder_operating_point_candidates(
         config,
         constant_current_codes=(1022,),
@@ -1482,6 +1533,19 @@ def verify_resumable_operating_point_search() -> None:
         item.apply(config).membrane_capacitance_code
         for item in capacitance_candidates
     } == {16, 63}
+    comparator_candidates = build_encoder_operating_point_candidates(
+        config,
+        constant_current_codes=(1022,),
+        threshold_codes=(600,),
+        ramp_stop_times_s=(25.0e-6,),
+        precharge_pairs=((1, 63),),
+        threshold_comparator_bias_codes=(200, 800),
+    )
+    assert len(comparator_candidates) == 2
+    assert {
+        item.apply(config).threshold_comparator_bias_code
+        for item in comparator_candidates
+    } == {200, 800}
     rejects(
         lambda: build_encoder_operating_point_candidates(
             config,
@@ -1490,6 +1554,17 @@ def verify_resumable_operating_point_search() -> None:
             ramp_stop_times_s=(25.0e-6,),
             precharge_pairs=((1, 63),),
             membrane_capacitance_codes=(64,),
+        ),
+        (ValueError,),
+    )
+    rejects(
+        lambda: build_encoder_operating_point_candidates(
+            config,
+            constant_current_codes=(1022,),
+            threshold_codes=(600,),
+            ramp_stop_times_s=(25.0e-6,),
+            precharge_pairs=((1, 63),),
+            threshold_comparator_bias_codes=(1023,),
         ),
         (ValueError,),
     )
@@ -1665,8 +1740,13 @@ def verify_artifact_integrity() -> None:
     assert config.reset_code_maximum == 900
     assert config.constant_current_code == 1022
     assert config.membrane_capacitance_code is None
+    assert config.threshold_comparator_bias_code is None
     rejects(
         lambda: PrimitiveNoiseConfig(membrane_capacitance_code=64),
+        (ValueError,),
+    )
+    rejects(
+        lambda: PrimitiveNoiseConfig(threshold_comparator_bias_code=1023),
         (ValueError,),
     )
     observation = MockPrimitiveNoiseBackend().collect(

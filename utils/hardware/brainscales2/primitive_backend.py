@@ -1435,6 +1435,21 @@ class PrimitiveHardwareBackend:
         return injection
 
     @staticmethod
+    def _configure_threshold_comparator_bias(
+        chip: Any, bias_code: int | None
+    ) -> None:
+        """Override the calibrated block-level comparator bias when requested."""
+        if bias_code is None:
+            return
+        vx = import_module("dlens_vx_v3")
+        values = chip.neuron_block.i_bias_threshold_comparator
+        for index in range(vx.halco.CapMemBlockOnDLS.size):
+            coordinate = vx.halco.CapMemBlockOnDLS(
+                vx.halco.common.Enum(index)
+            )
+            values[coordinate] = type(values[coordinate])(bias_code)
+
+    @staticmethod
     def _record_pynn_population(population: Any, *, membrane: bool) -> None:
         """Keep event recording separate from dense membrane recording."""
         population.record("spikes")
@@ -1462,6 +1477,10 @@ class PrimitiveHardwareBackend:
             pynn, "StaticSynapse", "synapses", "standardmodels"
         )
         chip = pynn.helper.chip_from_file(str(config.spiking_calibration_path))
+        self._configure_threshold_comparator_bias(
+            chip,
+            getattr(config, "threshold_comparator_bias_code", None),
+        )
         coordinates = self._pynn_coordinates(config)
         refractory_parameters, refractory_metadata = (
             self._configure_first_spike_refractory(chip, config)
