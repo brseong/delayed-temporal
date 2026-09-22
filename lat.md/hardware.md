@@ -694,6 +694,10 @@ The worker must reuse an inherited complete Quiggeldy endpoint and must fall bac
 
 The worker boundary must retry only recognized connection failures for a bounded number of attempts and must preserve nonconnection failures without retrying them.
 
+### Worker timeout cleanup
+
+A timed-out or manually interrupted hardware worker receives an interrupt and a bounded grace period for backend release. Forced termination is the final fallback, and the acquisition is never accepted.
+
 ### PyNN worker attempt budget
 
 The configuration must preserve the default of three attempts, reject nonpositive values, expose the command interface override, record it in the manifest and worker metadata, and stop after the configured number of attempts.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import signal
 import sys
 
 import torch
@@ -12,6 +13,19 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from utils.hardware.brainscales2.primitive_backend import PrimitiveHardwareBackend
+
+
+class _WorkerInterrupt(BaseException):
+    """Unwind the worker through its backend release path."""
+
+
+def _install_cleanup_interrupt_handler() -> None:
+    """Interrupt native waits without raising before backend cleanup executes."""
+
+    def interrupt(_signum, _frame) -> None:
+        raise _WorkerInterrupt("hardware worker interrupted for bounded cleanup")
+
+    signal.signal(signal.SIGINT, interrupt)
 
 
 def _reuse_configured_hardware_endpoint() -> bool:
@@ -51,6 +65,7 @@ def main() -> None:
         raise SystemExit("usage: primitive_pynn_worker.py REQUEST RESPONSE")
     request_path = Path(sys.argv[1])
     response_path = Path(sys.argv[2])
+    _install_cleanup_interrupt_handler()
     request = torch.load(request_path, map_location="cpu", weights_only=False)
     _setup_hardware_client()
     backend = PrimitiveHardwareBackend()

@@ -11,7 +11,10 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from utils.hardware.brainscales2.primitive_backend import PrimitiveHardwareBackend
-from utils.hardware.brainscales2.primitive_pynn_worker import _setup_hardware_client
+from utils.hardware.brainscales2.primitive_pynn_worker import (
+    _install_cleanup_interrupt_handler,
+    _setup_hardware_client,
+)
 
 
 def main() -> None:
@@ -19,6 +22,7 @@ def main() -> None:
         raise SystemExit("usage: primitive_spiking_worker.py REQUEST RESPONSE")
     request_path = Path(sys.argv[1])
     response_path = Path(sys.argv[2])
+    _install_cleanup_interrupt_handler()
     request = torch.load(request_path, map_location="cpu", weights_only=False)
     _setup_hardware_client()
 

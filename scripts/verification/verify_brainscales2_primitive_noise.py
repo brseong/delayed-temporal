@@ -10,6 +10,7 @@ import json
 import math
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -96,6 +97,87 @@ def verify_configured_hardware_endpoint_reuse() -> None:
         assert not _reuse_configured_hardware_endpoint()
 
 
+# @lat: [[hardware#Independent Primitive Noise Verification#Worker timeout cleanup]]
+def verify_worker_timeout_cleanup() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        marker = root / "cleanup.txt"
+        child = root / "worker.py"
+        child.write_text(
+            f"""
+from pathlib import Path
+import sys
+import time
+
+marker = Path(sys.argv[1])
+sys.path.insert(0, {str(ROOT)!r})
+
+from utils.hardware.brainscales2.primitive_pynn_worker import (
+    _install_cleanup_interrupt_handler,
+)
+
+_install_cleanup_interrupt_handler()
+print("ready", flush=True)
+try:
+    while True:
+        time.sleep(1.0)
+finally:
+    marker.write_text("released", encoding="utf-8")
+""".strip(),
+            encoding="utf-8",
+        )
+        try:
+            primitive_backend_module._run_isolated_worker(
+                [sys.executable, str(child), str(marker)],
+                timeout_s=5.0,
+                interrupt_grace_s=2.0,
+                terminate_grace_s=0.1,
+            )
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            raise AssertionError("worker timeout was accepted")
+        assert marker.read_text(encoding="utf-8") == "released"
+
+    class ParentInterruptedProcess:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.signal_received = None
+            self.returncode = 130
+
+        def communicate(self, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise KeyboardInterrupt
+            return "", ""
+
+        def poll(self):
+            return None if self.calls == 1 else self.returncode
+
+        def send_signal(self, received_signal):
+            self.signal_received = received_signal
+
+    interrupted_process = ParentInterruptedProcess()
+    with patch.object(
+        primitive_backend_module.subprocess,
+        "Popen",
+        return_value=interrupted_process,
+    ):
+        try:
+            primitive_backend_module._run_isolated_worker(
+                ["synthetic-worker"],
+                timeout_s=1.0,
+                interrupt_grace_s=1.0,
+                terminate_grace_s=0.1,
+            )
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("parent interrupt was accepted")
+    assert interrupted_process.signal_received == signal.SIGINT
+    assert interrupted_process.calls == 2
+
+
 # @lat: [[hardware#Independent Primitive Noise Verification#Transient worker retry]]
 def verify_transient_worker_error_classification() -> None:
     assert primitive_backend_module._is_transient_pynn_worker_error(
@@ -134,7 +216,7 @@ def verify_pynn_worker_attempt_budget() -> None:
     rejects(lambda: PrimitiveNoiseConfig(pynn_worker_max_attempts=0))
 
     backend = PrimitiveHardwareBackend()
-    original_subprocess_run = primitive_backend_module.subprocess.run
+    original_worker_runner = primitive_backend_module._run_isolated_worker
     original_sleep = primitive_backend_module.time.sleep
     attempts = 0
 
@@ -142,7 +224,7 @@ def verify_pynn_worker_attempt_budget() -> None:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            raise subprocess.TimeoutExpired(command, kwargs["timeout_s"])
         response_path = Path(command[-1])
         torch.save(
             {
@@ -163,7 +245,7 @@ def verify_pynn_worker_attempt_budget() -> None:
         pynn_worker_timeout_s=10.0,
         pynn_worker_max_attempts=2,
     )
-    primitive_backend_module.subprocess.run = timeout_then_succeed
+    primitive_backend_module._run_isolated_worker = timeout_then_succeed
     primitive_backend_module.time.sleep = lambda _seconds: None
     try:
         _, _, _, metadata = backend._run_pynn_code_process(
@@ -175,7 +257,7 @@ def verify_pynn_worker_attempt_budget() -> None:
             trial_start=0,
         )
     finally:
-        primitive_backend_module.subprocess.run = original_subprocess_run
+        primitive_backend_module._run_isolated_worker = original_worker_runner
         primitive_backend_module.time.sleep = original_sleep
     assert attempts == 2
     assert metadata["worker_attempts"] == 2
@@ -186,10 +268,10 @@ def verify_pynn_worker_attempt_budget() -> None:
     def always_timeout(command, **kwargs):
         nonlocal attempts
         attempts += 1
-        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        raise subprocess.TimeoutExpired(command, kwargs["timeout_s"])
 
     single_attempt_config = replace(retry_config, pynn_worker_max_attempts=1)
-    primitive_backend_module.subprocess.run = always_timeout
+    primitive_backend_module._run_isolated_worker = always_timeout
     primitive_backend_module.time.sleep = lambda _seconds: None
     try:
         try:
@@ -206,7 +288,7 @@ def verify_pynn_worker_attempt_budget() -> None:
         else:
             raise AssertionError("single-attempt timeout was accepted")
     finally:
-        primitive_backend_module.subprocess.run = original_subprocess_run
+        primitive_backend_module._run_isolated_worker = original_worker_runner
         primitive_backend_module.time.sleep = original_sleep
     assert attempts == 1
 
@@ -214,7 +296,7 @@ def verify_pynn_worker_attempt_budget() -> None:
 # @lat: [[hardware#Independent Primitive Noise Verification#PyNN worker cache identity]]
 def verify_pynn_worker_cache_identity() -> None:
     backend = PrimitiveHardwareBackend()
-    original_subprocess_run = primitive_backend_module.subprocess.run
+    original_worker_runner = primitive_backend_module._run_isolated_worker
     worker_calls: list[list[str]] = []
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -240,7 +322,7 @@ def verify_pynn_worker_cache_identity() -> None:
             )
             return SimpleNamespace(stdout="synthetic worker")
 
-        primitive_backend_module.subprocess.run = fake_subprocess_run
+        primitive_backend_module._run_isolated_worker = fake_subprocess_run
         try:
             first = backend._run_pynn_code_process(
                 "phi-np",
@@ -264,7 +346,7 @@ def verify_pynn_worker_cache_identity() -> None:
                 trial_start=0,
             )
         finally:
-            primitive_backend_module.subprocess.run = original_subprocess_run
+            primitive_backend_module._run_isolated_worker = original_worker_runner
         assert len(worker_calls) == 1
         assert first[3]["worker_cache_hit"] is False
         assert first[3]["worker_cache_identity"] == "canonical-v1"
@@ -1151,7 +1233,7 @@ def verify_nonlinear_drive_configuration() -> None:
     assert isolated.metadata["process_repeats"] == 2
 
     worker_calls: list[list[str]] = []
-    original_subprocess_run = primitive_backend_module.subprocess.run
+    original_worker_runner = primitive_backend_module._run_isolated_worker
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         calibration = root / "spiking.pbin"
@@ -1179,7 +1261,7 @@ def verify_nonlinear_drive_configuration() -> None:
             )
             return SimpleNamespace(stdout="synthetic worker")
 
-        primitive_backend_module.subprocess.run = fake_subprocess_run
+        primitive_backend_module._run_isolated_worker = fake_subprocess_run
         try:
             backend = PrimitiveHardwareBackend()
             first = backend._run_pynn_code_process(
@@ -1199,7 +1281,7 @@ def verify_nonlinear_drive_configuration() -> None:
                 trial_start=0,
             )
         finally:
-            primitive_backend_module.subprocess.run = original_subprocess_run
+            primitive_backend_module._run_isolated_worker = original_worker_runner
         assert len(worker_calls) == 1
         assert first[3]["worker_cache_hit"] is False
         assert first[3]["worker_attempts"] == 1
@@ -2387,6 +2469,7 @@ def verify_artifact_integrity() -> None:
 
 def main() -> None:
     verify_configured_hardware_endpoint_reuse()
+    verify_worker_timeout_cleanup()
     verify_transient_worker_error_classification()
     verify_pynn_worker_attempt_budget()
     verify_pynn_worker_cache_identity()

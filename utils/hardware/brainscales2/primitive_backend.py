@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 import json
 import math
+import signal
 import subprocess
 import sys
 import tempfile
@@ -51,6 +52,8 @@ _TRANSIENT_PYNN_WORKER_ERRORS = (
     "connection refused",
     "temporary failure in name resolution",
 )
+_WORKER_INTERRUPT_GRACE_S = 30.0
+_WORKER_TERMINATE_GRACE_S = 5.0
 
 
 class PrimitiveCapabilityError(RuntimeError):
@@ -60,6 +63,62 @@ class PrimitiveCapabilityError(RuntimeError):
 def _is_transient_pynn_worker_error(detail: str) -> bool:
     normalized = detail.casefold()
     return any(pattern in normalized for pattern in _TRANSIENT_PYNN_WORKER_ERRORS)
+
+
+def _run_isolated_worker(
+    command: list[str],
+    *,
+    timeout_s: float,
+    interrupt_grace_s: float = _WORKER_INTERRUPT_GRACE_S,
+    terminate_grace_s: float = _WORKER_TERMINATE_GRACE_S,
+) -> subprocess.CompletedProcess[str]:
+    """Run one hardware worker and bound cleanup after timeout or interruption."""
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    def interrupt_and_reap() -> tuple[str, str]:
+        if process.poll() is None:
+            try:
+                process.send_signal(signal.SIGINT)
+            except ProcessLookupError:
+                pass
+        try:
+            return process.communicate(timeout=interrupt_grace_s)
+        except subprocess.TimeoutExpired:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                return process.communicate(timeout=terminate_grace_s)
+            except subprocess.TimeoutExpired:
+                if process.poll() is None:
+                    process.kill()
+                return process.communicate()
+
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired as timeout_error:
+        stdout, stderr = interrupt_and_reap()
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout_s,
+            output=stdout,
+            stderr=stderr,
+        ) from timeout_error
+    except BaseException:
+        interrupt_and_reap()
+        raise
+    completed = subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        stdout,
+        stderr,
+    )
+    completed.check_returncode()
+    return completed
 
 
 def _pynn_cache_fingerprint(
@@ -588,12 +647,9 @@ class PrimitiveHardwareBackend:
                 request_path,
             )
             try:
-                completed = subprocess.run(
+                completed = _run_isolated_worker(
                     [sys.executable, str(worker), str(request_path), str(response_path)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=config.pynn_worker_timeout_s,
+                    timeout_s=config.pynn_worker_timeout_s,
                 )
             except subprocess.TimeoutExpired as error:
                 raise RuntimeError("spiking worker timed out") from error
@@ -952,12 +1008,9 @@ class PrimitiveHardwareBackend:
                 request_path,
             )
             try:
-                completed = subprocess.run(
+                completed = _run_isolated_worker(
                     [sys.executable, str(worker), str(request_path), str(response_path)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=config.pynn_worker_timeout_s,
+                    timeout_s=config.pynn_worker_timeout_s,
                 )
             except subprocess.TimeoutExpired as error:
                 raise RuntimeError("correlation worker timed out") from error
@@ -1273,17 +1326,14 @@ class PrimitiveHardwareBackend:
             for attempt in range(1, config.pynn_worker_max_attempts + 1):
                 worker_attempts = attempt
                 try:
-                    completed = subprocess.run(
+                    completed = _run_isolated_worker(
                         [
                             sys.executable,
                             str(worker),
                             str(request_path),
                             str(response_path),
                         ],
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=config.pynn_worker_timeout_s,
+                        timeout_s=config.pynn_worker_timeout_s,
                     )
                 except subprocess.TimeoutExpired as error:
                     if attempt == config.pynn_worker_max_attempts:
