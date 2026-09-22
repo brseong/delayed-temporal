@@ -78,6 +78,7 @@ def _run_isolated_worker(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        start_new_session=True,
     )
 
     def interrupt_and_reap() -> tuple[str, str]:

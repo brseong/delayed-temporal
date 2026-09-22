@@ -696,7 +696,7 @@ The worker boundary must retry only recognized connection failures for a bounded
 
 ### Worker timeout cleanup
 
-A timed-out or manually interrupted hardware worker receives a one-shot interrupt and a bounded grace period for best-effort backend release. Forced termination is the final fallback, and the acquisition is never accepted.
+A hardware worker runs in a private process session so notebook interrupts reach the controller first. The controller sends one bounded cleanup interrupt, with forced termination as the final fallback, and never accepts the interrupted acquisition.
 
 ### PyNN worker attempt budget
 

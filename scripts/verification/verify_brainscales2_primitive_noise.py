@@ -188,7 +188,7 @@ finally:
         primitive_backend_module.subprocess,
         "Popen",
         return_value=interrupted_process,
-    ):
+    ) as popen:
         try:
             primitive_backend_module._run_isolated_worker(
                 ["synthetic-worker"],
@@ -202,6 +202,7 @@ finally:
             raise AssertionError("parent interrupt was accepted")
     assert interrupted_process.signal_received == signal.SIGINT
     assert interrupted_process.calls == 2
+    assert popen.call_args.kwargs["start_new_session"] is True
 
 
 # @lat: [[hardware#Independent Primitive Noise Verification#Transient worker retry]]
