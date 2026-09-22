@@ -159,6 +159,13 @@ def make_config(args: argparse.Namespace) -> PrimitiveNoiseConfig:
         dynamic_reset_release_s=args.dynamic_reset_release,
         membrane_capacitance_code=args.membrane_capacitance_code,
         threshold_comparator_bias_code=args.threshold_comparator_bias_code,
+        excitatory_input_i_bias_tau_code=(
+            args.excitatory_input_i_bias_tau_code
+        ),
+        excitatory_input_i_bias_gm_code=(
+            args.excitatory_input_i_bias_gm_code
+        ),
+        synaptic_input_drop_bias_code=args.synaptic_input_drop_bias_code,
         precharge_weight_maximum=args.precharge_weight_maximum,
         precharge_input_fan_in=args.precharge_input_fan_in,
         record_precharge_cadc=not args.search_spike_times_only,
@@ -390,6 +397,15 @@ def _search_result_row(payload: dict[str, Any]) -> dict[str, Any]:
         "threshold_comparator_bias_code": candidate[
             "threshold_comparator_bias_code"
         ],
+        "excitatory_input_i_bias_tau_code": candidate[
+            "excitatory_input_i_bias_tau_code"
+        ],
+        "excitatory_input_i_bias_gm_code": candidate[
+            "excitatory_input_i_bias_gm_code"
+        ],
+        "synaptic_input_drop_bias_code": candidate[
+            "synaptic_input_drop_bias_code"
+        ],
         "ramp_stop_s": candidate["ramp_stop_s"],
         "precharge_input_fan_in": candidate["precharge_input_fan_in"],
         "precharge_weight_maximum": candidate["precharge_weight_maximum"],
@@ -509,6 +525,15 @@ def optimize_encoder_operating_point(
         membrane_capacitance_codes=args.search_membrane_capacitance_codes,
         threshold_comparator_bias_codes=(
             args.search_threshold_comparator_bias_codes
+        ),
+        excitatory_input_i_bias_tau_codes=(
+            args.search_excitatory_input_i_bias_tau_codes
+        ),
+        excitatory_input_i_bias_gm_codes=(
+            args.search_excitatory_input_i_bias_gm_codes
+        ),
+        synaptic_input_drop_bias_codes=(
+            args.search_synaptic_input_drop_bias_codes
         ),
     )
     if len(candidates) > args.search_max_candidates:
@@ -889,6 +914,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dynamic-reset-release", type=float, default=2.0e-6)
     parser.add_argument("--membrane-capacitance-code", type=int)
     parser.add_argument("--threshold-comparator-bias-code", type=int)
+    parser.add_argument("--excitatory-input-i-bias-tau-code", type=int)
+    parser.add_argument("--excitatory-input-i-bias-gm-code", type=int)
+    parser.add_argument("--synaptic-input-drop-bias-code", type=int)
     parser.add_argument("--precharge-weight-maximum", type=int, default=63)
     parser.add_argument("--precharge-input-fan-in", type=int, default=1)
     parser.add_argument("--exponential-input-weight", type=int, default=63)
@@ -935,6 +963,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--search-membrane-capacitance-codes", type=int, nargs="+")
     parser.add_argument(
         "--search-threshold-comparator-bias-codes", type=int, nargs="+"
+    )
+    parser.add_argument(
+        "--search-excitatory-input-i-bias-tau-codes", type=int, nargs="+"
+    )
+    parser.add_argument(
+        "--search-excitatory-input-i-bias-gm-codes", type=int, nargs="+"
+    )
+    parser.add_argument(
+        "--search-synaptic-input-drop-bias-codes", type=int, nargs="+"
     )
     parser.add_argument("--search-reset-current-codes", type=int, nargs="+")
     parser.add_argument(

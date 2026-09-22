@@ -7,6 +7,7 @@ from dataclasses import replace
 from contextlib import nullcontext
 import inspect
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -291,6 +292,15 @@ def verify_pynn_worker_cache_identity() -> None:
         assert canonical != fingerprint(
             "phi-np", "static", 15, changed_chunks, repeats=2, trial_start=0
         )
+        for changed in (
+            replace(config, excitatory_input_i_bias_tau_code=79),
+            replace(config, excitatory_input_i_bias_gm_code=524),
+            replace(config, synaptic_input_drop_bias_code=300),
+            replace(config, dynamic_reset_release_s=2.5e-6),
+        ):
+            assert canonical != fingerprint(
+                "phi-np", "static", 15, changed, repeats=2, trial_start=0
+            )
 
         for legacy in ("full-config", "before-attempt-budget"):
             legacy_config = replace(
@@ -1251,9 +1261,13 @@ def verify_static_reset_separation() -> None:
     comparator_values = {
         FakeBlock(index): FakeValue(200) for index in range(FakeBlock.size)
     }
+    synaptic_drop_values = {
+        FakeBlock(index): FakeValue(300) for index in range(FakeBlock.size)
+    }
     comparator_chip = SimpleNamespace(
         neuron_block=SimpleNamespace(
-            i_bias_threshold_comparator=comparator_values
+            i_bias_threshold_comparator=comparator_values,
+            i_bias_synin_drop=synaptic_drop_values,
         )
     )
     fake_vx = SimpleNamespace(
@@ -1276,9 +1290,34 @@ def verify_static_reset_separation() -> None:
         PrimitiveHardwareBackend._configure_threshold_comparator_bias(
             comparator_chip, 800
         )
+        PrimitiveHardwareBackend._configure_synaptic_input_drop_bias(
+            comparator_chip, None
+        )
+        assert {int(value) for value in synaptic_drop_values.values()} == {300}
+        PrimitiveHardwareBackend._configure_synaptic_input_drop_bias(
+            comparator_chip, 450
+        )
     finally:
         primitive_backend_module.import_module = original_import_module
     assert {int(value) for value in comparator_values.values()} == {800}
+    assert {int(value) for value in synaptic_drop_values.values()} == {450}
+
+    cell_config = PrimitiveNoiseConfig(
+        excitatory_input_i_bias_tau_code=79,
+        excitatory_input_i_bias_gm_code=524,
+        membrane_capacitance_code=32,
+    )
+    cell_parameters = PrimitiveHardwareBackend._pynn_cell_parameters(
+        "dynamic",
+        cell_config,
+        300,
+        {"refractory_period_refractory_time": 511},
+    )
+    assert cell_parameters["excitatory_input_i_bias_tau"] == 79
+    assert cell_parameters["excitatory_input_i_bias_gm"] == 524
+    assert cell_parameters["membrane_capacitance_capacitance"] == 32
+    assert cell_parameters["reset_v_reset"] == 300
+    assert cell_parameters["refractory_period_refractory_time"] == 511
 
     settings = SimpleNamespace(
         refractory_counters=list(range(512)),
@@ -1750,7 +1789,12 @@ def verify_encoder_operating_point_score() -> None:
         config,
         primitive="phi-np",
     )
-    assert changed["selection_objective_rt"] == reference["selection_objective_rt"]
+    assert math.isclose(
+        changed["selection_objective_rt"],
+        reference["selection_objective_rt"],
+        rel_tol=1.0e-12,
+        abs_tol=1.0e-15,
+    )
     assert (
         changed["calibration_selected_device"]["physical_coordinate"]
         == selected["physical_coordinate"]
@@ -1770,9 +1814,12 @@ def verify_encoder_operating_point_score() -> None:
         primitive="phi-np",
     )
     assert unrelated["held_out_validated"]
-    assert unrelated["validation_objective_rt"] == reference[
-        "validation_objective_rt"
-    ]
+    assert math.isclose(
+        unrelated["validation_objective_rt"],
+        reference["validation_objective_rt"],
+        rel_tol=1.0e-12,
+        abs_tol=1.0e-15,
+    )
 
     screened_values = observations[0].observed.clone()
     screened_values[: config.calibration_repeats, 15, :] += 10.0e-6
@@ -1862,6 +1909,9 @@ def verify_resumable_operating_point_search() -> None:
     assert candidates[0].apply(config).exponential_input_weight == 63
     assert candidates[0].apply(config).membrane_capacitance_code is None
     assert candidates[0].apply(config).threshold_comparator_bias_code is None
+    assert candidates[0].apply(config).excitatory_input_i_bias_tau_code is None
+    assert candidates[0].apply(config).excitatory_input_i_bias_gm_code is None
+    assert candidates[0].apply(config).synaptic_input_drop_bias_code is None
     assert candidates[0].apply(config).reset_current_code == 1022
     assert candidates[0].apply(config).reset_current_enable_multiplication is True
     assert candidates[0].apply(config).static_reset_release_s == 4.0e-6
@@ -1892,6 +1942,29 @@ def verify_resumable_operating_point_search() -> None:
         item.apply(config).threshold_comparator_bias_code
         for item in comparator_candidates
     } == {200, 800}
+    synaptic_candidates = build_encoder_operating_point_candidates(
+        config,
+        constant_current_codes=(1022,),
+        threshold_codes=(600,),
+        ramp_stop_times_s=(25.0e-6,),
+        precharge_pairs=((1, 63),),
+        excitatory_input_i_bias_tau_codes=(64, 96),
+        excitatory_input_i_bias_gm_codes=(480, 524),
+        synaptic_input_drop_bias_codes=(300,),
+    )
+    assert len(synaptic_candidates) == 4
+    assert {
+        (
+            item.apply(config).excitatory_input_i_bias_tau_code,
+            item.apply(config).excitatory_input_i_bias_gm_code,
+            item.apply(config).synaptic_input_drop_bias_code,
+        )
+        for item in synaptic_candidates
+    } == {
+        (tau_code, gain_code, 300)
+        for tau_code in (64, 96)
+        for gain_code in (480, 524)
+    }
     reset_candidates = build_encoder_operating_point_candidates(
         config,
         constant_current_codes=(1022,),
@@ -1900,7 +1973,7 @@ def verify_resumable_operating_point_search() -> None:
         precharge_pairs=((1, 63),),
         reset_current_codes=(512, 1022),
         static_reset_release_times_s=(3.5e-6, 4.5e-6),
-        dynamic_reset_release_times_s=(1.0e-6, 2.5e-6),
+        dynamic_reset_release_times_s=(1.5e-6, 2.5e-6),
     )
     assert len(reset_candidates) == 8
     assert {
@@ -1914,7 +1987,7 @@ def verify_resumable_operating_point_search() -> None:
         (current, static_release, dynamic_release)
         for current in (512, 1022)
         for static_release in (3.5e-6, 4.5e-6)
-        for dynamic_release in (1.0e-6, 2.5e-6)
+        for dynamic_release in (1.5e-6, 2.5e-6)
     }
     reset_mode_candidates = build_encoder_operating_point_candidates(
         config,
@@ -1948,6 +2021,17 @@ def verify_resumable_operating_point_search() -> None:
             ramp_stop_times_s=(25.0e-6,),
             precharge_pairs=((1, 63),),
             membrane_capacitance_codes=(64,),
+        ),
+        (ValueError,),
+    )
+    rejects(
+        lambda: build_encoder_operating_point_candidates(
+            config,
+            constant_current_codes=(1022,),
+            threshold_codes=(600,),
+            ramp_stop_times_s=(25.0e-6,),
+            precharge_pairs=((1, 63),),
+            excitatory_input_i_bias_tau_codes=(1023,),
         ),
         (ValueError,),
     )
@@ -2139,12 +2223,27 @@ def verify_artifact_integrity() -> None:
     assert config.dynamic_reset_release_s == 2.0e-6
     assert config.membrane_capacitance_code is None
     assert config.threshold_comparator_bias_code is None
+    assert config.excitatory_input_i_bias_tau_code is None
+    assert config.excitatory_input_i_bias_gm_code is None
+    assert config.synaptic_input_drop_bias_code is None
     rejects(
         lambda: PrimitiveNoiseConfig(membrane_capacitance_code=64),
         (ValueError,),
     )
     rejects(
         lambda: PrimitiveNoiseConfig(threshold_comparator_bias_code=1023),
+        (ValueError,),
+    )
+    rejects(
+        lambda: PrimitiveNoiseConfig(excitatory_input_i_bias_tau_code=1023),
+        (ValueError,),
+    )
+    rejects(
+        lambda: PrimitiveNoiseConfig(excitatory_input_i_bias_gm_code=-1),
+        (ValueError,),
+    )
+    rejects(
+        lambda: PrimitiveNoiseConfig(synaptic_input_drop_bias_code=1023),
         (ValueError,),
     )
     rejects(lambda: PrimitiveNoiseConfig(reset_current_code=1023), (ValueError,))
@@ -2155,10 +2254,28 @@ def verify_artifact_integrity() -> None:
         (TypeError,),
     )
     rejects(lambda: PrimitiveNoiseConfig(static_reset_release_s=5.0e-6), (ValueError,))
+    rejects(lambda: PrimitiveNoiseConfig(static_reset_release_s=1.0e-6), (ValueError,))
+    rejects(lambda: PrimitiveNoiseConfig(dynamic_reset_release_s=1.0e-6), (ValueError,))
     rejects(lambda: PrimitiveNoiseConfig(dynamic_reset_release_s=3.0e-6), (ValueError,))
     parser_defaults = build_parser().parse_args(["--output-dir", "unused"])
     assert parser_defaults.search_ramp_stop_us == (25.0,)
     assert parser_defaults.reset_current_enable_multiplication is True
+    parsed = build_parser().parse_args(
+        [
+            "--output-dir",
+            "unused",
+            "--excitatory-input-i-bias-tau-code",
+            "79",
+            "--excitatory-input-i-bias-gm-code",
+            "524",
+            "--synaptic-input-drop-bias-code",
+            "300",
+        ]
+    )
+    parsed_config = make_config(parsed)
+    assert parsed_config.excitatory_input_i_bias_tau_code == 79
+    assert parsed_config.excitatory_input_i_bias_gm_code == 524
+    assert parsed_config.synaptic_input_drop_bias_code == 300
     observation = MockPrimitiveNoiseBackend().collect(
         "psi-int", config, stage="transfer", quick=True
     )

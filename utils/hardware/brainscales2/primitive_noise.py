@@ -19,6 +19,7 @@ from .backend import calibration_sha256
 
 PrimitiveKind = Literal["phi-np", "phi-nl", "psi-int", "psi-ne", "psi-ed"]
 PrimitiveStage = Literal["static", "dynamic", "transfer"]
+RESET_ASSERT_S = 1.0e-6
 OutputKind = Literal["spike-time-s", "pwm-code", "cadc-potential"]
 
 PRIMITIVES: tuple[PrimitiveKind, ...] = (
@@ -108,6 +109,9 @@ class PrimitiveNoiseConfig:
     dynamic_reset_release_s: float = 2.0e-6
     membrane_capacitance_code: int | None = None
     threshold_comparator_bias_code: int | None = None
+    excitatory_input_i_bias_tau_code: int | None = None
+    excitatory_input_i_bias_gm_code: int | None = None
+    synaptic_input_drop_bias_code: int | None = None
     precharge_weight_maximum: int = 63
     precharge_input_fan_in: int = 1
     record_precharge_cadc: bool = True
@@ -169,13 +173,14 @@ class PrimitiveNoiseConfig:
                 raise ValueError(f"{name} must lie in [0, 1022]")
         if not isinstance(self.reset_current_enable_multiplication, bool):
             raise TypeError("reset current multiplication flag must be a bool")
-        if not 0.0 < self.static_reset_release_s < self.input_early_s:
+        if not RESET_ASSERT_S < self.static_reset_release_s < self.input_early_s:
             raise ValueError(
-                "static reset release must lie between zero and the ramp start"
+                "static reset release must follow reset assertion and precede "
+                "the ramp start"
             )
         precharge_time_s = max(0.5e-6, self.input_early_s - 2.0e-6)
         if (
-            not 0.0 < self.dynamic_reset_release_s < precharge_time_s
+            not RESET_ASSERT_S < self.dynamic_reset_release_s < precharge_time_s
             or math.isclose(
                 self.dynamic_reset_release_s,
                 precharge_time_s,
@@ -184,7 +189,8 @@ class PrimitiveNoiseConfig:
             )
         ):
             raise ValueError(
-                "dynamic reset release must precede the precharge event"
+                "dynamic reset release must follow reset assertion and precede "
+                "the precharge event"
             )
         if self.membrane_capacitance_code is not None and not (
             0 <= self.membrane_capacitance_code <= 63
@@ -196,6 +202,19 @@ class PrimitiveNoiseConfig:
             raise ValueError(
                 "threshold comparator bias code must lie in [0, 1022]"
             )
+        for name, value in (
+            (
+                "excitatory synaptic input time constant bias code",
+                self.excitatory_input_i_bias_tau_code,
+            ),
+            (
+                "excitatory synaptic input gain bias code",
+                self.excitatory_input_i_bias_gm_code,
+            ),
+            ("synaptic input drop bias code", self.synaptic_input_drop_bias_code),
+        ):
+            if value is not None and not 0 <= value <= 1022:
+                raise ValueError(f"{name} must lie in [0, 1022]")
         if self.reset_code_minimum > self.reset_code_maximum:
             raise ValueError("reset code range must be increasing")
         for name, value in (

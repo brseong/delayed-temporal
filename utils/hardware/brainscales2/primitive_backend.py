@@ -32,6 +32,7 @@ from .primitive_noise import (
     PrimitiveNoiseConfig,
     PrimitiveObservation,
     PrimitiveStage,
+    RESET_ASSERT_S,
 )
 
 
@@ -1488,7 +1489,9 @@ class PrimitiveHardwareBackend:
                 normal = copy.deepcopy(backend)
                 normal.force_reset = False
                 builder.write(
-                    vx.hal.Timer.Value(round((base_us + 1.0) * cycles_per_us)),
+                    vx.hal.Timer.Value(
+                        round((base_us + RESET_ASSERT_S * 1.0e6) * cycles_per_us)
+                    ),
                     coordinate,
                     forced,
                 )
@@ -1530,6 +1533,72 @@ class PrimitiveHardwareBackend:
             values[coordinate] = type(values[coordinate])(bias_code)
 
     @staticmethod
+    def _configure_synaptic_input_drop_bias(
+        chip: Any, bias_code: int | None
+    ) -> None:
+        """Override the calibrated block synaptic-input bias when requested."""
+        if bias_code is None:
+            return
+        vx = import_module("dlens_vx_v3")
+        values = chip.neuron_block.i_bias_synin_drop
+        for index in range(vx.halco.CapMemBlockOnDLS.size):
+            coordinate = vx.halco.CapMemBlockOnDLS(
+                vx.halco.common.Enum(index)
+            )
+            values[coordinate] = type(values[coordinate])(bias_code)
+
+    @staticmethod
+    def _pynn_cell_parameters(
+        stage: PrimitiveStage,
+        config: PrimitiveNoiseConfig,
+        resolved_reset_code: int | tuple[int, ...],
+        refractory_parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build the single PyNN neuron configuration for a primitive run."""
+        scalar_reset_code = (
+            resolved_reset_code[0]
+            if isinstance(resolved_reset_code, tuple)
+            else resolved_reset_code
+        )
+        parameters: dict[str, Any] = {
+            "leak_v_leak": (
+                scalar_reset_code
+                if stage == "static"
+                else config.reset_code_minimum
+            ),
+            "leak_i_bias": config.leak_bias,
+            "leak_enable_division": True,
+            "threshold_enable": True,
+            "threshold_v_threshold": config.threshold_code,
+            "reset_v_reset": (
+                scalar_reset_code
+                if stage == "static"
+                else config.reset_code_minimum
+            ),
+            "constant_current_enable": False,
+            "constant_current_i_offset": config.constant_current_code,
+            "reset_i_bias": config.reset_current_code,
+            "reset_enable_multiplication": (
+                config.reset_current_enable_multiplication
+            ),
+            "refractory_period_enable_pause": True,
+            **refractory_parameters,
+        }
+        if config.membrane_capacitance_code is not None:
+            parameters["membrane_capacitance_capacitance"] = (
+                config.membrane_capacitance_code
+            )
+        if config.excitatory_input_i_bias_tau_code is not None:
+            parameters["excitatory_input_i_bias_tau"] = (
+                config.excitatory_input_i_bias_tau_code
+            )
+        if config.excitatory_input_i_bias_gm_code is not None:
+            parameters["excitatory_input_i_bias_gm"] = (
+                config.excitatory_input_i_bias_gm_code
+            )
+        return parameters
+
+    @staticmethod
     def _record_pynn_population(population: Any, *, membrane: bool) -> None:
         """Keep event recording separate from dense membrane recording."""
         population.record("spikes")
@@ -1560,6 +1629,10 @@ class PrimitiveHardwareBackend:
         self._configure_threshold_comparator_bias(
             chip,
             getattr(config, "threshold_comparator_bias_code", None),
+        )
+        self._configure_synaptic_input_drop_bias(
+            chip,
+            getattr(config, "synaptic_input_drop_bias_code", None),
         )
         coordinates = self._pynn_coordinates(config)
         refractory_parameters, refractory_metadata = (
@@ -1595,45 +1668,12 @@ class PrimitiveHardwareBackend:
                 if stage == "static"
                 else config.reset_code_minimum
             )
-            scalar_reset_code = (
-                resolved_reset_code[0]
-                if isinstance(resolved_reset_code, tuple)
-                else resolved_reset_code
+            cell_parameters = self._pynn_cell_parameters(
+                stage,
+                config,
+                resolved_reset_code,
+                refractory_parameters,
             )
-            cell_parameters = {
-                "leak_v_leak": (
-                    scalar_reset_code
-                    if stage == "static"
-                    else config.reset_code_minimum
-                ),
-                "leak_i_bias": config.leak_bias,
-                "leak_enable_division": True,
-                "threshold_enable": True,
-                "threshold_v_threshold": config.threshold_code,
-                "reset_v_reset": (
-                    scalar_reset_code
-                    if stage == "static"
-                    else config.reset_code_minimum
-                ),
-                "constant_current_enable": False,
-                "constant_current_i_offset": config.constant_current_code,
-                "reset_i_bias": getattr(config, "reset_current_code", 1022),
-                "reset_enable_multiplication": getattr(
-                    config, "reset_current_enable_multiplication", True
-                ),
-                "refractory_period_enable_pause": True,
-                **refractory_parameters,
-            }
-            # Fingerprinted workers can resume while a notebook updates the
-            # repository.  A config pickled before this field existed retains
-            # the calibration file setting, which is also the public default.
-            membrane_capacitance_code = getattr(
-                config, "membrane_capacitance_code", None
-            )
-            if membrane_capacitance_code is not None:
-                cell_parameters["membrane_capacitance_capacitance"] = (
-                    membrane_capacitance_code
-                )
             population = pynn.Population(
                 config.device_count,
                 cell_type(**cell_parameters),
@@ -1742,6 +1782,9 @@ class PrimitiveHardwareBackend:
                     config.precharge_input_fan_in if uses_precharge else None
                 ),
                 "resolved_cell_parameters": cell_parameters,
+                "synaptic_input_drop_bias_code": (
+                    config.synaptic_input_drop_bias_code
+                ),
                 "window_ms": window_ms,
                 "observation_deadline_ms": config.deadline_s * 1.0e3,
                 "reference_ms": reference_ms,
