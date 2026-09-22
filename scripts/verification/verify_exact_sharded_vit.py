@@ -34,6 +34,7 @@ from scripts.experiments.run_exact_sharded_vit import (
     merge_shard_results,
     noise_profile_fractions,
     forward_termination_signals,
+    require_available_gpus,
     RunnerInterrupted,
     _signal_process_groups,
     _spawn_managed,
@@ -566,6 +567,47 @@ def verify_merge_rejections_and_offset_guards() -> None:
 
 
 def verify_model_provenance_and_process_cleanup() -> None:
+    busy_sample = {
+        0: {
+            "gpu_uuid": "gpu-0",
+            "memory_used_mib": 3.0,
+            "utilization_gpu_percent": 62.0,
+            "pids": [],
+        },
+        1: {
+            "gpu_uuid": "gpu-1",
+            "memory_used_mib": 3.0,
+            "utilization_gpu_percent": 0.0,
+            "pids": [],
+        },
+    }
+    idle_sample = {
+        gpu: {**sample, "utilization_gpu_percent": 0.0}
+        for gpu, sample in busy_sample.items()
+    }
+    with patch(
+        "scripts.experiments.run_exact_sharded_vit.local_gpu.gpu_activity",
+        side_effect=(busy_sample, idle_sample),
+    ) as activity, patch(
+        "scripts.experiments.run_exact_sharded_vit.time.sleep"
+    ) as sleep:
+        assert require_available_gpus(
+            (0, 1), max_attempts=2, retry_interval_s=1.0
+        ) == idle_sample
+        assert activity.call_count == 2
+        sleep.assert_called_once_with(1.0)
+    with patch(
+        "scripts.experiments.run_exact_sharded_vit.local_gpu.gpu_activity",
+        return_value=busy_sample,
+    ), patch("scripts.experiments.run_exact_sharded_vit.time.sleep") as sleep:
+        try:
+            require_available_gpus((0, 1), max_attempts=2, retry_interval_s=0.5)
+        except RuntimeError as error:
+            assert "requested physical GPUs are not available" in str(error)
+        else:
+            raise AssertionError("persistent device activity passed admission")
+        sleep.assert_called_once_with(0.5)
+
     first = torch.nn.Sequential(torch.nn.Linear(3, 2), torch.nn.LayerNorm(2))
     first.register_buffer("scalar_fixture", torch.tensor(1.0))
     second = copy.deepcopy(first)

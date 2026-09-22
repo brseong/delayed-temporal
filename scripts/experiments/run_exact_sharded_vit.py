@@ -1197,19 +1197,32 @@ def forward_termination_signals(
             signal.signal(signum, handler)
 
 
-def require_available_gpus(gpus: Iterable[int]) -> dict[int, dict[str, Any]]:
-    """Sample and require idle physical GPUs at one launch boundary."""
+def require_available_gpus(
+    gpus: Iterable[int],
+    *,
+    max_attempts: int = 1,
+    retry_interval_s: float = 0.0,
+) -> dict[int, dict[str, Any]]:
+    """Require idle physical GPUs, with optional bounded telemetry resampling."""
 
     requested = tuple(gpus)
-    activity = local_gpu.gpu_activity(gpu_ids=requested)
-    unavailable = {
-        gpu: sample
-        for gpu, sample in activity.items()
-        if not local_gpu.gpu_available(sample)
-    }
-    if unavailable:
-        raise RuntimeError(f"requested physical GPUs are not available: {unavailable}")
-    return activity
+    max_attempts = exact_positive_int(max_attempts, name="GPU admission attempts")
+    retry_interval_s = float(
+        nonnegative_number(retry_interval_s, name="GPU admission retry interval")
+    )
+    unavailable: dict[int, dict[str, Any]] = {}
+    for attempt in range(max_attempts):
+        activity = local_gpu.gpu_activity(gpu_ids=requested)
+        unavailable = {
+            gpu: sample
+            for gpu, sample in activity.items()
+            if not local_gpu.gpu_available(sample)
+        }
+        if not unavailable:
+            return activity
+        if attempt + 1 < max_attempts:
+            time.sleep(retry_interval_s)
+    raise RuntimeError(f"requested physical GPUs are not available: {unavailable}")
 
 
 def execute(args: argparse.Namespace) -> dict[str, Any]:
@@ -1328,7 +1341,11 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
                     "random generator preflight did not publish its contract"
                 )
 
-            post_preflight_activity = require_available_gpus(args.gpus)
+            post_preflight_activity = require_available_gpus(
+                args.gpus,
+                max_attempts=6,
+                retry_interval_s=1.0,
+            )
             if validate_local_checkpoint(evaluator_args) != checkpoint_artifact:
                 raise RuntimeError("local checkpoint artifact changed during preflight")
             runtime_files.new_json(
