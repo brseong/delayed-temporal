@@ -20,9 +20,10 @@ class _WorkerInterrupt(BaseException):
 
 
 def _install_cleanup_interrupt_handler() -> None:
-    """Interrupt native waits without raising before backend cleanup executes."""
+    """Unwind once into backend cleanup and ignore later interrupt signals."""
 
     def interrupt(_signum, _frame) -> None:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         raise _WorkerInterrupt("hardware worker interrupted for bounded cleanup")
 
     signal.signal(signal.SIGINT, interrupt)

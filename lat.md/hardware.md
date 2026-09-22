@@ -696,7 +696,7 @@ The worker boundary must retry only recognized connection failures for a bounded
 
 ### Worker timeout cleanup
 
-A timed-out or manually interrupted hardware worker receives an interrupt and a bounded grace period for backend release. Forced termination is the final fallback, and the acquisition is never accepted.
+A timed-out or manually interrupted hardware worker receives a one-shot interrupt and a bounded grace period for best-effort backend release. Forced termination is the final fallback, and the acquisition is never accepted.
 
 ### PyNN worker attempt budget
 

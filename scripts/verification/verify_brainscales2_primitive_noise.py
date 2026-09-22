@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -122,6 +123,8 @@ try:
     while True:
         time.sleep(1.0)
 finally:
+    marker.write_text("cleanup-started", encoding="utf-8")
+    time.sleep(0.5)
     marker.write_text("released", encoding="utf-8")
 """.strip(),
             encoding="utf-8",
@@ -137,6 +140,29 @@ finally:
             pass
         else:
             raise AssertionError("worker timeout was accepted")
+        assert marker.read_text(encoding="utf-8") == "released"
+
+        process = subprocess.Popen(
+            [sys.executable, str(child), str(marker)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "ready"
+        process.send_signal(signal.SIGINT)
+        deadline = time.monotonic() + 2.0
+        while (
+            not marker.is_file()
+            or marker.read_text(encoding="utf-8") != "cleanup-started"
+        ):
+            if time.monotonic() >= deadline:
+                process.kill()
+                process.communicate()
+                raise AssertionError("worker did not enter cleanup")
+            time.sleep(0.01)
+        process.send_signal(signal.SIGINT)
+        process.communicate(timeout=2.0)
         assert marker.read_text(encoding="utf-8") == "released"
 
     class ParentInterruptedProcess:
