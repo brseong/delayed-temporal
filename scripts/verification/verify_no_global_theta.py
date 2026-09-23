@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import contextlib
+import io
 import inspect
 from pathlib import Path
 import subprocess
@@ -87,10 +89,14 @@ def verify_production_surface() -> None:
 
 def verify_legacy_config_rejection() -> None:
     """All maintained model families fail closed on old serialized settings."""
-    from utils.transformers.models.spiking_bert.configuration_bert import BertConfig
-    from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
-    from utils.transformers.models.spiking_roberta.configuration_roberta import RobertaConfig
-    from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
+    # Vendored Transformers emits unrelated auto-docstring diagnostics while
+    # importing the local RoBERTa class. Keep this verifier focused on the
+    # configuration behavior it actually asserts.
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        from utils.transformers.models.spiking_bert.configuration_bert import BertConfig
+        from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
+        from utils.transformers.models.spiking_roberta.configuration_roberta import RobertaConfig
+        from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
 
     for config_type, kwargs in (
         (ViTConfig, {"theta": 40.0}),
