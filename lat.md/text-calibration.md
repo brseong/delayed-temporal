@@ -12,7 +12,7 @@ Selected Q/K/V ranges survive head reshaping and are passed together to attentio
 
 Each active LayerNorm observes signed centered inputs before clipping. Its selected upper endpoint governs magnitude, square, variance and logarithmic encoding with a shared time window. The fixed positive input floor and variance floor remain unchanged, as do the learned affine coefficients and derived output range. Checkpoint epsilon is forwarded to every normalization, including embedding and output head normalization when present.
 
-[[scripts/verification/verify_text_calibration_binding.py#verify_text_layernorm_binding]] checks all eight normalization combinations for each family, selected ranges above and below the global threshold, parity with noise disabled and with zero standard deviation, and seeded finite outputs. Incompatible family, version, dtype, epsilon or floor fails atomically.
+[[scripts/verification/verify_text_calibration_binding.py#verify_text_layernorm_binding]] checks all eight normalization combinations for each family, selected ranges of different widths, parity with noise disabled and with zero standard deviation, and seeded finite outputs. Incompatible family, version, dtype, epsilon or floor fails atomically.
 
 ## Encoder Coverage
 
@@ -22,7 +22,7 @@ BERT and RoBERTa discover sites from active modules, including embedding normali
 
 Softmax, Tanh, GELU and normalized outputs keep their fixed or input derived output bounds. Embedding lookup ranges remain parameter derived. Attention output projection is covered by the residual sum before the next normalization; it is not replaced with an unrelated independently selected range. Disabled temporal attention and fully dense normalization do not register unexecuted sites. Decoder or cross attention configurations are rejected rather than silently collecting incomplete tables.
 
-The spiking MLPs in ViT, BERT, RoBERTa, and GPT-2 now resolve the same canonical Power cubic in [[utils/transforms/functions.py#gelu_approximation]]. Their model threshold and time constant are forwarded explicitly.
+The spiking MLPs in ViT, BERT, RoBERTa, and GPT-2 now resolve the same canonical Power cubic in [[utils/transforms/functions.py#gelu_approximation]]. Their selected input bounds and time constant are forwarded explicitly.
 
 BERT and RoBERTa cast the attention mask to the embedding dtype before constructing its additive values. With float64, subtracting an integer mask in float32 before multiplying by the float64 minimum could otherwise create nonfinite values at unmasked positions. This numerical correction also applies when temporal attention is disabled.
 
