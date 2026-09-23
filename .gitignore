@@ -228,12 +228,8 @@ __marimo__/
 /analysis
 /reports
 
-# Generated experiment artifacts are denied by default. Keep only one reviewed,
-# representative calibration table under version control.
+# Generated experiment artifacts are denied by default.
 /artifacts/*
-!/artifacts/calibration/
-/artifacts/calibration/*
-!/artifacts/calibration/vit_small_fixed_domain_minmax_margin5.json
 /*_logs/
 /beta_pool_logs.txt
 /.worktrees/

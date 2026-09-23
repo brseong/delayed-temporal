@@ -270,9 +270,9 @@ The maintained scalar bound contract supports one calibrated radius per attentio
 
 Calibration artifacts use a versioned immutable schema for recorded model, data, numerical, capacity, and ablation settings. Compatibility checks cannot detect configuration choices omitted from that schema.
 
-Repository persistence is deny-by-default for generated artifacts. Only `artifacts/calibration/vit_small_fixed_domain_minmax_margin5.json`, the reviewed ViT-S min/max-plus-margin configuration, is whitelisted as a representative table; logs and alternative runs remain local outputs.
+Repository persistence is deny-by-default for generated artifacts, with no calibration table whitelisted as a reusable source file. Historical global-range tables remain recoverable from Git history but are absent from the maintained tree.
 
-The representative table is evidence for the documented environment, not a portable fallback: exact checkpoint identity, including its `/data/nas/` path, preprocessing fingerprint, dtype, and ablations must match before reuse.
+Current calibration evidence remains under ignored `artifacts/` paths and is reusable only when its manifest authenticates the exact source, checkpoint, dataset, preprocessing, dtype, range policy, and ablations.
 
 ### Canonical Table Round Trip
 

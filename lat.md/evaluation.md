@@ -98,7 +98,7 @@ Only 408 of 41,204,520,000 calibrated values exceed their frozen rails, an aggre
 
 At the precision-limited Gaussian setting, division-numerator misses are 8.67352%, multiplication-output underflow saturation is 0.901420%, LayerNorm positive/negative log misses are 0.583904%/0.600765%, and convolution data-event misses are 0.453567%. Division-output overflow is $9.46541\times10^{-6}$; affine output, attention value, exponential output, and normalized LayerNorm saturation are zero.
 
-The identical retired-calibration clean and Gaussian accuracies do not establish continuous-noise robustness because this $\sigma_t$ is below float32 spacing at relevant deadlines. They establish that physical miss and saturation counters remain observable even when top-1 predictions do not change. The replacement full-run log is `artifacts/logs/fixed_domain_validation/vit_small_minmax_margin5_clean_5000.log`, and its frozen table is `artifacts/calibration/vit_small_fixed_domain_minmax_margin5.json`.
+The identical retired-calibration clean and Gaussian accuracies do not establish continuous-noise robustness because this $\sigma_t$ is below float32 spacing at relevant deadlines. They establish that physical miss and saturation counters remain observable even when top-1 predictions do not change. The former frozen table is retained only in Git history and cannot be loaded as current evidence.
 
 ## Fixed-Domain Text-Model Real-Data Audit
 
