@@ -60,30 +60,35 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--kind", choices=("vit", "text"), required=True)
     parser.add_argument("--source-pipeline", type=Path, required=True)
-    parser.add_argument("--target-pipeline", type=Path, required=True)
+    parser.add_argument("--target-pipeline", type=Path)
     parser.add_argument(
         "--cache-root", type=Path,
         default=Path("/data/delayed-temporal/artifacts/logs/ann_baselines/v1"),
     )
     args = parser.parse_args()
     source = args.source_pipeline.resolve(strict=True)
-    target = args.target_pipeline.resolve(strict=True)
-    if source == target:
-        raise ValueError("ANN baseline source and target must differ")
     source_manifest = json.loads((source / "manifest.json").read_text())
-    target_manifest = json.loads((target / "manifest.json").read_text())
     build_identity = text_identity if args.kind == "text" else vit_identity
     source_identity = build_identity(source_manifest)
-    target_identity = build_identity(target_manifest)
-    if source_identity != target_identity:
-        raise ValueError("source and target dense evaluation identities differ")
+    target = args.target_pipeline.resolve(strict=True) if args.target_pipeline else None
+    if target is not None:
+        if source == target:
+            raise ValueError("ANN baseline source and target must differ")
+        target_manifest = json.loads((target / "manifest.json").read_text())
+        target_identity = build_identity(target_manifest)
+        if source_identity != target_identity:
+            raise ValueError("source and target dense evaluation identities differ")
+    else:
+        target_manifest = source_manifest
+        target_identity = source_identity
 
     source_result = json.loads((source / "result.json").read_text())
-    if source_result.get("state") != "complete":
-        raise ValueError("source pipeline is incomplete")
-    source_phase = source_result.get("phases", {}).get("ann")
-    if not isinstance(source_phase, dict):
+    phase_path = source / "phases/ann.json"
+    if not phase_path.is_file():
         raise ValueError("source pipeline has no completed ANN phase")
+    source_phase = json.loads(phase_path.read_text())
+    if source_result.get("phases", {}).get("ann") not in (None, source_phase):
+        raise ValueError("source ANN result and phase evidence differ")
     source_log = source / source_phase["log_file"]
     if identity.sha256_file(source_log) != source_phase.get("log_sha256"):
         raise ValueError("source ANN log hash differs")
@@ -116,17 +121,18 @@ def main() -> None:
     )
     if cached is None:
         raise RuntimeError("published ANN baseline is unavailable")
-    phase = ann_baseline.materialize_phase(record=cached[0], source_log=cached[1], output=target)
-    phase_path = target / "phases/ann.json"
-    if phase_path.exists():
-        if json.loads(phase_path.read_text()) != phase:
-            raise ValueError("target ANN phase already differs")
-    else:
-        runtime_files.new_json(phase_path, phase)
+    if target is not None:
+        phase = ann_baseline.materialize_phase(record=cached[0], source_log=cached[1], output=target)
+        phase_path = target / "phases/ann.json"
+        if phase_path.exists():
+            if json.loads(phase_path.read_text()) != phase:
+                raise ValueError("target ANN phase already differs")
+        else:
+            runtime_files.new_json(phase_path, phase)
     print(json.dumps({
         "state": "complete",
         "source_pipeline": str(source),
-        "target_pipeline": str(target),
+        "target_pipeline": str(target) if target is not None else None,
         "ann_baseline_identity_sha256": record["identity_sha256"],
         "metrics": metrics,
     }, sort_keys=True))
