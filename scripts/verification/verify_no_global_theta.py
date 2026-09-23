@@ -123,6 +123,57 @@ def verify_operator_signatures() -> None:
         assert names.isdisjoint(FORBIDDEN_NAMES), (callable_object, names)
 
 
+def verify_model_instance_attributes() -> None:
+    """Tiny instances of every maintained family expose no removed attribute."""
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        from utils.transformers.models.spiking_bert.configuration_bert import BertConfig
+        from utils.transformers.models.spiking_bert.modeling_spiking_bert import (
+            BertForSequenceClassification,
+        )
+        from utils.transformers.models.spiking_gpt2.configuration_gpt2 import GPT2Config
+        from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import GPT2LMHeadModel
+        from utils.transformers.models.spiking_roberta.configuration_roberta import RobertaConfig
+        from utils.transformers.models.spiking_roberta.modeling_spiking_roberta import (
+            RobertaForSequenceClassification,
+        )
+        from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
+        from utils.transformers.models.spiking_vit.modeling_spiking_vit import (
+            ViTForImageClassification,
+        )
+
+        pairs = (
+            (ViTForImageClassification, ViTConfig(
+                hidden_size=8, num_hidden_layers=1, num_attention_heads=2,
+                intermediate_size=16, image_size=16, patch_size=8,
+                num_channels=3, num_labels=2,
+            )),
+            (BertForSequenceClassification, BertConfig(
+                hidden_size=8, num_hidden_layers=1, num_attention_heads=2,
+                intermediate_size=16, vocab_size=32, max_position_embeddings=16,
+                num_labels=2,
+            )),
+            (RobertaForSequenceClassification, RobertaConfig(
+                hidden_size=8, num_hidden_layers=1, num_attention_heads=2,
+                intermediate_size=16, vocab_size=32, max_position_embeddings=16,
+                num_labels=2,
+            )),
+            (GPT2LMHeadModel, GPT2Config(
+                n_embd=8, n_layer=1, n_head=2, n_positions=16, n_ctx=16,
+                vocab_size=32, n_inner=16,
+            )),
+        )
+        for model_type, config in pairs:
+            assert set(vars(config)).isdisjoint(FORBIDDEN_NAMES), model_type.__name__
+            model = model_type(config)
+            violations = [
+                f"{model_type.__name__}:{name or '<root>'}:{attribute}"
+                for name, module in model.named_modules()
+                for attribute in vars(module)
+                if attribute in FORBIDDEN_NAMES
+            ]
+            assert not violations, "removed model attributes returned:\n" + "\n".join(violations)
+
+
 def verify_evaluator_help() -> None:
     """Maintained evaluator parsers reject the former command-line setting."""
     for filename in (
@@ -190,6 +241,7 @@ def main() -> None:
     verify_production_surface()
     verify_legacy_config_rejection()
     verify_operator_signatures()
+    verify_model_instance_attributes()
     verify_evaluator_help()
     verify_maintained_guidance()
     verify_no_tracked_calibration_fallback()
