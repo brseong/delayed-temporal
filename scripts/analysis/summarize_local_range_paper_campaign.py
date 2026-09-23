@@ -346,7 +346,13 @@ def noise_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return summary
 
 
-def render_figure(path: Path, summary: list[dict[str, Any]]) -> None:
+def render_figure(
+    path: Path,
+    summary: list[dict[str, Any]],
+    *,
+    dense_accuracy: float,
+    clean_spiking_accuracy: float,
+) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -367,18 +373,35 @@ def render_figure(path: Path, summary: list[dict[str, Any]]) -> None:
         y = [100 * row["accuracy_mean"] for row in rows]
         lower = [100 * (row["accuracy_mean"] - row["accuracy_ci95_low"]) for row in rows]
         upper = [100 * (row["accuracy_ci95_high"] - row["accuracy_mean"]) for row in rows]
+        axis.axhline(100 * clean_spiking_accuracy, linestyle="--", linewidth=1.3,
+                     color="#237a3b", label="Clean spiking")
+        axis.axhline(100 * dense_accuracy, linestyle=":", linewidth=1.3,
+                     color="#666666", label="Dense reference")
         axis.errorbar(x, y, yerr=[lower, upper], marker="o", linewidth=1.5, capsize=2,
-                      color="#2f5597", label="Top-1 accuracy")
+                      color="#2f5597", label="Noisy accuracy")
         axis.set_xlabel(label)
         axis.set_ylabel("Top-1 accuracy (%)")
         axis.grid(True, alpha=0.25)
         if key == "time_noise_std_fraction":
             axis.set_xscale("log")
+            axis.legend(loc="best")
         else:
             secondary = axis.twinx()
-            secondary.plot(x, [100 * row["miss_rate"] for row in rows], marker="s",
-                           linewidth=1.2, color="#c65911", label="Deadline-miss rate")
+            rates = [100 * row["miss_rate"] for row in rows]
+            nonzero = [rate for rate in rates if rate > 0]
+            floor = min(nonzero) / 10 if nonzero else 1e-12
+            plotted_rates = [rate if rate > 0 else floor for rate in rates]
+            secondary.plot(x, plotted_rates, marker="s", linewidth=1.2,
+                           color="#c65911", label="Deadline-miss rate")
+            zero_x = [value for value, rate in zip(x, rates, strict=True) if rate == 0]
+            if zero_x:
+                secondary.scatter(zero_x, [floor] * len(zero_x), marker="v",
+                                  facecolors="white", edgecolors="#c65911", zorder=3)
+            secondary.set_yscale("log")
             secondary.set_ylabel("Deadline-miss rate (%)")
+            handles, labels = axis.get_legend_handles_labels()
+            extra_handles, extra_labels = secondary.get_legend_handles_labels()
+            axis.legend(handles + extra_handles, labels + extra_labels, loc="best")
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
@@ -399,7 +422,13 @@ def main() -> None:
     write_csv(output / "table_results.csv", tables, list(tables[0]))
     write_csv(output / "noise_raw_runs.csv", raw, list(raw[0]))
     write_csv(output / "noise_summary.csv", summary, list(summary[0]))
-    render_figure(artifacts / "figures/ViT-noise-eval-local-ranges", summary)
+    vit_base = next(row for row in tables if row["model"] == "imagenet_vit_base")
+    render_figure(
+        artifacts / "figures/ViT-noise-eval-local-ranges",
+        summary,
+        dense_accuracy=vit_base["ann_metric"],
+        clean_spiking_accuracy=vit_base["snn_metric"],
+    )
     runtime_files.atomic_json(output / "summary.json", {
         "state": "complete", "table_models": len(tables), "noise_runs": len(raw),
         "noise_cells": len(summary), "source_commit": tables[0]["source_commit"],

@@ -13,6 +13,7 @@ from scripts.analysis.summarize_local_range_paper_campaign import (
     contains_legacy_range_key,
     expected_noise_cells,
     noise_summary,
+    render_figure,
     validate_calibration,
     validate_metric,
 )
@@ -106,6 +107,28 @@ def main() -> None:
     assert row["accuracy_ci95_low"] < row["accuracy_mean"] < row["accuracy_ci95_high"]
     assert math.isclose(row["miss_rate"], 6 / 300)
     assert math.isclose(row["saturation_rate"], 3 / 600)
+
+    figure_rows = [
+        {
+            "time_noise_std_fraction": fraction,
+            "deadline_margin_sigma_ratio": ratio,
+            "accuracy_mean": 0.9,
+            "accuracy_ci95_low": 0.89,
+            "accuracy_ci95_high": 0.91,
+            "miss_rate": 0.0 if ratio >= 8 else 1e-4,
+        }
+        for fraction, ratio in sorted(expected_noise_cells())
+    ]
+    with tempfile.TemporaryDirectory(prefix="local-range-figure-") as directory:
+        path = Path(directory) / "noise"
+        render_figure(
+            path,
+            figure_rows,
+            dense_accuracy=0.91,
+            clean_spiking_accuracy=0.90,
+        )
+        assert path.with_suffix(".pdf").stat().st_size > 0
+        assert path.with_suffix(".png").stat().st_size > 0
     print("Local-range paper summary verification passed")
 
 
