@@ -52,7 +52,12 @@ from utils.transformers.calibration import (
 )
 from utils.transformers.models.text_calibration import calibrate_text_potential
 from utils.transformers.calibration import calibration_uses_explicit_bounds
-from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear, _apply_norm
+from utils.transformers.models.spiking_ops import (
+    SpikingLayerNorm,
+    SpikingLinear,
+    _apply_dropout,
+    _apply_norm,
+)
 
 logger = logging.get_logger(__name__)
 
@@ -788,7 +793,7 @@ class BertForSequenceClassification(BertPreTrainedModel):
         self.num_labels = config.num_labels
         self.bert = BertModel(config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        self.classifier = SpikingLinear(config.hidden_size, config.num_labels)
         self.post_init()
 
     def forward(
@@ -809,8 +814,14 @@ class BertForSequenceClassification(BertPreTrainedModel):
             inputs_embeds=inputs_embeds,
         )
         pooled_output = outputs[1]
-        pooled_output = self.dropout(pooled_output)
-        logits = self.classifier(pooled_output)
+        # The operator-backed pooler ends in Tanh, whose analytic output range is
+        # independent of the realized batch. Preserve that range through dropout so
+        # the task projection never reconstructs bounds from logits or activations.
+        pooled_potential = _apply_dropout(
+            self.dropout,
+            Potential(pooled_output, PotentialBounds(-1.0, 1.0)),
+        )
+        logits = self.classifier(pooled_potential).value
         loss = None
         if labels is not None:
             if self.num_labels == 1:

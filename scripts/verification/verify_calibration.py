@@ -1894,7 +1894,11 @@ def verify_gpt2_fixed_range_flow() -> None:
         model_id="tiny-gpt2",
         max_sequence_length=4,
         input_shape=(4,),
-        model_options=(("text_calibration_policy_version", 1), ("use_spiking_mlp", True)),
+        model_options=(
+            ("operator_backed_output_head_version", 1),
+            ("text_calibration_policy_version", 2),
+            ("use_spiking_mlp", True),
+        ),
     )
     collector = create_calibration_collector(metadata, specs, bin_count=16)
     input_ids = torch.tensor([[1, 2, 3, 4], [4, 3, 2, 1]])

@@ -5,11 +5,12 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[domain]] — Potentials, bounds, TTFS encodings, scale parameters, and finite-window semantics.
 - [[operators]] — Primitive temporal integration and the composite Transformer operator vocabulary.
 - [[models]] — Hugging Face model-family adapters, checkpoint compatibility, and ablation controls.
+- [[output-heads]] — Output projection range flow, artifact identity, and verification.
 - [[decisions]] — Rationale and trade-offs behind the project’s major architectural choices.
 - [[noise]] — Gaussian event timing, fixed-deadline potential readout, calibrated ViT-B/16 evidence, and verification.
 - [[clock-driven]] — Explicit time-step TTFS simulation and fixed ImageNet-1k validation contract.
 - [[calibration]] — Deterministic layer-wise collection, immutable ranges, clipping accounting, and strict persistence.
-- [[vit-calibration-policy2]] — Maintained ViT Q/K/V and LayerNorm range-transfer contract, persistence, and completed evidence.
+- [[vit-calibration-policy2]] — Maintained ViT policy-3 Q/K/V, LayerNorm, output-head identity, and persistence contract.
 - [[text-calibration]] — Complete BERT, RoBERTa and GPT-2 range collection, held-out evaluation, and evaluator lifecycle.
 - [[evaluation]] — Experiment entry points, metrics, diagnostics, sweeps, and verification boundaries.
 - [[quick-family-checks]] — Small model comparisons and calibration requirements before language-model evaluation.

@@ -24,8 +24,17 @@ from utils.transforms.types import Potential, PotentialBounds
 
 def metadata(family="bert", **changes):
     base = _metadata(policy=None)
-    options = dict(base.model_options, text_calibration_policy_version=1)
-    return replace(base, model_family=family, **changes, model_options=tuple(options.items()))
+    options = dict(
+        base.model_options,
+        text_calibration_policy_version=2,
+        operator_backed_output_head_version=1,
+    )
+    return replace(
+        base,
+        model_family=family,
+        **changes,
+        model_options=tuple(sorted(options.items())),
+    )
 
 
 def runtime(meta, radius=60):
@@ -74,14 +83,16 @@ def verify_rejection_is_atomic():
     """Version, family, dtype and LayerNorm identity errors publish no bindings."""
     base = metadata()
     variants = [replace(base, model_family="vit"), replace(base, dtype="float32")]
-    for key, value in (("text_calibration_policy_version", 2),
+    for key, value in (("text_calibration_policy_version", 1),
+                       ("text_calibration_policy_version", 3),
                        ("text_calibration_policy_version", True),
                        ("vit_calibration_policy_version", 2),
+                       ("operator_backed_output_head_version", 2),
                        ("layer_norm_eps", 1e-5),
                        ("layer_norm_clip_margin", 1e-4)):
         options = dict(base.model_options)
         options[key] = value
-        variants.append(replace(base, model_options=tuple(options.items())))
+        variants.append(replace(base, model_options=tuple(sorted(options.items()))))
     for meta in variants:
         layer = _layer()
         try:

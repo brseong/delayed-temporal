@@ -85,7 +85,7 @@ def make_table(identity, site_specs, values):
     return finalize_calibration_collection(collector)
 
 
-# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#ViT Calibration Policy 2]]
+# @lat: [[calibration#Layer-wise Calibration#Frozen Execution#ViT Calibration Policy 3]]
 def verify_topology_and_ablations():
     """Discover real modules without loading checkpoint weights or using a GPU."""
     for depth, hidden, heads in ((12, 384, 6), (12, 768, 12), (24, 1024, 16)):
@@ -151,11 +151,17 @@ def verify_range_validation_and_identity():
     cfg = config()
     identity = metadata(cfg)
     options = dict(identity.model_options)
-    assert options["vit_calibration_policy_version"] == VIT_CALIBRATION_POLICY_VERSION == 2
+    assert options["vit_calibration_policy_version"] == VIT_CALIBRATION_POLICY_VERSION
+    assert options["operator_backed_output_head_version"] == 1
     assert options["output_bounds_version"] == 4
     assert options["layer_norm_eps"] == 1e-12
     assert options["layer_norm_clip_margin"] == identity.clip_margin == 1e-5
-    for name in ("vit_calibration_policy_version", "layer_norm_eps", "layer_norm_clip_margin"):
+    for name in (
+        "vit_calibration_policy_version",
+        "operator_backed_output_head_version",
+        "layer_norm_eps",
+        "layer_norm_clip_margin",
+    ):
         changed = tuple(option for option in identity.model_options if option[0] != name)
         _expect_raises(ValueError, lambda changed=changed: validate_calibration_metadata(
             replace(identity, model_options=changed), identity
@@ -182,12 +188,22 @@ def verify_range_validation_and_identity():
         assert not model_calibration_is_bound(norm)
         assert all(row.num_values == 0 for row in get_calibration_clipping_report(runtime))
 
-    for supplied in (1, 3, True):
+    for supplied in (1, 2, 4, True):
         bad_options = dict(identity.model_options, vit_calibration_policy_version=supplied)
         bad_identity = replace(identity, model_options=tuple(sorted(bad_options.items())))
         collector = create_calibration_collector(bad_identity, (spec,), bin_count=16)
         _expect_raises(ValueError, lambda: bind_model_calibration(model, collector), "vit_calibration_policy_version")
         assert not model_calibration_is_bound(norm)
+
+    bad_options = dict(identity.model_options, operator_backed_output_head_version=2)
+    bad_identity = replace(identity, model_options=tuple(sorted(bad_options.items())))
+    collector = create_calibration_collector(bad_identity, (spec,), bin_count=16)
+    _expect_raises(
+        ValueError,
+        lambda: bind_model_calibration(model, collector),
+        "operator-backed output head",
+    )
+    assert not model_calibration_is_bound(norm)
     legacy = replace(identity, model_options=tuple(
         option for option in identity.model_options if option[0] != "vit_calibration_policy_version"
     ))
@@ -306,7 +322,7 @@ def main():
                       verify_centered_collection_and_reuse, verify_model_two_pass_and_persistence):
             check()
             print(f"PASS {check.__name__}")
-    print("ViT calibration policy 2: four verification groups passed")
+    print("ViT calibration policy 3: four verification groups passed")
 
 
 if __name__ == "__main__":

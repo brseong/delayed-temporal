@@ -8,7 +8,7 @@ Experiment conditions and execution identities are defined in [[conversion-compa
 
 Data SOP counts an encoded value delivered to a destination; Global SOP counts encoder synchronization and scalar reference deliveries. These are assumed circuit operations, not Python instructions or measured GPU operations.
 
-[[scripts/analysis/vit_comparison_costs.py#estimate_vit_cost]] implements `vit_composed_sop_v1`. The older `scripts/verification/verify_sop.py` only verifies the internal arithmetic of the archived manuscript. It does not validate the new mapping.
+[[scripts/analysis/vit_comparison_costs.py#estimate_vit_cost]] implements `vit_composed_sop_v2`. The older `scripts/verification/verify_sop.py` only verifies the internal arithmetic of the archived manuscript. It does not validate the new mapping.
 
 The notation follows the archived Transformer description and SOP appendix: $N$ is sequence length including the class token, $D$ the embedding dimension, $H$ the MLP hidden dimension, $h$ the number of attention heads, $L$ the block count, $d_{in}$ the input patch dimension, and $C$ the class count. All costs below are for one image.
 
@@ -102,9 +102,9 @@ Only a complete, validated comparison bundle may fill the four Ours rows. Paper 
 
 `scripts/analysis/summarize_vit_comparison.py#verify_publication_bundle` checks all four calibration and eight evaluation records, their common identities, generated file hashes and reproducibility of CSV and LaTeX content. `scripts/analysis/publish_vit_comparison.py#prepare_paper_update` creates a proposed table and comparison-protocol update without writing the paper.
 
-The table caption must identify our CIFAR test 10k and ImageNet fixed validation 5k populations, preserve literature provenance, correct SpikeZIP quantization levels, and distinguish derived energy from measured energy. A comparison-specific paragraph records float64, training seed-0 5k calibration, min/max with 5% range margin, frozen local ranges and disabled noise. It also discloses the dense runtime classifier and assumed TTFS head in the estimate.
+The table caption must identify our CIFAR test 10k and ImageNet fixed validation 5k populations, preserve literature provenance, correct SpikeZIP quantization levels, and distinguish derived energy from measured energy. A comparison-specific paragraph records float64, training seed-0 5k calibration, min/max with 5% range margin, frozen local ranges and disabled noise. The classifier counted by the estimate is the same TTFS linear composition executed by evaluation.
 
-The ICLR appendix now derives affine projection, GELU, LayerNorm, multi-head self-attention, MLP, complete block, stem, final LayerNorm and assumed TTFS head costs under `vit_composed_sop_v1`. It distinguishes 196 image patches from 197 tokens and reports the exact SOP totals that generate the rounded table values. The comparison section links directly to this derivation.
+The ICLR appendix derives affine projection, GELU, LayerNorm, multi-head self-attention, MLP, complete block, stem, final LayerNorm and classification-head costs. `vit_composed_sop_v2` identifies the implementation in which evaluation and SOP accounting use the same final projection. It distinguishes 196 image patches from 197 tokens and reports the exact SOP totals that generate the rounded table values.
 
 The existing general experiment prose separately needs review: its calibration paragraph still describes the older uncalibrated noise run and 1,024-sample implementation default. Those statements must not be relabeled as the new comparison protocol. Other model families and noise-study descriptions are outside the automatic table patch.
 

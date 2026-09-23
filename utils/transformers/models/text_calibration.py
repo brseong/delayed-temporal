@@ -21,6 +21,7 @@ from utils.transforms.functions import GELU_OUTPUT_MIN, OUTPUT_BOUNDS_VERSION
 from utils.transforms.noise import get_gaussian_time_noise
 from utils.transforms.types import Potential, PotentialBounds
 from utils.transformers.calibration import (
+    OPERATOR_BACKED_OUTPUT_HEAD_VERSION,
     TEXT_CALIBRATION_POLICY_VERSION, bind_model_calibration,
     calibrated_potential, clear_model_calibration, model_calibration_is_bound,
     validate_symmetric_encoder_bounds,
@@ -186,6 +187,7 @@ def build_text_calibration_metadata(
     )
     options: dict[str, Any] = {
         "text_calibration_policy_version": TEXT_CALIBRATION_POLICY_VERSION,
+        "operator_backed_output_head_version": OPERATOR_BACKED_OUTPUT_HEAD_VERSION,
         "output_bounds_version": OUTPUT_BOUNDS_VERSION, "gelu_output_min": GELU_OUTPUT_MIN,
         "attention_implementation": attention_implementation,
         "hidden_act": str(getattr(config, "hidden_act", getattr(config, "activation_function", ""))),

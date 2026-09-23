@@ -192,7 +192,10 @@ def verify_summarizer(root: Path) -> None:
                  for index in range(runner.FAMILY_CONFIG[family]["sites"])]
         output.joinpath("calibration.json").write_text(json.dumps({
             "layers": sites, "metadata": {"dtype": "float64",
-                                             "model_options": [["text_calibration_policy_version", 1]]},
+                                             "model_options": [
+                                                 ["operator_backed_output_head_version", 1],
+                                                 ["text_calibration_policy_version", 2],
+                                             ]},
         }))
         phases = {}
         for phase in ("collect", "ann", "snn"):
@@ -215,7 +218,7 @@ def verify_summarizer(root: Path) -> None:
             "evaluation_dataset": {"fingerprint": "evaluation"},
             "calibration_samples": 5000,
             "evaluation_samples": runner.FAMILY_CONFIG[family]["evaluation_samples"],
-            "batch_size": 8, "range_contract": "operator_local_v1", "dtype": "float64",
+            "batch_size": 8, "range_contract": "operator_local_end_to_end_v1", "dtype": "float64",
         }))
         output.joinpath("result.json").write_text(json.dumps({
             "state": "complete", "family": family, "phases": phases,

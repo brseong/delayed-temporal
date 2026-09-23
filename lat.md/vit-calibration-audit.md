@@ -4,7 +4,7 @@
 
 ## Scope and Evidence
 
-2026-09-15의 초기 조사는 당시 비교 실험 source와 calibration 및 평가 로그를 대상으로 했다. 이후 policy 2가 Q/K/V와 centered LayerNorm 범위를 추가했으므로 아래의 누락 판정은 현재 구현 상태가 아니다.
+2026-09-15의 초기 조사는 당시 비교 실험 source와 calibration 및 평가 로그를 대상으로 했다. 이후 policy 2가 Q/K/V와 centered LayerNorm 범위를 추가했고, 현재 policy 3은 TTFS output head identity까지 요구하므로 아래의 누락 판정은 현재 구현 상태가 아니다.
 
 태그는 `vit_conversion_comparison_theta40_calibrated_float64_bounds3_v1`, 평가 source는 `2c0fbd3f6fd1d043ffc34295f891d4bccaa5113a`이다. 고정 checkout은 `/data/delayed-temporal-worktrees/vit-conversion-comparison`이며, 조사 시점 main의 연산·ViT adapter·calibration 구현도 이 source와 같았다. float64, theta 40, 모든 spiking LayerNorm 단계·attention·MLP 활성화, 잡음과 deadline margin 비활성화 조건을 확인했다.
 

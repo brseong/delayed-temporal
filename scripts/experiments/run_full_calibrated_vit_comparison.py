@@ -25,10 +25,14 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.runtime import files as runtime_files
 from scripts.runtime import identity
 from scripts.runtime import local_gpu
+from utils.transformers.calibration import (
+    OPERATOR_BACKED_OUTPUT_HEAD_VERSION,
+    VIT_CALIBRATION_POLICY_VERSION,
+)
 
 
 ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", "/data/delayed-temporal/artifacts"))
-TAG = "conversion_comparison_local_ranges_calibrated_float64_bounds4_v1"
+TAG = "conversion_comparison_end_to_end_local_ranges_float64_v1"
 MODEL_CONFIG = {
     "cifar10_vit_small": {"dataset_id": "cifar10", "split": "test", "samples": 10_000},
     "imagenet_vit_small": {"dataset_id": "imagenet-1k", "split": "validation", "samples": 5_000},
@@ -137,7 +141,12 @@ def calibration_sites(path: Path) -> set[str]:
     table = json.loads(path.read_text())
     metadata = table["metadata"]
     options = dict(metadata["model_options"])
-    if metadata["dtype"] != "float64" or options["vit_calibration_policy_version"] != 2:
+    if (
+        metadata["dtype"] != "float64"
+        or options.get("vit_calibration_policy_version") != VIT_CALIBRATION_POLICY_VERSION
+        or options.get("operator_backed_output_head_version")
+        != OPERATOR_BACKED_OUTPUT_HEAD_VERSION
+    ):
         raise ValueError("ViT calibration policy differs")
     if options["output_bounds_version"] != 4 or "theta" in metadata or "theta" in options:
         raise ValueError("calibration artifact contains a legacy global range")
@@ -246,7 +255,9 @@ def main() -> None:
         "checkpoint_path": str(args.model_id), "checkpoint_sha256": args.checkpoint_sha256,
         "calibration_dataset": calibration_dataset, "evaluation_dataset": evaluation_dataset,
         "evaluation_samples": config["samples"], "batch_size": args.batch_size,
-        "range_contract": "operator_local_v1", "vit_calibration_policy_version": 2,
+        "range_contract": "operator_local_end_to_end_v1",
+        "vit_calibration_policy_version": VIT_CALIBRATION_POLICY_VERSION,
+        "operator_backed_output_head_version": OPERATOR_BACKED_OUTPUT_HEAD_VERSION,
         "output_bounds_version": 4, "dtype": "float64", "noise": False,
         "host_label": args.host_label, "physical_gpu": args.gpu,
         "runtime_dir": str(runtime), "commands": commands,

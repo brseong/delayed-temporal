@@ -25,6 +25,11 @@ from scripts.experiments.run_full_calibrated_text_comparison import (
     ROBERTA_LARGE_TAG,
     TAG as TEXT_TAG,
 )
+from utils.transformers.calibration import (
+    OPERATOR_BACKED_OUTPUT_HEAD_VERSION,
+    TEXT_CALIBRATION_POLICY_VERSION,
+    VIT_CALIBRATION_POLICY_VERSION,
+)
 
 
 T_CRITICAL_DF2 = 4.302652729911275
@@ -106,10 +111,18 @@ def validate_calibration(
         raise ValueError(f"calibration identity or site population differs: {path}")
     if family == "vit" and (
         options.get("source_commit") != expected_source_commit
-        or options.get("vit_calibration_policy_version") != 2
+        or options.get("vit_calibration_policy_version")
+        != VIT_CALIBRATION_POLICY_VERSION
+        or options.get("operator_backed_output_head_version")
+        != OPERATOR_BACKED_OUTPUT_HEAD_VERSION
     ):
         raise ValueError(f"ViT calibration source or policy differs: {path}")
-    if family == "text" and options.get("text_calibration_policy_version") != 1:
+    if family == "text" and (
+        options.get("text_calibration_policy_version")
+        != TEXT_CALIBRATION_POLICY_VERSION
+        or options.get("operator_backed_output_head_version")
+        != OPERATOR_BACKED_OUTPUT_HEAD_VERSION
+    ):
         raise ValueError(f"text calibration policy differs: {path}")
 
 
@@ -122,7 +135,7 @@ def validate_pipeline(
     family: str,
 ) -> None:
     if (
-        manifest.get("range_contract") != "operator_local_v1"
+        manifest.get("range_contract") != "operator_local_end_to_end_v1"
         or manifest.get("output_bounds_version") != 4
         or manifest.get("dtype") != "float64"
         or manifest.get("noise") is not False
@@ -290,7 +303,7 @@ def noise_rows(
             metric["total"] != 5_000
             or manifest["run_id"] != root.name
             or result.get("run_id") != root.name
-            or manifest.get("range_contract") != "operator_local_v1"
+            or manifest.get("range_contract") != "operator_local_end_to_end_v1"
             or manifest.get("timing_noise_contract") != "local_encoder_window_fraction_v1"
             or manifest.get("dtype") != "float64"
             or contains_legacy_range_key(manifest)
@@ -444,7 +457,7 @@ def main() -> None:
     parser.add_argument("--noise-calibration-source", type=Path)
     args = parser.parse_args()
     artifacts = args.artifacts_root.resolve(strict=True)
-    output = artifacts / "results/paper_local_range_poseidon_v1"
+    output = artifacts / "results/paper_end_to_end_local_range_poseidon_v1"
     tables = table_rows(artifacts)
     reference_root, reference_result, reference_manifest = noise_reference(
         artifacts, args.noise_calibration_source,
@@ -469,7 +482,7 @@ def main() -> None:
     reference_ann = reference_result["phases"]["ann"]["metrics"]["accuracy"]
     reference_snn = reference_result["phases"]["snn"]["metrics"]["accuracy"]
     render_figure(
-        artifacts / "figures/ViT-noise-eval-local-ranges",
+        artifacts / "figures/ViT-noise-eval-end-to-end",
         summary,
         dense_accuracy=reference_ann,
         clean_spiking_accuracy=reference_snn,

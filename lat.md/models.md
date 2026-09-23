@@ -4,9 +4,9 @@ The model layer adapts pretrained Hugging Face architectures so their Transforme
 
 ## Shared State Carrier
 
-Transformer blocks use `Potential(value, domain)` internally and unwrap the tensor at framework-facing boundaries.
+Transformer blocks use `Potential(value, domain)` internally and unwrap tensor values only after the final learned projection.
 
-Embeddings initialize the carrier, spiking projections and residuals propagate or combine its bounds, and task heads consume the final `.value`. Shared layers are defined by [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm]], [[utils/transformers/models/spiking_ops.py#SpikingLinear]], and [[utils/transformers/models/spiking_ops.py#SpikingConv2d]].
+Embeddings initialize the carrier, spiking projections and residuals propagate or combine its bounds, and task heads consume the final `Potential`. Shared layers are defined by [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm]], [[utils/transformers/models/spiking_ops.py#SpikingLinear]], and [[utils/transformers/models/spiking_ops.py#SpikingConv2d]].
 
 This wrapper avoids changing pretrained parameter storage and Hugging Face output types. It also makes domain metadata explicit enough for operator composition and clamp analysis.
 
@@ -14,7 +14,7 @@ This wrapper avoids changing pretrained parameter storage and Hugging Face outpu
 
 Spiking projection classes subclass or mirror the dense modules they replace so pretrained state dictionaries load without a conversion-training stage.
 
-The project reconstructs model families with familiar module names and parameter shapes, then invokes `from_pretrained` on the local class. Embedding layers, classifier or language-model heads, dropout, and output dataclasses remain conventional unless a model adapter explicitly replaces them.
+The project reconstructs model families with familiar module names and parameter shapes, then invokes `from_pretrained` on the local class. Embedding lookup, dropout, losses, and output dataclasses retain their framework roles; every learned affine output projection in the maintained wrappers uses the TTFS linear composition.
 
 Compatibility here means parameter-layout and API compatibility. It does not imply that every finite-domain spiking forward is numerically identical to the source ANN under clipping, approximate activations, or noise.
 
@@ -26,7 +26,7 @@ The current adapters cover image classification, encoder text classification, an
 
 The ViT path is the most complete operator composition and robustness target.
 
-[[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTModel]] retains standard patch and position embeddings, runs a `Potential` through a stack of spiking-aware blocks, applies configurable final normalization, and returns a Hugging Face-compatible output. [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTForImageClassification]] keeps the final classifier conventional.
+[[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTModel]] retains patch and position embeddings, runs a `Potential` through a stack of spiking-aware blocks, applies configurable final normalization, and returns a Hugging Face-compatible output. [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTForImageClassification]] passes the class-token `Potential` to a final [[utils/transformers/models/spiking_ops.py#SpikingLinear]] classifier.
 
 When ViT selects the spiking attention backend, [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTSelfAttention#forward]] derives $S_{\max}$ from the configured patch grid plus the class token and attaches the memoized fixed attention-output range. Eager attention retains the projected-value range.
 
@@ -46,7 +46,7 @@ Both adapters support accuracy experiments on SST-2, AG News, and IMDB through p
 
 GPT-2 adapts causal self-attention, cache-aware decoding, pre-norm blocks, and the Hugging Face `Conv1D` projection layout.
 
-[[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Model]] wraps token-plus-position embeddings, propagates a bounded potential through causal blocks, and returns standard cache-aware outputs. [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2LMHeadModel]] retains the tied conventional language-model head.
+[[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Model]] wraps token-plus-position embeddings, propagates a bounded potential through causal blocks, and returns standard cache-aware outputs. [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2LMHeadModel]] preserves the tied input/output weight while its final [[utils/transformers/models/spiking_ops.py#SpikingLinear]] consumes the encoder `Potential`.
 
 [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#GPT2Attention#forward]] uses local Q/K/V projection bounds and `max_position_embeddings` for the score representability ceiling. Eager attention and residual dropout propagate analytic ranges without runtime extrema; nonzero spiking attention training dropout remains outside the paper scope.
 
@@ -78,8 +78,8 @@ The four maintained configs reject `theta`; GPT-2 also rejects `attention_theta`
 
 ViT additionally distinguishes an operator-composed cubic GELU from a direct evaluation of the same tanh formula. Experiments must log the full flag set because several configurations can all be described informally as a “spiking model” while executing different arithmetic.
 
-## Conventional Boundaries
+## Framework Boundaries
 
-The project deliberately keeps dataset preprocessing, embeddings, losses, output containers, and most task heads within standard PyTorch and Hugging Face conventions.
+The project keeps dataset preprocessing, embedding lookup, losses, tensor indexing or rearrangement, and output containers within standard PyTorch and Hugging Face conventions.
 
-This narrows the research question to Transformer operator replacement and permits direct loading of pretrained models. Reported system costs must therefore state whether these conventional boundaries are included; an operator-only count is not an end-to-end hardware estimate.
+Learned patch projection, affine Transformer operations, normalization, and every maintained output projection use TTFS compositions. Reported costs must still state which input construction, loss, and control operations are excluded; an operator count is not a measured end-to-end hardware cost.

@@ -50,9 +50,9 @@ Maintained production paths no longer derive ranges from observed activation min
 
 Operator-backed layers preserve dense module parameter shapes and task-model interfaces to evaluate conversion without retraining the original network.
 
-This supports direct ANN-versus-spiking comparison using the same checkpoints and datasets. Conventional embeddings and task heads also isolate the effect of replaced Transformer internals.
+This supports direct ANN-versus-spiking comparison using the same checkpoints and datasets. Embedding lookup remains input construction, while every learned affine operation through the output head uses the maintained TTFS composition.
 
-The cost is a mixed system boundary. Neither task accuracy nor an operator count alone establishes a fully spiking end-to-end implementation; see [[models#Conventional Boundaries]].
+Dataset preprocessing, embedding lookup, losses, and public framework outputs remain outside the converted arithmetic. Neither task accuracy nor an operator count alone establishes a measured hardware implementation; see [[models#Framework Boundaries]].
 
 ## Explicit Finite Domains and Clamping
 

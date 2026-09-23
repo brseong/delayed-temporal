@@ -88,7 +88,7 @@ The checkpoint is `/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k`; all ru
 | Retired tail-trim calibration | 59.26% | 1,024 training images, 2,048 bins, 0.001/0.999 quantiles, 5% margin |
 | Retired calibration + Gaussian | 59.26% | $r_t=3.162\times10^{-10}$, $\sigma_t=1.2648\times10^{-6}$, seed 0 |
 
-The analytic run reports zero excursions for the input embedding convolution, affine input rails, attention scores, attention value outputs, LayerNorm variance, and the new $\sqrt d$ normalized LayerNorm rail across all 5,000 images. Inactive LayerNorm dual rails clamped to `clip_margin` and the product primitive's structural reset rail are bookkeeping, not failures of those ideal output rails. The conventional classifier has no TTFS rail and is assessed by task accuracy.
+The analytic run reports zero excursions for the input embedding convolution, affine input ranges, attention scores, attention value outputs, LayerNorm variance, and the new $\sqrt d$ normalized LayerNorm range across all 5,000 images. Inactive LayerNorm dual paths clamped to `clip_margin` and the product primitive's structural reset path are bookkeeping, not failures of those ideal ranges. This historical run used the former conventional classifier and is not evidence for the maintained complete output head path.
 
 The retired tail-trim artifact is the observed accuracy bottleneck. Its largest single rate is layer-10 attention-score overflow at 0.158845%; layer-0 output underflow is 0.114174%, and encoder-input underflow/overflow are 0.0577443%/0.0628810%. These individually small clamps compound to a 21.28-point loss relative to the analytic spiking run, so this artifact is diagnostic and must not be treated as the maintained accuracy baseline.
 

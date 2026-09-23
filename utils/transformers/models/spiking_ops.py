@@ -1558,6 +1558,39 @@ def _apply_norm(norm: nn.Module, pot: Potential) -> Potential:
     return Potential(out, output_domain)
 
 
+def _apply_dropout(dropout: nn.Dropout, pot: Potential) -> Potential:
+    """Apply dropout without discarding the input's fixed potential range.
+
+    Evaluation dropout is the identity.  During training, PyTorch either resets a
+    value to zero or scales it by the inverse keep probability, so the propagated
+    interval includes zero and the two scaled endpoints.  No sampled mask or live
+    activation extremum participates in the range calculation.
+
+    Args:
+        dropout: PyTorch dropout module applied to the carried tensor.
+        pot: Input tensor paired with its declared fixed bounds.
+
+    Returns:
+        The dropout result paired with an analytic interval for the configured
+        training/evaluation mode.
+    """
+    if not isinstance(dropout, nn.Dropout):
+        raise TypeError("_apply_dropout requires torch.nn.Dropout")
+    probability = float(dropout.p)
+    if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+        raise ValueError("dropout probability must lie in [0, 1]")
+
+    value = dropout(pot.value)
+    if not dropout.training or probability == 0.0:
+        return Potential(value, pot.domain)
+    if probability == 1.0:
+        return Potential(value, PotentialBounds(0.0, 0.0))
+
+    scale = 1.0 / (1.0 - probability)
+    candidates = (0.0, float(pot.domain.min) * scale, float(pot.domain.max) * scale)
+    return Potential(value, PotentialBounds(min(candidates), max(candidates)))
+
+
 if __name__ == "__main__":
     import torch
     from torch import nn

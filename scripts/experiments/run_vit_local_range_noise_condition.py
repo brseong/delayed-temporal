@@ -32,7 +32,7 @@ from scripts.experiments.run_full_calibrated_vit_comparison import (
 
 
 ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", "/data/delayed-temporal/artifacts"))
-TAG = "vit_base_local_range_timing_noise_float64_v1"
+TAG = "vit_base_end_to_end_local_range_timing_noise_float64_v1"
 
 
 def canonical(value: Any) -> str:
@@ -177,7 +177,8 @@ def main() -> None:
         "calibration_dataset_fingerprint": args.calibration_dataset_fingerprint,
         "time_noise_std_fraction": args.time_noise_std_frac,
         "deadline_margin_sigma_ratio": args.deadline_margin_ratio,
-        "seed": args.seed, "dtype": "float64", "range_contract": "operator_local_v1",
+        "seed": args.seed, "dtype": "float64",
+        "range_contract": "operator_local_end_to_end_v1",
         "timing_noise_contract": "local_encoder_window_fraction_v1",
         "physical_gpu": args.gpu, "runtime_dir": str(runtime), "command": command,
     }

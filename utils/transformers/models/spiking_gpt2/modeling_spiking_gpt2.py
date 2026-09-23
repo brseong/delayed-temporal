@@ -23,7 +23,7 @@ from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 from transformers import initialization as init
-from transformers.activations import ACT2FN, get_activation
+from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache, EncoderDecoderCache
 from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_bidirectional_mask, create_causal_mask
@@ -52,6 +52,7 @@ from utils.transforms.functions import (
     clamp_gelu_output,
     clamp_swish_output,
     gelu_approximation,
+    tanh,
 )
 from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_noise
 from utils.transforms.types import Potential, PotentialBounds, SpikeSample
@@ -63,6 +64,7 @@ from utils.transformers.calibration import (
 from utils.transformers.models.spiking_ops import (
     SpikingLayerNorm,
     SpikingLinear,
+    _apply_dropout,
     _apply_norm,
     _validate_pwm_input_domain,
 )
@@ -946,21 +948,20 @@ class GPT2SequenceSummary(nn.Module):
                 num_classes = config.num_labels
             else:
                 num_classes = config.hidden_size
-            self.summary = nn.Linear(config.hidden_size, num_classes)
+            self.summary = SpikingLinear(config.hidden_size, num_classes)
 
         activation_string = getattr(config, "summary_activation", None)
-        self.activation: Callable = get_activation(activation_string) if activation_string else nn.Identity()
+        if activation_string not in (None, "tanh"):
+            raise ValueError("operator-backed GPT-2 sequence summary supports tanh only")
+        self.activation_name = activation_string
+        self.tau_s = getattr(config, "tau_s", 1.0)
 
-        self.first_dropout = nn.Identity()
-        if hasattr(config, "summary_first_dropout") and config.summary_first_dropout > 0:
-            self.first_dropout = nn.Dropout(config.summary_first_dropout)
+        self.first_dropout = nn.Dropout(float(getattr(config, "summary_first_dropout", 0.0)))
 
-        self.last_dropout = nn.Identity()
-        if hasattr(config, "summary_last_dropout") and config.summary_last_dropout > 0:
-            self.last_dropout = nn.Dropout(config.summary_last_dropout)
+        self.last_dropout = nn.Dropout(float(getattr(config, "summary_last_dropout", 0.0)))
 
     def forward(
-        self, hidden_states: torch.FloatTensor, cls_index: torch.LongTensor | None = None
+        self, hidden_states: Potential, cls_index: torch.LongTensor | None = None
     ) -> torch.FloatTensor:
         """
         Compute a single vector summary of a sequence hidden states.
@@ -974,33 +975,44 @@ class GPT2SequenceSummary(nn.Module):
         Returns:
             `torch.FloatTensor`: The summary of the sequence hidden states.
         """
+        if not isinstance(hidden_states, Potential):
+            raise TypeError("operator-backed GPT-2 sequence summary requires Potential input")
+        values = hidden_states.value
         if self.summary_type == "last":
-            output = hidden_states[:, -1]
+            output = values[:, -1]
         elif self.summary_type == "first":
-            output = hidden_states[:, 0]
+            output = values[:, 0]
         elif self.summary_type == "mean":
-            output = hidden_states.mean(dim=1)
+            output = values.mean(dim=1)
         elif self.summary_type == "cls_index":
             if cls_index is None:
                 cls_index = torch.full_like(
-                    hidden_states[..., :1, :],
-                    hidden_states.shape[-2] - 1,
+                    values[..., :1, :],
+                    values.shape[-2] - 1,
                     dtype=torch.long,
                 )
             else:
                 cls_index = cls_index.unsqueeze(-1).unsqueeze(-1)
-                cls_index = cls_index.expand((-1,) * (cls_index.dim() - 1) + (hidden_states.size(-1),))
+                cls_index = cls_index.expand((-1,) * (cls_index.dim() - 1) + (values.size(-1),))
             # shape of cls_index: (bsz, XX, 1, hidden_size) where XX are optional leading dim of hidden_states
-            output = hidden_states.gather(-2, cls_index).squeeze(-2)  # shape (bsz, XX, hidden_size)
+            output = values.gather(-2, cls_index).squeeze(-2)  # shape (bsz, XX, hidden_size)
         elif self.summary_type == "attn":
             raise NotImplementedError
 
-        output = self.first_dropout(output)
-        output = self.summary(output)
-        output = self.activation(output)
-        output = self.last_dropout(output)
-
-        return output
+        potential = _apply_dropout(
+            self.first_dropout,
+            Potential(output, hidden_states.domain),
+        )
+        if isinstance(self.summary, SpikingLinear):
+            potential = self.summary(potential)
+        if self.activation_name == "tanh":
+            value, domain = tanh(
+                potential.value,
+                potential.domain,
+                tau_s=self.tau_s,
+            )
+            potential = Potential(value, domain)
+        return _apply_dropout(self.last_dropout, potential).value
 
 
 @auto_docstring
@@ -1210,6 +1222,7 @@ class GPT2Model(GPT2PreTrainedModel):
         encoder_hidden_states: torch.Tensor | None = None,
         encoder_attention_mask: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
+        return_potential: bool = False,
         **kwargs,
     ) -> BaseModelOutputWithPastAndCrossAttentions:
         r"""
@@ -1388,13 +1401,17 @@ class GPT2Model(GPT2PreTrainedModel):
 
         pot = _apply_norm(self.ln_f, pot)
 
-        hidden_states = pot.value.view(output_shape)
+        pot = Potential(pot.value.view(output_shape), pot.domain)
+        hidden_states = pot.value
 
         past_key_values = past_key_values if use_cache else None
-        return BaseModelOutputWithPastAndCrossAttentions(
+        output = BaseModelOutputWithPastAndCrossAttentions(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
         )
+        if not isinstance(return_potential, bool):
+            raise TypeError("return_potential must be a bool")
+        return (output, pot) if return_potential else output
 
 
 @auto_docstring(
@@ -1409,10 +1426,18 @@ class GPT2LMHeadModel(GPT2PreTrainedModel, GenerationMixin):
     def __init__(self, config):
         super().__init__(config)
         self.transformer = GPT2Model(config)
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = SpikingLinear(config.n_embd, config.vocab_size, bias=False)
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        if not isinstance(new_embeddings, SpikingLinear):
+            raise TypeError("GPT-2 output embeddings must use SpikingLinear")
+        self.lm_head = new_embeddings
 
     @can_return_tuple
     @auto_docstring
@@ -1450,7 +1475,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel, GenerationMixin):
             `labels = input_ids` Indices are selected in `[-100, 0, ..., config.vocab_size]` All labels set to `-100`
             are ignored (masked), the loss is only computed for labels in `[0, ..., config.vocab_size]`
         """
-        transformer_outputs: BaseModelOutputWithPastAndCrossAttentions = self.transformer(
+        transformer_outputs, final_potential = self.transformer(
             input_ids,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
@@ -1461,12 +1486,15 @@ class GPT2LMHeadModel(GPT2PreTrainedModel, GenerationMixin):
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_attention_mask,
             use_cache=use_cache,
+            return_potential=True,
             **kwargs,
         )
-        hidden_states = transformer_outputs.last_hidden_state
 
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
+        logits = self.lm_head(Potential(
+            final_potential.value[:, slice_indices, :],
+            final_potential.domain,
+        )).value
 
         loss = None
         if labels is not None:
@@ -1503,11 +1531,19 @@ class GPT2DoubleHeadsModel(GPT2PreTrainedModel, GenerationMixin):
         super().__init__(config)
         config.num_labels = 1
         self.transformer = GPT2Model(config)
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = SpikingLinear(config.n_embd, config.vocab_size, bias=False)
         self.multiple_choice_head = GPT2SequenceSummary(config)
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        if not isinstance(new_embeddings, SpikingLinear):
+            raise TypeError("GPT-2 output embeddings must use SpikingLinear")
+        self.lm_head = new_embeddings
 
     @can_return_tuple
     @auto_docstring
@@ -1575,7 +1611,7 @@ class GPT2DoubleHeadsModel(GPT2PreTrainedModel, GenerationMixin):
         >>> lm_logits = outputs.logits
         >>> mc_logits = outputs.mc_logits
         ```"""
-        transformer_outputs: BaseModelOutputWithPastAndCrossAttentions = self.transformer(
+        transformer_outputs, final_potential = self.transformer(
             input_ids,
             past_key_values=past_key_values,
             cache_position=cache_position,
@@ -1584,13 +1620,12 @@ class GPT2DoubleHeadsModel(GPT2PreTrainedModel, GenerationMixin):
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
+            return_potential=True,
             **kwargs,
         )
 
-        hidden_states = transformer_outputs.last_hidden_state
-
-        lm_logits = self.lm_head(hidden_states)
-        mc_logits = self.multiple_choice_head(hidden_states, mc_token_ids).squeeze(-1)
+        lm_logits = self.lm_head(final_potential).value
+        mc_logits = self.multiple_choice_head(final_potential, mc_token_ids).squeeze(-1)
 
         mc_loss = None
         if mc_labels is not None:
@@ -1634,7 +1669,7 @@ class GPT2ForSequenceClassification(GPT2PreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.transformer = GPT2Model(config)
-        self.score = nn.Linear(config.n_embd, self.num_labels, bias=False)
+        self.score = SpikingLinear(config.n_embd, self.num_labels, bias=False)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1671,7 +1706,7 @@ class GPT2ForSequenceClassification(GPT2PreTrainedModel):
             config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
             `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
-        transformer_outputs: BaseModelOutputWithPastAndCrossAttentions = self.transformer(
+        transformer_outputs, final_potential = self.transformer(
             input_ids,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
@@ -1679,10 +1714,10 @@ class GPT2ForSequenceClassification(GPT2PreTrainedModel):
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
+            return_potential=True,
             **kwargs,
         )
-        hidden_states = transformer_outputs.last_hidden_state
-        logits = self.score(hidden_states)
+        logits = self.score(final_potential).value
 
         if input_ids is not None:
             batch_size, sequence_length = input_ids.shape[:2]
@@ -1752,7 +1787,7 @@ class GPT2ForTokenClassification(GPT2PreTrainedModel):
         else:
             classifier_dropout = 0.1
         self.dropout = nn.Dropout(classifier_dropout)
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        self.classifier = SpikingLinear(config.hidden_size, config.num_labels)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1789,7 +1824,7 @@ class GPT2ForTokenClassification(GPT2PreTrainedModel):
             config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
             `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
-        transformer_outputs: BaseModelOutputWithPastAndCrossAttentions = self.transformer(
+        transformer_outputs, final_potential = self.transformer(
             input_ids,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
@@ -1797,12 +1832,13 @@ class GPT2ForTokenClassification(GPT2PreTrainedModel):
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
+            return_potential=True,
             **kwargs,
         )
 
-        hidden_states = transformer_outputs.last_hidden_state
-        hidden_states = self.dropout(hidden_states)
-        logits = self.classifier(hidden_states)
+        logits = self.classifier(
+            _apply_dropout(self.dropout, final_potential)
+        ).value
 
         loss = None
         if labels is not None:
@@ -1824,7 +1860,7 @@ class GPT2ForQuestionAnswering(GPT2PreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.transformer = GPT2Model(config)
-        self.qa_outputs = nn.Linear(config.hidden_size, 2)
+        self.qa_outputs = SpikingLinear(config.hidden_size, 2)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1856,18 +1892,16 @@ class GPT2ForQuestionAnswering(GPT2PreTrainedModel):
 
             [What are input IDs?](../glossary#input-ids)
         """
-        outputs: BaseModelOutputWithPastAndCrossAttentions = self.transformer(
+        outputs, final_potential = self.transformer(
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
+            return_potential=True,
             **kwargs,
         )
-
-        sequence_output = outputs.last_hidden_state
-
-        logits = self.qa_outputs(sequence_output)
+        logits = self.qa_outputs(final_potential).value
         start_logits, end_logits = logits.split(1, dim=-1)
         start_logits = start_logits.squeeze(-1).contiguous()
         end_logits = end_logits.squeeze(-1).contiguous()

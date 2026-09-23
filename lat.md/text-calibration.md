@@ -4,7 +4,7 @@ BERT, RoBERTa and GPT-2 collect fixed training ranges and consume the same range
 
 ## Shared Range Binding
 
-Text tables use their actual model family and `text_calibration_policy_version=1`. They retain output bound policy 3; ViT policy 2 remains a separate contract.
+Text tables use their actual model family and `text_calibration_policy_version=2`. They retain output bound policy 3, require output head contract version 1, and remain separate from ViT policy 3.
 
 [[utils/transformers/calibration.py#calibration_uses_explicit_bounds]] enables selected ranges without treating text models as ViT. [[utils/transformers/calibration.py#bind_model_calibration]] validates all selected text ranges, execution dtype, LayerNorm epsilon and positive floor before publishing any bindings. Zero, asymmetric, nonfinite or numerically unrepresentable ranges fail with the site identity.
 

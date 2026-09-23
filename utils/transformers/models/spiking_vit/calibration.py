@@ -23,6 +23,7 @@ from utils.transforms.functions import GELU_OUTPUT_MIN, OUTPUT_BOUNDS_VERSION
 from utils.transforms.noise import get_gaussian_time_noise
 from utils.transforms.types import PotentialBounds
 from utils.transformers.calibration import (
+    OPERATOR_BACKED_OUTPUT_HEAD_VERSION,
     VIT_CALIBRATION_POLICY_VERSION,
     bind_model_calibration,
     clear_model_calibration,
@@ -573,6 +574,10 @@ def build_vit_calibration_metadata(
                 ("attention_implementation", attention_implementation),
                 ("gelu_output_min", GELU_OUTPUT_MIN),
                 ("output_bounds_version", OUTPUT_BOUNDS_VERSION),
+                (
+                    "operator_backed_output_head_version",
+                    OPERATOR_BACKED_OUTPUT_HEAD_VERSION,
+                ),
                 ("hidden_act", str(getattr(config, "hidden_act", ""))),
                 ("layer_norm_eps", float(config.layer_norm_eps)),
                 ("layer_norm_clip_margin", float(getattr(config, "clip_margin", 1.0e-5))),

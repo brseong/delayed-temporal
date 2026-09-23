@@ -8,7 +8,12 @@ from argparse import Namespace
 import json
 import math
 from pathlib import Path
+import sys
 import tempfile
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from scripts.analysis.summarize_local_range_paper_campaign import (
     contains_legacy_range_key,
@@ -41,7 +46,8 @@ def main() -> None:
             "model_options": [
                 ["source_commit", source_commit],
                 ["output_bounds_version", 4],
-                ["vit_calibration_policy_version", 2],
+                ["vit_calibration_policy_version", 3],
+                ["operator_backed_output_head_version", 1],
             ],
         },
         "layers": [
@@ -82,7 +88,8 @@ def main() -> None:
                 **table["metadata"],
                 "model_options": [
                     ["output_bounds_version", 4],
-                    ["text_calibration_policy_version", 1],
+                    ["text_calibration_policy_version", 2],
+                    ["operator_backed_output_head_version", 1],
                 ],
             },
         }

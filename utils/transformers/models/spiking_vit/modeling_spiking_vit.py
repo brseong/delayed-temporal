@@ -44,6 +44,7 @@ from utils.transforms.functions import (
     clamp_gelu_output,
     clamp_swish_output,
     gelu_approximation,
+    tanh,
 )
 from utils.transforms.types import Potential, PotentialBounds
 from utils.transformers.calibration import (
@@ -51,7 +52,12 @@ from utils.transformers.calibration import (
     model_calibration_is_bound,
     validate_symmetric_encoder_bounds,
 )
-from utils.transformers.models.spiking_ops import SpikingConv2d, SpikingLayerNorm, SpikingLinear, _apply_norm
+from utils.transformers.models.spiking_ops import (
+    SpikingConv2d,
+    SpikingLayerNorm,
+    SpikingLinear,
+    _apply_norm,
+)
 
 
 class ViTEmbeddings(nn.Module):
@@ -845,6 +851,7 @@ class ViTModel(ViTPreTrainedModel):
         pixel_values: Optional[torch.Tensor] = None,
         bool_masked_pos: Optional[torch.BoolTensor] = None,
         interpolate_pos_encoding: Optional[bool] = None,
+        return_potential: bool = False,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPooling:
         r"""
@@ -867,23 +874,36 @@ class ViTModel(ViTPreTrainedModel):
         pot: Potential = self.encoder(embedding_output)   # 도메인 전파
         pot = _apply_norm(self.layernorm, pot)
         sequence_output = pot.value
-        pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
+        pooled_output = self.pooler(pot) if self.pooler is not None else None
 
-        return BaseModelOutputWithPooling(last_hidden_state=sequence_output, pooler_output=pooled_output)
+        output = BaseModelOutputWithPooling(
+            last_hidden_state=sequence_output,
+            pooler_output=pooled_output,
+        )
+        if not isinstance(return_potential, bool):
+            raise TypeError("return_potential must be a bool")
+        return (output, pot) if return_potential else output
 
 
 class ViTPooler(nn.Module):
     def __init__(self, config: ViTConfig):
         super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.pooler_output_size)
-        self.activation = ACT2FN[config.pooler_act]
+        if config.pooler_act != "tanh":
+            raise ValueError("operator-backed ViT pooler supports tanh only")
+        self.dense = SpikingLinear(config.hidden_size, config.pooler_output_size)
+        self.tau_s = getattr(config, "tau_s", 1.0)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # We "pool" the model by simply taking the hidden state corresponding
-        # to the first token.
-        first_token_tensor = hidden_states[:, 0]
-        pooled_output = self.dense(first_token_tensor)
-        pooled_output = self.activation(pooled_output)
+    def forward(self, hidden_states: Potential) -> torch.Tensor:
+        """Pool the first token without dropping its declared range."""
+        if not isinstance(hidden_states, Potential):
+            raise TypeError("operator-backed ViT pooler requires Potential input")
+        first_token = Potential(hidden_states.value[:, 0], hidden_states.domain)
+        projected = self.dense(first_token)
+        pooled_output, _ = tanh(
+            projected.value,
+            projected.domain,
+            tau_s=self.tau_s,
+        )
         return pooled_output
 
 
@@ -906,7 +926,7 @@ class ViTForMaskedImageModeling(ViTPreTrainedModel):
         self.vit = ViTModel(config, add_pooling_layer=False, use_mask_token=True)
 
         self.decoder = nn.Sequential(
-            nn.Conv2d(
+            SpikingConv2d(
                 in_channels=config.hidden_size,
                 out_channels=config.encoder_stride**2 * config.num_channels,
                 kernel_size=1,
@@ -961,23 +981,26 @@ class ViTForMaskedImageModeling(ViTPreTrainedModel):
                 f"Got `patch_size` = {self.config.patch_size} and `encoder_stride` = {self.config.encoder_stride}."
             )
 
-        outputs: BaseModelOutputWithPooling = self.vit(
+        outputs, sequence_potential = self.vit(
             pixel_values,
             bool_masked_pos=bool_masked_pos,
             interpolate_pos_encoding=interpolate_pos_encoding,
+            return_potential=True,
             **kwargs,
         )
 
-        sequence_output = outputs.last_hidden_state
-
         # Reshape to (batch_size, num_channels, height, width)
-        sequence_output = sequence_output[:, 1:]
+        sequence_output = sequence_potential.value[:, 1:]
         batch_size, sequence_length, num_channels = sequence_output.shape
         height = width = math.floor(sequence_length**0.5)
         sequence_output = sequence_output.permute(0, 2, 1).reshape(batch_size, num_channels, height, width)
 
-        # Reconstruct pixel values
-        reconstructed_pixel_values = self.decoder(sequence_output)
+        # Reconstruct pixels with an operator-backed 1x1 projection. PixelShuffle
+        # only rearranges entries and therefore preserves the projection range.
+        decoded = self.decoder[0](
+            Potential(sequence_output, sequence_potential.domain)
+        )
+        reconstructed_pixel_values = self.decoder[1](decoded.value)
 
         masked_im_loss = None
         if bool_masked_pos is not None:
@@ -1022,7 +1045,11 @@ class ViTForImageClassification(ViTPreTrainedModel):
         self.vit = ViTModel(config, add_pooling_layer=False)
 
         # Classifier head
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels) if config.num_labels > 0 else nn.Identity()
+        self.classifier = (
+            SpikingLinear(config.hidden_size, config.num_labels)
+            if config.num_labels > 0
+            else nn.Identity()
+        )
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1043,15 +1070,21 @@ class ViTForImageClassification(ViTPreTrainedModel):
             `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
 
-        outputs: BaseModelOutputWithPooling = self.vit(
+        outputs, sequence_potential = self.vit(
             pixel_values,
             interpolate_pos_encoding=interpolate_pos_encoding,
+            return_potential=True,
             **kwargs,
         )
 
-        sequence_output = outputs.last_hidden_state
-        pooled_output = sequence_output[:, 0, :]
-        logits = self.classifier(pooled_output)
+        pooled_potential = Potential(
+            sequence_potential.value[:, 0, :],
+            sequence_potential.domain,
+        )
+        if isinstance(self.classifier, SpikingLinear):
+            logits = self.classifier(pooled_potential).value
+        else:
+            logits = self.classifier(pooled_potential.value)
 
         loss = None
         if labels is not None:

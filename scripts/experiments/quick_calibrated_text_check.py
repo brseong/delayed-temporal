@@ -103,8 +103,12 @@ def calibration_sites(path: Path) -> tuple[dict[str, Any], set[str]]:
     preprocessing = json.loads(metadata["preprocessing"])
     if preprocessing["subset_samples"] != SAMPLES or metadata["dtype"] != "float64":
         raise ValueError("calibration sample count or dtype differs from the pilot")
-    if dict(metadata["model_options"])["text_calibration_policy_version"] != 1:
-        raise ValueError("calibration must use complete text policy 1")
+    options = dict(metadata["model_options"])
+    if (
+        options.get("text_calibration_policy_version") != 2
+        or options.get("operator_backed_output_head_version") != 1
+    ):
+        raise ValueError("calibration must use complete text policy 2")
     return metadata, sites
 
 
@@ -237,7 +241,7 @@ def main() -> None:
             "calibration_split": "train", "calibration_order": "existing seeded training subset",
             "text_filter": "nonempty stripped text" if args.family == "gpt2" else "none",
             "tokenizer_model_id": args.model_id, "padding": "max_length", "truncation": True,
-            "max_length": 128, "range_contract": "operator_local_v1",
+            "max_length": 128, "range_contract": "operator_local_end_to_end_v1",
             "dtype": "float64", "calibration_seed": 0,
             "diagnostic_only": True, "paper_reuse_allowed": False, "runtime_dir": str(runtime),
             "runtime_filesystem": filesystem, "wandb_mode": "disabled", "tensorboard": False,

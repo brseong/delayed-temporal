@@ -47,7 +47,12 @@ from utils.transforms.functions import clamp_gelu_output, gelu_approximation, ta
 from utils.transforms.types import Potential, PotentialBounds
 from utils.transformers.models.text_calibration import calibrate_text_potential
 from utils.transformers.calibration import calibration_uses_explicit_bounds
-from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear, _apply_norm
+from utils.transformers.models.spiking_ops import (
+    SpikingLayerNorm,
+    SpikingLinear,
+    _apply_dropout,
+    _apply_norm,
+)
 
 logger = logging.get_logger(__name__)
 
@@ -896,8 +901,10 @@ class RobertaLMHead(nn.Module):
         else:
             self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
-        self.decoder = nn.Linear(config.hidden_size, config.vocab_size)
-        self.bias = nn.Parameter(torch.zeros(config.vocab_size))
+        self.decoder = SpikingLinear(config.hidden_size, config.vocab_size)
+        # Preserve Hugging Face's two state-dict names for one learned bias without
+        # applying that bias twice in the forward path.
+        self.bias = self.decoder.bias
 
     def forward(self, features: Potential | torch.Tensor, **kwargs):
         """Apply the language-model transform without losing encoder bounds.
@@ -935,12 +942,10 @@ class RobertaLMHead(nn.Module):
             x = nn.functional.gelu(x)
             pot_act = Potential(*clamp_gelu_output(x, dense_domain))
 
-        # LayerNorm eliminates the potentially broad GELU envelope through its fixed
-        # normalized range. The final decoder is dense and does not emit spike metadata.
-        x = _apply_norm(self.layer_norm, pot_act).value
-        # project back to size of vocabulary with bias
-        x = self.decoder(x) + self.bias
-        return x
+        # LayerNorm supplies the fixed decoder input rail. The tied vocabulary
+        # projection is itself operator-backed and owns the sole decoder bias.
+        normalized = _apply_norm(self.layer_norm, pot_act)
+        return self.decoder(normalized).value
 
 
 @auto_docstring
@@ -960,7 +965,10 @@ class RobertaForCausalLM(RobertaPreTrainedModel):
         return self.lm_head.decoder
 
     def set_output_embeddings(self, new_embeddings):
+        if not isinstance(new_embeddings, SpikingLinear):
+            raise TypeError("RoBERTa output embeddings must use SpikingLinear")
         self.lm_head.decoder = new_embeddings
+        self.lm_head.bias = new_embeddings.bias
 
     def forward(
         self,
@@ -1011,7 +1019,10 @@ class RobertaForMaskedLM(RobertaPreTrainedModel):
         return self.lm_head.decoder
 
     def set_output_embeddings(self, new_embeddings):
+        if not isinstance(new_embeddings, SpikingLinear):
+            raise TypeError("RoBERTa output embeddings must use SpikingLinear")
         self.lm_head.decoder = new_embeddings
+        self.lm_head.bias = new_embeddings.bias
 
     def forward(
         self,
@@ -1061,21 +1072,21 @@ class RobertaClassificationHead(nn.Module):
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
         )
         self.dropout = nn.Dropout(classifier_dropout)
-        self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
+        self.out_proj = SpikingLinear(config.hidden_size, config.num_labels)
 
     def forward(self, features: Potential | torch.Tensor, **kwargs):
         """Classify RoBERTa's first token with inherited fixed bounds.
 
         The first-token slice retains the final encoder interval. Evaluation dropout
         is identity; dense and spiking projections share one frozen affine range, and
-        Tanh is structurally bounded before the ordinary output classifier.
+        Tanh is structurally bounded before the TTFS output projection.
 
         Args:
             features: Final sequence representation with optional fixed bounds.
             **kwargs: Reserved Hugging Face classifier arguments.
 
         Returns:
-            Dense task logits.
+            Task logits.
         """
         # Slice values and metadata together; spiking execution requires the
         # encoder-supplied domain.
@@ -1085,10 +1096,10 @@ class RobertaClassificationHead(nn.Module):
         else:
             raise TypeError("RoBERTa classification head requires declared input bounds")
 
-        # Evaluation dropout leaves both tensor and interval unchanged. This project
-        # does not train converted models, so no sampled training mask enters bounds.
-        x = self.dropout(first_token)
-        pot_in = Potential(x, first_token_domain)
+        pot_in = _apply_dropout(
+            self.dropout,
+            Potential(first_token, first_token_domain),
+        )
 
         # Select numerical execution without splitting range semantics. The dense
         # Tanh maps the frozen affine endpoints monotonically; the spiking Tanh owns
@@ -1117,11 +1128,8 @@ class RobertaClassificationHead(nn.Module):
                 ),
             )
 
-        # No later operator-backed layer consumes a Potential. The second dropout and
-        # output projection therefore remain the existing dense task-head arithmetic.
-        x = self.dropout(pot_tanh.value)
-        x = self.out_proj(x)
-        return x
+        projected = self.out_proj(_apply_dropout(self.dropout, pot_tanh))
+        return projected.value
 
 
 @auto_docstring
@@ -1172,7 +1180,7 @@ class RobertaForMultipleChoice(RobertaPreTrainedModel):
         super().__init__(config)
         self.roberta = RobertaModel(config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(config.hidden_size, 1)
+        self.classifier = SpikingLinear(config.hidden_size, 1)
         self.post_init()
 
     def forward(
@@ -1197,18 +1205,22 @@ class RobertaForMultipleChoice(RobertaPreTrainedModel):
             else None
         )
 
-        outputs = self.roberta(
+        outputs, _ = self.roberta(
             flat_input_ids,
             position_ids=flat_position_ids,
             token_type_ids=flat_token_type_ids,
             attention_mask=flat_attention_mask,
             inputs_embeds=flat_inputs_embeds,
+            return_potential=True,
             **kwargs
         )
         pooled_output = outputs[1]
 
-        pooled_output = self.dropout(pooled_output)
-        logits = self.classifier(pooled_output)
+        pooled_potential = _apply_dropout(
+            self.dropout,
+            Potential(pooled_output, PotentialBounds(-1.0, 1.0)),
+        )
+        logits = self.classifier(pooled_potential).value
         reshaped_logits = logits.view(-1, num_choices)
 
         loss = None
@@ -1229,7 +1241,7 @@ class RobertaForTokenClassification(RobertaPreTrainedModel):
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
         )
         self.dropout = nn.Dropout(classifier_dropout)
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        self.classifier = SpikingLinear(config.hidden_size, config.num_labels)
         self.post_init()
 
     def forward(
@@ -1242,17 +1254,18 @@ class RobertaForTokenClassification(RobertaPreTrainedModel):
         labels: Optional[torch.Tensor] = None,
         **kwargs
     ):
-        outputs = self.roberta(
+        outputs, sequence_potential = self.roberta(
             input_ids=input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
+            return_potential=True,
             **kwargs
         )
-        sequence_output = outputs[0]
-        sequence_output = self.dropout(sequence_output)
-        logits = self.classifier(sequence_output)
+        logits = self.classifier(
+            _apply_dropout(self.dropout, sequence_potential)
+        ).value
 
         loss = None
         if labels is not None:
@@ -1268,7 +1281,7 @@ class RobertaForQuestionAnswering(RobertaPreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.roberta = RobertaModel(config, add_pooling_layer=False)
-        self.qa_outputs = nn.Linear(config.hidden_size, config.num_labels)
+        self.qa_outputs = SpikingLinear(config.hidden_size, config.num_labels)
         self.post_init()
 
     def forward(
@@ -1282,16 +1295,16 @@ class RobertaForQuestionAnswering(RobertaPreTrainedModel):
         end_positions: Optional[torch.Tensor] = None,
         **kwargs
     ):
-        outputs = self.roberta(
+        outputs, sequence_potential = self.roberta(
             input_ids=input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
+            return_potential=True,
             **kwargs
         )
-        sequence_output = outputs[0]
-        logits = self.qa_outputs(sequence_output)
+        logits = self.qa_outputs(sequence_potential).value
         start_logits, end_logits = logits.split(1, dim=-1)
         start_logits = start_logits.squeeze(-1).contiguous()
         end_logits = end_logits.squeeze(-1).contiguous()

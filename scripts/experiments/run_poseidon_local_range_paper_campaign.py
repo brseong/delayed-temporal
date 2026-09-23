@@ -30,7 +30,7 @@ from scripts.experiments.run_full_calibrated_text_comparison import (
 
 
 ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", "/data/delayed-temporal/artifacts"))
-CAMPAIGN_TAG = "paper_local_range_poseidon_v1"
+CAMPAIGN_TAG = "paper_end_to_end_local_range_poseidon_v1"
 IMAGENET_TRAIN_FP = "cabf903d14d1b1ac"
 IMAGENET_VAL_FP = "746378cc7befed99"
 CIFAR_TRAIN_FP = "7201bcb7da71648f"

@@ -26,11 +26,15 @@ from scripts.runtime import files as runtime_files
 from scripts.runtime import identity
 from scripts.runtime import local_gpu
 from utils.transforms.functions import GELU_CUBIC_IMPLEMENTATION
+from utils.transformers.calibration import (
+    OPERATOR_BACKED_OUTPUT_HEAD_VERSION,
+    TEXT_CALIBRATION_POLICY_VERSION,
+)
 
 
 ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", "/data/delayed-temporal/artifacts"))
-TAG = "conversion_comparison_local_ranges_calibrated_float64_bounds4_v1"
-GPT2_COMPOSED_GELU_TAG = "gpt2_local_ranges_calibrated_float64_bounds4_v1"
+TAG = "conversion_comparison_end_to_end_local_ranges_float64_v1"
+GPT2_COMPOSED_GELU_TAG = "gpt2_end_to_end_local_ranges_float64_v1"
 FAMILY_CONFIG = {
     "bert": {"task": "sst2", "evaluation_samples": 872, "sites": 110, "activation": "gelu"},
     "roberta": {"task": "sst2", "evaluation_samples": 872, "sites": 110, "activation": "gelu"},
@@ -40,7 +44,7 @@ FAMILY_CONFIG = {
         "activation_implementation": "composed_gelu_new_v1",
     },
 }
-ROBERTA_LARGE_TAG = "roberta_large_local_ranges_calibrated_float64_bounds4_v1"
+ROBERTA_LARGE_TAG = "roberta_large_end_to_end_local_ranges_float64_v1"
 POWER_REUSE_TAG = "text_power_gelu_local_ranges_float64_reused_calibration_v1"
 MODEL_CONFIG = {
     **{
@@ -200,7 +204,12 @@ def parse_sites(path: Path, expected: int) -> tuple[dict[str, Any], set[str]]:
     metadata = table["metadata"]
     if metadata["dtype"] != "float64":
         raise ValueError("calibration numerical contract differs")
-    if dict(metadata["model_options"])["text_calibration_policy_version"] != 1:
+    options = dict(metadata["model_options"])
+    if (
+        options.get("text_calibration_policy_version") != TEXT_CALIBRATION_POLICY_VERSION
+        or options.get("operator_backed_output_head_version")
+        != OPERATOR_BACKED_OUTPUT_HEAD_VERSION
+    ):
         raise ValueError("text calibration policy differs")
     return metadata, sites
 
@@ -502,10 +511,12 @@ def main() -> None:
         "evaluation_dataset": evaluation_dataset_identity,
         "calibration_samples": CALIBRATION_SAMPLES,
         "evaluation_samples": config["evaluation_samples"],
-        "batch_size": BATCH_SIZE, "range_contract": "operator_local_v1", "dtype": "float64",
+        "batch_size": BATCH_SIZE, "range_contract": "operator_local_end_to_end_v1", "dtype": "float64",
         "tau_s": 1.0, "tau_m": 1.0, "calibration_seed": 0,
         "calibration_bins": 2048, "calibration_quantiles": [0.0, 1.0],
-        "calibration_margin_fraction": 0.05, "text_calibration_policy_version": 1,
+        "calibration_margin_fraction": 0.05,
+        "text_calibration_policy_version": TEXT_CALIBRATION_POLICY_VERSION,
+        "operator_backed_output_head_version": OPERATOR_BACKED_OUTPUT_HEAD_VERSION,
         "output_bounds_version": 4, "noise": False, "wandb": False,
         "tensorboard": False, "host_label": args.host_label, "physical_gpu": args.gpu,
         "activation": config["activation"],

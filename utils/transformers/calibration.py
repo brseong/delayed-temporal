@@ -21,8 +21,9 @@ from utils.transforms.types import Potential, PotentialBounds
 
 _CALIBRATION_STATE_ATTRIBUTE = "_delayed_temporal_calibration_state"
 _CALIBRATION_NAME_ATTRIBUTE = "_delayed_temporal_calibration_module_name"
-VIT_CALIBRATION_POLICY_VERSION = 2
-TEXT_CALIBRATION_POLICY_VERSION = 1
+VIT_CALIBRATION_POLICY_VERSION = 3
+TEXT_CALIBRATION_POLICY_VERSION = 2
+OPERATOR_BACKED_OUTPUT_HEAD_VERSION = 1
 TEXT_CALIBRATION_FAMILIES = frozenset({"bert", "roberta", "gpt2"})
 
 
@@ -37,6 +38,8 @@ def _vit_calibration_policy_enabled(
     version = options["vit_calibration_policy_version"]
     if type(version) is not int or version != VIT_CALIBRATION_POLICY_VERSION:
         raise ValueError("unsupported vit_calibration_policy_version")
+    if options.get("operator_backed_output_head_version") != OPERATOR_BACKED_OUTPUT_HEAD_VERSION:
+        raise ValueError("ViT calibration requires the operator-backed output head")
     if metadata.model_family != "vit":
         raise ValueError("vit_calibration_policy_version requires a ViT model")
     return True
@@ -66,6 +69,8 @@ def _explicit_calibration_policy_enabled(
     version = options["text_calibration_policy_version"]
     if type(version) is not int or version != TEXT_CALIBRATION_POLICY_VERSION:
         raise ValueError("unsupported text_calibration_policy_version")
+    if options.get("operator_backed_output_head_version") != OPERATOR_BACKED_OUTPUT_HEAD_VERSION:
+        raise ValueError("text calibration requires operator-backed output heads")
     if metadata.model_family not in TEXT_CALIBRATION_FAMILIES:
         raise ValueError("text_calibration_policy_version requires BERT, RoBERTa or GPT-2")
     return True

@@ -85,7 +85,7 @@ Gaussian timing error는 event time만 바꾸며 output range를 재선택하지
 
 Current calibration schema binds source, model, data, preprocessing, dtype, numerical floors, site population and output-bound policy.
 
-ViT policy 2 and text policy 1 reject missing or duplicate sites and mismatched metadata. Calibration format version 2 and output bounds version 4 distinguish the local-range contract from historical tables. A short smoke table cannot substitute for a complete training-5k collection.
+ViT policy 3 and text policy 2 reject missing or duplicate sites, outdated output heads, and mismatched metadata. Calibration format version 2 and output bounds version 4 distinguish the local-range contract from historical tables. A short smoke table cannot substitute for a complete training-5k collection.
 
 ## 검증 기준
 

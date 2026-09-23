@@ -199,7 +199,9 @@ def verify_family_lifecycle(root, family):
     assert not (root / "runs").exists()
     table = load_calibration_table(args.calibration_path)
     assert table.metadata.model_family == family
-    assert dict(table.metadata.model_options)["text_calibration_policy_version"] == 1
+    options = dict(table.metadata.model_options)
+    assert options["text_calibration_policy_version"] == 2
+    assert options["operator_backed_output_head_version"] == 1
     assert len(table.layers) == 11
     assert all(layer.num_values == layer.histogram.num_values for layer in table.layers)
     for model in created:

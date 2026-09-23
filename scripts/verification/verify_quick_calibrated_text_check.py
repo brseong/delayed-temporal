@@ -109,7 +109,10 @@ def verify_result_parsing() -> None:
 
 def verify_table_parsing() -> None:
     table = {"metadata": {"dtype": "float64", "preprocessing": json.dumps({"subset_samples": 256}),
-                          "model_options": [["text_calibration_policy_version", 1]]},
+                          "model_options": [
+                              ["operator_backed_output_head_version", 1],
+                              ["text_calibration_policy_version", 2],
+                          ]},
              "layers": [{"module_name": "module", "tensor_name": "query"}]}
     temporary_root = ROOT / "artifacts/runtime"
     temporary_root.mkdir(parents=True, exist_ok=True)
@@ -118,11 +121,15 @@ def verify_table_parsing() -> None:
         runtime_files.new_json(path, table)
         assert runner.calibration_sites(path)[1] == {"module/query"}
         rejects(runtime_files.new_json, path, table)
-        for index, bad in enumerate((copy.deepcopy(table), copy.deepcopy(table))):
+        for index, bad in enumerate(
+            (copy.deepcopy(table), copy.deepcopy(table), copy.deepcopy(table))
+        ):
             if index == 0:
                 bad["layers"] *= 2
-            else:
+            elif index == 1:
                 bad["metadata"]["model_options"] = [["text_calibration_policy_version", 0]]
+            else:
+                bad["metadata"]["model_options"] = [["text_calibration_policy_version", 2]]
             bad_path = Path(directory) / f"bad-{index}.json"
             runtime_files.new_json(bad_path, bad)
             rejects(runner.calibration_sites, bad_path)

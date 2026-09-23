@@ -44,7 +44,7 @@ def validate_family(root: Path, family: str) -> tuple[list[dict[str, Any]], dict
         raise ValueError(f"{family} is not a completed member of {expected_tag}")
     if manifest.get("evaluation_samples") != config["evaluation_samples"]:
         raise ValueError(f"{family} evaluation population differs")
-    if manifest.get("range_contract") != "operator_local_v1" or manifest.get("dtype") != "float64":
+    if manifest.get("range_contract") != "operator_local_end_to_end_v1" or manifest.get("dtype") != "float64":
         raise ValueError(f"{family} numerical contract differs")
     phases = result.get("phases", {})
     expected_phases = {"ann", "snn"} if calibration_reuse is not None else {"collect", "ann", "snn"}

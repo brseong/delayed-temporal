@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 
-COST_MODEL_VERSION = "vit_composed_sop_v1"
+COST_MODEL_VERSION = "vit_composed_sop_v2"
 ENERGY_PJ_PER_SOP = 0.9
 ASSUMPTIONS = (
     "Data SOP counts deliveries of encoded values, including explicit constant tensors.",
@@ -32,8 +32,8 @@ ASSUMPTIONS = (
     "The explicit LayerNorm gamma encoding is retained, including its token fan-out.",
     "Static GELU gains, bias, residual addition, mean and other potential sums, "
     "positional encoding and class-token initialization add no SOP in this mapping.",
-    "The entire network includes attention output projection, final LayerNorm, "
-    "and an assumed TTFS classification head; the evaluated classifier is dense.",
+    "The entire evaluated network includes attention output projection, final "
+    "LayerNorm, and the TTFS classification head.",
     "Energy is estimated at 0.9 pJ/SOP, not measured GPU or physical device energy. "
     "Memory traffic, control, routing, leakage and analog peripheral costs are excluded.",
 )
@@ -201,7 +201,7 @@ def estimate_vit_cost(checkpoint_config: dict) -> dict:
                       "a reference delivery per product output.")
     linear("block.mlp.output_projection", n, m, d, depth)
     layernorm("final_layernorm", 1)
-    linear("classification_head_assumed_ttfs", 1, d, config.classes)
+    linear("classification_head", 1, d, config.classes)
     data = sum(row["data_sop"] for row in rows)
     global_ = sum(row["global_sop"] for row in rows)
     total = data + global_

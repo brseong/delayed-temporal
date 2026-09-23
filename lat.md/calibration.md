@@ -96,7 +96,7 @@ The ViT evaluator exposes disabled, collection, frozen-validation, and inference
 
 The artifact persists histogram, endpoint selection, margin, subset size, and subset seed controls. Defaults retain observed extrema and add 5% of the selected width per calibrated side. Disabled mode loads no table and keeps bounds computed from configuration and parameters; it does not restore runtime activation extrema.
 
-Collection requires the clean spiking checkpoint in evaluation mode with sequential replay of the training subset and no timing noise, mismatch, or parameter perturbation. Frozen modes validate recorded metadata and the enabled site topology before applying optional robustness axes and reporting clipping. The former ViT tables with four sites per block contain 48 or 96 sites; current ViT policy 2 additionally includes Q/K/V and internal LayerNorm inputs as described below.
+Collection requires the clean spiking checkpoint in evaluation mode with sequential replay of the training subset and no timing noise, mismatch, or parameter perturbation. Frozen modes validate recorded metadata and the enabled site topology before applying optional robustness axes and reporting clipping. The former ViT tables with four sites per block contain 48 or 96 sites; current ViT policy 3 additionally includes Q/K/V and internal LayerNorm inputs as described below.
 
 ### ViT Fixed Activation Ranges
 
@@ -152,17 +152,19 @@ The positive log floor remains `clip_margin=1e-5`, distinct from variance `eps`.
 
 [[scripts/verification/verify_vit_layernorm_eps.py#verify_checkpoint_epsilon_all_sites]] checks every site in an actual small ViT, multiple configuration values, dense and spiking constructors, and all eight LayerNorm ablations. Further checks cover reference outputs with small variance, unchanged magnitude and variance log domains, and the intended variance calculation from clipped magnitudes. [[scripts/verification/verify_calibration.py#verify_deterministic_training_subset]] checks metadata reuse and rejection of missing or different epsilon settings.
 
-### ViT Calibration Policy 2
+### ViT Calibration Policy 3
 
-ViT policy 2 selects separate symmetric Q/K/V ranges and one symmetric range for the input after mean subtraction in every active spiking LayerNorm. Fixed log lower endpoints remain independent of those selected upper endpoints.
+ViT policy 3 identifies the maintained selected-range contract and requires the TTFS output head.
+
+It selects separate symmetric Q/K/V ranges and one symmetric range for the input after mean subtraction in every active spiking LayerNorm. Fixed log lower endpoints remain independent of those selected upper endpoints.
 
 The existing two residual ranges, first MLP affine output and attention score remain calibrated. Full 12-block models have 109 sites and 24-block models have 217. Exact module discovery includes final LayerNorm and excludes unexecuted attention or fully dense LayerNorm paths. Each selected tensor shares one scalar range, not a separate range per neuron or head.
 
 Both training passes with noise disabled observe unclamped values and use the same static collection domains. Q/K/V use symmetric envelopes of their projection bounds computed from parameters; the input after mean subtraction uses the incoming interval width as a conservative symmetric radius. Final ranges are installed together only after both passes finish. Min/max selection adds 5% of the full symmetric width on each side. There is no sequential calibration or adjustment based on accuracy.
 
-The metadata key `vit_calibration_policy_version=2`, checkpoint `layer_norm_eps`, and actual `layer_norm_clip_margin` distinguish execution from archived tables. Output bounds version 4 and calibration schema version 2 identify the local-range contract. Nonfinite, zero-width, asymmetric, or dtype-unrepresentable intervals fail with the site name.
+The metadata key `vit_calibration_policy_version=3`, output head contract version 1, checkpoint `layer_norm_eps`, and actual `layer_norm_clip_margin` distinguish execution from archived tables. Output bounds version 4 and calibration schema version 2 identify the local-range contract. Nonfinite, zero-width, asymmetric, or dtype-unrepresentable intervals fail with the site name.
 
-[[scripts/verification/verify_vit_calibration_policy2.py#verify_topology_and_ablations]] checks actual model discovery, counts for active paths and final LayerNorm coverage. Other checks in the same verifier cover invalid ranges and identity, raw collection, counts for both passes, reuse of fixed domains and persistence. The separate execution and smoke contract is [[vit-calibration-policy2#ViT Calibration Policy 2 Implementation]].
+[[scripts/verification/verify_vit_calibration_policy2.py#verify_topology_and_ablations]] checks actual model discovery, counts for active paths and final LayerNorm coverage. Other checks in the same verifier cover invalid ranges and identity, raw collection, counts for both passes, reuse of fixed domains and persistence. The separate execution and smoke contract is [[vit-calibration-policy2#ViT Calibration Policy 3 Implementation]].
 
 ### ViT Attention Bound Transfer
 
@@ -170,7 +172,7 @@ Maintained attention consumes the Q/K/V ranges passed from its projections and n
 
 The selected K range drives its multiplication encoder; V uses its selected interval and matching zero-reference time for reconstruction. The attention output retains the selected V interval. Timing-noise fractions are applied separately to each resulting local encoder window.
 
-Policy 2 attention score calibration retains the dtype, temporal scale, and numerical ceiling for the maximum token count. Clean execution, Gaussian execution with zero standard deviation, and stochastic execution all consume the same fixed input and output bounds.
+Policy 3 attention score calibration retains the dtype, temporal scale, and numerical ceiling for the maximum token count. Clean execution, Gaussian execution with zero standard deviation, and stochastic execution all consume the same fixed input and output bounds.
 
 [[scripts/verification/verify_vit_attention_calibrated_bounds.py#verify_explicit_attention_bounds]] checks distinct projection ranges and correct reconstruction. Companion cases cover the numerical score limit, seeded replay, invalid inputs rejected before random draws, projection collection before clamping, and actual ViT range transfer.
 
@@ -220,7 +222,9 @@ Versioned RoBERTa calibration follows [[text-calibration#Text Model Calibration#
 
 ### GPT-2 Fixed Range Flow
 
-GPT-2 freezes embedding ranges and derives activation output ranges analytically. Text policy 1 additionally selects Q/K/V, attention scores, two residuals, first MLP affine outputs and active LayerNorm centered inputs, including final normalization.
+GPT-2 freezes embedding ranges and derives activation output ranges analytically under text policy 2.
+
+The policy selects Q/K/V, attention scores, two residuals, first MLP affine outputs and active LayerNorm centered inputs, including final normalization, and requires the TTFS output head.
 
 Unbound execution retains exact interval sums. Collection uses those sums as safety rails, while frozen execution resets attention and MLP residual streams to persisted ranges so depth cannot recursively widen them.
 
@@ -228,7 +232,7 @@ Unbound execution retains exact interval sums. Collection uses those sums as saf
 
 ### GPT-2 Evaluator Artifact Lifecycle
 
-The GPT-2 evaluator collects or consumes immutable ranges under text policy 1 without using evaluation texts to select them. The model entry remains on its analytic interval, and both float32 and float64 are supported.
+The GPT-2 evaluator collects or consumes immutable ranges under text policy 2 without using evaluation texts to select them. The model entry remains on its analytic interval, and both float32 and float64 are supported.
 
 Collection removes empty WikiText rows, selects a fixed prefix of a seeded training-split permutation, tokenizes to one padded maximum length, and replays the same sequential loader for min-max and histogram passes with cache, loss, timing noise, and `DataParallel` disabled.
 

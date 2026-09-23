@@ -16,7 +16,7 @@ The maintained comparison has no global-range selection phase. Each model receiv
 
 All runs use float64, time constant 1, all three spiking LayerNorm stages, spiking attention, and spiking MLP. Noise, deadline margin, static range mismatch, parameter perturbation, W&B, TensorBoard, extra training, and 50k ImageNet evaluation are disabled. Each deterministic ANN/SNN pair is evaluated once without a replica confidence interval.
 
-Calibration uses the model's training seed-0 5k artifact, two deterministic passes, 2,048 histogram bins, observed minimum and maximum, and 5% of the interval width added on each side. Policy 2 requires 109 active sites for ViT-S/B and 217 for ViT-L, including Q/K/V outputs and centered LayerNorm inputs. Frozen execution rejects a different site set, epsilon, preprocessing, dtype, source, checkpoint, or data identity.
+Calibration uses the model's training seed-0 5k artifact, two deterministic passes, 2,048 histogram bins, observed minimum and maximum, and 5% of the interval width added on each side. Policy 3 requires 109 active sites for ViT-S/B and 217 for ViT-L, including Q/K/V outputs and centered LayerNorm inputs, and records the current output head contract. Frozen execution rejects a different site set, epsilon, preprocessing, dtype, source, checkpoint, or data identity.
 
 CIFAR-10 ViT-S uses test 10k. ImageNet ViT-S/B/L use the existing fixed validation 5k in its saved order. ANN and SNN within a row share the checkpoint, deterministic preprocessing, sample order, batch size, and evaluation population.
 
@@ -80,7 +80,7 @@ The replacement campaign must enforce fresh calibration, ANN evaluation, and SNN
 
 Operation and energy values are generated from the actual S/B/L architecture and remain estimates under the declared TTFS implementation boundary.
 
-The calculation includes patch and class tokens, attention output projection, final LayerNorm, attention heads, and classifier dimensions. Energy is total SOP multiplied by 0.9 pJ/SOP; it is not measured GPU or chip energy. The evaluated runtime classifier is dense, while the cost table assumes its stated TTFS counterpart. Detailed formulas and exclusions are in [[comparison-costs]].
+The calculation includes patch and class tokens, attention output projection, final LayerNorm, attention heads, and classifier dimensions. Energy is total SOP multiplied by 0.9 pJ/SOP; it is not measured GPU or chip energy. The maintained evaluator and cost table use the same TTFS classification head. Detailed formulas and exclusions are in [[comparison-costs]].
 
 Raw logs, calibration tables, summaries, provenance, generated LaTeX, and manuscript build evidence remain under versioned artifact paths. ICLR rows may be filled only from the verified current summaries and must state CIFAR test 10k versus ImageNet fixed validation 5k.
 
@@ -88,7 +88,7 @@ Raw logs, calibration tables, summaries, provenance, generated LaTeX, and manusc
 
 The severe clean-accuracy drop observed in the early 48-site threshold-40 campaign occurred with an incomplete range-transfer contract and incorrect ImageNet preprocessing; Gaussian timing noise was disabled in those runs.
 
-Policy 2 adds Q/K/V and centered LayerNorm ranges, consumes them through attention and LayerNorm internals, and uses checkpoint epsilon. The timm correction restores the checkpoint evaluation transform. The old 64-image threshold diagnostic and direct-resize results remain useful provenance but are not current model evidence; see [[deprecated#과거 실험과 범위 감사#과거 ViT Conversion Comparison]].
+Policy 3 retains the Q/K/V and centered LayerNorm ranges, consumes them through attention and LayerNorm internals, uses checkpoint epsilon, and requires the TTFS output head. The timm correction restores the checkpoint evaluation transform. The old 64-image threshold diagnostic and direct-resize results remain useful provenance but are not current model evidence; see [[deprecated#과거 실험과 범위 감사#과거 ViT Conversion Comparison]].
 
 ## Verification
 
