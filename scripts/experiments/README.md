@@ -8,16 +8,16 @@ The multi-file Python campaigns use a contract module, one or more workers or co
 
 | Campaign | Contract and runners | Result processing |
 |---|---|---|
-| Calibrated ViT comparison | `vit_comparison.py`, `run_vit_comparison.py`, `vit_comparison_controller.py` | `scripts/analysis/summarize_vit_comparison.py` |
+| Calibrated ViT comparison | `run_full_calibrated_vit_comparison.py` | `scripts/analysis/summarize_local_range_paper_campaign.py` |
 | Calibrated text comparison | `run_full_calibrated_text_comparison.py` | `scripts/analysis/summarize_full_calibrated_text_comparison.py` |
-| Threshold, timing-noise, and deadline-margin sweeps | `calibrated_three_sweeps.py`, `run_calibrated_three_sweeps.py`, `run_calibrated_three_sweep_task.py` | `scripts/analysis/summarize_calibrated_three_sweeps.py` |
-| Calibrated ViT noise comparison | `run_calibrated_noise_vit.py` | `scripts/analysis/plot_calibrated_noise_progress.py` |
+| Local-window timing-noise and deadline-margin sweeps | `run_vit_local_range_noise_condition.py`, `run_poseidon_local_range_paper_campaign.py` | `scripts/analysis/summarize_local_range_paper_campaign.py` |
+| Discrete-time compatibility | `run_clock_driven_vit.py` | `scripts/analysis/plot_clock_discretization.py`, `scripts/analysis/plot_clock_time_step_sweep.py` |
 
-The `ubai/` directory contains only cluster deployment and task wrappers for these campaigns. It must follow the cluster instructions and must not become a second implementation of evaluator semantics.
+Historical UBAI deployment scripts were removed with their global-range campaigns. Any future cluster wrapper must follow the cluster instructions and must not become a second implementation of evaluator semantics.
 
 ## Small checks
 
-`quick_vit_check.py`, `quick_text_check.py`, and `quick_calibrated_text_check.py` are bounded diagnostic runs. They do not produce publication results and must identify their frozen evaluator source.
+`quick_text_check.py` and `quick_calibrated_text_check.py` are bounded diagnostic runs. They do not produce publication results and must identify their frozen evaluator source.
 
 ## Compatibility shell drivers
 

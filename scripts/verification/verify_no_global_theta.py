@@ -154,7 +154,10 @@ def verify_maintained_guidance() -> None:
         "wandb-theta-std", "df['theta']", 'df["theta"]',
     )
     violations: list[str] = []
-    for path in (ROOT / "README.md", ROOT / "AGENTS.md"):
+    for path in (
+        ROOT / "README.md", ROOT / "AGENTS.md",
+        ROOT / "scripts" / "experiments" / "README.md",
+    ):
         text = path.read_text(encoding="utf-8")
         for fragment in forbidden_fragments:
             if fragment in text:
