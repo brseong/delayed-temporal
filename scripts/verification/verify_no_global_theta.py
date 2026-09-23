@@ -173,12 +173,26 @@ def verify_maintained_guidance() -> None:
     assert not violations, "maintained guidance restores global theta:\n" + "\n".join(violations)
 
 
+def verify_no_tracked_calibration_fallback() -> None:
+    """Generated calibration tables cannot become a source-controlled fallback."""
+    result = subprocess.run(
+        ["git", "ls-files", "--", "artifacts/calibration"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    tracked = [line for line in result.stdout.splitlines() if line]
+    assert not tracked, "tracked calibration fallback was introduced:\n" + "\n".join(tracked)
+
+
 def main() -> None:
     verify_production_surface()
     verify_legacy_config_rejection()
     verify_operator_signatures()
     verify_evaluator_help()
     verify_maintained_guidance()
+    verify_no_tracked_calibration_fallback()
     print("Global theta removal verification passed")
 
 
