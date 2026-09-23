@@ -16,7 +16,7 @@ If layer $i$ has Lipschitz constant $L_i$ and introduces clipping error $e_i$, t
 
 The maintained implementation has no model-wide `theta` or attention-specific threshold setting; every temporal operator consumes an analytic or frozen calibrated local range.
 
-ViT, BERT, RoBERTa, and GPT-2 configs reject legacy `theta` keys, and GPT-2 also rejects `attention_theta`. Evaluator parsers expose neither option. [[scripts/verification/verify_no_global_theta.py#verify_production_surface]] audits active code for forbidden arguments, assignments, keywords, and CLI flags so later code cannot silently restore the removed setting.
+ViT, BERT, RoBERTa, and GPT-2 configs reject legacy `theta` keys, and GPT-2 also rejects `attention_theta`. Evaluator parsers expose neither option. [[scripts/verification/verify_no_global_theta.py#verify_production_surface]] audits active code, while [[scripts/verification/verify_no_global_theta.py#verify_maintained_guidance]] rejects obsolete CLI examples and notebook cells so later work cannot silently restore the removed setting.
 
 Calibration schema version 2 omits the former scalar identity. Old calibration tables and results remain historical artifacts but cannot be loaded by maintained evaluators. This range-contract change requires fresh calibration before new accuracy or robustness evidence is promoted.
 

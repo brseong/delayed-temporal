@@ -43,10 +43,13 @@ For a direct smoke evaluation, invoke an evaluator rather than copying a campaig
 CUDA_VISIBLE_DEVICES=4 python3 scripts/evaluation/error_analysis_vit.py \
   --experiment_name smoke --model_backend spiking \
   --model_id /data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k \
-  --dataset_id imagenet-1k --batch_size 32 --theta 40 \
+  --dataset_id imagenet-1k --batch_size 32 \
   --spiking-layernorm --spiking-mlp --spiking-attention \
   --max_eval_batches 5
 ```
+
+Every temporal operator uses its declared analytic or frozen calibrated
+potential range. There is no shared range setting for the complete model.
 
 ## Verification
 

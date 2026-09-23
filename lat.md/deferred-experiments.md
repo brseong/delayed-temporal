@@ -15,9 +15,9 @@ These refinements are unnecessary for the accuracy result on the fixed 5,000-ima
 - Do not draw timing error for the inactive member of a signed pair; report its counts separately from delivered events.
 - Test alternative placement and correlation of the shared reference event, including the start of the code interval.
 - Calibrate variation in output time instead of defining $r_t$ per sampled event.
-- Repeat timing-noise sweeps over multiple theta values or adaptive sweeps of the deadline margin.
+- Repeat timing-noise sweeps over deliberately rescaled local windows or adaptive sweeps of the deadline margin.
 
-Promote one only if the paper attributes a failure to an internal event population, interprets $r_t$ as a calibrated output distribution, or compares robustness across theta values.
+Promote one only if the paper attributes a failure to an internal event population, interprets $r_t$ as a calibrated output distribution, or compares robustness across alternative local-range policies.
 
 ## Additional Robustness Axes
 

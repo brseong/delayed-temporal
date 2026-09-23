@@ -16,7 +16,7 @@ Checkpoint `layer_norm_eps` is forwarded to every LayerNorm. The current four Vi
 
 Frozen evaluation accepts only a table whose model family, policy version, output bounds policy, source, checkpoint, dataset, preprocessing, dtype, epsilon, floor, site set, and collection controls match.
 
-Policy-1 tables and the early 48/96-site ViT tables remain readable as historical artifacts but are rejected for policy-2 evaluation. Calibration is model and threshold specific; the nine-candidate ViT-B/16 selection therefore collected nine separate 109-site tables. A short-check table never substitutes for the complete training 5k collection.
+Policy-1 tables and the early 48/96-site ViT tables remain readable as historical artifacts but are rejected for policy-2 evaluation. Current calibration is model and source specific and contains no shared range setting. A short-check table never substitutes for the complete training 5k collection.
 
 ## Shared Deadline Fix
 
@@ -28,12 +28,10 @@ This avoids one-ULP endpoint disagreement between positive and negative domains 
 
 Current full-model evidence replaces the rollout-era short checks as the maintained status of policy 2.
 
-The conversion comparison completed CIFAR-10 ViT-S test 10k and timm-preprocessed ImageNet ViT-S/B/L fixed validation 5k; exact results are in [[conversion-comparison#Superseded Results]]. The noise campaign completed nine threshold tables, selected $\theta=20$, and evaluated the two separate robustness axes plus the high-scale timing-noise extension; see [[noise#Superseded Calibrated Threshold and Noise Sweeps]].
-
-The comparison table still fixes $\theta=40$, whereas the separate timing-noise campaign selected $\theta=20$. This is an experiment-level distinction, not a calibration-policy version change.
+The earlier conversion and timing-noise campaigns are preserved in [[conversion-comparison#Superseded Results]] and [[noise#Superseded Calibrated Threshold and Noise Sweeps]]. They use the removed global-range contract and cannot supply current manuscript numbers.
 
 ## Verification
 
 Verification covers range collection, transfer, frozen replay, numerical boundaries, inactive configurations, and rejection of mixed identities.
 
-`scripts/verification/verify_vit_comparison_runner.py#verify_policy2_and_preparation` checks 109/217 sites and rejection of old tables. Attention and LayerNorm checks exercise selected ranges above the global threshold, all normalization ablations, equality when noise is disabled, Gaussian execution with standard deviation zero, seeded finite output, and shared deadlines. Campaign reducers revalidate each table and complete result before aggregation.
+The maintained calibration checks cover 109/217 sites and rejection of old tables. Attention and LayerNorm checks exercise ranges wider than earlier shared envelopes, all normalization ablations, equality when noise is disabled, Gaussian execution with standard deviation zero, seeded finite output, and shared deadlines. Campaign reducers revalidate each table and complete result before aggregation.

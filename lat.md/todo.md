@@ -47,19 +47,15 @@ Source details and reviewer labels are consolidated in [[deprecated#과거 리�
 
 ### Current ViT-B Noise and Time-Scale Update
 
-This manuscript checklist records only reporting decisions required by the active 5k result; it does not authorize additional sweeps.
+This checklist covers reporting from the active local-range 5k campaign; removed global-range campaigns remain historical evidence only.
 
-The current result is the completed policy-2 campaign at source `f7b74c1aef38502caccf532d1e58a7cf321833d6`; earlier threshold-40 campaigns are historical only.
-
-- [x] Select the clean ViT-B/16 threshold on training 5k from the nine exact logarithmic candidates between 10 and 160.
-- [x] Replay the selected $\theta=20$ condition and confirm it against neighboring candidates on the fixed validation 5k subset.
-- [ ] Report the predefined rule: choose the smallest candidate within 0.5 percentage points of the best training accuracy. State 4,590/5,000 training and 4,300/5,000 validation for the selected candidate.
-- [ ] Describe the selected threshold as an accuracy and input-domain tradeoff, not a requirement of zero clipping.
-- [ ] State that policy-2 calibration covers 109 active sites and remains frozen during validation and noise evaluation.
-- [ ] Explain how the dimensionless code interval maps to a declared physical duration and state that every time constant must be rescaled consistently; list timing resolution, timing error, leakage, synchronization, and realizable time constants as limitations.
-- [ ] State that the physical timing-error standard deviation and margin follow from the declared mapping rather than treating $\theta$ as a hardware time constant.
-- [ ] Report the timing-noise configuration, injection scope, seeds, confidence interval, and empirical miss statistics from the accepted logs.
-- [ ] Mark threshold 40, $\theta=2000$, and the old joint-grid evidence as superseded for manuscript support and label the current result as applying only to the fixed 5,000-image validation subset.
+- [x] Remove the global range selection phase and define timing-noise scale relative to each encoder's declared local time window.
+- [ ] Complete the fresh ViT-B calibration and deterministic ANN/SNN evaluation on the fixed validation 5k subset.
+- [ ] Complete the nine-point timing-noise fraction and thirteen-point deadline-margin ratio sweeps with seeds 0, 1, and 2.
+- [ ] State that the frozen calibration covers the complete active site set and remains unchanged during validation and noise evaluation.
+- [ ] Explain how each dimensionless local code interval maps to a declared physical duration and state that all associated time constants must be rescaled consistently.
+- [ ] Report the injection scope, seeds, confidence interval and empirical miss statistics from the accepted local-range logs.
+- [ ] Mark every earlier shared-range and threshold-selection result as superseded for manuscript support.
 
 ### P0 Claims, Novelty, and Structure
 
@@ -90,7 +86,7 @@ Every retained theorem and operator claim must match the implemented equations, 
 - [ ] Re-derive the GELU relation involving $1/(1+\kappa e^{-\beta x})$, state the required $\kappa$ and time-constant conditions, and quantify finite-window error.
 - [ ] Add the complete LayerNorm dual-rail derivation, state that it uses unrestricted $\psi_{\mathrm{ED}}$ rather than public $f_{\mathrm{Div}}$, and distinguish the variance stabilizer from the positive log input floor.
 - [ ] Unify the LayerNorm references as $H$ and $H^2$, including the finite-domain definition used in code.
-- [ ] Resolve the residual $1/\sqrt{\theta}$ explanation against any statement that no residual scale remains.
+- [ ] Resolve any residual normalization-scale explanation against the current declared local-range equations.
 - [ ] Add deterministic boundary tests for zero variance, centered values close to zero, symmetric inputs of both signs, and declared upper bounds in the LayerNorm configuration used for publication.
 - [ ] Have a human audit every retained lemma, theorem, and appendix proof line by line and record the verifier and status.
 - [ ] Move routine statements to the appendix and foreground the genuinely new composition and failure conditions.
@@ -177,7 +173,7 @@ Work should proceed by evidence dependency so prose never outruns mathematical o
 2. Fix the central question, claim boundary, paper outline, and keep/move/delete map.
 3. Complete the mathematical and operator audit before changing theorem language.
 4. Isolate deterministic conversion errors and settle metric and baseline policy.
-5. Finalize the $\theta$ and physical-time interpretation, then run only the approved robustness diagnostics.
+5. Finalize the local-window and physical-time interpretation, then run only the approved robustness diagnostics.
 6. Rebuild the energy and latency section using an explicit system boundary.
 7. Prepare the collaborator package before adding calibrated device claims.
 8. Rewrite the abstract and introduction last, then update the NeurIPS submission checklist.

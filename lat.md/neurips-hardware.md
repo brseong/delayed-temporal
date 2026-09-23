@@ -42,7 +42,7 @@ Primitive operator의 chip 측정을 전체 변환 모델의 성능 추정에 �
 
 Deadline margin sweep은 측정 분포를 적용한 모델 평가에서 한 번만 수행한다. 같은 margin sweep을 임의의 Gaussian 조건과 측정 조건에서 각각 핵심 결과로 제시하면 두 실험의 역할이 중복된다.
 
-현재 ViT-B/16의 fixed-5k 세 panel figure는 appendix의 simulated sensitivity analysis로 둔다. Threshold panel은 policy-2 training calibration에서 선택한 $\theta=20$의 근거, 가운데 panel은 Gaussian timing noise, 오른쪽 panel은 deadline margin ratio 결과를 보존한다. Main text의 Figure 2는 BrainScaleS-2에서 측정한 분포가 생긴 뒤 그 분포를 적용한 모델 성능과 같은 조건의 deadline margin 및 deadline miss 결과를 받을 placeholder로 유지한다.
+새 ViT-B/16 fixed-5k 두 panel figure는 appendix의 simulated sensitivity analysis로 둔다. 첫 panel은 local-window timing-noise fraction, 둘째 panel은 deadline-margin ratio를 보고한다. 제거된 global-range selection panel은 재사용하지 않는다. Main text의 Figure 2는 실제 측정 분포가 생긴 뒤에만 채운다.
 
 ## 에너지 추정의 근거 단계
 

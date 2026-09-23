@@ -58,7 +58,7 @@ The cost is a mixed system boundary. Neither task accuracy nor an operator count
 
 Every practical simulation uses finite potential and time windows, so clipping is explicit rather than hidden in overflow behavior.
 
-`theta` supplies a common symmetric activation envelope for major affine paths, while positive floors protect logarithmic encoding. Attention adds an exponential stability cap.
+Every encoder receives a finite interval from analytic propagation or a frozen calibration record, while positive floors protect logarithmic encoding. Attention additionally applies a dtype- and sequence-capacity-derived exponential stability cap.
 
 Clamping improves numerical robustness but changes the mathematical function at the boundary. Fidelity results should therefore pair task metrics with clamp statistics and calibrated range assumptions rather than describe the finite implementation as unconditionally exact.
 
@@ -68,7 +68,7 @@ Attention masks are converted to boolean suppression positions and overwritten w
 
 This avoids allowing masked locations to regain probability through later transformations. It also unifies causal masks and Hugging Face additive or boolean masks at the operator normalization boundary.
 
-The suppressing value is finite, so it is a numerical approximation to negative-infinite conventional logits. Its magnitude is the final per-layer score cap, constrained by the analytic score interval, the configured threshold, and the dtype-, temporal-scale-, and source-capacity-derived representability ceiling.
+The suppressing value is finite, so it is a numerical approximation to negative-infinite conventional logits. Its magnitude is the final per-layer score cap, constrained by the analytic score interval and the dtype-, temporal-scale-, and source-capacity-derived representability ceiling.
 
 ## Stage-Level Ablations
 

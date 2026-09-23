@@ -4,7 +4,7 @@ Small diagnostic comparisons inspect performance before full evaluation. They re
 
 ## Small ViT Comparison
 
-The first check uses ViT-S ImageNet, 256 fixed training images for calibration and 256 fixed validation images for matched ANN/SNN evaluation. The current float64, theta 40 and ViT policy 2 implementation remain fixed.
+The first check used ViT-S ImageNet, 256 fixed training images for calibration and 256 fixed validation images for matched ANN/SNN evaluation. Its former shared-range setting makes it historical after global-range removal.
 
 `scripts/experiments/quick_vit_check.py#main` derives evaluator commands from the current comparison manifest, verifies frozen source and assets, and records the helper hash separately. It acquires one idle GPU from 4–7 using the shared lock and stores runtime on real disk under artifacts. All logs and phase exit status are preserved; no paper table is changed.
 
@@ -22,7 +22,7 @@ The new text policy provides collection, immutable persistence and consumption o
 
 Short comparisons use a newly collected training subset and matched ANN/SNN evaluation examples. They inspect performance before full evaluation and cannot replace complete training calibration or manuscript results.
 
-The committed runner uses 256 training examples selected with seed 0, two collection passes and the first 256 held out examples in fixed order. BERT and RoBERTa use SST-2 validation; GPT-2 uses nonempty WikiText-2 test rows with its existing mean of batch losses. All use float64, theta 40, batch size 8, sequence length 128, active temporal attention and LayerNorm, and each model's maintained activation construction. Noise, W&B and TensorBoard are disabled.
+The retained runner records a historical 256-example diagnostic from the removed shared-range contract. It must not be copied into a maintained campaign; current full evaluations use the complete local-range calibration path documented in [[text-calibration#Complete Comparison Execution]].
 
 [[scripts/experiments/quick_calibrated_text_check.py#main]] requires a clean checkout at the supplied commit, validates the source throughout execution, and records collection, ANN and SNN commands and logs separately. It checks complete evaluation counts, finite metrics and the executed calibration site list before accepting a result. The final comparison records its dataset order and preprocessing identity. Missing or failed phases are preserved as failures rather than silently omitted.
 

@@ -18,8 +18,10 @@ FORBIDDEN_NAMES = {"theta", "attention_theta", "selected_theta"}
 PRODUCTION_ROOTS = (
     ROOT / "utils" / "transforms",
     ROOT / "utils" / "transformers",
+    ROOT / "scripts" / "analysis",
     ROOT / "scripts" / "evaluation",
     ROOT / "scripts" / "experiments",
+    ROOT / "scripts" / "setup",
 )
 CONFIGURATION_FILES = {
     "utils/transformers/models/spiking_vit/configuration_spiking_vit.py",
@@ -145,11 +147,41 @@ def verify_evaluator_help() -> None:
         assert "--theta" not in result.stdout
 
 
+def verify_maintained_guidance() -> None:
+    """Examples and executable notebook cells cannot advertise the retired knob."""
+    forbidden_fragments = (
+        "--theta", "attention_theta", "mismatch_theta", "selected_theta",
+        "wandb-theta-std", "df['theta']", 'df["theta"]',
+    )
+    violations: list[str] = []
+    for path in (ROOT / "README.md", ROOT / "AGENTS.md"):
+        text = path.read_text(encoding="utf-8")
+        for fragment in forbidden_fragments:
+            if fragment in text:
+                violations.append(f"{path.relative_to(ROOT)}:{fragment}")
+
+    import json
+
+    for path in sorted((ROOT / "scripts" / "notebooks").glob("*.ipynb")):
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        for index, cell in enumerate(notebook.get("cells", ())):
+            if cell.get("cell_type") != "code":
+                continue
+            source = "".join(cell.get("source", ()))
+            for fragment in forbidden_fragments:
+                if fragment in source:
+                    violations.append(
+                        f"{path.relative_to(ROOT)}:cell-{index}:{fragment}"
+                    )
+    assert not violations, "maintained guidance restores global theta:\n" + "\n".join(violations)
+
+
 def main() -> None:
     verify_production_surface()
     verify_legacy_config_rejection()
     verify_operator_signatures()
     verify_evaluator_help()
+    verify_maintained_guidance()
     print("Global theta removal verification passed")
 
 

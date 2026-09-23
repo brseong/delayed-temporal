@@ -64,8 +64,6 @@ Run experiment wrappers from the repository root:
 ```bash
 bash scripts/setup/convert_vits.sh
 bash scripts/experiments/error_analysis_vit.sh
-bash scripts/experiments/theta_jitter_analysis_vit.sh
-bash scripts/experiments/jitter_analysis_vit.sh
 bash scripts/experiments/ablation_gelu_vit.sh
 bash scripts/experiments/error_analysis_bert.sh sst2
 ```
@@ -76,7 +74,7 @@ A short ViT evaluation can be launched directly:
 CUDA_VISIBLE_DEVICES=0 python3 scripts/evaluation/error_analysis_vit.py \
   --experiment_name smoke --model_backend spiking \
   --model_id /data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k \
-  --dataset_id imagenet-1k --batch_size 32 --theta 2000 \
+  --dataset_id imagenet-1k --batch_size 32 \
   --spiking-layernorm --spiking-mlp --spiking-attention \
   --max_eval_batches 5
 ```
@@ -109,7 +107,7 @@ Preserve these invariants when making changes:
 - Treat global noise configuration and clamp logging as mutable process-wide state; do not assume scoped changes are thread-safe or `DataParallel`-safe.
 - Match validation effort to the changed layer. Operator changes need reference-value and boundary checks; noise changes need seeded distribution and injection-scope checks; model changes need at least a smoke evaluation when dependencies permit.
 
-The `theta` threshold controls the representable potential interval, and out-of-range values are clamped. Quantile collection writes calibration data under `artifacts/quantiles/`. W&B exports used by notebooks live under `artifacts/wandb/`, generated plots under `artifacts/figures/`, and NeurIPS snapshot copies under `paper/neurips_2026/figures/`.
+Each temporal operator consumes an analytic or frozen calibrated local potential range, and out-of-range values are clamped to that declared interval. Quantile collection writes calibration data under `artifacts/quantiles/`. W&B exports used by notebooks live under `artifacts/wandb/`, generated plots under `artifacts/figures/`, and NeurIPS snapshot copies under `paper/neurips_2026/figures/`.
 
 ## Coding conventions
 

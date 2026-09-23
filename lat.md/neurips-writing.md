@@ -32,7 +32,7 @@ NeurIPS 부록은 현재 ICLR 정의와 실험 계약을 기준으로 선별하�
 
 가장 우선할 자료는 primitive operator와 composition의 유도이다. 다만 현재의 $f_{\mathrm{Pow}}$, GELU, LayerNorm, finite potential range에 맞추어 다시 써야 하며, 제거되거나 변경된 구성과 exactness 주장은 이어받지 않는다.
 
-Experimental Details and Hyperparameters는 checkpoint, dataset split, calibration subset, seed, histogram, 고정된 양의 log 입력 하한, noise replica를 보고하는 재현성 표로 재구성한다. 과거의 $\theta=2000$과 완료되지 않은 sweep 조건은 사용하지 않는다.
+Experimental Details and Hyperparameters는 checkpoint, dataset split, calibration subset, seed, histogram, 고정된 양의 log 입력 하한, noise replica를 보고하는 재현성 표로 재구성한다. 제거된 global-range sweep 조건은 사용하지 않는다.
 
 Simulated Timing Noise Sweeps에는 현재 부록 그림을 재현하는 grid, subset, seed, replica, aggregation을 덧붙일 수 있다. 이 절은 BrainScaleS-2 측정과 분리한다.
 
@@ -40,6 +40,4 @@ Natural Language Performance Details는 이미 본문 표에 있으므로 중복
 
 실제 이전에서는 현행 코드와 대수적으로 일치하는 primitive 및 composition 식만 다시 유도하고, 평가에 사용한 checkpoint와 data population을 현행 artifact로 교체했다. 옛 robustness protocol은 현재 그림과 일치하지 않아 사용하지 않았다.
 
-현행 ImageNet-1k 및 CIFAR-10 ViT 성능 artifact는 논문 평가 runner가 런타임에 적용한 Power cubic을 사용하므로 이 차이 때문에 재실행할 필요가 없다. 기존 simulated timing noise 그림도 Power cubic은 사용했지만 고정 GELU 계수를 별도 composed multiplication으로 계산하여, 그 그림만 current receiving synaptic gain 구성과 일치하지 않는다. RoBERTa 평가는 유지되는 multiplication cubic을 사용한다.
-
-현행 ViT-B/16 근거는 source `f7b74c1aef38502caccf532d1e58a7cf321833d6`의 policy-2 campaign이다. Training 5k에서 $\theta=20$을 선택하고 fixed validation 5k에서 threshold, timing noise, deadline margin ratio를 각각 아홉 점으로 평가했다. Timing-noise 상단 네 점을 같은 identity로 추가해 $r_t=10^{-3}$까지 확인했다. Source `648af9bb`의 threshold-40 그림은 역사 자료이며 새 결과와 합치지 않는다.
+전역 범위가 제거되었으므로 이전 ImageNet-1k, CIFAR-10, 텍스트 정확도와 simulated timing-noise 그림은 모두 provenance로만 남긴다. 현행 근거는 [[evaluation#Local-Range Paper Re-evaluation]]의 새 calibration과 평가가 완료되고 identity 검증을 통과한 뒤에만 원고에 반영한다.

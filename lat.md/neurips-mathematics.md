@@ -57,11 +57,11 @@ GELU 분모에 들어가는 지수 출력의 고정 배율은 receiving $\Psi$ g
 고정 관측 시각에서 negative-potential encoder와 exponential decoding을 합성하면
 
 $$
-z(v)=w\exp\!\left[-\frac{t_{\mathrm{obs}}-\theta}{\tau_m}\right]
+z(v)=w\exp\!\left[-\frac{t_{\mathrm{obs}}-u}{\tau_m}\right]
 \exp(-v/\tau_m)=\kappa\exp(-v/\tau_m).
 $$
 
-전체 exponential readout weight를 $w=\exp((t_{\mathrm{obs}}-\theta)/\tau_m)$로 정하거나, 기존 응답에 $\kappa^{-1}\cdot_{\mkern-2mu\scriptscriptstyle\Psi}$를 적용하면 normalized output은 $\exp(-v/\tau_m)$가 된다. 이 $\cdot_{\mkern-2mu\scriptscriptstyle\Psi}$는 원고가 이미 정의한 fixed receiving synaptic gain이며 별도 $f_{\mathrm{Mul}}$이 아니다. 다만 GELU 식 안에서 지수 입력 계수에 붙은 기존 $\cdot_{\mkern-2mu\scriptscriptstyle\Psi}$와 역할이 다르다. 여기서는 지수 contribution 전체에 적용한 뒤 $1$을 더해야 하며, 완성된 gate나 GELU 출력 뒤의 gain으로 옮길 수 없다. $\tau_m\ne1$에서 목표가 $\exp(-u)$이면 exponential decoding 전에 입력을 $\tau_m u$로 맞춘다.
+여기서 $u$는 해당 encoder가 선언한 local upper endpoint다. 전체 exponential readout weight를 $w=\exp((t_{\mathrm{obs}}-u)/\tau_m)$로 정하거나, 기존 응답에 $\kappa^{-1}\cdot_{\mkern-2mu\scriptscriptstyle\Psi}$를 적용하면 normalized output은 $\exp(-v/\tau_m)$가 된다. 이 $\cdot_{\mkern-2mu\scriptscriptstyle\Psi}$는 원고가 이미 정의한 fixed receiving synaptic gain이며 별도 $f_{\mathrm{Mul}}$이 아니다. 다만 GELU 식 안에서 지수 입력 계수에 붙은 기존 $\cdot_{\mkern-2mu\scriptscriptstyle\Psi}$와 역할이 다르다. 여기서는 지수 contribution 전체에 적용한 뒤 $1$을 더해야 하며, 완성된 gate나 GELU 출력 뒤의 gain으로 옮길 수 없다. $\tau_m\ne1$에서 목표가 $\exp(-x)$이면 exponential decoding 전에 입력을 $\tau_m x$로 맞춘다.
 
 Composition table의 $f_{\mathrm{Exp}}$ 행에만 $w$나 $\kappa^{-1}\cdot_{\mkern-2mu\scriptscriptstyle\Psi}$를 노출하면 다른 operator mapping과 추상화 수준이 달라진다. 모든 $\Psi$ operator가 fixed receiving synaptic gain을 가진다는 공통 규칙을 먼저 두고, 이 gain은 입력과 무관한 multiplicative prefactor만 상쇄할 수 있다고 한정한다. Primitive table에서는 $\psi_{\mathrm{NE}}$ 행에만 있는 $w$를 제거하며, $\alpha\cdot_{\mkern-2mu\scriptscriptstyle\Psi}z$는 composition에서 함수상 fixed coefficient를 드러낼 때만 쓴다. $f_{\mathrm{Exp}}$에 필요한 gain 값과 GELU 분모에서의 적용 순서는 appendix derivation에 명시하는 편이 일관된다.
 

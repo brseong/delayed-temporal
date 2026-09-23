@@ -22,21 +22,19 @@ CIFAR-10 ViT-S uses test 10k. ImageNet ViT-S/B/L use the existing fixed validati
 
 ## Scheduling
 
-The completed evaluations used one visible GPU per process, persistent artifact storage, and checked runtime paths outside `/tmp`.
+The active local-range rerun uses one visible GPU per process on `poseidon1`, persistent artifact storage, and checked runtime paths outside `/tmp`.
 
-Local GPU devices 4--7 remain the default. Campaign-specific temporary access to devices 0--3 has expired and does not alter that rule. UBAI jobs use Slurm compute nodes and place extracted environments and scratch data under checked `/enroot` disk paths, never a RAM filesystem. A result is reusable only after the source, evaluator, dataset, checkpoint, preprocessing, and calibration identities match its manifest.
+The campaign supervisor and authenticated outputs are defined in [[evaluation#Local-Range Paper Re-evaluation]]. A result is reusable only after the source, evaluator, dataset, checkpoint, preprocessing, and calibration identities match its manifest.
 
-The active campaign first assigned CIFAR-10 ViT-S and ImageNet ViT-L locally and ImageNet ViT-S/B to UBAI. Local admission initially exhausted three technical attempts when a device changed from idle to occupied between the controller check and the worker's second check; completed results were retained and only the failed attempt counters were reset.
-
-UBAI preparation completed, but all three paired jobs stopped before evaluation because the prepared artifact file membership no longer matched. The controller did not bypass that identity check or accept a partial remote result. After Slurm reported the pair jobs terminal, ImageNet ViT-S/B ownership moved to local devices 6 and 7; devices 4 and 5 continued ViT-L and CIFAR-10 ViT-S. Each evaluator still receives one visible GPU and writes outside `/tmp`.
+The earlier local and UBAI scheduling record belongs to the superseded global-range campaign and is retained in [[deprecated#과거 실험과 범위 감사]].
 
 ## Superseded Results
 
 The rows below preserve completed evidence from the removed global-range contract. They cannot update the paper table; fresh local-range results require new calibration and evaluation.
 
-### Current Training-Only Evidence
+### Historical Training-Only Evidence
 
-The active campaign is frozen as `conversion_comparison_training_selected_theta_float64_bounds3_v4` at source `bf861b55cf1811209e436f8bae98c80240dfa042`; selection uses no validation or test labels.
+The historical campaign is frozen as `conversion_comparison_training_selected_theta_float64_bounds3_v4` at source `bf861b55cf1811209e436f8bae98c80240dfa042`; selection used no validation or test labels.
 
 | Task and model | Selected $\theta$ | Selected training correct | Best training correct | Evaluation population | ANN correct | SNN correct | ANN top-1 | SNN top-1 | Difference |
 |---|---:|---:|---:|---|---:|---:|---:|---:|---:|
@@ -60,9 +58,9 @@ The prior common-$\theta=40$ rows remain provenance only and are not replicas of
 
 CIFAR comes from `conversion_comparison_theta40_calibrated_float64_bounds3_v3` at source `b3a50bab6805ae62e620ce5fc12e8e7f5eb2cb05`. The ImageNet rows come from `conversion_comparison_imagenet_timm_theta40_float64_v4` at source `0573a1fad36bf04d512a9eac543851f6769b232a`. The two bundles are combined only because the ImageNet correction does not change CIFAR data or preprocessing; their source identities remain explicit.
 
-## Complete Seven-Model Campaign
+## Historical Seven-Model Campaign
 
-The completed campaign also evaluates BERT, RoBERTa, and GPT-2 with fresh model-specific training 5k calibration and their complete held-out populations.
+This completed campaign used the removed global-range contract and is preserved only as prior evidence; the current paper rerun does not reuse its numbers.
 
 BERT evaluates all 872 SST-2 validation examples and records 806/872 for both ANN and SNN, or 92.4312%. RoBERTa evaluates all 872 examples and records 824/872 for ANN and 823/872 for SNN, or 94.4954% and 94.3807%. GPT-2 evaluates every 2,891 nonempty row in the pinned WikiText-2 raw test artifact, covering 204,257 valid tokens. Its primary token-weighted corpus perplexity is 21.984180 for ANN and 21.984387 for SNN; the retained mean-of-batch-loss compatibility values are 23.253149 and 23.253467.
 

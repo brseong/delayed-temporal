@@ -76,7 +76,7 @@ Redirected evaluation logs disable the terminal progress bar so records occupy c
 
 ## Fixed-Domain ViT-S Real-Data Audit
 
-The fixed-domain audit measures one cached pretrained ViT-S checkpoint on the same 5,000-image ImageNet-1k validation subset and separates analytic rails, residual calibration, and Gaussian event effects.
+This audit is a historical measurement from the removed global-range source; it cannot define current ViT bounds or manuscript results.
 
 The checkpoint is `/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k`; all runs use float32, batch size 32, $\theta=2000$, and all three spiking LayerNorm stages plus spiking attention and MLP. The dense Hugging Face reference scores 80.26%, while calibration-free spiking scores 80.54%.
 
@@ -102,7 +102,7 @@ The identical retired-calibration clean and Gaussian accuracies do not establish
 
 ## Fixed-Domain Text-Model Real-Data Audit
 
-The text-model audit compares cached pretrained checkpoints on complete held-out splits and distinguishes representative wrapper settings from a deliberately narrow-domain diagnostic.
+This audit is a historical measurement from the removed global and attention-specific range source; it cannot define current text-model bounds or manuscript results.
 
 All runs use float32, maximum length 128, no timing noise, and all three temporal LayerNorm stages when LayerNorm is enabled. BERT and RoBERTa use all 872 GLUE/SST-2 validation examples with batch size 32. GPT-2 uses all 181 nonempty WikiText-2 test batches with batch size 16. The representative wrapper thresholds are 1,000 for BERT, 2,000 for RoBERTa, and global 2,000 plus attention-local 100 for GPT-2.
 
@@ -138,7 +138,7 @@ The classifier results and mixed-threshold GPT-2 result support low degradation 
 
 ### GPT-2 Floating-Point Precision Control
 
-The appendix control separates float32 timestamp resolution from execution-range clipping in the fully converted GPT-2 path.
+This historical appendix control separated float32 timestamp resolution from execution-range clipping under the removed GPT-2 range settings.
 
 [[scripts/evaluation/error_analysis_gpt2.py#evaluate_gpt2_model]] accepts an explicit float32 or float64 model dtype when calibration is disabled. Active calibration remains float32-only because artifact metadata currently locks that numerical contract.
 
