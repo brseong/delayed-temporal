@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.runtime import ann_baseline
 from scripts.runtime import files as runtime_files
 from scripts.runtime import identity
 from scripts.runtime import local_gpu
@@ -58,6 +59,7 @@ def source_identity(source: Path, expected_commit: str) -> dict[str, str]:
         source / "scripts/evaluation/error_analysis_vit.py",
         source / "scripts/analysis/evaluate_calibrated_vit.py",
         source / "scripts/analysis/gelu_cubic_phi_nl_vit.py",
+        source / "scripts/runtime/ann_baseline.py",
         Path(__file__).resolve(),
     ]
     return {str(path.relative_to(source)): identity.sha256_file(path) for path in sorted(set(paths))}
@@ -70,6 +72,36 @@ def dataset_identity(path: Path, fingerprint: str, samples: int) -> dict[str, An
     if len(dataset) != samples or str(dataset._fingerprint) != fingerprint:
         raise ValueError("self-contained ViT dataset identity differs")
     return {"path": str(path), "fingerprint": fingerprint, "samples": samples}
+
+
+def dense_baseline_identity(
+    args: argparse.Namespace,
+    *,
+    checkpoint_sha256: str,
+    evaluation_dataset: dict[str, Any],
+) -> dict[str, Any]:
+    """Identify the dense ViT evaluation independently of converted-model code."""
+    config = MODEL_CONFIG[args.model_key]
+    preprocessing_sha256 = (
+        identity.sha256_file(args.image_preprocessing_config)
+        if args.image_preprocessing_config is not None else None
+    )
+    return ann_baseline.build_identity(
+        model_key=args.model_key,
+        model_family="vit",
+        checkpoint_identity=checkpoint_sha256,
+        evaluation_dataset=evaluation_dataset,
+        evaluation_settings={
+            "backend": "hf",
+            "metric": "top1_accuracy",
+            "split": config["split"],
+            "evaluation_samples": config["samples"],
+            "batch_size": args.batch_size,
+            "precision": "float64",
+            "image_preprocessing_sha256": preprocessing_sha256,
+            "quick_test": config["dataset_id"] == "imagenet-1k",
+        },
+    )
 
 
 def common_evaluator_args(args: argparse.Namespace, output: Path) -> list[str]:
@@ -235,6 +267,12 @@ def main() -> None:
         args.evaluation_dataset_path, args.evaluation_dataset_fingerprint,
         50_000 if config["dataset_id"] == "imagenet-1k" else config["samples"],
     )
+    dense_identity = dense_baseline_identity(
+        args,
+        checkpoint_sha256=args.checkpoint_sha256,
+        evaluation_dataset=evaluation_dataset,
+    )
+    dense_cache_root = ARTIFACTS / "logs/ann_baselines/v1"
     output = args.output_root.resolve()
     required_output = (ARTIFACTS / "logs/conversion_comparison" / TAG / "vit" / args.model_key).resolve()
     if output != required_output:
@@ -261,6 +299,8 @@ def main() -> None:
         "output_bounds_version": 4, "dtype": "float64", "noise": False,
         "host_label": args.host_label, "physical_gpu": args.gpu,
         "runtime_dir": str(runtime), "commands": commands,
+        "ann_baseline_identity": dense_identity,
+        "ann_baseline_identity_sha256": ann_baseline.identity_sha256(dense_identity),
     }
     manifest_path = output / "manifest.json"
     if manifest_path.exists():
@@ -304,12 +344,35 @@ def main() -> None:
                         raise ValueError("completed phase log hash differs")
                     if phase == "collect":
                         sites = calibration_sites(output / "calibration.json")
+                    elif phase == "ann":
+                        phase_result["metrics"] = parse_metric(log_path.read_text(), config["samples"])
+                        ann_baseline.publish(
+                            cache_root=dense_cache_root,
+                            baseline_identity=dense_identity,
+                            source_log=log_path,
+                            metrics=phase_result["metrics"],
+                            elapsed_seconds=phase_result["elapsed_seconds"],
+                        )
                     state["phases"][phase] = phase_result
                     continue
                 if phase == "collect" and (output / "calibration.json").exists():
                     rejected = output / "rejected" / f"orphan-collect-{time.time_ns()}"
                     rejected.mkdir(parents=True)
                     os.replace(output / "calibration.json", rejected / "calibration.json")
+                if phase == "ann":
+                    cached = ann_baseline.load(
+                        cache_root=dense_cache_root,
+                        baseline_identity=dense_identity,
+                        parse_metrics=lambda text: parse_metric(text, config["samples"]),
+                    )
+                    if cached is not None:
+                        phase_result = ann_baseline.materialize_phase(
+                            record=cached[0], source_log=cached[1], output=output,
+                        )
+                        runtime_files.new_json(phase_path, phase_result)
+                        state["phases"][phase] = phase_result
+                        runtime_files.atomic_json(output / "result.json", state)
+                        continue
                 source_identity(args.source_root, args.expected_commit)
                 log_path, elapsed = run_phase(
                     commands[phase], output=output, phase=phase,
@@ -329,6 +392,15 @@ def main() -> None:
                     )
                 else:
                     phase_result["metrics"] = parse_metric(log_text, config["samples"])
+                    if phase == "ann":
+                        record = ann_baseline.publish(
+                            cache_root=dense_cache_root,
+                            baseline_identity=dense_identity,
+                            source_log=log_path,
+                            metrics=phase_result["metrics"],
+                            elapsed_seconds=elapsed,
+                        )
+                        phase_result["ann_baseline_identity_sha256"] = record["identity_sha256"]
                     if phase == "snn":
                         if sites is None:
                             raise RuntimeError("calibration sites are unavailable")

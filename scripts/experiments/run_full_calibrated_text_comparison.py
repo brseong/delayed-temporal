@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.runtime import ann_baseline
 from scripts.runtime import files as runtime_files
 from scripts.runtime import identity
 from scripts.runtime import local_gpu
@@ -76,6 +77,7 @@ def source_identity(source: Path, expected_commit: str, family: str) -> dict[str
         source / "scripts/runtime" / "files.py",
         source / "scripts/runtime" / "identity.py",
         source / "scripts/runtime" / "local_gpu.py",
+        source / "scripts/runtime" / "ann_baseline.py",
         Path(__file__).resolve(),
     ]
     hashes = {
@@ -157,6 +159,35 @@ def verify_dataset_snapshot(snapshot: dict[str, Any]) -> None:
     }
     if files != snapshot["files_sha256"]:
         raise ValueError("self-contained text dataset files changed during evaluation")
+
+
+def dense_baseline_identity(
+    args: argparse.Namespace,
+    *,
+    checkpoint_files_sha256: dict[str, str],
+    evaluation_dataset: dict[str, Any],
+) -> dict[str, Any]:
+    """Identify a dense text evaluation independently of converted-model code."""
+    config = MODEL_CONFIG[args.family]
+    return ann_baseline.build_identity(
+        model_key=args.family,
+        model_family=config["evaluator_family"],
+        checkpoint_identity=checkpoint_files_sha256,
+        evaluation_dataset=evaluation_dataset,
+        evaluation_settings={
+            "backend": "hf",
+            "task": config["task"],
+            "metric": (
+                "token_weighted_corpus_perplexity"
+                if config["evaluator_family"] == "gpt2" else "accuracy"
+            ),
+            "evaluation_samples": config["evaluation_samples"],
+            "batch_size": BATCH_SIZE,
+            "max_length": 128,
+            "dtype": "float64",
+            "activation": config["activation"],
+        },
+    )
 
 
 def build_commands(args: argparse.Namespace, output: Path) -> dict[str, list[str]]:
@@ -487,6 +518,12 @@ def main() -> None:
         evaluation_dataset, args.evaluation_dataset_fingerprint,
         config["evaluation_samples"],
     )
+    dense_identity = dense_baseline_identity(
+        args,
+        checkpoint_files_sha256=checkpoint_files_sha256,
+        evaluation_dataset=evaluation_dataset_identity,
+    )
+    dense_cache_root = ARTIFACTS / "logs/ann_baselines/v1"
     calibration_reuse = None
     reused_sites: set[str] | None = None
     if args.reuse_calibration_from is not None:
@@ -523,6 +560,8 @@ def main() -> None:
         "activation_implementation": config.get("activation_implementation", "model_default"),
         "gelu_cubic_implementation": GELU_CUBIC_IMPLEMENTATION,
         "calibration_reuse": calibration_reuse,
+        "ann_baseline_identity": dense_identity,
+        "ann_baseline_identity_sha256": ann_baseline.identity_sha256(dense_identity),
         "campaign_extra_local_gpus": bool(args.campaign_extra_local_gpus),
         "commands": commands, "runtime_dir": str(runtime),
     }
@@ -603,12 +642,34 @@ def main() -> None:
                         phase_result["metrics"] = parse_evaluation(
                             log_path.read_text(), args.family, sites if phase == "snn" else None,
                         )
+                        if phase == "ann":
+                            ann_baseline.publish(
+                                cache_root=dense_cache_root,
+                                baseline_identity=dense_identity,
+                                source_log=log_path,
+                                metrics=phase_result["metrics"],
+                                elapsed_seconds=phase_result["elapsed_seconds"],
+                            )
                     state["phases"][phase] = phase_result
                     continue
                 if phase == "collect" and (output / "calibration.json").exists():
                     rejected = output / "rejected" / f"orphan-collect-{time.time_ns()}"
                     rejected.mkdir(parents=True)
                     os.replace(output / "calibration.json", rejected / "calibration.json")
+                if phase == "ann":
+                    cached = ann_baseline.load(
+                        cache_root=dense_cache_root,
+                        baseline_identity=dense_identity,
+                        parse_metrics=lambda text: parse_evaluation(text, args.family),
+                    )
+                    if cached is not None:
+                        phase_result = ann_baseline.materialize_phase(
+                            record=cached[0], source_log=cached[1], output=output,
+                        )
+                        runtime_files.new_json(phase_path, phase_result)
+                        state["phases"][phase] = phase_result
+                        runtime_files.atomic_json(output / "result.json", state)
+                        continue
                 source_identity(args.source_root, args.expected_commit, evaluator_family)
                 log_path, elapsed = run_phase(
                     commands[phase], output=output, family=args.family, phase=phase,
@@ -630,6 +691,15 @@ def main() -> None:
                     phase_result["metrics"] = parse_evaluation(
                         log_text, args.family, sites if phase == "snn" else None,
                     )
+                    if phase == "ann":
+                        record = ann_baseline.publish(
+                            cache_root=dense_cache_root,
+                            baseline_identity=dense_identity,
+                            source_log=log_path,
+                            metrics=phase_result["metrics"],
+                            elapsed_seconds=elapsed,
+                        )
+                        phase_result["ann_baseline_identity_sha256"] = record["identity_sha256"]
                 runtime_files.new_json(phase_path, phase_result)
                 state["phases"][phase] = phase_result
                 runtime_files.atomic_json(output / "result.json", state)

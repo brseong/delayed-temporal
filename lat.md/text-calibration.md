@@ -60,7 +60,7 @@ Tokenization disables on-disk `Dataset.map` cache creation and keeps transformed
 
 GPT-2 progress validation extracts each JSON object after an optional progress-bar prefix. It still requires exactly one valid record per expected batch and rejects malformed, missing or duplicate records.
 
-[[scripts/experiments/run_full_calibrated_text_comparison.py#main]] runs collection, ANN evaluation and SNN evaluation sequentially on one GPU while allowing different models to run in parallel. It preserves each attempt log, reuses only hash-validated completed phases, and writes flushed progress records throughout evaluation.
+[[scripts/experiments/run_full_calibrated_text_comparison.py#main]] runs collection and SNN evaluation sequentially on one GPU while allowing different models to run in parallel. It reuses a matching authenticated ANN baseline when available, otherwise evaluates and publishes it once. Each attempt log is preserved and progress records are flushed throughout evaluation.
 
 RoBERTa-L completed under the separate `roberta_large_theta40_calibrated_float64_bounds3_v1` tag with its own checkpoint and 218-site calibration table. ANN and SNN both record 841/872, or 96.4450%, on SST-2 validation. This diagnostic does not reuse the RoBERTa-B table or imply that its checkpoint matches SpikeZIP-TF.
 

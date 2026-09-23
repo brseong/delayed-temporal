@@ -174,7 +174,9 @@ The audited BERT, RoBERTa, and GPT-2 configurations use the same explicit LayerN
 
 The active paper campaign regenerates continuous-time task results after replacing the global range setting with explicit operator-local bounds.
 
-[[scripts/experiments/run_full_calibrated_vit_comparison.py#main]] owns the ViT `collect → ANN → SNN` path. It authenticates source, checkpoint, self-contained dataset, preprocessing, and calibration identities; preserves per-phase logs; and resumes only completed phases with matching hashes.
+[[scripts/experiments/run_full_calibrated_vit_comparison.py#main]] owns the ViT `collect → ANN → SNN` result path. It authenticates source, checkpoint, self-contained dataset, preprocessing, and calibration identities; preserves per-phase logs; and resumes only completed phases with matching hashes.
+
+ANN inference is cached separately from conversion evidence. [[scripts/runtime/ann_baseline.py#build_identity]] keys it by model family, checkpoint, evaluation data, preprocessing, numerical settings, batch size, and metric contract, but not the SNN source commit. [[scripts/runtime/ann_baseline.py#load]] re-parses the immutable log before reuse; any changed dense identity forces a fresh ANN evaluation. [[scripts/experiments/import_completed_ann_baseline.py#main]] applies the same checks when importing an older completed phase. Calibration and SNN phases continue to require the exact converted source.
 
 [[scripts/experiments/run_full_calibrated_text_comparison.py#main]] is the corresponding text-model owner. Direct execution on `poseidon1` uses the same GPU lock and occupancy checks as local execution, while UBAI retains its separate Slurm and `/enroot` rules.
 

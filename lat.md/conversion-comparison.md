@@ -14,7 +14,7 @@ The GELU output lower bound is -0.170041. LayerNorm uses the positive logarithmi
 
 The maintained comparison has no global-range selection phase. Each model receives one fresh schema-2 calibration table from its training seed-0 5k artifact, then evaluates the held-out population once after that table is frozen.
 
-All runs use float64, time constant 1, all three spiking LayerNorm stages, spiking attention, and spiking MLP. Noise, deadline margin, static range mismatch, parameter perturbation, W&B, TensorBoard, extra training, and 50k ImageNet evaluation are disabled. Each deterministic ANN/SNN pair is evaluated once without a replica confidence interval.
+All runs use float64, time constant 1, all three spiking LayerNorm stages, spiking attention, and spiking MLP. Noise, deadline margin, static range mismatch, parameter perturbation, W&B, TensorBoard, extra training, and 50k ImageNet evaluation are disabled. Each deterministic SNN is evaluated once without a replica confidence interval; a matching authenticated ANN baseline may be reused.
 
 Calibration uses the model's training seed-0 5k artifact, two deterministic passes, 2,048 histogram bins, observed minimum and maximum, and 5% of the interval width added on each side. Policy 3 requires 109 active sites for ViT-S/B and 217 for ViT-L, including Q/K/V outputs and centered LayerNorm inputs, and records the current output head contract. Frozen execution rejects a different site set, epsilon, preprocessing, dtype, source, checkpoint, or data identity.
 
@@ -24,7 +24,7 @@ CIFAR-10 ViT-S uses test 10k. ImageNet ViT-S/B/L use the existing fixed validati
 
 The active local-range rerun uses one visible GPU per process on `poseidon1`, persistent artifact storage, and checked runtime paths outside `/tmp`.
 
-The campaign supervisor and authenticated outputs are defined in [[evaluation#Local-Range Paper Re-evaluation]]. A result is reusable only after the source, evaluator, dataset, checkpoint, preprocessing, and calibration identities match its manifest.
+The campaign supervisor and authenticated outputs are defined in [[evaluation#Local-Range Paper Re-evaluation]]. SNN and calibration evidence require their full source identity. ANN evidence instead uses the dense evaluation contract described there, so a conversion-only source change does not trigger unchanged dense inference.
 
 The earlier local and UBAI scheduling record belongs to the superseded global-range campaign and is retained in [[deprecated#과거 실험과 범위 감사]].
 
