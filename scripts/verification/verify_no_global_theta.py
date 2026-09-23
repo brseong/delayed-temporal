@@ -25,14 +25,6 @@ PRODUCTION_ROOTS = (
     ROOT / "scripts" / "experiments",
     ROOT / "scripts" / "setup",
 )
-CONFIGURATION_FILES = {
-    "utils/transformers/models/spiking_vit/configuration_spiking_vit.py",
-    "utils/transformers/models/spiking_bert/configuration_bert.py",
-    "utils/transformers/models/spiking_roberta/configuration_roberta.py",
-    "utils/transformers/models/spiking_gpt2/configuration_gpt2.py",
-}
-
-
 def _terminal_name(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
         return node.id
@@ -70,10 +62,6 @@ def _scan_python(path: Path) -> list[str]:
                             violations.append(
                                 f"{relative}:{argument.lineno}:cli:{argument.value}"
                             )
-
-    # Configuration modules may read legacy serialized keys only to reject them.
-    if relative in CONFIGURATION_FILES:
-        violations = [item for item in violations if ":assignment:" in item]
     return violations
 
 
