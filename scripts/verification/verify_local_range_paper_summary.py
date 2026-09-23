@@ -73,6 +73,26 @@ def main() -> None:
             family="vit",
         ))
 
+        text_table = {
+            **table,
+            "metadata": {
+                **table["metadata"],
+                "model_options": [
+                    ["output_bounds_version", 4],
+                    ["text_calibration_policy_version", 1],
+                ],
+            },
+        }
+        text_table["metadata"].pop("theta", None)
+        path.write_text(json.dumps(text_table, sort_keys=True))
+        validate_calibration(
+            path,
+            expected_sha256=identity.sha256_file(path),
+            expected_source_commit=source_commit,
+            expected_sites=2,
+            family="text",
+        )
+
     assert contains_legacy_range_key({"nested": [{"attention_theta": 40}]})
     assert contains_legacy_range_key({"model_options": [["theta", 40]]})
     assert contains_legacy_range_key({"command": ["python", "--theta", "40"]})

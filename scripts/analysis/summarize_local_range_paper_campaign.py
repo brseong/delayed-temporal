@@ -99,14 +99,16 @@ def validate_calibration(
     options = dict(metadata.get("model_options", []))
     if (
         metadata.get("dtype") != "float64"
-        or options.get("source_commit") != expected_source_commit
         or options.get("output_bounds_version") != 4
         or len(rows) != expected_sites
         or len(sites) != expected_sites
     ):
         raise ValueError(f"calibration identity or site population differs: {path}")
-    if family == "vit" and options.get("vit_calibration_policy_version") != 2:
-        raise ValueError(f"ViT calibration policy differs: {path}")
+    if family == "vit" and (
+        options.get("source_commit") != expected_source_commit
+        or options.get("vit_calibration_policy_version") != 2
+    ):
+        raise ValueError(f"ViT calibration source or policy differs: {path}")
     if family == "text" and options.get("text_calibration_policy_version") != 1:
         raise ValueError(f"text calibration policy differs: {path}")
 
