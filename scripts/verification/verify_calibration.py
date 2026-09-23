@@ -2056,7 +2056,6 @@ def verify_vit_residual_range_reset() -> None:
     assert clear_model_calibration(model, expected_state=runtime) == 1
 
     # A complete encoder adds one entry site before the two residual sites. Its
-    # calibration-free theta rail makes declared output domains independent of the
     # declared embedding range makes output domains independent of batch extrema.
     class EncoderModel(nn.Module):
         """Expose a one-block encoder under a wrapper-stable module path."""
