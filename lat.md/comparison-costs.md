@@ -49,7 +49,7 @@ The gamma vector has $D$ encoded values, each delivered to $N$ token outputs; it
 
 ## Network Geometry and Energy
 
-The whole estimate is derived from checkpoint dimensions, with the output projection, final LayerNorm and an assumed TTFS classification head included. No evaluation result is needed to determine these structural costs.
+The whole estimate is derived from checkpoint dimensions, with the output projection, final LayerNorm and TTFS classification head included. No evaluation result is needed to determine these structural costs.
 
 | Component | Data SOP | Global SOP |
 | --- | ---: | ---: |
@@ -62,11 +62,11 @@ The whole estimate is derived from checkpoint dimensions, with the output projec
 | Attention output projection per block | $ND^2$ | $2ND+1$ |
 | First MLP projection per block | $NDH$ | $N(D+H)+1$ |
 | Second MLP projection per block | $NHD$ | $N(H+D)+1$ |
-| Assumed classification head | $DC$ | $D+C+1$ |
+| Classification head | $DC$ | $D+C+1$ |
 
 Each block additionally includes one GELU component and two LayerNorm components from the preceding tables. The complete network is patch embedding plus $L$ blocks plus one final LayerNorm over all $N$ tokens plus the classification head on one token. For a $224\times224$ image and $16\times16$ patches, patch embedding processes 196 patches, whereas each Transformer block processes 197 tokens. The head uses 10 classes for CIFAR-10 and 1,000 for ImageNet.
 
-Energy in mJ is total SOP multiplied by $0.9\times10^{-9}$, following the approved $0.9$ pJ/SOP assumption. This is an SOP-based estimate, not a measurement of GPU energy or a fabricated analog chip. The evaluated classifier remains an ordinary dense linear layer; the cost includes its assumed TTFS counterpart. Memory access, control, routing, leakage, analog peripheral circuits, accuracy-dependent device requirements and physical feasibility are outside this estimate.
+Energy in mJ is total SOP multiplied by $0.9\times10^{-9}$, following the approved $0.9$ pJ/SOP assumption. This is an SOP-based estimate, not a measurement of GPU energy or a fabricated analog chip. The evaluated classifier uses the same TTFS linear composition counted here. Memory access, control, routing, leakage, analog peripheral circuits, accuracy-dependent device requirements and physical feasibility are outside this estimate.
 
 The coefficient agrees with the value used for accumulation in [TTFSFormer, Section 5.2](https://openreview.net/pdf?id=mJAa823xKu). That agreement alone does not make the two complete hardware mappings or excluded costs identical.
 
