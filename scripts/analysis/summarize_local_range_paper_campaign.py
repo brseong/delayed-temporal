@@ -31,10 +31,17 @@ T_CRITICAL_DF2 = 4.302652729911275
 VIT_MODELS = (
     "cifar10_vit_small", "imagenet_vit_small", "imagenet_vit_base", "imagenet_vit_large",
 )
+VIT_SITE_COUNTS = {
+    "cifar10_vit_small": 109,
+    "imagenet_vit_small": 109,
+    "imagenet_vit_base": 109,
+    "imagenet_vit_large": 217,
+}
 TEXT_MODELS = (
     ("roberta", TEXT_TAG), ("roberta_large", ROBERTA_LARGE_TAG),
     ("gpt2", GPT2_COMPOSED_GELU_TAG),
 )
+TEXT_SITE_COUNTS = {"roberta": 110, "roberta_large": 218, "gpt2": 109}
 
 
 def read_complete(path: Path) -> dict[str, Any]:
@@ -52,19 +59,146 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
         writer.writerows(rows)
 
 
+def contains_legacy_range_key(value: Any) -> bool:
+    """Return whether persisted evidence exposes a removed global range key."""
+    legacy = {"theta", "attention_theta", "selected_theta"}
+    if isinstance(value, dict):
+        return any(
+            str(key) in legacy
+            or contains_legacy_range_key(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        if len(value) == 2 and isinstance(value[0], str) and value[0] in legacy:
+            return True
+        return any(contains_legacy_range_key(item) for item in value)
+    if isinstance(value, str):
+        return value == "--theta" or value.startswith("--theta=") or value == "--attention-theta"
+    return False
+
+
+def validate_calibration(
+    path: Path,
+    *,
+    expected_sha256: str,
+    expected_source_commit: str,
+    expected_sites: int,
+    family: str,
+) -> None:
+    if identity.sha256_file(path) != expected_sha256:
+        raise ValueError(f"calibration hash differs: {path}")
+    table = json.loads(path.read_text())
+    if table.get("format_version") != 2 or contains_legacy_range_key(table):
+        raise ValueError(f"calibration range contract differs: {path}")
+    rows = table.get("layers", [])
+    sites = {
+        row["module_name"] + "/" + row["tensor_name"]
+        for row in rows
+    }
+    metadata = table.get("metadata", {})
+    options = dict(metadata.get("model_options", []))
+    if (
+        metadata.get("dtype") != "float64"
+        or options.get("source_commit") != expected_source_commit
+        or options.get("output_bounds_version") != 4
+        or len(rows) != expected_sites
+        or len(sites) != expected_sites
+    ):
+        raise ValueError(f"calibration identity or site population differs: {path}")
+    if family == "vit" and options.get("vit_calibration_policy_version") != 2:
+        raise ValueError(f"ViT calibration policy differs: {path}")
+    if family == "text" and options.get("text_calibration_policy_version") != 1:
+        raise ValueError(f"text calibration policy differs: {path}")
+
+
+def validate_pipeline(
+    root: Path,
+    *,
+    manifest: dict[str, Any],
+    result: dict[str, Any],
+    expected_sites: int,
+    family: str,
+) -> None:
+    if (
+        manifest.get("range_contract") != "operator_local_v1"
+        or manifest.get("output_bounds_version") != 4
+        or manifest.get("dtype") != "float64"
+        or manifest.get("noise") is not False
+        or contains_legacy_range_key(manifest)
+        or contains_legacy_range_key(result)
+    ):
+        raise ValueError(f"pipeline range contract differs: {root}")
+    phases = result.get("phases", {})
+    if set(phases) != {"collect", "ann", "snn"}:
+        raise ValueError(f"pipeline phase population differs: {root}")
+    for phase, record in phases.items():
+        if record.get("phase") != phase:
+            raise ValueError(f"phase identity differs: {root}/{phase}")
+        log_path = root / record["log_file"]
+        if identity.sha256_file(log_path) != record["log_sha256"]:
+            raise ValueError(f"phase log hash differs: {root}/{phase}")
+    calibration_sha256 = result.get("calibration_sha256")
+    if calibration_sha256 != phases["collect"].get("calibration_sha256"):
+        raise ValueError(f"completed calibration hash differs: {root}")
+    if phases["collect"].get("calibration_site_count") != expected_sites:
+        raise ValueError(f"collection site count differs: {root}")
+    snn_metrics = phases["snn"].get("metrics", {})
+    snn_sites = phases["snn"].get("calibration_site_count", snn_metrics.get("calibration_site_count"))
+    if snn_sites != expected_sites:
+        raise ValueError(f"SNN site count differs: {root}")
+    validate_calibration(
+        root / "calibration.json",
+        expected_sha256=calibration_sha256,
+        expected_source_commit=manifest["source_commit"],
+        expected_sites=expected_sites,
+        family=family,
+    )
+
+
+def validate_metric(value: float, *, accuracy: bool) -> None:
+    if (
+        not math.isfinite(value)
+        or (accuracy and not 0.0 <= value <= 1.0)
+        or (not accuracy and value <= 0)
+    ):
+        raise ValueError("table metric is outside its valid range")
+
+
+def expected_noise_cells() -> set[tuple[float, float]]:
+    """Return the exact 21 unique Figure 4 cells."""
+    return {
+        (10 ** (-5 + index / 8), 4.0) for index in range(9)
+    } | {
+        (1e-5, ratio)
+        for ratio in (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0)
+    }
+
+
 def table_rows(artifacts: Path) -> list[dict[str, Any]]:
     rows = []
     for model in VIT_MODELS:
         root = artifacts / "logs/conversion_comparison" / VIT_TAG / "vit" / model
         result = read_complete(root / "result.json")
         manifest = json.loads((root / "manifest.json").read_text())
+        if manifest.get("model_key") != model:
+            raise ValueError(f"ViT model identity differs: {model}")
+        validate_pipeline(
+            root,
+            manifest=manifest,
+            result=result,
+            expected_sites=VIT_SITE_COUNTS[model],
+            family="vit",
+        )
         ann = result["phases"]["ann"]["metrics"]
         snn = result["phases"]["snn"]["metrics"]
         if ann["total"] != manifest["evaluation_samples"] or snn["total"] != manifest["evaluation_samples"]:
             raise ValueError(f"ViT sample count differs: {model}")
+        validate_metric(ann["accuracy"], accuracy=True)
+        validate_metric(snn["accuracy"], accuracy=True)
         rows.append({
             "model": model, "family": "vit", "samples": ann["total"],
             "ann_metric": ann["accuracy"], "snn_metric": snn["accuracy"],
+            "snn_minus_ann": snn["accuracy"] - ann["accuracy"],
             "metric": "accuracy", "calibration_sha256": result["calibration_sha256"],
             "source_commit": manifest["source_commit"],
         })
@@ -72,6 +206,15 @@ def table_rows(artifacts: Path) -> list[dict[str, Any]]:
         root = artifacts / "logs/conversion_comparison" / tag / "text" / model
         result = read_complete(root / "result.json")
         manifest = json.loads((root / "manifest.json").read_text())
+        if manifest.get("family") != model:
+            raise ValueError(f"text model identity differs: {model}")
+        validate_pipeline(
+            root,
+            manifest=manifest,
+            result=result,
+            expected_sites=TEXT_SITE_COUNTS[model],
+            family="text",
+        )
         ann = result["phases"]["ann"]["metrics"]
         snn = result["phases"]["snn"]["metrics"]
         if model == "gpt2":
@@ -86,9 +229,12 @@ def table_rows(artifacts: Path) -> list[dict[str, Any]]:
             metric = "accuracy"
         if samples != manifest["evaluation_samples"] or snn["total"] != samples:
             raise ValueError(f"text sample count differs: {model}")
+        validate_metric(ann_metric, accuracy=model != "gpt2")
+        validate_metric(snn_metric, accuracy=model != "gpt2")
         rows.append({
             "model": model, "family": "text", "samples": samples,
             "ann_metric": ann_metric, "snn_metric": snn_metric, "metric": metric,
+            "snn_minus_ann": snn_metric - ann_metric,
             "calibration_sha256": result["calibration_sha256"],
             "source_commit": manifest["source_commit"],
         })
@@ -99,8 +245,14 @@ def table_rows(artifacts: Path) -> list[dict[str, Any]]:
 
 def noise_rows(artifacts: Path) -> list[dict[str, Any]]:
     runs = artifacts / "logs/noise_scan" / NOISE_TAG / "runs"
+    vit_root = artifacts / "logs/conversion_comparison" / VIT_TAG / "vit/imagenet_vit_base"
+    vit_result_path = vit_root / "result.json"
+    vit_result = read_complete(vit_result_path)
+    vit_manifest = json.loads((vit_root / "manifest.json").read_text())
+    expected_cells = expected_noise_cells()
     rows = []
     identities = set()
+    run_ids = set()
     for result_path in sorted(runs.glob("*/result.json")):
         result = read_complete(result_path)
         root = result_path.parent
@@ -109,8 +261,44 @@ def noise_rows(artifacts: Path) -> list[dict[str, Any]]:
             raise ValueError(f"noise log hash differs: {root.name}")
         metric = result["metrics"]
         counts = metric["physical_counts"]
-        if metric["total"] != 5_000 or manifest["run_id"] != root.name:
+        if (
+            metric["total"] != 5_000
+            or manifest["run_id"] != root.name
+            or result.get("run_id") != root.name
+            or manifest.get("range_contract") != "operator_local_v1"
+            or manifest.get("timing_noise_contract") != "local_encoder_window_fraction_v1"
+            or manifest.get("dtype") != "float64"
+            or contains_legacy_range_key(manifest)
+            or contains_legacy_range_key(result)
+        ):
             raise ValueError(f"noise run population or identity differs: {root.name}")
+        if root.name in run_ids:
+            raise ValueError(f"duplicate noise run identifier: {root.name}")
+        run_ids.add(root.name)
+        if (
+            manifest.get("source_commit") != vit_manifest.get("source_commit")
+            or manifest.get("checkpoint_sha256") != vit_manifest.get("checkpoint_sha256")
+            or manifest.get("calibration_sha256") != vit_result.get("calibration_sha256")
+            or manifest.get("calibration_source_result_sha256") != identity.sha256_file(vit_result_path)
+            or manifest.get("evaluation_dataset_path") != vit_manifest["evaluation_dataset"]["path"]
+        ):
+            raise ValueError(f"noise evidence differs from the ViT-B source: {root.name}")
+        validate_metric(metric["accuracy"], accuracy=True)
+        if any(
+            isinstance(counts.get(key), bool)
+            or not isinstance(counts.get(key), int)
+            or counts[key] < 0
+            for key in ("events", "misses", "deadline_events", "outputs", "underflows", "overflows")
+        ):
+            raise ValueError(f"noise physical counts are invalid: {root.name}")
+        if (
+            counts["events"] <= 0
+            or counts["outputs"] <= 0
+            or counts["misses"] > counts["events"]
+            or counts["deadline_events"] > counts["events"]
+            or counts["underflows"] + counts["overflows"] > counts["outputs"]
+        ):
+            raise ValueError(f"noise physical counts are inconsistent: {root.name}")
         identities.add((manifest["source_commit"], manifest["checkpoint_sha256"],
                         manifest["calibration_sha256"], manifest["evaluation_dataset_path"]))
         rows.append({
@@ -127,7 +315,7 @@ def noise_rows(artifacts: Path) -> list[dict[str, Any]]:
     for row in rows:
         key = (row["time_noise_std_fraction"], row["deadline_margin_sigma_ratio"])
         cells.setdefault(key, set()).add(row["seed"])
-    if len(cells) != 21 or any(seeds != {0, 1, 2} for seeds in cells.values()):
+    if set(cells) != expected_cells or any(seeds != {0, 1, 2} for seeds in cells.values()):
         raise ValueError("noise cell or seed population differs")
     return rows
 

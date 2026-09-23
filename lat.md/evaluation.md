@@ -182,7 +182,7 @@ The active paper campaign regenerates continuous-time task results after replaci
 
 After the ViT-B result authenticates its frozen calibration, the supervisor releases the 63 unique Figure 4 stochastic replicas through [[scripts/experiments/run_vit_local_range_noise_condition.py#main]]. The noise stage contains nine timing-noise fractions and thirteen deadline-margin ratios with three seeds, evaluating their shared condition once per seed. The discrete-time simulation is outside this campaign.
 
-[[scripts/analysis/summarize_local_range_paper_campaign.py#main]] accepts only seven complete table pipelines and all 63 identity-consistent noise replicas. It writes table, raw-replica, and cell-summary CSV files and renders the two-panel PDF and PNG with three-replica 95% Student-$t$ intervals and pooled event counts.
+[[scripts/analysis/summarize_local_range_paper_campaign.py#main]] accepts only seven complete table pipelines and all 63 identity-consistent noise replicas. It authenticates phase logs and frozen calibration, rejects removed range keys, and requires the noise runs to share the completed ViT-B source, checkpoint, dataset, and calibration identities. It writes table, raw-replica, and cell-summary CSV files and renders the two-panel PDF and PNG with three-replica 95% Student-$t$ intervals and pooled event counts.
 
 ## Historical ViT-B/16 Global Range Selection
 
