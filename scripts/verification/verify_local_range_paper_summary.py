@@ -18,6 +18,7 @@ from scripts.analysis.summarize_local_range_paper_campaign import (
     validate_calibration,
     validate_metric,
 )
+from scripts.analysis import summarize_local_range_paper_campaign as summary_module
 from scripts.runtime import identity
 from scripts.experiments import run_poseidon_local_range_paper_campaign as campaign
 
@@ -94,6 +95,23 @@ def main() -> None:
             expected_sites=2,
             family="text",
         )
+
+    with tempfile.TemporaryDirectory(prefix="local-range-reference-") as directory:
+        root = Path(directory)
+        (root / "result.json").write_text(json.dumps({"state": "complete"}))
+        (root / "manifest.json").write_text(json.dumps({
+            "model_key": "imagenet_vit_base",
+        }))
+        original_validate_pipeline = summary_module.validate_pipeline
+        summary_module.validate_pipeline = lambda *args, **kwargs: None
+        try:
+            resolved, _, manifest = summary_module.noise_reference(root, root)
+            assert resolved == root.resolve()
+            assert manifest["model_key"] == "imagenet_vit_base"
+            (root / "manifest.json").write_text(json.dumps({"model_key": "other"}))
+            expect_value_error(lambda: summary_module.noise_reference(root, root))
+        finally:
+            summary_module.validate_pipeline = original_validate_pipeline
 
     assert contains_legacy_range_key({"nested": [{"attention_theta": 40}]})
     assert contains_legacy_range_key({"model_options": [["theta", 40]]})

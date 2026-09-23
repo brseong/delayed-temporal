@@ -245,12 +245,35 @@ def table_rows(artifacts: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def noise_rows(artifacts: Path) -> list[dict[str, Any]]:
+def noise_reference(
+    artifacts: Path,
+    calibration_source: Path | None = None,
+) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+    root = calibration_source or (
+        artifacts / "logs/conversion_comparison" / VIT_TAG / "vit/imagenet_vit_base"
+    )
+    root = root.resolve(strict=True)
+    result = read_complete(root / "result.json")
+    manifest = json.loads((root / "manifest.json").read_text())
+    if manifest.get("model_key") != "imagenet_vit_base":
+        raise ValueError("noise calibration source is not the ViT-B pipeline")
+    validate_pipeline(
+        root,
+        manifest=manifest,
+        result=result,
+        expected_sites=VIT_SITE_COUNTS["imagenet_vit_base"],
+        family="vit",
+    )
+    return root, result, manifest
+
+
+def noise_rows(
+    artifacts: Path,
+    calibration_source: Path | None = None,
+) -> list[dict[str, Any]]:
     runs = artifacts / "logs/noise_scan" / NOISE_TAG / "runs"
-    vit_root = artifacts / "logs/conversion_comparison" / VIT_TAG / "vit/imagenet_vit_base"
+    vit_root, vit_result, vit_manifest = noise_reference(artifacts, calibration_source)
     vit_result_path = vit_root / "result.json"
-    vit_result = read_complete(vit_result_path)
-    vit_manifest = json.loads((vit_root / "manifest.json").read_text())
     expected_cells = expected_noise_cells()
     rows = []
     identities = set()
@@ -310,6 +333,9 @@ def noise_rows(artifacts: Path) -> list[dict[str, Any]]:
             "accuracy": metric["accuracy"], "events": counts["events"], "misses": counts["misses"],
             "deadline_events": counts["deadline_events"], "outputs": counts["outputs"],
             "underflows": counts["underflows"], "overflows": counts["overflows"],
+            "source_commit": manifest["source_commit"],
+            "checkpoint_sha256": manifest["checkpoint_sha256"],
+            "calibration_sha256": manifest["calibration_sha256"],
         })
     if len(rows) != 63 or len(identities) != 1:
         raise ValueError("noise evidence is incomplete or identity-mixed")
@@ -415,25 +441,46 @@ def render_figure(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifacts-root", type=Path, default=Path("/data/delayed-temporal/artifacts"))
+    parser.add_argument("--noise-calibration-source", type=Path)
     args = parser.parse_args()
     artifacts = args.artifacts_root.resolve(strict=True)
     output = artifacts / "results/paper_local_range_poseidon_v1"
     tables = table_rows(artifacts)
-    raw = noise_rows(artifacts)
+    reference_root, reference_result, reference_manifest = noise_reference(
+        artifacts, args.noise_calibration_source,
+    )
+    table_vit_base = next(row for row in tables if row["model"] == "imagenet_vit_base")
+    table_vit_manifest = json.loads((
+        artifacts / "logs/conversion_comparison" / VIT_TAG
+        / "vit/imagenet_vit_base/manifest.json"
+    ).read_text())
+    if (
+        reference_manifest.get("checkpoint_sha256")
+        != table_vit_manifest.get("checkpoint_sha256")
+        or reference_manifest.get("evaluation_dataset")
+        != table_vit_manifest.get("evaluation_dataset")
+    ):
+        raise ValueError("noise reference does not match the Table 3 ViT-B checkpoint or dataset")
+    raw = noise_rows(artifacts, reference_root)
     summary = noise_summary(raw)
     write_csv(output / "table_results.csv", tables, list(tables[0]))
     write_csv(output / "noise_raw_runs.csv", raw, list(raw[0]))
     write_csv(output / "noise_summary.csv", summary, list(summary[0]))
-    vit_base = next(row for row in tables if row["model"] == "imagenet_vit_base")
+    reference_ann = reference_result["phases"]["ann"]["metrics"]["accuracy"]
+    reference_snn = reference_result["phases"]["snn"]["metrics"]["accuracy"]
     render_figure(
         artifacts / "figures/ViT-noise-eval-local-ranges",
         summary,
-        dense_accuracy=vit_base["ann_metric"],
-        clean_spiking_accuracy=vit_base["snn_metric"],
+        dense_accuracy=reference_ann,
+        clean_spiking_accuracy=reference_snn,
     )
     runtime_files.atomic_json(output / "summary.json", {
         "state": "complete", "table_models": len(tables), "noise_runs": len(raw),
-        "noise_cells": len(summary), "source_commit": tables[0]["source_commit"],
+        "noise_cells": len(summary), "table_source_commit": tables[0]["source_commit"],
+        "noise_source_commit": reference_manifest["source_commit"],
+        "noise_calibration_sha256": reference_result["calibration_sha256"],
+        "noise_calibration_source": str(reference_root),
+        "table_vit_base_calibration_sha256": table_vit_base["calibration_sha256"],
     })
 
 
