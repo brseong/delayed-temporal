@@ -8,15 +8,13 @@ The evaluated ViT path uses the time-constant cubic construction and treats fixe
 
 Calibration collection and SNN evaluation call the same canonical [[utils/transforms/functions.py#gelu_approximation]]. The final product combines the input with the gate, while the cubic and gate constants do not create extra time encodings. The general multiplication operator is unchanged.
 
-The GELU output lower bound is -0.170041. LayerNorm uses the positive logarithmic input floor $10^{-5}$, checkpoint epsilon $10^{-12}$ for the four ViT checkpoints, and output bounds policy 3. Results produced before this construction or before policy-2 calibration are not reused.
+The GELU output lower bound is -0.170041. LayerNorm uses the positive logarithmic input floor $10^{-5}$, checkpoint epsilon $10^{-12}$ for the four ViT checkpoints, and output bounds policy 4. Results produced under an earlier range contract are not reused.
 
 ## Evaluation Contract
 
-The comparison selects a separate global threshold for each ViT checkpoint using only its training seed-0 5k artifact. The shared grid is $\theta=5\,2^{i/2}$ for integer indices 0 through 10.
+The maintained comparison has no global-range selection phase. Each model receives one fresh schema-2 calibration table from its training seed-0 5k artifact, then evaluates the held-out population once after that table is frozen.
 
-[[scripts/experiments/vit_comparison.py#select_model_theta]] chooses the smallest candidate within 25 correct predictions, or 0.5 percentage points, of the best training accuracy. Validation and test labels never enter selection; each evaluation population is evaluated once after the choice is frozen.
-
-All runs use float64, time constant 1, all three spiking LayerNorm stages, spiking attention, and spiking MLP. Noise, deadline margin, static threshold mismatch, parameter perturbation, W&B, TensorBoard, extra training, and 50k ImageNet evaluation are disabled. Each deterministic ANN/SNN pair is evaluated once without a replica confidence interval.
+All runs use float64, time constant 1, all three spiking LayerNorm stages, spiking attention, and spiking MLP. Noise, deadline margin, static range mismatch, parameter perturbation, W&B, TensorBoard, extra training, and 50k ImageNet evaluation are disabled. Each deterministic ANN/SNN pair is evaluated once without a replica confidence interval.
 
 Calibration uses the model's training seed-0 5k artifact, two deterministic passes, 2,048 histogram bins, observed minimum and maximum, and 5% of the interval width added on each side. Policy 2 requires 109 active sites for ViT-S/B and 217 for ViT-L, including Q/K/V outputs and centered LayerNorm inputs. Frozen execution rejects a different site set, epsilon, preprocessing, dtype, source, checkpoint, or data identity.
 
@@ -32,9 +30,9 @@ The active campaign first assigned CIFAR-10 ViT-S and ImageNet ViT-L locally and
 
 UBAI preparation completed, but all three paired jobs stopped before evaluation because the prepared artifact file membership no longer matched. The controller did not bypass that identity check or accept a partial remote result. After Slurm reported the pair jobs terminal, ImageNet ViT-S/B ownership moved to local devices 6 and 7; devices 4 and 5 continued ViT-L and CIFAR-10 ViT-S. Each evaluator still receives one visible GPU and writes outside `/tmp`.
 
-## Results
+## Superseded Results
 
-Results distinguish complete rows from the active training-only threshold-selection campaign and retained common-threshold evidence. An incomplete row cannot update the paper table.
+The rows below preserve completed evidence from the removed global-range contract. They cannot update the paper table; fresh local-range results require new calibration and evaluation.
 
 ### Current Training-Only Evidence
 
@@ -47,7 +45,7 @@ The active campaign is frozen as `conversion_comparison_training_selected_theta_
 | ImageNet-1k ViT-B/16 | 20 | 4,590/5,000 | 4,590/5,000 | fixed validation 5k | 4,303 | 4,300 | 86.06% | 86.00% | -0.06 pp |
 | ImageNet-1k ViT-L/16 | 10 | 4,605/5,000 | 4,609/5,000 | fixed validation 5k | 4,319 | 4,300 | 86.38% | 86.00% | -0.38 pp |
 
-All 44 calibration collections, 44 training evaluations, and eight held-out ANN/SNN evaluations passed the campaign validator. Table 3 uses these four rows; validation and test labels were excluded from threshold selection and calibration.
+All 44 calibration collections, 44 training evaluations, and eight held-out ANN/SNN evaluations passed their historical campaign validator. They are retained only for provenance after global-range removal.
 
 ### Retained Common-Threshold Evidence
 
@@ -78,7 +76,7 @@ The fixed configuration is 224-pixel input, bicubic interpolation, center crop, 
 
 The v3 ImageNet rows used a bilinear direct resize produced by the converted Hugging Face processor. They must not be averaged, compared as a replicate, or substituted for the current v4 rows. The current fixed 5k ANN/SNN difference measures conversion fidelity on the same population; absolute accuracy must not be ranked against prior work's full-validation values as if protocols matched.
 
-[[scripts/experiments/run_imagenet_timm_recheck.py#run_pipeline]] enforces fresh calibration, ANN evaluation, and SNN evaluation for each ImageNet model. It accepts only complete pipelines with the timm configuration hash before generating the summary.
+The replacement campaign must enforce fresh calibration, ANN evaluation, and SNN evaluation for each ImageNet model and accept only complete pipelines with the timm configuration hash before generating a summary.
 
 ## Cost and Paper Integration
 

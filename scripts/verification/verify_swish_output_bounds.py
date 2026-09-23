@@ -98,7 +98,7 @@ def verify_swish_clamp_diagnostics() -> None:
             [bounds.min - 1.0, bounds.min, 0.0, bounds.max, bounds.max + 1.0],
             dtype=torch.float64,
         )
-        set_gaussian_time_noise(enabled=True, time_std=0.1, seed=73, device="cpu")
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.1, seed=73, device="cpu")
         try:
             before = get_gaussian_time_noise().generator.get_state().clone()
             output, output_domain = clamp_swish_output(raw, domain, beta=beta)
@@ -135,7 +135,7 @@ def verify_direct_swish_adapters() -> None:
     for activation in ("silu", "swish"):
         config = ViTConfig(
             hidden_size=4, intermediate_size=4, num_hidden_layers=1,
-            num_attention_heads=1, theta=40.0, use_spiking_mlp=False,
+            num_attention_heads=1, use_spiking_mlp=False,
             hidden_act=activation,
         )
         module = vit.ViTIntermediate(config).double().eval()
@@ -151,8 +151,7 @@ def verify_direct_swish_adapters() -> None:
 
         for spiking in (False, True):
             config = GPT2Config(
-                n_embd=4, n_layer=1, n_head=1, n_positions=4,
-                theta=40.0, use_spiking_mlp=spiking,
+                n_embd=4, n_layer=1, n_head=1, n_positions=4, use_spiking_mlp=spiking,
                 activation_function=activation, resid_pdrop=0.0,
             )
             module = gpt2.GPT2MLP(4, config).double().eval()
@@ -182,12 +181,12 @@ def verify_output_bounds_calibration_identity() -> None:
     )
     vit_metadata = build_vit_calibration_metadata(
         **common, processor=SimpleNamespace(),
-        config=ViTConfig(image_size=4, num_channels=3, theta=40.0, tau_s=1.0),
+        config=ViTConfig(image_size=4, num_channels=3, tau_s=1.0),
         dtype="float64",
     )
     gpt2_metadata = build_gpt2_calibration_metadata(
         **common, tokenizer=SimpleNamespace(),
-        config=GPT2Config(n_positions=4, theta=40.0, tau_s=1.0), max_length=4,
+        config=GPT2Config(n_positions=4, tau_s=1.0), max_length=4,
     )
     assert OUTPUT_BOUNDS_VERSION == 3
     for metadata in (vit_metadata, gpt2_metadata):

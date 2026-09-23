@@ -44,7 +44,7 @@ KEY = ("", "centered_input")
 def _metadata(*, policy: int | None = 2, dtype: str = "float64") -> CalibrationMetadata:
     return CalibrationMetadata(
         model_family="vit", model_id="layernorm-test", dataset_id="fixture",
-        dataset_split="train", preprocessing="none", dtype=dtype, theta=40.0,
+        dataset_split="train", preprocessing="none", dtype=dtype,
         tau_s=1.0, tau_m=1.0, clip_margin=1e-5,
         max_sequence_length=None, input_shape=(4,),
         model_options=(("layer_norm_clip_margin", 1e-5), ("layer_norm_eps", 1e-12))
@@ -72,7 +72,7 @@ def _table(radius: float, *, policy: int = 2):
 
 def _layer(flags=(True, True, True), *, dtype=torch.float64):
     layer = SpikingLayerNorm(
-        4, theta=40, eps=1e-12, clip_margin=1e-5,
+        4, eps=1e-12, clip_margin=1e-5,
         use_spiking_mul=flags[0], use_spiking_log=flags[1],
         use_spiking_expdiff=flags[2],
     ).to(dtype=dtype)
@@ -98,7 +98,7 @@ def _reference(layer, value, radius):
         return torch.nn.functional.layer_norm(value, (4,), layer.weight, layer.bias, layer.eps)
     centered = (value - value.mean(-1, keepdim=True)).clamp(-radius, radius)
     variance = (centered.square().mean(-1, keepdim=True) + layer.eps).clamp(
-        layer.clip_margin**2, radius**2
+        layer.clip_margin**2, radius**2 + layer.eps
     )
     centered = torch.where(centered.abs() >= layer.clip_margin, centered, 0.0)
     return centered / variance.sqrt() * layer.weight + layer.bias
@@ -116,9 +116,9 @@ def _capture(layer, pot, *, enabled=False, std=0.0, seed=171):
         logs.append((bounds, kwargs["tau_s"], time_bounds))
         return result
 
-    def multiply(value, bounds, factor, factor_bounds, theta):
-        multiplications.append(float(theta))
-        return original_mul(value, bounds, factor, factor_bounds, theta)
+    def multiply(value, bounds, factor, factor_bounds):
+        multiplications.append(float(factor_bounds.max))
+        return original_mul(value, bounds, factor, factor_bounds)
 
     def clamp(bounds, value, name=None):
         result = original_clamp(bounds, value, name=name)
@@ -126,7 +126,7 @@ def _capture(layer, pot, *, enabled=False, std=0.0, seed=171):
             clamps[name] = (bounds, result.detach().clone())
         return result
 
-    set_gaussian_time_noise(enabled=enabled, time_std=std, seed=seed)
+    set_gaussian_time_noise(enabled=enabled, time_std_fraction=std, seed=seed)
     with patch.object(spiking_ops, "neg_log_transform", log), \
          patch.object(spiking_ops, "multiplication_operator", multiply), \
          patch.object(PotentialBounds, "clamp", clamp):
@@ -151,7 +151,7 @@ def verify_selected_ranges_and_ablations():
         for enabled, std in ((False, 0.0), (True, 0.0), (True, 1e-9)):
             out, logs, multiplications, clamps = _capture(layer, pot, enabled=enabled, std=std)
             assert out.domain is output_domain and torch.isfinite(out.value).all()
-            assert layer.theta == 40 and layer.eps == 1e-12 and layer.clip_margin == 1e-5
+            assert layer.eps == 1e-12 and layer.clip_margin == 1e-5
             if not enabled:
                 clean = out.value
                 tolerance = 3e-4 if dtype == torch.float32 else 2e-10
@@ -167,20 +167,21 @@ def verify_selected_ranges_and_ablations():
                 continue
             expected_multiplications = ([radius, radius] if flags[0] else [])
             if flags[2]:
-                expected_multiplications.append(40.0)
+                expected_multiplications.append(6.0)
             assert multiplications == expected_multiplications
             for name in ("x_err_pos_magnitude", "x_err_neg_magnitude"):
                 assert clamps[name][0] == PotentialBounds(0, radius)
-            assert clamps["var_x"][0] == PotentialBounds(layer.clip_margin**2, radius**2)
+            log_radius = math.sqrt(radius**2 + layer.eps)
+            assert clamps["var_x"][0] == PotentialBounds(layer.clip_margin**2, log_radius**2)
             if flags[1]:
                 assert [entry[0] for entry in logs] == [
-                    PotentialBounds(layer.clip_margin**2, radius**2),
-                    PotentialBounds(layer.clip_margin, radius),
-                    PotentialBounds(layer.clip_margin, radius),
+                    PotentialBounds(layer.clip_margin**2, log_radius**2),
+                    PotentialBounds(layer.clip_margin, log_radius),
+                    PotentialBounds(layer.clip_margin, log_radius),
                 ]
                 assert [entry[1] for entry in logs] == [0.5, 1.0, 1.0]
                 for entry in logs:
-                    assert math.isclose(entry[2].max, math.log(radius/layer.clip_margin))
+                    assert math.isclose(entry[2].max, math.log(log_radius/layer.clip_margin))
             else:
                 assert not logs
         if any(flags):
@@ -203,8 +204,11 @@ def verify_collection_and_partitioning():
                 out, logs, multiplications, _ = _capture(
                     layer, Potential(part, PotentialBounds(-30, 30))
                 )
-                assert multiplications == [60, 60, 40]
-                assert logs[1][0] == PotentialBounds(1e-5, 60)
+                assert multiplications == [60, 60, 6]
+                assert logs[1][0] == PotentialBounds(
+                    1e-5,
+                    math.sqrt(60**2 + layer.eps),
+                )
                 torch.testing.assert_close(out.value, _reference(layer, part, 60), rtol=2e-10, atol=2e-10)
         observer = collector.min_max_states[KEY]
         assert (observer.observed_min, observer.observed_max, observer.num_values) == (-45, 15, 8)
@@ -233,7 +237,7 @@ def verify_collection_and_partitioning():
 
 
 def verify_legacy_and_dense_parity():
-    """Unbound and old-policy execution keep the old theta limit; dense stays dense."""
+    """Unbound and old-policy execution use the incoming range; dense stays dense."""
     value = torch.tensor([[-30, 30, 30, 30]], dtype=torch.float64)
     pot = Potential(value, PotentialBounds(-30, 30))
     for flags in FLAGS:
@@ -243,11 +247,14 @@ def verify_legacy_and_dense_parity():
         bound, logs, multiplications, _ = _capture(layer, pot)
         assert torch.equal(clean.value, bound.value) and clean.domain is bound.domain
         assert runtime.clipping_counts[KEY].num_values == 0
-        assert all(theta == 40 for theta in multiplications)
+        assert all(bound_max in {6.0, 60.0} for bound_max in multiplications)
         if any(flags):
-            torch.testing.assert_close(bound.value, _reference(layer, value, 40), rtol=2e-10, atol=2e-10)
+            torch.testing.assert_close(bound.value, _reference(layer, value, 60), rtol=2e-10, atol=2e-10)
         if flags[1]:
-            assert logs[1][0] == PotentialBounds(1e-5, 40)
+            assert logs[1][0] == PotentialBounds(
+                1e-5,
+                math.sqrt(60**2 + layer.eps),
+            )
 
 
 def verify_floor_and_epsilon():
@@ -272,7 +279,7 @@ def verify_invalid_ranges():
             _bind(layer, radius)
             layer(Potential(torch.tensor([[-1, 0, 0, 1]], dtype=torch.float64), PotentialBounds(-2, 2)))
         except ValueError as error:
-            assert "centered_input" in str(error)
+            assert "centered_input" in str(error) or "incoming interval width" in str(error)
         else:
             raise AssertionError(f"accepted invalid centered_input radius {radius}")
     for bounds in (PotentialBounds(0, 0), PotentialBounds(-1e308, 1e308),
@@ -283,7 +290,7 @@ def verify_invalid_ranges():
         try:
             layer(Potential(torch.zeros(1, 4, dtype=torch.float64), bounds))
         except ValueError as error:
-            assert "centered_input" in str(error)
+            assert "centered_input" in str(error) or "incoming interval width" in str(error)
         else:
             raise AssertionError(f"accepted invalid collection bounds {bounds}")
         assert collector.min_max_states == {}
@@ -306,7 +313,6 @@ def verify_seeded_noise_and_output_cache():
     clear_model_calibration(layer)
     _bind(layer, 1)
     assert layer.freeze_parameter_bounds()[2] is domain
-    assert layer.theta == 40
 
 
 def main():

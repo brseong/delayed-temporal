@@ -44,7 +44,7 @@ Fixed range는 설정, 가중치, interval arithmetic 또는 calibration으로 �
 
 목표는 모든 위치에 가장 넓은 analytic interval을 강제하는 것이 아니다. [[domain#Domain Propagation]]처럼 좁은 해석적 범위를 유지할 경우, 유한하지만 가중치나 층 반복으로 확대되어 calibration이 필요한 경우, 원래 domain에서 유한 범위가 없어 제한해야 할 경우를 구분한다. 고정 bound라는 사실만으로 calibration이 불필요해지지는 않는다.
 
-이것은 범위 선택의 설계 원칙이다. 구현은 층별 calibration 미사용 실행도 지원하며, 이때 가중치에서 계산한 범위와 residual의 구간 합을 유지한다. 현재 noise 실험의 해당 선택은 [[noise#Timing Noise Scale Sweep at Ratio 4]]에 별도로 기록한다.
+이것은 범위 선택의 설계 원칙이다. 구현은 층별 calibration 미사용 실행도 지원하며, 이때 가중치에서 계산한 범위와 residual의 구간 합을 유지한다. 현재 noise 실험의 해당 선택은 [[noise#Local-Window Timing Noise Sweep]]에 별도로 기록한다.
 
 각 layer의 Lipschitz constant가 $L_i>1$이면 $\lVert\delta x_{i+1}\rVert\le L_i\lVert\delta x_i\rVert+\lVert e_i\rVert$에 따라 이전 clipping error와 propagated range가 함께 증폭될 수 있다. 따라서 calibration clamp는 unbounded output만 잘라내는 보조 기능이 아니라 depth 방향의 range를 다시 고정하는 경계이며, layer별 clipping rate와 최종 task accuracy를 함께 검증해야 한다.
 
@@ -452,7 +452,7 @@ Attention에서 최초 감사가 확인한 masked score와 value-output range �
 | 위치 | 판정 | 현재 처리 |
 |---|---|---|
 | [[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_scaled_dot_product_attention]] | Q/K/V와 score range는 fixed; masked score도 declared upper score bound $c$ 사용 | 완료 |
-| [[utils/transformers/integrations/spiking_sdpa_attention.py#_gaussian_attention_value_readout]] | [[utils/transformers/integrations/spiking_sdpa_attention.py#attention_output_bounds]]가 정한 $[-S_{\max}\theta,S_{\max}\theta]$를 사용하고 adapter가 memoized range를 재사용 | 완료 |
+| [[utils/transformers/integrations/spiking_sdpa_attention.py#_gaussian_attention_value_readout]] | [[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_scaled_dot_product_attention]]가 받은 fixed value range를 출력 rail로 재사용 | 완료 |
 | [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTSelfAttention#forward]] | spiking backend는 patch-grid $S_{\max}$의 memoized output range를 부착하고 eager backend는 `pot_v.domain` 유지 | 완료 |
 | [[utils/transformers/models/spiking_bert/modeling_spiking_bert.py#BertSelfAttention#forward]] | `max_position_embeddings` 기반 memoized spiking output range 부착 | 완료 |
 | [[utils/transformers/models/spiking_roberta/modeling_spiking_roberta.py#RobertaSelfAttention#forward]] | `max_position_embeddings` 기반 memoized spiking output range 부착 | 완료 |
@@ -583,7 +583,7 @@ Transform algebra, time window, attention, LayerNorm, affine, embedding, activat
 
 - GELU는 [[calibration#Layer-wise Calibration#Frozen Execution#Fixed GELU Output Bounds]]로 수정됐고, division/softmin/gate/tanh/LayerNorm의 고정 출력 제한도 적용돼 있다.
 - ViT/GPT-2 직접 Swish 분기와 SwiGLU 내부 Swish는 고정 하한을 활용하지 않는다. 현재 ViT GELU 실험에서는 사용하지 않으므로 추가 실험을 요구하지 않는다.
-- [[utils/transformers/integrations/spiking_sdpa_attention.py#attention_output_bounds]]는 clean normalized weighted sum보다 넓은 공통 구간을 쓴다. Noisy weight 합은 1을 벗어나므로 더 좁은 bound로 바꾸려면 출력 clamp 정책을 함께 결정해야 한다.
+- [[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_scaled_dot_product_attention]]는 전달받은 fixed value range를 공통 출력 구간으로 쓴다. Noisy weight 합은 1을 벗어나므로 더 좁은 bound로 바꾸려면 출력 clamp 정책을 함께 결정해야 한다.
 - 지수 입력 cap이 한쪽 범위를 포화시키는 경우 metadata 교집합 때문에 endpoint가 역전되거나 길이 0인 encoding interval로 실패하는 경계 버그를 재현했다. 현재 대칭 ViT 조건에서는 발생하지 않는다.
 - Square와 LayerNorm learned affine의 추가 범위 축소는 현재 실험의 필수 변경으로 채택하지 않았다. 조사는 소스 수정·실험 재시작·추가 sweep을 승인하거나 수행하지 않는다.
 
@@ -597,7 +597,7 @@ Transform algebra, time window, attention, LayerNorm, affine, embedding, activat
 
 Attention은 source capacity와 무관하게 encoded value의 고정 범위를 출력에 적용한다. Clean weighted sum과 noisy 출력 모두 같은 범위로 제한하고 기존 출력 통계에 초과를 기록한다.
 
-[[utils/transformers/integrations/spiking_sdpa_attention.py#attention_output_bounds]]는 `[-theta, theta]`를 반환한다. Capacity 검증과 immutable cache는 유지하지만 capacity를 bound에 곱하지 않는다. Noisy weight의 합을 다시 1로 맞추지 않으며 value/reference event도 변경하지 않는다. `attention.value_output`은 최종 clamp 전 count를 보존한다.
+[[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_scaled_dot_product_attention]]는 필수로 전달된 fixed value range를 출력 구간으로 재사용한다. Capacity 검증은 유지하지만 capacity를 bound에 곱하지 않는다. Noisy weight의 합을 다시 1로 맞추지 않으며 value/reference event도 변경하지 않는다. `attention.value_output`은 최종 clamp 전 count를 보존한다.
 
 검증은 clean reference, 서로 다른 capacity, mask, noisy 초과 count, 동일 seed의 이벤트와 난수 상태 보존을 확인한다. 학습 dropout은 평균의 범위 보존을 보장하지 않으므로 최종 clamp 대상이며, 유지하는 평가에서는 dropout을 끈다.
 

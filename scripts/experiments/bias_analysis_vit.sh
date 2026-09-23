@@ -45,7 +45,7 @@ for index in "${!expr_names[@]}"; do
     script="CUDA_VISIBLE_DEVICES=${gpu} python3 scripts/evaluation/error_analysis_vit.py \
         --experiment_name ${expr_names[$index]} --device ${device}\
         --model_id ${model_id} --dataset_id ${dataset_id} \
-        --batch_size ${batch_size} ${flags[$index]} --theta 400.0"
+        --batch_size ${batch_size} ${flags[$index]}"
     echo $script
     eval $script &
     gpu_pool_register $! "$gpu"

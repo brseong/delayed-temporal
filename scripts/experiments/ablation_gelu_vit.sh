@@ -32,7 +32,7 @@ for index in "${!expr_names[@]}"; do
         --experiment_name vit_base-${expr_names[$index]} --device ${device} \
         --batch_size ${batch_size} \
         --model_id ${model_id} --dataset_id ${dataset_id} \
-        ${flags[$index]} --theta 2000"
+        ${flags[$index]}"
     echo $script
     eval $script
 done

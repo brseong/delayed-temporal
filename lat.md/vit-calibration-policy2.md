@@ -28,7 +28,7 @@ This avoids one-ULP endpoint disagreement between positive and negative domains 
 
 Current full-model evidence replaces the rollout-era short checks as the maintained status of policy 2.
 
-The conversion comparison completed CIFAR-10 ViT-S test 10k and timm-preprocessed ImageNet ViT-S/B/L fixed validation 5k; exact results are in [[conversion-comparison#Results]]. The noise campaign completed nine threshold tables, selected $\theta=20$, and evaluated the two separate robustness axes plus the high-scale timing-noise extension; see [[noise#Calibrated Threshold and Noise Sweeps]].
+The conversion comparison completed CIFAR-10 ViT-S test 10k and timm-preprocessed ImageNet ViT-S/B/L fixed validation 5k; exact results are in [[conversion-comparison#Superseded Results]]. The noise campaign completed nine threshold tables, selected $\theta=20$, and evaluated the two separate robustness axes plus the high-scale timing-noise extension; see [[noise#Superseded Calibrated Threshold and Noise Sweeps]].
 
 The comparison table still fixes $\theta=40$, whereas the separate timing-noise campaign selected $\theta=20$. This is an experiment-level distinction, not a calibration-policy version change.
 
@@ -36,4 +36,4 @@ The comparison table still fixes $\theta=40$, whereas the separate timing-noise 
 
 Verification covers range collection, transfer, frozen replay, numerical boundaries, inactive configurations, and rejection of mixed identities.
 
-[[scripts/verification/verify_vit_comparison_runner.py#verify_policy2_and_preparation]] checks 109/217 sites and rejection of old tables. Attention and LayerNorm checks exercise selected ranges above the global threshold, all normalization ablations, equality when noise is disabled, Gaussian execution with standard deviation zero, seeded finite output, and shared deadlines. Campaign reducers revalidate each table and complete result before aggregation.
+`scripts/verification/verify_vit_comparison_runner.py#verify_policy2_and_preparation` checks 109/217 sites and rejection of old tables. Attention and LayerNorm checks exercise selected ranges above the global threshold, all normalization ablations, equality when noise is disabled, Gaussian execution with standard deviation zero, seeded finite output, and shared deadlines. Campaign reducers revalidate each table and complete result before aggregation.

@@ -30,7 +30,7 @@ def _gaussian_multiplication_operator(
         V: Potential supplying the constant integration drive.
         domain_V: Declared bounds of the integration drive.
         encoded_B: Pre-clamped operand encoded into the opening event.
-        encoder_domain_B: Symmetric ``[-theta, theta]`` identity-encoder domain.
+        encoder_domain_B: Fixed zero-containing identity-encoder domain.
         ideal_domain_B: Caller-declared factor interval after endpoint clamping to
             the physical encoder rail. This defines the ideal product output rail.
 
@@ -113,15 +113,14 @@ def multiplication_operator(
     domain_V: PotentialBounds,
     B: torch.Tensor, 
     domain_B: PotentialBounds,
-    theta: float
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Multiply two potentials through affine TTFS and PWM integration.
 
-    ``B`` is encoded as ``t_B = theta - B`` inside ``[0, 2 * theta]``
-    and ``V`` is integrated from that opening event to the zero-reference event at
-    nominal time ``theta``. This public entry point performs the common calibrated
-    encoding setup, then dispatches either to the private Gaussian event readout or
-    to the deterministic analytic PWM primitive.
+    ``B`` is encoded over its declared finite domain and ``V`` is integrated from
+    that opening event to the zero-reference event produced by the same encoder.
+    This public entry point performs the common domain-aware encoding setup, then
+    dispatches either to the private Gaussian event readout or to the deterministic
+    analytic PWM primitive.
 
     In Gaussian mode, data and reference events independently supply two causal
     time-to-deadline rails. Each miss leaves only its own rail at reset. Those
@@ -132,26 +131,32 @@ def multiplication_operator(
         V: Potential supplying the constant integration drive.
         domain_V: Declared bounds of the integration drive.
         B: Potential encoded into the opening spike time.
-        domain_B: Declared caller bounds used by input validation and, after
-            endpoint clamping to the encoder rail, by ideal product propagation.
-        theta: Symmetric encoder rail and nominal zero-reference time.
+        domain_B: Fixed finite factor bounds. The interval must contain zero so the
+            data event and zero-reference event share one physical code window.
 
     Returns:
         The physically read multiplication result and its ideal output rails.
     """
-    # Multiplication always uses the symmetric identity-code window physically. Keep
-    # that encoder interval separate from the narrower mathematical factor contract
-    # so fixed coefficients and bounded gates do not inherit a spurious theta factor.
-    th_val = float(theta)
-    encoder_domain_B = PotentialBounds(-th_val, th_val)
-
-    # Clamping is monotone, so clamping both declared endpoints gives the complete
-    # range of factors that can reach the encoder. This also handles a caller domain
-    # wholly above or below the physical rail by collapsing it to one endpoint.
-    ideal_domain_B = PotentialBounds(
-        min(max(float(domain_B.min), -th_val), th_val),
-        min(max(float(domain_B.max), -th_val), th_val),
-    )
+    # The caller's immutable factor interval determines the physical identity-code
+    # window. Widen only as far as zero when necessary so the reference codeword is
+    # representable without introducing a second global range setting.
+    lower_B = float(domain_B.min)
+    upper_B = float(domain_B.max)
+    if (
+        not isfinite(lower_B)
+        or not isfinite(upper_B)
+        or lower_B > upper_B
+    ):
+        raise ValueError(
+            "multiplication factor domain must have finite ordered endpoints"
+        )
+    encoder_lower = min(lower_B, 0.0)
+    encoder_upper = max(upper_B, 0.0)
+    if encoder_lower == encoder_upper:
+        zero = torch.zeros_like(V * B)
+        return zero, PotentialBounds(0.0, 0.0)
+    encoder_domain_B = PotentialBounds(encoder_lower, encoder_upper)
+    ideal_domain_B = domain_B
 
     # Clamp the encoded operand once before dispatch so deterministic and Gaussian
     # implementations receive the exact same nominal potential tensor.
@@ -168,10 +173,9 @@ def multiplication_operator(
             ideal_domain_B,
         )
 
-    # Noise-free execution uses delivered tensor times, so signed PWM evaluates the
-    # algebraically cancelled expression V * (theta - data_time) directly. The common
-    # observation deadline remains part of the physical contract without creating
-    # deadline-sized intermediates in this deterministic path.
+    # Noise-free execution uses delivered tensor times. The data and zero-reference
+    # events share the caller's code window, so their signed difference recovers B
+    # without a global threshold-sized intermediate.
     data_time, data_time_domain = neg_identity_transform(
         encoded_B,
         encoder_domain_B,
@@ -179,8 +183,8 @@ def multiplication_operator(
     result, _ = signed_pulse_width_modulation_operator(
         t_A=data_time,
         domain_t_A=data_time_domain,
-        t_B=th_val,
-        domain_t_B=th_val,
+        t_B=neg_identity_transform(encoded_B.new_zeros(()), encoder_domain_B)[0],
+        domain_t_B=data_time_domain,
         V=V,
         domain_V=domain_V,
         observation_deadline=float(data_time_domain.max),
@@ -220,11 +224,10 @@ def scaled_dot_product_function(
     domain_q: PotentialBounds,
     k: torch.Tensor, 
     domain_k: PotentialBounds,
-    theta: float
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Scaled dot-product operator (f_SDP)"""
     d_k = q.shape[-1]
-    M_val, M_bounds = multiplication_operator(q, domain_q, k, domain_k, theta)
+    M_val, M_bounds = multiplication_operator(q, domain_q, k, domain_k)
     summed_M = torch.sum(M_val, dim=-1)
     
     # Bound multiplication by sum
@@ -843,13 +846,8 @@ def _tanh_sigmoid_gate(
     domain: PotentialBounds,
     *,
     tau_s: float,
-    theta: float,
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Return ``1 / (1 + exp(-2v))`` with fixed synaptic input scaling.
-
-    ``theta`` remains a compatibility argument; no multiplication operand is
-    encoded for the fixed gain, even when ``2 * tau_s`` exceeds ``theta``.
-    """
+    """Return ``1 / (1 + exp(-2v))`` with fixed synaptic input scaling."""
     tau_value = float(tau_s)
     if not isfinite(tau_value) or tau_value <= 0.0:
         raise ValueError("tau_s must be finite and positive")
@@ -882,9 +880,8 @@ GELU_OUTPUT_MIN = -0.170041
 GELU_CUBIC_MAGNITUDE_FLOOR = 1.0e-5
 GELU_CUBIC_IMPLEMENTATION = "phi_nl_psi_ed_v1"
 
-# Version 3 retains theta as the LayerNorm logarithmic input upper endpoint.
-# Reject calibration collected with the previous theta - clip_margin maximum.
-OUTPUT_BOUNDS_VERSION = 3
+# Version 4 removes the global potential rail from composed-operator bounds.
+OUTPUT_BOUNDS_VERSION = 4
 SWISH_OUTPUT_MIN = -0.278465
 
 
@@ -916,15 +913,11 @@ def clamp_swish_output(
 
 
 def clamp_gelu_square_output(
-    value: torch.Tensor, input_domain: PotentialBounds, *, theta: float,
+    value: torch.Tensor, input_domain: PotentialBounds,
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Bound the repeated-input product without changing generic multiplication."""
-    theta_value = float(theta)
-    if not isfinite(theta_value) or theta_value <= 0.0:
-        raise ValueError("theta must be finite and positive")
-    # Only the second factor is encoded and clipped to [-theta, theta].
+    """Bound the repeated-input product from the declared input interval."""
     magnitude = max(abs(float(input_domain.min)), abs(float(input_domain.max)))
-    output_domain = PotentialBounds(0.0, magnitude * min(magnitude, theta_value))
+    output_domain = PotentialBounds(0.0, magnitude * magnitude)
     return (
         clamp_gaussian_output(value, output_domain, site="gelu.square_output", name="gelu_square_output"),
         output_domain,
@@ -968,7 +961,6 @@ def gelu_cubic_power_operator(
     domain: PotentialBounds,
     *,
     tau_s: float,
-    theta: float,
     magnitude_floor: float = GELU_CUBIC_MAGNITUDE_FLOOR,
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Construct the signed GELU cubic with logarithmic encoding and decoding.
@@ -979,21 +971,19 @@ def gelu_cubic_power_operator(
     restores the potential scale before the two signed branches are subtracted.
     """
     tau_value = float(tau_s)
-    theta_value = float(theta)
     floor_value = float(magnitude_floor)
     if not isfinite(tau_value) or tau_value <= 0.0:
         raise ValueError("tau_s must be finite and positive")
-    if not isfinite(theta_value) or theta_value <= 0.0:
-        raise ValueError("theta must be finite and positive")
     if not isfinite(floor_value) or floor_value <= 0.0:
         raise ValueError("magnitude_floor must be finite and positive")
 
-    magnitude_upper = min(
-        max(abs(float(domain.min)), abs(float(domain.max))),
-        theta_value,
-    )
+    magnitude_upper = max(abs(float(domain.min)), abs(float(domain.max)))
     if magnitude_upper <= floor_value:
-        raise ValueError("GELU magnitude domain must exceed magnitude_floor")
+        input_clamped = domain.clamp(input_value, name="gelu_phi_nl_x")
+        active = input_clamped.abs() >= floor_value
+        result = torch.where(active, input_clamped.pow(3), torch.zeros_like(input_clamped))
+        cubic_upper = magnitude_upper**3
+        return result, PotentialBounds(-cubic_upper, cubic_upper)
 
     input_clamped = domain.clamp(input_value, name="gelu_phi_nl_x")
     magnitude_domain = PotentialBounds(floor_value, magnitude_upper)
@@ -1090,7 +1080,6 @@ def gelu_approximation(
     domain: PotentialBounds,
     *,
     tau_s: float = 1.0,
-    theta: float = 400.0,
     magnitude_floor: float = GELU_CUBIC_MAGNITUDE_FLOOR,
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
@@ -1107,8 +1096,6 @@ def gelu_approximation(
         domain: Fixed signed input interval, optionally supplied by layer-wise
             calibration before this function is called.
         tau_s: Positive physical time scale; matched input scaling preserves tanh.
-        theta: Upper magnitude supported by the cubic logarithmic encoder and
-            symmetric identity-code interval used by the final multiplication.
         magnitude_floor: Positive carrier floor for the signed cubic branches.
 
     Returns:
@@ -1122,7 +1109,6 @@ def gelu_approximation(
         input_clamped,
         domain,
         tau_s=tau_s,
-        theta=theta,
         magnitude_floor=magnitude_floor,
     )
 
@@ -1150,11 +1136,10 @@ def gelu_approximation(
         tanh_in,
         tanh_in_domain,
         tau_s=tau_s,
-        theta=theta,
     )
 
     # x * gate
-    gelu_approx, _ = multiplication_operator(input_clamped, domain, gate, gate_domain, theta)
+    gelu_approx, _ = multiplication_operator(input_clamped, domain, gate, gate_domain)
     return clamp_gelu_output(gelu_approx, domain)
 
 
@@ -1164,7 +1149,6 @@ def gelu_approximation_sigmoid(
     domain: PotentialBounds,
     *,
     tau_s: float = 1.0,
-    theta: float = 400.0,
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Approximate GELU with a structurally bounded sigmoid gate.
@@ -1179,7 +1163,6 @@ def gelu_approximation_sigmoid(
         input_value: Activation tensor contained by ``domain``.
         domain: Declared input potential interval.
         tau_s: Positive physical time scale canceled from the sigmoid gate slope.
-        theta: Symmetric identity-code rail used by multiplication.
 
     Returns:
         The sigmoid-form GELU approximation with the shared fixed output domain.
@@ -1233,7 +1216,6 @@ def gelu_approximation_sigmoid(
         domain,
         gate,
         gate_domain,
-        theta=theta,
     )
     return clamp_gelu_output(result, domain)
 
@@ -1244,7 +1226,6 @@ def tanh(
     domain: PotentialBounds,
     *,
     tau_s: float = 1.0,
-    theta: float = 400.0,
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Approximate tanh with a fixed structural output interval.
@@ -1259,7 +1240,6 @@ def tanh(
         input_value: Activation tensor contained by ``domain``.
         domain: Declared input potential interval.
         tau_s: Shared exponential and logarithmic temporal scale.
-        theta: Symmetric identity-code rail used by multiplication.
 
     Returns:
         The composed tanh approximation clamped to ``[-1, 1]`` together with that
@@ -1269,7 +1249,6 @@ def tanh(
         input_value,
         domain,
         tau_s=tau_s,
-        theta=theta,
     )
 
     # Map the sigmoid-like ratio from [0,1] onto the tanh interval [-1,1].
@@ -1296,7 +1275,6 @@ def _gaussian_swiglu_function(
     *,
     beta: float,
     tau_s: float,
-    theta: float,
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Evaluate SwiGLU through event-aware exponential, division, and products.
 
@@ -1315,7 +1293,6 @@ def _gaussian_swiglu_function(
         domain_v: Declared bounds of ``v``.
         beta: Scale applied to ``u`` before gate construction.
         tau_s: Exponential time constant and temporal scale forwarded to division.
-        theta: Symmetric identity-code rail used by multiplication stages.
 
     Returns:
         The finite event-aware SwiGLU output and its propagated product rails.
@@ -1420,7 +1397,6 @@ def _gaussian_swiglu_function(
         domain_u,
         sigmoid_out,
         sigmoid_domain,
-        theta=theta,
     )
     swish_out, swish_domain = clamp_swish_output(swish_out, domain_u, beta=beta)
 
@@ -1431,7 +1407,6 @@ def _gaussian_swiglu_function(
         domain_v,
         swish_out,
         swish_domain,
-        theta=theta,
     )
 
 
@@ -1444,7 +1419,6 @@ def swiglu_function(
     *,
     beta: float = 1.0,
     tau_s: float = 1.0,
-    theta: float = 400.0,
     **_
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Evaluate SwiGLU with a bias-corrected exponential gate.
@@ -1473,7 +1447,6 @@ def swiglu_function(
         tau_s: Positive exponential and logarithmic time constant. Input scaling
             cancels this physical time constant, so the gate remains exactly
             ``sigmoid(beta * u)``.
-        theta: Parameter for multiplication operator (default: 400.0)
     
     Returns:
         Tuple of (output, output_domain)
@@ -1491,7 +1464,6 @@ def swiglu_function(
             domain_v,
             beta=beta,
             tau_s=tau_s,
-            theta=theta,
         )
 
     # Scale by tau_s so the gate remains sigmoid(beta*u) for every
@@ -1563,7 +1535,6 @@ def swiglu_function(
     swish_out, swish_domain = multiplication_operator(
         u, domain_u,
         sigmoid_out, sigmoid_domain,
-        theta=theta
     )
     swish_out, swish_domain = clamp_swish_output(swish_out, domain_u, beta=beta)
     
@@ -1571,7 +1542,6 @@ def swiglu_function(
     final_out, final_domain = multiplication_operator(
         v, domain_v,
         swish_out, swish_domain,
-        theta=theta
     )
     
     return final_out, final_domain

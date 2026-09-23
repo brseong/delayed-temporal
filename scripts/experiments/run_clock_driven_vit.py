@@ -30,9 +30,9 @@ from utils.transforms.calibration import (
 )
 
 
-default_tag = "vit_base_clock_driven_imagenet500_theta20_float64_fine_v1"
+default_tag = "vit_base_clock_driven_imagenet500_local_ranges_float64_fine_v2"
 default_window_steps_tag = (
-    "vit_base_clock_driven_window_steps_imagenet500_theta20_float64_v1"
+    "vit_base_clock_driven_window_steps_imagenet500_local_ranges_float64_v2"
 )
 default_evaluation_samples = 500
 default_shards = 21
@@ -211,7 +211,6 @@ def common_arguments(
         "--evaluation-split", "validation",
         "--image-preprocessing-config", str(source / PREPROCESSING),
         "--batch_size", "32",
-        "--theta", "20",
         "--precision", "float64",
         "--source-commit", commit,
         "--checkpoint-sha256", CHECKPOINT_SHA256,
@@ -230,7 +229,7 @@ def common_arguments(
         "--time-noise-mean", "0",
         "--time-noise-deadline-margin-std", "0",
         "--no-mismatch-enabled",
-        "--mismatch-theta-std", "0",
+        "--mismatch-range-std-frac", "0",
         "--mismatch-seed", "0",
         "--weight-noise-std", "0",
         "--bias-noise-std", "0",
@@ -349,7 +348,7 @@ def build_experiment(
         "evaluation_selection": evaluation_metadata["selection"],
         "preprocessing_path": str(source / PREPROCESSING),
         "preprocessing_sha256": identity.sha256_file(source / PREPROCESSING),
-        "theta": 20.0,
+        "range_contract": "operator_local_v1",
         "precision": "float64",
         "batch_size": 32,
         "time_steps": list(time_steps),
@@ -490,8 +489,8 @@ def validate_calibration(
     if len(table.get("layers", {})) != 109:
         raise ValueError("clock-driven ViT-B calibration requires 109 active sites")
     metadata = table["metadata"]
-    if metadata.get("theta") != 20.0 or metadata.get("dtype") != "float64":
-        raise ValueError("clock-driven calibration theta or dtype differs")
+    if metadata.get("dtype") != "float64":
+        raise ValueError("clock-driven calibration dtype differs")
     options = dict(metadata["model_options"])
     table_commit = options.get("source_commit")
     expected_table_commit = calibration_source_commit or commit
@@ -1001,7 +1000,7 @@ def main() -> None:
     calibration_path = (
         args.calibration_path.resolve()
         if args.calibration_path is not None
-        else root / "calibration" / "vit_base_theta20.json"
+        else root / "calibration" / "vit_base_local_ranges.json"
     )
     requested_gpus = tuple(args.gpus)
     allowed_gpus = EXTENDED_GPUS if args.allow_gpus_0_3 else ALLOWED_GPUS

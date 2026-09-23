@@ -43,10 +43,10 @@ def metadata(family, tokenizer, *, max_length=8):
         attention_implementation="spiking_sdpa", dtype="float64",
     )
     if family == "gpt2":
-        config = GPT2Config(n_positions=64, theta=40.0, tau_s=1.0, clip_margin=1e-5)
+        config = GPT2Config(n_positions=64, tau_s=1.0, clip_margin=1e-5)
         return build_gpt2_calibration_metadata(config=config, **common)
     config = SimpleNamespace(
-        max_position_embeddings=64, pad_token_id=1, theta=40.0, tau_s=1.0,
+        max_position_embeddings=64, pad_token_id=1, tau_s=1.0,
         layer_norm_eps=1e-12, clip_margin=1e-5,
     )
     return build_text_calibration_metadata(model_family=family, config=config, **common)

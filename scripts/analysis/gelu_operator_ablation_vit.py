@@ -62,7 +62,7 @@ def _consume_shadow_gaussian_event(
     # broadcasting, and the zero-standard-deviation RNG contract remain identical.
     _sample_gaussian_spike_time(
         nominal_time,
-        time_std=config.time_std,
+        time_std=config.time_std_fraction * (float(domain.max) - float(domain.min)),
         domain=domain,
         generator=config.generator,
         time_mean=config.time_mean,
@@ -74,40 +74,37 @@ def _dense_gelu_multiplication(
     value_domain: PotentialBounds,
     encoded_factor: torch.Tensor,
     factor_domain: PotentialBounds,
-    *,
-    theta: float,
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Evaluate one GELU multiplication densely while preserving temporal rails.
 
-    The production operator encodes its second operand against the symmetric
-    ``[-theta, theta]`` physical interval while deriving ideal product bounds from
-    the caller factor domain clipped to that interval. This bypass reproduces both
-    the encoded carrier and the final rail clamp so only sampled events differ.
+    The production operator encodes its second operand over the caller's declared
+    interval widened only to contain the zero reference. This bypass reproduces the
+    encoded carrier and final rail clamp so only sampled events differ.
 
     Args:
         value: Potential supplying the multiplication drive.
         value_domain: Declared bounds of the drive.
         encoded_factor: Operand normally converted to a spike time.
         factor_domain: Declared factor bounds used for ideal product propagation.
-        theta: Symmetric identity-code rail used by production multiplication.
 
     Returns:
         The direct tensor product and production-equivalent ideal output rails.
     """
     # Match the encoder-side clamp before constructing its nominal spike time. This
     # is essential when an intermediate GELU value exceeds the calibrated rail.
-    factor = encoded_factor.clamp(min=-theta, max=theta)
-    ideal_factor_domain = PotentialBounds(
-        min(max(float(factor_domain.min), -theta), theta),
-        min(max(float(factor_domain.max), -theta), theta),
+    encoder_domain = PotentialBounds(
+        min(float(factor_domain.min), 0.0),
+        max(float(factor_domain.max), 0.0),
     )
+    factor = encoder_domain.clamp(encoded_factor)
+    ideal_factor_domain = factor_domain
 
     # Reproduce the negative-linear encoder in the payload dtype. Computing the
-    # product directly would also erase theta-scale float32 codeword rounding and
+    # product directly would also erase local-window float32 codeword rounding and
     # would therefore confound timing-noise removal with a precision improvement.
-    encoder_endpoints = factor.new_tensor([-theta, theta])
+    encoder_endpoints = factor.new_tensor([encoder_domain.min, encoder_domain.max])
     encoder_width = encoder_endpoints[1] - encoder_endpoints[0]
-    window = factor.new_tensor(2.0 * theta)
+    window = factor.new_tensor(encoder_domain.max - encoder_domain.min)
     normalized_time = 1.0 - (
         (factor - encoder_endpoints[0]) / encoder_width
     )
@@ -115,13 +112,14 @@ def _dense_gelu_multiplication(
 
     # Consume the tensor opening draw followed by the scalar shared-reference draw,
     # matching the event-aware multiplication call's exact generator order.
-    time_domain = TimeBounds(0.0, 2.0 * theta)
+    time_domain = TimeBounds(0.0, float(window))
     _consume_shadow_gaussian_event(opening_time, time_domain)
-    _consume_shadow_gaussian_event(opening_time.new_tensor(theta), time_domain)
+    reference_time = opening_time.new_tensor(encoder_domain.max)
+    _consume_shadow_gaussian_event(reference_time, time_domain)
 
     # Use the same scalar nominal zero-reference time and PWM arithmetic order as
     # the production noise-off operator, but do not draw either Gaussian event.
-    result = value * (theta - opening_time)
+    result = value * (reference_time - opening_time)
 
     # Reuse the caller-derived factor interval and apply the production final clamp.
     candidates = (
@@ -294,7 +292,6 @@ def gelu_operator_ablation(
     *,
     dense_operators: frozenset[str],
     tau_s: float = 1.0,
-    theta: float = 400.0,
     **_: object,
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Evaluate cubic-tanh GELU with selected atomic operators computed densely.
@@ -310,7 +307,6 @@ def gelu_operator_ablation(
         domain: Propagated input bounds used by the production composition.
         dense_operators: Atomic operator names bypassed only inside this GELU call.
         tau_s: Shared temporal scale used by the gate exponential and division.
-        theta: Symmetric multiplication encoder rail.
 
     Returns:
         The ablated GELU value and its propagated production-compatible bounds.
@@ -333,14 +329,12 @@ def gelu_operator_ablation(
                 value_domain,
                 factor,
                 factor_domain,
-                theta=theta,
             )
         return multiplication_operator(
             value,
             value_domain,
             factor,
             factor_domain,
-            theta,
         )
 
     # Reproduce x^2 and x^3 through the same two multiplication sites used by the
@@ -352,7 +346,7 @@ def gelu_operator_ablation(
         input_clamped,
         domain,
     )
-    x2, domain_x2 = clamp_gelu_square_output(x2, domain, theta=theta)
+    x2, domain_x2 = clamp_gelu_square_output(x2, domain)
     x3, domain_x3 = multiply(x2, domain_x2, input_clamped, domain)
 
     # Fixed coefficients do not add encoded operands or shadow Gaussian draws.

@@ -279,8 +279,8 @@ def vit_calibration_specs(
     :func:`vit_residual_calibration_specs`. Operator-composed GELU modules freeze
     their affine pre-activation distributions. Spiking attention freezes separate
     query, key, value and score ranges; active LayerNorm modules freeze their signed
-    centered inputs. Scores retain a dtype-derived ceiling independent of theta. The
-    encoder entry keeps its analytic theta rail and therefore declares no site.
+    centered inputs. Scores retain a dtype-derived ceiling, and the encoder entry
+    receives the analytic range propagated by the embedding stack.
 
     Args:
         model: Unwrapped ViT model or task wrapper.
@@ -389,11 +389,9 @@ def vit_calibration_specs(
             + 1
         )
         ceiling = attention_score_representability_bounds(
-            float(getattr(module.config, "theta", 10.0)),
             float(getattr(module.config, "tau_s", 1.0)),
             source_length_max,
             module.query.weight.dtype,
-            cap_by_theta=False,
         )
         attention_specs.append(
             LayerCalibrationSpec(
@@ -600,7 +598,6 @@ def build_vit_calibration_metadata(
         dataset_split=calibration_split,
         preprocessing=preprocessing,
         dtype=dtype,
-        theta=float(getattr(config, "theta")),
         tau_s=float(getattr(config, "tau_s")),
         tau_m=float(getattr(config, "tau_s")),
         clip_margin=float(getattr(config, "clip_margin", 1.0e-5)),

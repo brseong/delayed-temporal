@@ -8,9 +8,21 @@ Only the explicitly listed evaluations are authorized. Unchecked items elsewhere
 
 The completed GPT-2 composed GELU rerun and shared Power cubic text rerun are archived in [[deprecated#완료된 TODO 기록]]; do not restart them from that record.
 
-### ViT-B Timing Robustness
+### Local-Range Re-evaluation
 
-The completed scope is the fixed 5,000-image validation subset at calibrated $\theta=20$, with timing seeds 0, 1, and 2.
+The active campaign replaces every manuscript result produced with a global range setting, excluding the separate discrete-time simulation requested to remain unchanged.
+
+- [x] Remove global `theta` and GPT-2 `attention_theta` from operators, model configs, evaluators, calibration metadata, and maintained experiment wrappers.
+- [x] Reject legacy config keys and add a production-source verifier that blocks later reintroduction.
+- [x] Define timing-noise standard deviation and deadline margin relative to each encoder's declared local time window.
+- [ ] Recollect schema-2 calibration and rerun Table 3 ViT rows on their complete declared evaluation populations.
+- [ ] Recollect schema-2 calibration and rerun Table 4 RoBERTa-B/L and GPT-2 rows on their complete declared evaluation populations.
+- [ ] Recollect ViT-B calibration and rerun Figure 4 timing-noise and deadline-margin sweeps with three replicas.
+- [ ] Update manuscript numbers and Figure 4 only from verified new artifacts; keep old global-range results as superseded provenance.
+
+### Historical ViT-B Timing Robustness
+
+This completed global-range campaign is historical after local-range migration and must not be restarted as current evidence.
 
 - [x] Complete policy-2 calibration for all nine threshold candidates, select $\theta=20$ from training 5k, and confirm the replay and neighboring validation candidates.
 - [x] Complete the nine-point timing-noise sweep at deadline margin/noise standard deviation ratio 4 and the nine-point ratio sweep at $r_t=10^{-5}$.
@@ -18,9 +30,9 @@ The completed scope is the fixed 5,000-image validation subset at calibrated $\t
 - [x] Keep threshold-40 uncalibrated campaigns, the 12 by 13 joint grid, and $\theta=2000$ artifacts as separate provenance rather than statistical replicas.
 - [ ] Decide whether the fixed-5k computational stress test belongs in the main text or appendix; do not describe it as full ImageNet-1k validation or calibrated hardware evidence.
 
-### ViT Training-Only Threshold Comparison
+### Historical ViT Training-Only Threshold Comparison
 
-The active comparison must finish all four model-specific selections and held-out ANN/SNN pairs before updating the manuscript table.
+This completed selection campaign is historical after global-range removal and cannot update the manuscript table.
 
 - [x] Freeze the eleven-candidate grid and select each threshold only from training seed-0 5k accuracy.
 - [x] Preserve the failed UBAI identity checks and reassign only terminal, non-duplicated work to local GPU devices 4--7.

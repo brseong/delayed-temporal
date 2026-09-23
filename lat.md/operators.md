@@ -52,7 +52,7 @@ The principal compositions live in `utils/transforms/functions.py`. They share a
 
 Multiplication encodes one operand as a latency and uses the other as the integrated potential.
 
-[[utils/transforms/functions.py#multiplication_operator]] clamps the encoded operand to `[-theta, theta]`, obtains $t=\theta-B$, and evaluates the delivered data time and scalar $\theta$ reference through signed PWM. The noise-free wrapper directly computes $V(\theta-t)=VB$ after algebraic deadline cancellation. Its ideal output interval uses the caller-declared factor endpoints after clamping them to the encoder rail, so fixed coefficients and bounded gates do not acquire a full-$\theta$ range.
+[[utils/transforms/functions.py#multiplication_operator]] widens the encoded operand's declared range only as far as zero, obtains its data event and scalar zero-reference event from that same identity-code window, and evaluates both through signed PWM. The noise-free wrapper directly recovers $VB$ after algebraic deadline cancellation. Its ideal output interval uses the caller-declared factor endpoints, so fixed coefficients and bounded gates retain their own ranges.
 
 Under maintained timing noise, the same function requests a decorated event for the encoded operand and one scalar zero-reference event for the operator call. It passes those existing samples to the signed PWM wrapper without resampling: each delivered event contributes its event-to-deadline rail and each miss contributes reset zero. The raw result is then saturation-counted and clamped to the same declared-factor product rails; no public Gaussian-specific multiplication API exists.
 
@@ -100,7 +100,7 @@ Dense and convolutional layers retain pretrained parameters but express multiply
 
 These classes subclass PyTorch’s corresponding modules so parameter names and shapes remain checkpoint-compatible. In the noise-free tensor simulation they are intended to be numerically equivalent subject to clamping and floating-point arithmetic.
 
-The three affine adapters freeze parameter-derived safety rails after checkpoint loading and static perturbation. [[utils/transformers/models/spiking_ops.py#SpikingLinear#freeze_parameter_bounds]] and [[utils/transformers/models/spiking_ops.py#SpikingConv2d#freeze_parameter_bounds]] reduce each output row or grouped kernel, while [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#SpikingConv1D#freeze_parameter_bounds]] reduces the transposed weight's input dimension. For an upstream interval $[l,u]$, each weight selects the smaller and larger of $W_{ji}l$ and $W_{ji}u$ before reduction and optional bias addition. The symmetric formula $r_j=\theta\sum_i|W_{ji}|$ is only the special case $[l,u]=[-\theta,\theta]$. Each adapter reuses the resulting immutable interval and rejects later standard in-place parameter changes unless explicitly refreshed.
+The three affine adapters freeze parameter-derived output intervals after checkpoint loading and static perturbation. [[utils/transformers/models/spiking_ops.py#SpikingLinear#freeze_parameter_bounds]] and [[utils/transformers/models/spiking_ops.py#SpikingConv2d#freeze_parameter_bounds]] reduce each output row or grouped kernel, while [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#SpikingConv1D#freeze_parameter_bounds]] reduces the transposed weight's input dimension. For an upstream interval $[l,u]$, each weight selects the smaller and larger of $W_{ji}l$ and $W_{ji}u$ before reduction and optional bias addition. Each adapter reuses the resulting immutable interval and rejects later standard in-place parameter changes unless explicitly refreshed.
 
 [[utils/transformers/models/spiking_ops.py#SpikingLinear#forward]], [[utils/transformers/models/spiking_ops.py#SpikingConv2d#forward]], and [[utils/transformers/models/spiking_gpt2/modeling_spiking_gpt2.py#SpikingConv1D#forward]] attach the same frozen rail to deterministic and Gaussian outputs, so changing noise configuration does not change metadata. Their Gaussian helpers use it directly for saturation accounting and clamping without rescanning weight or bias bounds.
 
@@ -114,7 +114,7 @@ LayerNorm is a multi-stage composition and the most delicate shared operator in 
 
 [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm]] performs centering, dual-rail magnitude encoding, variance estimation, log encoding of variance and rails, exponential-difference normalization, and learned affine output scaling.
 
-Centered values first form actual nonnegative magnitude rails on $[0,\theta-\epsilon_{\mathrm{enc}}]$. Variance squares those magnitudes, not their logarithmic carrier copies. Only log carriers are floored to $\epsilon_{\mathrm{enc}}$, and active masks suppress the inactive or below-floor numerator rail after exponential decoding. A constant feature vector therefore produces the learned bias exactly. Suppressing a nonzero numerator below the encoder floor and clamping variance to the finite positive window remain explicit finite-domain approximations.
+Centered values first form actual nonnegative magnitude rails on $[0,r]$, with $r$ frozen from calibration or the incoming interval. Variance squares those magnitudes, not their logarithmic carrier copies. Only log carriers are floored to $\epsilon_{\mathrm{enc}}`; their common upper reference is $\sqrt{r^2+\mathrm{eps}}$. Active masks suppress inactive or below-floor numerator rails after exponential decoding.
 
 Three flags independently replace variance multiplication, log encoding, and exponential-difference decoding with tensor equivalents. These switches support causal attribution of error but also mean “spiking LayerNorm enabled” is not enough to identify the exact execution path; all three stage flags must be recorded.
 
@@ -134,9 +134,9 @@ The current implementation has finite-floor and clipping behavior described in [
 
 Attention composes spiking projections, signed dot products, softmin normalization, and PWM-weighted value accumulation.
 
-[[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_scaled_dot_product_attention]] clamps query and key to a fixed symmetric domain, computes negated scaled dot products, applies hard mask suppression, normalizes with softmin, and integrates encoded values against the resulting weights.
+[[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_scaled_dot_product_attention]] consumes explicit query, key, and value domains, computes negated scaled dot products, applies hard mask suppression, normalizes with softmin, and integrates encoded values against the resulting weights.
 
-[[utils/transformers/integrations/spiking_sdpa_attention.py#attention_output_bounds]] memoizes the immutable value-integration rail for each $\theta$ and configured maximum source length. Masked scores use the same finite upper endpoint declared to softmin, and Gaussian and noise-free readouts clamp against the common output rail.
+[[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_scaled_dot_product_attention]] requires explicit query, key, and value bounds and reuses the value interval as the common output interval. Masked scores use the same finite upper endpoint declared to softmin, and Gaussian and noise-free readouts clamp against that interval.
 
 In noise-free execution, the scalar zero-reference time cancels algebraically and matrix multiplication reduces the delivered signed value widths. Under maintained noise, value and scalar zero-reference events come from the same decorated encoder used by affine PWM. Each event supplies an independent causal pulse width, and a miss leaves only that rail at reset. The same matrix multiplication evaluates the complete attention-weight-driven signed PWM reduction while avoiding an explicit `(L,S,D)` synapse tensor. The raw observation-time output is then saturation-counted and clamped to its conservative summed rail envelope.
 
@@ -146,7 +146,7 @@ In noise-free execution, the scalar zero-reference time cancels algebraically an
 
 Every operator has domain conditions that are part of its contract rather than optional implementation details.
 
-- The generic multiplication operator encodes its factor on the symmetric $[-\theta,\theta]$ rail, while affine adapters require their upstream fixed input interval to be finite, ordered, and contain zero.
+- The generic multiplication operator encodes its factor on its declared finite interval widened only to contain zero; affine adapters impose the same finite, ordered, zero-containing input requirement.
 - Log encoders require strictly positive inputs and synchronized domains when offsets must cancel.
 - Division assumes the numerator does not exceed the denominator in its current contract.
 - Exponential paths require a bounded input range to avoid overflow or underflow.

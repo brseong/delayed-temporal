@@ -75,7 +75,7 @@ LayerNorm 수는 block당 두 개와 마지막 한 개를 포함한다. Calibrat
 | 실험 절의 기본 1,024장 및 기존 ViT-B noise calibration 비활성 서술 | 기본값·기존 noise 실험 설명이지, 새 네 모델 비교의 training 5k·calibration 활성 조건을 기록한 것이 아니다. 새 결과를 반영할 때 해당 실험의 별도 조건을 명시해야 한다. |
 | LayerNorm의 고정 log 입력 범위 | 현재 구현과 일치한다. 그 상한에서 clipping과 정확도 손실이 생길 수 있다는 사실이 곧 방법론 미준수를 의미하지는 않는다. |
 
-공유 범위 수집은 [[utils/transforms/calibration.py#observe_calibration_activation]]와 [[utils/transforms/calibration.py#update_min_max_observer]]의 site별 scalar 통계에서 확인했다. 실제 실행의 training 5k와 min/max·5% 설정은 [[scripts/experiments/vit_comparison.py#evaluator_command]] 및 앞 절의 네 calibration artifact 검증에 근거한다.
+공유 범위 수집은 [[utils/transforms/calibration.py#observe_calibration_activation]]와 [[utils/transforms/calibration.py#update_min_max_observer]]의 site별 scalar 통계에서 확인했다. 실제 실행의 training 5k와 min/max·5% 설정은 `scripts/experiments/vit_comparison.py#evaluator_command` 및 앞 절의 네 calibration artifact 검증에 근거한다.
 
 이번 대조에서는 원고, 코드, 실험 조건을 수정하지 않았다. LayerNorm 내부 calibration을 새로 도입하려면 고정 상한 설정과 구별하여 방법·인코딩 범위·실험 계약을 함께 정해야 하며, 이 문서는 그 변경을 승인하지 않는다.
 
@@ -251,7 +251,7 @@ Attention score calibration은 Q/K 제한 후의 score를 수집한다. 현재 f
 
 합의한 시간상수 기반 세제곱과 고정 상수의 시냅스 계수 처리는 현재 calibration 수집과 SNN 평가 양쪽에 적용되어 있다.
 
-[[scripts/experiments/vit_comparison.py#evaluator_command]]가 GELU wrapper와 `phi_nl_psi_ed`를 선택하며, [[scripts/analysis/gelu_cubic_phi_nl_vit.py#install_phi_nl_psi_ed_cube]]가 실제 ViT adapter의 GELU 함수를 교체한다. 실제 collection·SNN 명령과 로그, calibration metadata에서 동일 구현과 source·GELU hash를 확인했다.
+`scripts/experiments/vit_comparison.py#evaluator_command`가 GELU wrapper와 `phi_nl_psi_ed`를 선택하며, [[scripts/analysis/gelu_cubic_phi_nl_vit.py#install_phi_nl_psi_ed_cube]]가 실제 ViT adapter의 GELU 함수를 교체한다. 실제 collection·SNN 명령과 로그, calibration metadata에서 동일 구현과 source·GELU hash를 확인했다.
 
 | 항목 | 현재 구현 |
 |---|---|

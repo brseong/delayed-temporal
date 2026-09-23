@@ -48,7 +48,7 @@ def verify_commands_and_admission() -> None:
         for phase, command in commands.items():
             def value(flag):
                 return command[command.index(flag) + 1]
-            assert value("--dtype") == "float64" and value("--theta") == "40"
+            assert value("--dtype") == "float64" and "--theta" not in command
             assert value("--batch_size") == "8" and value("--max_length") == "128"
             assert "--no-tensorboard" in command and "--no-gaussian-time-noise" in command
             assert "--report-clamp-stats" not in command

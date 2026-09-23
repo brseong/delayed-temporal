@@ -7,7 +7,6 @@ cd "$repo_root"
 
 # source ./venv/bin/activate
 device="cuda"
-theta=2000
 task="${1:-sst2-b}"  # sst2-b | sst2-l | agnews | imdb
 
 case "${task}" in
@@ -66,7 +65,7 @@ for index in "${!expr_names[@]}"; do
         --task ${task} --batch_size 16 \
         --model_id ${model_id} \
         --dataset_name ${dataset_name} --dataset_split ${dataset_split} \
-        ${flags[$index]} --theta ${theta}"
+        ${flags[$index]}"
     if [[ -n "${dataset_config_name}" ]]; then
         script+=" --dataset_config_name ${dataset_config_name}"
     fi

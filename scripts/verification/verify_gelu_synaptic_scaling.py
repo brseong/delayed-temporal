@@ -23,7 +23,7 @@ def verify_fixed_gains() -> None:
     values = torch.tensor([-3.0, 0.0, 2.0], dtype=torch.float64)
     domain = PotentialBounds(-3.0, 2.0)
     noise.set_gaussian_time_noise(
-        enabled=True, time_std=1.0e-4, deadline_margin=4.0e-4, seed=17, device="cpu",
+        enabled=True, time_std_fraction=1.0e-4, deadline_margin_std_ratio=4.0e-4, seed=17, device="cpu",
     )
     generator = noise.get_gaussian_time_noise().generator
     assert isinstance(generator, torch.Generator)
@@ -54,15 +54,15 @@ def verify_fixed_gains() -> None:
 
 
 def verify_tanh_time_constants() -> None:
-    """A fixed time scale cancels at decoding without theta clipping of its gain."""
+    """A fixed time scale cancels at decoding without clipping its gain."""
     values = torch.linspace(-3.0, 3.0, 79, dtype=torch.float64)
     domain = PotentialBounds(-3.0, 3.0)
     for enabled in (False, True):
         for tau_s in (0.125, 0.5, 1.0, 2.0, 25.0):
-            noise.set_gaussian_time_noise(enabled=enabled, time_std=0.0, seed=3, device="cpu")
+            noise.set_gaussian_time_noise(enabled=enabled, time_std_fraction=0.0, seed=3, device="cpu")
             with patch.object(functions, "multiplication_operator", side_effect=AssertionError):
                 actual, bounds = functions._tanh_sigmoid_gate(
-                    values, domain, tau_s=tau_s, theta=40.0,
+                    values, domain, tau_s=tau_s,
                 )
             torch.testing.assert_close(actual, torch.sigmoid(2.0 * values), rtol=2.0e-12, atol=2.0e-12)
             assert bounds == PotentialBounds(0.0, 1.0)
@@ -73,7 +73,7 @@ def verify_tanh_time_constants() -> None:
 
 
 def verify_cubic_boundaries() -> None:
-    """Signed magnitudes retain the floor, inclusive theta cap, and fixed output bounds."""
+    """Signed magnitudes retain the floor and declared input-range bound."""
     floor = 1.0e-5
     values = torch.tensor(
         [-80.0, -40.0, -3.0, -0.752461, -floor, -floor / 2, 0.0,
@@ -81,7 +81,7 @@ def verify_cubic_boundaries() -> None:
         dtype=torch.float64,
     )
     domain = PotentialBounds(-80.0, 80.0)
-    reference_cube = values.clamp(-40.0, 40.0).pow(3)
+    reference_cube = values.pow(3)
     reference_cube = torch.where(values.abs() >= floor, reference_cube, 0.0)
     reference_gate = torch.sigmoid(
         2.0 * 0.7978845608028654 * (values + 0.044715 * reference_cube),
@@ -90,16 +90,16 @@ def verify_cubic_boundaries() -> None:
     for tau_s in (0.5, 1.0, 2.0, 25.0):
         outputs = []
         for enabled in (False, True):
-            noise.set_gaussian_time_noise(enabled=enabled, time_std=0.0, seed=3, device="cpu")
+            noise.set_gaussian_time_noise(enabled=enabled, time_std_fraction=0.0, seed=3, device="cpu")
             actual_cube, cube_bounds = cubic.phi_nl_psi_ed_cube(
-                values, domain, tau_s=tau_s, theta=40.0, magnitude_floor=floor,
+                values, domain, tau_s=tau_s, magnitude_floor=floor,
             )
             torch.testing.assert_close(actual_cube, reference_cube, rtol=3.0e-13, atol=2.0e-20)
-            assert cube_bounds == PotentialBounds(-64000.0, 64000.0)
+            assert cube_bounds == PotentialBounds(-512000.0, 512000.0)
             actual, bounds = cubic.gelu_with_phi_nl_psi_ed_cube(
-                values, domain, tau_s=tau_s, theta=40.0, magnitude_floor=floor,
+                values, domain, tau_s=tau_s, magnitude_floor=floor,
             )
-            assert functions.OUTPUT_BOUNDS_VERSION == 3
+            assert functions.OUTPUT_BOUNDS_VERSION == 4
             assert bounds == PotentialBounds(functions.GELU_OUTPUT_MIN, 80.0)
             assert bool(torch.isfinite(actual).all())
             torch.testing.assert_close(actual, expected_gelu, rtol=2.0e-11, atol=2.0e-11)
@@ -121,25 +121,25 @@ def verify_dynamic_products() -> None:
         calls = []
         original = functions.multiplication_operator
 
-        def traced(value, value_domain, factor, factor_domain, theta):
+        def traced(value, value_domain, factor, factor_domain):
             assert factor_domain.min < factor_domain.max, "a fixed gain entered multiplication"
             calls.append((factor.clone(), factor_domain))
-            return original(value, value_domain, factor, factor_domain, theta)
+            return original(value, value_domain, factor, factor_domain)
 
         noise.set_gaussian_time_noise(enabled=False)
         with patch.object(functions, "multiplication_operator", side_effect=traced):
             if owner is cubic:
                 with patch.object(cubic, "multiplication_operator", side_effect=traced):
-                    result, _ = evaluator(values, domain, theta=40.0)
+                    result, _ = evaluator(values, domain)
             else:
-                result, _ = evaluator(values, domain, theta=40.0)
+                result, _ = evaluator(values, domain)
         assert len(calls) == expected_count
         assert calls[-1][1] == PotentialBounds(0.0, 1.0)
         assert bool(torch.isfinite(result).all())
     # The generic operator must still encode a caller-supplied constant operand.
-    noise.set_gaussian_time_noise(enabled=True, time_std=0.0, seed=3, device="cpu")
+    noise.set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=3, device="cpu")
     functions.multiplication_operator(
-        values, domain, torch.full_like(values, 0.5), PotentialBounds(0.5, 0.5), 40.0,
+        values, domain, torch.full_like(values, 0.5), PotentialBounds(0.5, 0.5),
     )
     assert noise.get_gaussian_noise_stats()["multiplication.data"]["events"] == values.numel()
     noise.set_gaussian_time_noise(enabled=False)
@@ -164,14 +164,14 @@ def verify_gaussian_events_and_replay() -> None:
     outputs = []
     for seed in (17, 17, 18):
         noise.set_gaussian_time_noise(
-            enabled=True, time_std=1.0e-3, deadline_margin=4.0e-3, seed=seed, device="cpu",
+            enabled=True, time_std_fraction=1.0e-3, deadline_margin_std_ratio=4.0e-3, seed=seed, device="cpu",
         )
         generator = noise.get_gaussian_time_noise().generator
         assert isinstance(generator, torch.Generator)
         with patch.object(
             noise, "_sample_gaussian_spike_time", wraps=noise._sample_gaussian_spike_time,
         ) as sampler:
-            output, _ = cubic.gelu_with_phi_nl_psi_ed_cube(values, domain, theta=40.0)
+            output, _ = cubic.gelu_with_phi_nl_psi_ed_cube(values, domain)
         outputs.append(output)
         stats = noise.get_gaussian_noise_stats()
         events = {site: counts["events"] for site, counts in stats.items() if counts["events"]}

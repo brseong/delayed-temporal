@@ -105,9 +105,6 @@ class GPT2Config(PreTrainedConfig):
             Whether cross-attention layers should be added to the model.
         tie_word_embeddings (`bool`, *optional*, defaults to `True`):
             Whether to tie weight embeddings
-        attention_theta (`float`, *optional*):
-            GPT-2 attention-only temporal threshold. If omitted, attention uses the
-            model-wide ``theta`` for backward compatibility.
 
     Example:
 
@@ -161,9 +158,12 @@ class GPT2Config(PreTrainedConfig):
         reorder_and_upcast_attn=False,
         add_cross_attention=False,
         tie_word_embeddings=True,
-        attention_theta=None,
         **kwargs,
     ):
+        if "theta" in kwargs or "attention_theta" in kwargs:
+            raise TypeError(
+                "GPT2Config no longer accepts global or attention theta; operators use declared ranges"
+            )
         self.add_cross_attention = add_cross_attention
         self.tie_word_embeddings = tie_word_embeddings
         self.vocab_size = vocab_size
@@ -187,10 +187,6 @@ class GPT2Config(PreTrainedConfig):
         self.use_cache = use_cache
         self.scale_attn_by_inverse_layer_idx = scale_attn_by_inverse_layer_idx
         self.reorder_and_upcast_attn = reorder_and_upcast_attn
-        # ``None`` preserves the historical single-theta contract. The model
-        # resolves it to the global threshold when constructing attention.
-        self.attention_theta = attention_theta
-
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
         self.pad_token_id = pad_token_id

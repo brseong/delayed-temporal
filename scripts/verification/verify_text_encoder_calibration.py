@@ -47,8 +47,7 @@ from utils.transformers.models.text_calibration import (
 def make_model(family="bert", *, dtype=torch.float64, depth=1, head="classification", **changes):
     options = dict(
         vocab_size=32, hidden_size=8, intermediate_size=16, num_hidden_layers=depth,
-        num_attention_heads=2, max_position_embeddings=16, num_labels=2,
-        theta=40.0, tau_s=1.0, layer_norm_eps=1e-12, clip_margin=1e-5,
+        num_attention_heads=2, max_position_embeddings=16, num_labels=2, tau_s=1.0, layer_norm_eps=1e-12, clip_margin=1e-5,
         hidden_dropout_prob=0.0, attention_probs_dropout_prob=0.0, pad_token_id=0,
     )
     options.update(changes)
@@ -265,9 +264,9 @@ def verify_attention_selected_ranges_and_noise():
         assert result.domain.max > 40.0
         snapshot = calibration_table_to_dict(table)
         for std in (0.0, 1e-9):
-            set_gaussian_time_noise(enabled=True, time_std=std, seed=3)
+            set_gaussian_time_noise(enabled=True, time_std_fraction=std, seed=3)
             first, _ = attention(hidden)
-            set_gaussian_time_noise(enabled=True, time_std=std, seed=3)
+            set_gaussian_time_noise(enabled=True, time_std_fraction=std, seed=3)
             second, _ = attention(hidden)
             assert torch.isfinite(first.value).all()
             assert torch.equal(first.value, second.value)

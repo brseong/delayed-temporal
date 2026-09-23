@@ -52,7 +52,6 @@ from utils.transformers.calibration import (
 )
 from utils.transformers.models.text_calibration import calibrate_text_potential
 from utils.transformers.calibration import calibration_uses_explicit_bounds
-from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear, _apply_norm
 
 logger = logging.get_logger(__name__)
@@ -67,12 +66,11 @@ class BertEmbeddings(nn.Module):
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
 
-        _theta = getattr(config, "theta", 10.0)
         _tau_s = getattr(config, "tau_s", 1.0)
         _use_spiking_ln = getattr(config, "use_spiking_layernorm", True)
         if _use_spiking_ln:
             _sln_kwargs = dict(
-                theta=_theta, tau_s=_tau_s,
+                tau_s=_tau_s,
                 eps=config.layer_norm_eps,
                 clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
@@ -351,10 +349,9 @@ class BertSelfAttention(nn.Module):
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
         self.dropout_prob = config.attention_probs_dropout_prob
-        _theta = getattr(config, "theta", 400.0)
-        self.query = SpikingLinear(config.hidden_size, self.all_head_size, theta=_theta)
-        self.key = SpikingLinear(config.hidden_size, self.all_head_size, theta=_theta)
-        self.value = SpikingLinear(config.hidden_size, self.all_head_size, theta=_theta)
+        self.query = SpikingLinear(config.hidden_size, self.all_head_size)
+        self.key = SpikingLinear(config.hidden_size, self.all_head_size)
+        self.value = SpikingLinear(config.hidden_size, self.all_head_size)
 
     def forward(self, pot: Potential, attention_mask=None) -> tuple[Potential, torch.Tensor]:
         """Apply BERT self-attention with a backend-consistent output domain.
@@ -380,11 +377,7 @@ class BertSelfAttention(nn.Module):
         pot_k = self.key(pot)
         pot_v = self.value(pot)
         pot_q = self.query(pot)
-        explicit_bounds = (
-            self.config._attn_implementation == "spiking_sdpa"
-            and calibration_uses_explicit_bounds(self)
-        )
-        if explicit_bounds:
+        if self.config._attn_implementation == "spiking_sdpa" and calibration_uses_explicit_bounds(self):
             pot_q = calibrate_text_potential(self, "query", pot_q)
             pot_k = calibrate_text_potential(self, "key", pot_k)
             pot_v = calibrate_text_potential(self, "value", pot_v)
@@ -404,20 +397,15 @@ class BertSelfAttention(nn.Module):
         kwargs = {}
         context_domain = pot_v.domain
         if self.config._attn_implementation == "spiking_sdpa":
-            theta = float(getattr(self.config, "theta", 10.0))
             source_length_max = int(self.config.max_position_embeddings)
-            kwargs["theta"] = theta
             kwargs["tau"] = getattr(self.config, "tau_s", 1.0)
             kwargs["source_length_max"] = source_length_max
-            if explicit_bounds:
-                kwargs.update(
-                    query_bounds=pot_q.domain,
-                    key_bounds=pot_k.domain,
-                    value_bounds=pot_v.domain,
-                )
-                context_domain = pot_v.domain
-            else:
-                context_domain = attention_output_bounds(theta, source_length_max)
+            kwargs.update(
+                query_bounds=pot_q.domain,
+                key_bounds=pot_k.domain,
+                value_bounds=pot_v.domain,
+            )
+            context_domain = pot_v.domain
 
         # Eager training dropout scales surviving normalized weights by 1/(1-p).
         # Include zero plus both scaled value endpoints without observing its mask.
@@ -436,8 +424,7 @@ class BertSelfAttention(nn.Module):
                     max(dropout_candidates),
                 )
 
-        # Backend clamping receives the same theta and S_max pair used above, so the
-        # memoized helper resolves to the identical immutable domain object.
+        # Backend clamping receives the same value bounds propagated above.
         context_layer, attention_probs = attention_interface(
             self, query_layer, key_layer, value_layer, attention_mask,
             dropout=0.0 if not self.training else self.dropout_prob,
@@ -454,13 +441,12 @@ class BertSelfAttention(nn.Module):
 class BertSelfOutput(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.dense = SpikingLinear(config.hidden_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
-        _theta = getattr(config, "theta", 10.0)
+        self.dense = SpikingLinear(config.hidden_size, config.hidden_size)
         _tau_s = getattr(config, "tau_s", 1.0)
         _use_spiking_ln = getattr(config, "use_spiking_layernorm", True)
         if _use_spiking_ln:
             _sln_kwargs = dict(
-                theta=_theta, tau_s=_tau_s,
+                tau_s=_tau_s,
                 eps=config.layer_norm_eps,
                 clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
@@ -499,7 +485,7 @@ class BertAttention(nn.Module):
 class BertIntermediate(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.dense = SpikingLinear(config.hidden_size, config.intermediate_size, theta=getattr(config, "theta", 400.0))
+        self.dense = SpikingLinear(config.hidden_size, config.intermediate_size)
         self._use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
         self.tau_s = getattr(config, "tau_s", 1.0)
         if isinstance(config.hidden_act, str):
@@ -531,7 +517,7 @@ class BertIntermediate(nn.Module):
         if self._use_spiking_mlp:
             if isinstance(self.intermediate_act_fn, GELUActivation):
                 pot_z = calibrate_text_potential(self, "activation_input", pot_z)
-                return Potential(*gelu_approximation(*pot_z, theta=self.dense.theta, tau_s=self.tau_s))
+                return Potential(*gelu_approximation(*pot_z, tau_s=self.tau_s))
             if isinstance(self.intermediate_act_fn, nn.ReLU):
                 # ReLU is monotone and clips negative inputs to the fixed zero rail.
                 return Potential(
@@ -564,13 +550,12 @@ class BertIntermediate(nn.Module):
 class BertOutput(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.dense = SpikingLinear(config.intermediate_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
-        _theta = getattr(config, "theta", 10.0)
+        self.dense = SpikingLinear(config.intermediate_size, config.hidden_size)
         _tau_s = getattr(config, "tau_s", 1.0)
         _use_spiking_ln = getattr(config, "use_spiking_layernorm", True)
         if _use_spiking_ln:
             _sln_kwargs = dict(
-                theta=_theta, tau_s=_tau_s,
+                tau_s=_tau_s,
                 eps=config.layer_norm_eps,
                 clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
@@ -612,7 +597,6 @@ class BertEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self._theta = float(getattr(config, "theta", 10.0))
         self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
 
     def forward(
@@ -620,13 +604,12 @@ class BertEncoder(nn.Module):
         hidden_states: Potential | torch.Tensor,
         attention_mask=None,
     ) -> Potential:
-        """Enter the BERT stack through an upstream or fixed calibrated range.
+        """Enter the BERT stack through the upstream declared range.
 
         Normal model execution may carry the embedding LayerNorm range as a
-        :class:`Potential`. A direct tensor call has no upstream metadata, so it uses
-        the configured symmetric ``theta`` rail. An installed calibration binding
-        observes or clamps the same encoder-entry tensor without consulting its live
-        extrema.
+        :class:`Potential`. Direct tensor calls are rejected because they would have
+        no input-independent encoder range. An installed calibration binding observes
+        or clamps the same encoder-entry tensor without consulting live extrema.
 
         Args:
             hidden_states: Embedding output with optional declared potential bounds.
@@ -636,22 +619,15 @@ class BertEncoder(nn.Module):
             Final BERT encoder activation with fixed propagated bounds.
 
         Raises:
-            ValueError: If the configured fallback threshold is not finite and
-                positive.
+            TypeError: If the embedding range metadata is absent.
         """
         # Preserve a range already established by the embedding LayerNorm. Standalone
         # tensor callers instead receive the same configuration-derived physical rail
         # for every batch, independent of its values or ordering.
-        if isinstance(hidden_states, Potential):
-            entry_value = hidden_states.value
-            entry_bounds = hidden_states.domain
-        else:
-            if not isinstance(hidden_states, torch.Tensor):
-                raise TypeError("hidden_states must be Potential or torch.Tensor")
-            if not math.isfinite(self._theta) or self._theta <= 0.0:
-                raise ValueError("BERT encoder theta must be finite and positive")
-            entry_value = hidden_states
-            entry_bounds = PotentialBounds(-self._theta, self._theta)
+        if not isinstance(hidden_states, Potential):
+            raise TypeError("BERT encoder requires embeddings with declared bounds")
+        entry_value = hidden_states.value
+        entry_bounds = hidden_states.domain
 
         # Collection observes raw values on the fixed upstream safety interval;
         # frozen phases attach their persisted range. Without a binding, only direct
@@ -663,13 +639,8 @@ class BertEncoder(nn.Module):
                 entry_value,
                 collection_bounds=entry_bounds,
             )
-        elif isinstance(hidden_states, Potential):
-            pot = hidden_states
         else:
-            pot = Potential(
-                entry_bounds.clamp(entry_value, name="bert_encoder_input"),
-                entry_bounds,
-            )
+            pot = hidden_states
 
         # Every layer consumes and returns Potential, so the entry range remains part
         # of the operator graph instead of being reconstructed from a later tensor.
@@ -683,7 +654,7 @@ class BertPooler(nn.Module):
         super().__init__()
         self.use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
         if self.use_spiking_mlp:
-            self.dense = SpikingLinear(config.hidden_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
+            self.dense = SpikingLinear(config.hidden_size, config.hidden_size)
             self.tau_s = getattr(config, "tau_s", 1.0)
         else:
             self.dense = nn.Linear(config.hidden_size, config.hidden_size)
@@ -693,9 +664,8 @@ class BertPooler(nn.Module):
         """Pool the first BERT token without rebuilding its potential range.
 
         The first-token slice is a view of the final encoder activation and therefore
-        retains the encoder's declared range. Direct tensor calls use the configured
-        fixed ``theta`` rail for compatibility, while the dense pooler remains an
-        ordinary PyTorch path that does not encode a temporal event.
+        retains the encoder's declared range. The dense pooler may still accept a
+        tensor because it does not encode a temporal event.
 
         Args:
             hidden_states: Final sequence activation with optional fixed bounds.
@@ -722,20 +692,13 @@ class BertPooler(nn.Module):
         # Hugging Face-compatible pooler API boundary.
         if self.use_spiking_mlp:
             if first_token_domain is None:
-                theta = float(self.dense.theta)
-                if not math.isfinite(theta) or theta <= 0.0:
-                    raise ValueError("BERT pooler theta must be finite and positive")
-                first_token_domain = PotentialBounds(-theta, theta)
-                first_token_tensor = first_token_domain.clamp(
-                    first_token_tensor,
-                    name="bert_pooler_input",
-                )
+                raise TypeError("spiking BERT pooler requires declared input bounds")
             first_token_potential = Potential(
                 first_token_tensor,
                 first_token_domain,
             )
             pot_dense = calibrate_text_potential(self, "activation_input", self.dense(first_token_potential))
-            pooled_output, _ = tanh(pot_dense.value, pot_dense.domain, tau_s=self.tau_s, theta=self.dense.theta)
+            pooled_output, _ = tanh(pot_dense.value, pot_dense.domain, tau_s=self.tau_s)
             return pooled_output
 
         # Dense execution intentionally ignores range metadata after selecting the

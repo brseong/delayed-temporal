@@ -183,7 +183,6 @@ def _make_metadata() -> CalibrationMetadata:
         dataset_split="train",
         preprocessing="resize=224",
         dtype="float32",
-        theta=2000.0,
         tau_s=1.0,
         tau_m=1.0,
         clip_margin=1.0e-5,
@@ -426,30 +425,26 @@ def verify_attention_score_range_calibration() -> None:
 
     # The analytic ceiling is evaluated in log space. Reconstruct its defining
     # equation independently and require source capacity and dtype to affect the
-    # result while theta remains the outer physical cap.
-    theta = 80.0
+    # result without a process-wide potential cap.
     tau = 1.0
     source_length_max = 512
     float32_bounds = attention_score_representability_bounds(
-        theta,
         tau,
         source_length_max,
         torch.float32,
     )
-    expected_radius = min(
-        theta,
+    expected_radius = (
         0.5
         * tau
         * (
             -math.log(torch.finfo(torch.float32).tiny)
             - math.log(source_length_max)
             - 2.0
-        ),
+        )
     )
     assert math.isclose(float32_bounds.max, expected_radius)
     assert float32_bounds.min == -float32_bounds.max
     assert attention_score_representability_bounds(
-        theta,
         tau,
         source_length_max,
         torch.float16,
@@ -488,9 +483,11 @@ def verify_attention_score_range_calibration() -> None:
             key,
             value,
             tau=1.0,
-            theta=8.0,
             source_length_max=2,
             score_calibration_module=owner,
+            query_bounds=PotentialBounds(-8.0, 8.0),
+            key_bounds=PotentialBounds(-8.0, 8.0),
+            value_bounds=PotentialBounds(-1.0, 1.0),
         )
 
     first_output = run_attention()
@@ -538,7 +535,6 @@ def verify_attention_score_range_calibration() -> None:
         num_hidden_layers=1,
         num_attention_heads=2,
         intermediate_size=16,
-        theta=8.0,
         tau_s=1.0,
     )
     vit_model = ViTModel(vit_config)
@@ -559,7 +555,6 @@ def verify_attention_score_range_calibration() -> None:
         n_embd=8,
         n_layer=1,
         n_head=2,
-        theta=8.0,
         tau_s=1.0,
     )
     gpt2_model = GPT2Model(gpt2_config)
@@ -1063,7 +1058,6 @@ def verify_deterministic_training_subset() -> None:
         num_channels=3,
         hidden_act="gelu",
         layer_norm_eps=1.0e-12,
-        theta=4.0,
         tau_s=1.0,
         tau_m=1.0,
         use_spiking_layernorm=True,
@@ -1306,7 +1300,6 @@ def verify_vit_fixed_activation_ranges() -> None:
             intermediate_size=8,
             num_hidden_layers=1,
             num_attention_heads=1,
-            theta=4.0,
             use_spiking_mlp=use_spiking_mlp,
             spiking_mlp_exact_gelu=exact_gelu,
             hidden_act=hidden_act,
@@ -1344,7 +1337,6 @@ def verify_vit_fixed_activation_ranges() -> None:
         intermediate_size=8,
         num_hidden_layers=1,
         num_attention_heads=1,
-        theta=100.0,
         use_spiking_mlp=True,
         spiking_mlp_exact_gelu=False,
     )
@@ -1445,7 +1437,6 @@ def verify_bert_fixed_range_flow() -> None:
             use_spiking_layernorm=False,
             use_spiking_mlp=use_spiking_mlp,
             hidden_act="gelu",
-            theta=4.0,
         )
         config._attn_implementation = "eager"
         return config
@@ -1564,7 +1555,6 @@ def verify_roberta_fixed_range_flow() -> None:
             use_spiking_layernorm=False,
             use_spiking_mlp=use_spiking_mlp,
             hidden_act="gelu",
-            theta=8.0,
             num_labels=2,
             pad_token_id=1,
         )
@@ -1652,7 +1642,8 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
     assert default_args.calibration_lower_quantile == 0.0
     assert default_args.calibration_upper_quantile == 1.0
     assert default_args.calibration_margin_fraction == 0.05
-    assert default_args.attention_theta == default_args.theta
+    assert not hasattr(default_args, "theta")
+    assert not hasattr(default_args, "attention_theta")
     assert default_args.dtype == "float32"
     _expect_raises(
         ValueError,
@@ -1687,10 +1678,6 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
             "0.99",
             "--calibration-margin-fraction",
             "0.1",
-            "--theta",
-            "2000",
-            "--attention-theta",
-            "100",
         ],
     ):
         args = parse_arguments()
@@ -1698,8 +1685,6 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
     assert args.calibration_samples == 4
     assert args.calibration_seed == 19
     assert args.calibration_bins == 16
-    assert args.theta == 2000.0
-    assert args.attention_theta == 100.0
     assert validate_gpt2_calibration_arguments(
         replace(args, dtype="float64")
     ) is CalibrationMode.COLLECT
@@ -1730,8 +1715,6 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
         use_spiking_mlp=True,
         use_spiking_layernorm=False,
         activation_function="gelu_new",
-        theta=8.0,
-        attention_theta=2.0,
         tau_s=1.0,
         resid_pdrop=0.0,
         attn_pdrop=0.0,
@@ -1764,17 +1747,17 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
     assert metadata.max_sequence_length == 4
     assert "filtered-selected-v1" in metadata.preprocessing
     assert metadata.input_shape == (4,)
-    assert dict(metadata.model_options)["attention_theta"] == 2.0
+    assert "attention_theta" not in dict(metadata.model_options)
     _verify_gelu_metadata_identity(metadata)
 
     # Selected attention score bounds retain the numerical limit without an
-    # additional threshold cap. The affine operators retain their own threshold.
+    # additional process-wide cap. Affine operators consume their input ranges.
     config._attn_implementation = "spiking_sdpa"
     torch.manual_seed(2119)
     spiking_model = GPT2Model(config).eval()
     attention = spiking_model.h[0].attn
-    assert attention.attention_theta == 2.0
-    assert attention.c_attn.theta == 8.0
+    assert not hasattr(attention, "attention_theta")
+    assert not hasattr(attention.c_attn, "theta")
     spiking_specs = gpt2_calibration_specs(
         spiking_model,
         lower_quantile=0.0,
@@ -1785,11 +1768,9 @@ def verify_gpt2_evaluator_artifact_lifecycle() -> None:
         spec for spec in spiking_specs if spec.tensor_name == "attention_score"
     )
     expected_score_bounds = attention_score_representability_bounds(
-        2.0,
         1.0,
         8,
         attention.c_attn.weight.dtype,
-        cap_by_theta=False,
     )
     assert score_spec.fixed_min == expected_score_bounds.min
     assert score_spec.fixed_max == expected_score_bounds.max
@@ -1863,7 +1844,6 @@ def verify_gpt2_fixed_range_flow() -> None:
             use_spiking_mlp=use_spiking_mlp,
             use_spiking_layernorm=False,
             activation_function=activation_function,
-            theta=8.0,
             resid_pdrop=0.0,
             attn_pdrop=0.0,
             embd_pdrop=0.0,
@@ -1988,7 +1968,6 @@ def verify_vit_residual_range_reset() -> None:
                 intermediate_size=8,
                 hidden_dropout_prob=0.0,
                 attention_probs_dropout_prob=0.0,
-                theta=4.0,
                 use_spiking_layernorm=False,
                 use_spiking_mlp=True,
                 spiking_mlp_exact_gelu=False,
@@ -2078,7 +2057,7 @@ def verify_vit_residual_range_reset() -> None:
 
     # A complete encoder adds one entry site before the two residual sites. Its
     # calibration-free theta rail makes declared output domains independent of the
-    # current embedding values instead of reconstructing them from batch extrema.
+    # declared embedding range makes output domains independent of batch extrema.
     class EncoderModel(nn.Module):
         """Expose a one-block encoder under a wrapper-stable module path."""
 
@@ -2091,7 +2070,6 @@ def verify_vit_residual_range_reset() -> None:
                 intermediate_size=8,
                 hidden_dropout_prob=0.0,
                 attention_probs_dropout_prob=0.0,
-                theta=4.0,
                 use_spiking_layernorm=False,
                 use_spiking_mlp=True,
             )
@@ -2118,8 +2096,9 @@ def verify_vit_residual_range_reset() -> None:
         dtype=torch.float32,
     )
     broad_embeddings = small_embeddings * 8.0
-    small_output = encoder_model.encoder(small_embeddings)
-    broad_output = encoder_model.encoder(broad_embeddings)
+    embedding_bounds = PotentialBounds(-2.0, 2.0)
+    small_output = encoder_model.encoder(Potential(small_embeddings, embedding_bounds))
+    broad_output = encoder_model.encoder(Potential(broad_embeddings, embedding_bounds))
     assert small_output.domain == broad_output.domain
 
 
@@ -2182,14 +2161,14 @@ def verify_canonical_table_round_trip() -> None:
     )
 
     # Metadata compatibility is exact and reports the differing configuration field
-    # rather than allowing a table collected at another threshold to be installed.
+    # rather than allowing a table collected under another numeric contract.
     validate_calibration_metadata(table.metadata, metadata)
     _expect_raises(
         ValueError,
         lambda: validate_calibration_metadata(
-            table.metadata, replace(metadata, theta=1000.0)
+            table.metadata, replace(metadata, tau_s=2.0)
         ),
-        "theta",
+        "tau_s",
     )
 
     old_commit = "a" * 40
@@ -2216,9 +2195,9 @@ def verify_canonical_table_round_trip() -> None:
             ValueError,
             lambda: validate_calibration_metadata(
                 compatible_actual,
-                replace(compatible_expected, theta=1000.0),
+                replace(compatible_expected, tau_s=2.0),
             ),
-            "theta",
+            "tau_s",
         )
 
     old_evaluator = "c" * 64
@@ -2582,8 +2561,8 @@ def verify_static_bounds_across_batching() -> None:
 
     # Linear and GPT-2 Conv1D use different learned-weight layouts, but both memoize
     # exact sign-aware intervals by the immutable input domain and parameter version.
-    linear = SpikingLinear(4, 3, theta=2.0).eval()
-    conv1d = SpikingConv1D(3, 4, theta=2.0).eval()
+    linear = SpikingLinear(4, 3).eval()
+    conv1d = SpikingConv1D(3, 4).eval()
     linear_domains = tuple(linear(Potential(value, domain)).domain for value in variants)
     conv1d_domains = tuple(conv1d(Potential(value, domain)).domain for value in variants)
     assert all(item is linear_domains[0] for item in linear_domains)
@@ -2594,7 +2573,6 @@ def verify_static_bounds_across_batching() -> None:
     # batches therefore reuse exactly one cached range object.
     layer_norm = SpikingLayerNorm(
         4,
-        theta=4.0,
         use_spiking_mul=False,
         use_spiking_log=False,
         use_spiking_expdiff=False,
@@ -2613,7 +2591,7 @@ def verify_static_bounds_across_batching() -> None:
         images[:1],
         images[1:],
     )
-    conv2d = SpikingConv2d(1, 2, kernel_size=2, theta=2.0).eval()
+    conv2d = SpikingConv2d(1, 2, kernel_size=2).eval()
     conv2d_domains = tuple(
         conv2d(Potential(value, domain)).domain for value in image_variants
     )
@@ -2628,7 +2606,6 @@ def verify_static_bounds_across_batching() -> None:
             domain,
             value.flip(-1),
             domain,
-            theta=2.0,
         )[1]
         for value in variants
     )

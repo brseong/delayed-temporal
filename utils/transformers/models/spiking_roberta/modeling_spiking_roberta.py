@@ -47,7 +47,6 @@ from utils.transforms.functions import clamp_gelu_output, gelu_approximation, ta
 from utils.transforms.types import Potential, PotentialBounds
 from utils.transformers.models.text_calibration import calibrate_text_potential
 from utils.transformers.calibration import calibration_uses_explicit_bounds
-from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import SpikingLayerNorm, SpikingLinear, _apply_norm
 
 logger = logging.get_logger(__name__)
@@ -61,12 +60,11 @@ class RobertaEmbeddings(nn.Module):
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
 
-        _theta = getattr(config, "theta", 10.0)
         _tau_s = getattr(config, "tau_s", 1.0)
         _use_spiking_ln = getattr(config, "use_spiking_layernorm", True)
         if _use_spiking_ln:
             _sln_kwargs = dict(
-                theta=_theta, tau_s=_tau_s,
+                tau_s=_tau_s,
                 eps=config.layer_norm_eps,
                 clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
@@ -364,10 +362,9 @@ class RobertaSelfAttention(nn.Module):
         self.all_head_size = self.num_attention_heads * self.attention_head_size
         self.scaling = self.attention_head_size**-0.5
         
-        _theta = getattr(config, "theta", 400.0)
-        self.query = SpikingLinear(config.hidden_size, self.all_head_size, theta=_theta)
-        self.key = SpikingLinear(config.hidden_size, self.all_head_size, theta=_theta)
-        self.value = SpikingLinear(config.hidden_size, self.all_head_size, theta=_theta)
+        self.query = SpikingLinear(config.hidden_size, self.all_head_size)
+        self.key = SpikingLinear(config.hidden_size, self.all_head_size)
+        self.value = SpikingLinear(config.hidden_size, self.all_head_size)
         
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
         self.is_causal = is_causal
@@ -377,9 +374,8 @@ class RobertaSelfAttention(nn.Module):
         """Apply RoBERTa self-attention with fixed backend-specific bounds.
 
         The eager path remains a convex combination and retains the projected value
-        range. The spiking path derives one immutable output rail from ``theta`` and
-        the configured positional capacity, passes that capacity to the backend,
-        and attaches the same memoized domain to the reshaped context.
+        range. The spiking path passes the projected query, key, and value ranges
+        together with the configured positional capacity to the backend.
 
         Args:
             pot: Hidden states paired with their upstream potential bounds.
@@ -398,11 +394,7 @@ class RobertaSelfAttention(nn.Module):
         pot_k = self.key(pot)
         pot_v = self.value(pot)
         pot_q = self.query(pot)
-        explicit_bounds = (
-            self.config._attn_implementation == "spiking_sdpa"
-            and calibration_uses_explicit_bounds(self)
-        )
-        if explicit_bounds:
+        if self.config._attn_implementation == "spiking_sdpa" and calibration_uses_explicit_bounds(self):
             pot_q = calibrate_text_potential(self, "query", pot_q)
             pot_k = calibrate_text_potential(self, "key", pot_k)
             pot_v = calibrate_text_potential(self, "value", pot_v)
@@ -421,20 +413,15 @@ class RobertaSelfAttention(nn.Module):
         attention_kwargs = dict(kwargs)
         context_domain = pot_v.domain
         if self.config._attn_implementation == "spiking_sdpa":
-            theta = float(getattr(self.config, "theta", 10.0))
             source_length_max = int(self.config.max_position_embeddings)
-            attention_kwargs["theta"] = theta
             attention_kwargs["tau"] = getattr(self.config, "tau_s", 1.0)
             attention_kwargs["source_length_max"] = source_length_max
-            if explicit_bounds:
-                attention_kwargs.update(
-                    query_bounds=pot_q.domain,
-                    key_bounds=pot_k.domain,
-                    value_bounds=pot_v.domain,
-                )
-                context_domain = pot_v.domain
-            else:
-                context_domain = attention_output_bounds(theta, source_length_max)
+            attention_kwargs.update(
+                query_bounds=pot_q.domain,
+                key_bounds=pot_k.domain,
+                value_bounds=pot_v.domain,
+            )
+            context_domain = pot_v.domain
 
         # Eager training dropout scales surviving normalized weights by 1/(1-p).
         # Include zero plus both scaled value endpoints without reading its mask.
@@ -480,15 +467,13 @@ class RobertaSelfOutput(nn.Module):
         self.dense = SpikingLinear(
             config.hidden_size,
             config.hidden_size,
-            theta=getattr(config, "theta", 400.0),
         )
         
-        _theta = getattr(config, "theta", 10.0)
         _tau_s = getattr(config, "tau_s", 1.0)
         _use_spiking_ln = getattr(config, "use_spiking_layernorm", True)
         if _use_spiking_ln:
             _sln_kwargs = dict(
-                theta=_theta, tau_s=_tau_s,
+                tau_s=_tau_s,
                 eps=config.layer_norm_eps,
                 clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
@@ -558,7 +543,6 @@ class RobertaIntermediate(nn.Module):
         self.dense = SpikingLinear(
             config.hidden_size,
             config.intermediate_size,
-            theta=getattr(config, "theta", 400.0),
         )
             
         if isinstance(config.hidden_act, str):
@@ -589,7 +573,7 @@ class RobertaIntermediate(nn.Module):
             pot_z = self.dense(pot)
             if isinstance(self.intermediate_act_fn, GELUActivation):
                 pot_z = calibrate_text_potential(self, "activation_input", pot_z)
-                return Potential(*gelu_approximation(*pot_z, theta=self.dense.theta, tau_s=self.tau_s))
+                return Potential(*gelu_approximation(*pot_z, tau_s=self.tau_s))
             if isinstance(self.intermediate_act_fn, nn.ReLU):
                 return Potential(
                     pot_z.value.relu(),
@@ -632,15 +616,13 @@ class RobertaOutput(nn.Module):
         self.dense = SpikingLinear(
             config.intermediate_size,
             config.hidden_size,
-            theta=getattr(config, "theta", 400.0),
         )
         
-        _theta = getattr(config, "theta", 10.0)
         _tau_s = getattr(config, "tau_s", 1.0)
         _use_spiking_ln = getattr(config, "use_spiking_layernorm", True)
         if _use_spiking_ln:
             _sln_kwargs = dict(
-                theta=_theta, tau_s=_tau_s,
+                tau_s=_tau_s,
                 eps=config.layer_norm_eps,
                 clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
@@ -707,7 +689,6 @@ class RobertaEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self._theta = float(getattr(config, "theta", 10.0))
         self.layer = nn.ModuleList([RobertaLayer(config, layer_idx=i) for i in range(config.num_hidden_layers)])
 
     def forward(
@@ -716,11 +697,10 @@ class RobertaEncoder(nn.Module):
         attention_mask=None,
         **kwargs,
     ) -> Potential:
-        """Enter the RoBERTa stack with an upstream or configured fixed range.
+        """Enter the RoBERTa stack with an upstream declared range.
 
         Internal execution receives the embedding LayerNorm ``Potential``. Direct
-        tensor calls retain compatibility through one fixed ``[-theta, theta]`` rail
-        and never derive endpoints from their batch contents.
+        tensor calls are rejected because they provide no fixed encoder range.
 
         Args:
             hidden_states: Embedding output with optional fixed metadata.
@@ -732,18 +712,9 @@ class RobertaEncoder(nn.Module):
         """
         # Preserve upstream metadata when available. A standalone tensor is clamped
         # to the same configuration-derived rail for every invocation.
-        if isinstance(hidden_states, Potential):
-            pot = hidden_states
-        elif isinstance(hidden_states, torch.Tensor):
-            if not math.isfinite(self._theta) or self._theta <= 0.0:
-                raise ValueError("RoBERTa encoder theta must be finite and positive")
-            entry_bounds = PotentialBounds(-self._theta, self._theta)
-            pot = Potential(
-                entry_bounds.clamp(hidden_states, name="roberta_encoder_input"),
-                entry_bounds,
-            )
-        else:
-            raise TypeError("hidden_states must be Potential or torch.Tensor")
+        if not isinstance(hidden_states, Potential):
+            raise TypeError("RoBERTa encoder requires embeddings with declared bounds")
+        pot = hidden_states
 
         # Each post-norm layer returns a new analytic Potential, so no later block
         # needs to reconstruct its input domain from a live tensor.
@@ -757,7 +728,7 @@ class RobertaPooler(nn.Module):
         super().__init__()
         self.use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
         if self.use_spiking_mlp:
-            self.dense = SpikingLinear(config.hidden_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
+            self.dense = SpikingLinear(config.hidden_size, config.hidden_size)
             self.tau_s = getattr(config, "tau_s", 1.0)
         else:
             self.dense = nn.Linear(config.hidden_size, config.hidden_size)
@@ -768,7 +739,7 @@ class RobertaPooler(nn.Module):
 
         Slicing the token dimension cannot enlarge the declared scalar interval.
         Spiking projection therefore consumes the final encoder range directly;
-        standalone tensor calls use the configured fixed threshold rail.
+        standalone tensor calls are supported only by the dense pooler.
 
         Args:
             hidden_states: Final sequence activation with optional fixed bounds.
@@ -788,20 +759,13 @@ class RobertaPooler(nn.Module):
             raise TypeError("hidden_states must be Potential or torch.Tensor")
 
         # Spiking pooling requires a zero-containing identity-code rail. The internal
-        # path supplies one from the encoder; only direct tensor calls use theta.
+        # path supplies one from the encoder; direct tensor calls are rejected.
         if self.use_spiking_mlp:
             if first_token_domain is None:
-                theta = float(self.dense.theta)
-                if not math.isfinite(theta) or theta <= 0.0:
-                    raise ValueError("RoBERTa pooler theta must be finite and positive")
-                first_token_domain = PotentialBounds(-theta, theta)
-                first_token_tensor = first_token_domain.clamp(
-                    first_token_tensor,
-                    name="roberta_pooler_input",
-                )
+                raise TypeError("spiking RoBERTa pooler requires declared input bounds")
             pot_in = Potential(first_token_tensor, first_token_domain)
             pot_dense = calibrate_text_potential(self, "activation_input", self.dense(pot_in))
-            pooled_output, _ = tanh(pot_dense.value, pot_dense.domain, tau_s=self.tau_s, theta=self.dense.theta)
+            pooled_output, _ = tanh(pot_dense.value, pot_dense.domain, tau_s=self.tau_s)
             return pooled_output
 
         # Dense pooling contains no temporal encoder and uses the unchanged slice.
@@ -915,15 +879,13 @@ class RobertaLMHead(nn.Module):
         self.dense = SpikingLinear(
             config.hidden_size,
             config.hidden_size,
-            theta=getattr(config, "theta", 400.0),
         )
 
-        _theta = getattr(config, "theta", 10.0)
         _tau_s = getattr(config, "tau_s", 1.0)
         _use_spiking_ln = getattr(config, "use_spiking_layernorm", True)
         if _use_spiking_ln:
             _sln_kwargs = dict(
-                theta=_theta, tau_s=_tau_s,
+                tau_s=_tau_s,
                 eps=config.layer_norm_eps,
                 clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
@@ -941,8 +903,8 @@ class RobertaLMHead(nn.Module):
         """Apply the language-model transform without losing encoder bounds.
 
         Local wrappers provide the final encoder ``Potential``. Direct tensor calls
-        use the configured threshold rail for compatibility. Dense and spiking affine
-        paths share one frozen parameter interval, GELU uses an analytic or composed
+        must provide the encoder's declared range. Dense and spiking affine paths
+        share one frozen parameter interval, GELU uses an analytic or composed
         range, and LayerNorm supplies its own fixed output envelope before decoding.
 
         Args:
@@ -953,27 +915,16 @@ class RobertaLMHead(nn.Module):
             Vocabulary logits with the established tied decoder and bias.
         """
         # Preserve final encoder metadata. A standalone tensor lacks an upstream
-        # contract, so clamp it to the same fixed theta rail used by spiking affine
-        # encoding instead of measuring the current head input.
-        if isinstance(features, Potential):
-            pot = features
-        elif isinstance(features, torch.Tensor):
-            theta = float(self.dense.theta)
-            if not math.isfinite(theta) or theta <= 0.0:
-                raise ValueError("RoBERTa LM head theta must be finite and positive")
-            input_domain = PotentialBounds(-theta, theta)
-            pot = Potential(
-                input_domain.clamp(features, name="roberta_lm_head_input"),
-                input_domain,
-            )
-        else:
-            raise TypeError("features must be Potential or torch.Tensor")
+        # contract and therefore cannot be replaced by a tensor-only fallback.
+        if not isinstance(features, Potential):
+            raise TypeError("RoBERTa LM head requires features with declared bounds")
+        pot = features
 
         # Dense and spiking GELU use the same fixed output range.
         if self.use_spiking_mlp:
             pot_z = self.dense(pot)
             pot_z = calibrate_text_potential(self, "activation_input", pot_z)
-            pot_act = Potential(*gelu_approximation(*pot_z, theta=self.dense.theta, tau_s=self.tau_s))
+            pot_act = Potential(*gelu_approximation(*pot_z, tau_s=self.tau_s))
         else:
             x = nn.functional.linear(
                 pot.value,
@@ -1103,7 +1054,6 @@ class RobertaClassificationHead(nn.Module):
         self.dense = SpikingLinear(
             config.hidden_size,
             config.hidden_size,
-            theta=getattr(config, "theta", 400.0),
         )
         self.tau_s = getattr(config, "tau_s", 1.0)
             
@@ -1127,24 +1077,13 @@ class RobertaClassificationHead(nn.Module):
         Returns:
             Dense task logits.
         """
-        # Slice values and metadata together. Direct calls use a fixed theta fallback
-        # because no caller-supplied domain is available.
+        # Slice values and metadata together; spiking execution requires the
+        # encoder-supplied domain.
         if isinstance(features, Potential):
             first_token = features.value[:, 0, :]
             first_token_domain = features.domain
-        elif isinstance(features, torch.Tensor):
-            theta = float(self.dense.theta)
-            if not math.isfinite(theta) or theta <= 0.0:
-                raise ValueError(
-                    "RoBERTa classification head theta must be finite and positive"
-                )
-            first_token_domain = PotentialBounds(-theta, theta)
-            first_token = first_token_domain.clamp(
-                features[:, 0, :],
-                name="roberta_classification_head_input",
-            )
         else:
-            raise TypeError("features must be Potential or torch.Tensor")
+            raise TypeError("RoBERTa classification head requires declared input bounds")
 
         # Evaluation dropout leaves both tensor and interval unchanged. This project
         # does not train converted models, so no sampled training mask enters bounds.
@@ -1161,7 +1100,6 @@ class RobertaClassificationHead(nn.Module):
                     pot_z.value,
                     pot_z.domain,
                     tau_s=self.tau_s,
-                    theta=self.dense.theta,
                 )
             )
         else:

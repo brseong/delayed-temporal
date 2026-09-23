@@ -26,7 +26,7 @@ from utils.transforms.noise import (
     gaussian_deadline_miss_probability,
     get_gaussian_noise_stats,
     get_gaussian_time_noise,
-    install_device_mismatch,
+    install_range_mismatch,
     set_gaussian_time_noise,
 )
 from utils.transforms.potential_to_spike import (
@@ -64,7 +64,7 @@ from utils.transformers.models.spiking_ops import (
 )
 from utils.transformers.integrations.spiking_sdpa_attention import (
     _gaussian_attention_value_readout,
-    attention_output_bounds,
+    attention_score_representability_bounds,
     spiking_scaled_dot_product_attention,
 )
 
@@ -73,8 +73,8 @@ def verify_immutable_memoized_bounds() -> None:
     """Verify immutable domains and memoized fixed attention rails.
 
     Static potential and time envelopes must not be widened after construction.
-    Attention additionally reuses one bounds object for each ``(theta, S_max)``
-    configuration so repeated forward calls do not allocate equivalent metadata.
+    Attention additionally reuses one score-bounds object per numeric configuration
+    so repeated forward calls do not allocate equivalent metadata.
 
     Raises:
         AssertionError: If endpoint mutation succeeds, equal attention
@@ -99,13 +99,12 @@ def verify_immutable_memoized_bounds() -> None:
 
     # Repeated calls with one normalized configuration must return the exact cached
     # object. Distinct source capacities retain separate configuration cache entries.
-    first = attention_output_bounds(2.0, 5)
-    repeated = attention_output_bounds(2.0, 5)
-    distinct = attention_output_bounds(2.0, 6)
+    first = attention_score_representability_bounds(1.0, 5, torch.float32)
+    repeated = attention_score_representability_bounds(1.0, 5, torch.float32)
+    distinct = attention_score_representability_bounds(1.0, 6, torch.float32)
     assert repeated is first
     assert distinct is not first
-    assert first == PotentialBounds(-2.0, 2.0)
-    assert distinct == PotentialBounds(-2.0, 2.0)
+    assert first != distinct
 
     # Gaussian seed selects only the sampled physical event stream. Run the same
     # multiplication under two replicas with enough events to make an identical
@@ -113,21 +112,19 @@ def verify_immutable_memoized_bounds() -> None:
     drive = torch.linspace(-1.5, 1.5, 128)
     encoded = torch.linspace(1.5, -1.5, 128)
     operand_domain = PotentialBounds(-2.0, 2.0)
-    set_gaussian_time_noise(enabled=True, time_std=0.5, seed=41)
+    set_gaussian_time_noise(enabled=True, time_std_fraction=0.5, seed=41)
     first_output, first_domain = multiplication_operator(
         drive,
         operand_domain,
         encoded,
         operand_domain,
-        theta=2.0,
     )
-    set_gaussian_time_noise(enabled=True, time_std=0.5, seed=42)
+    set_gaussian_time_noise(enabled=True, time_std_fraction=0.5, seed=42)
     second_output, second_domain = multiplication_operator(
         drive,
         operand_domain,
         encoded,
         operand_domain,
-        theta=2.0,
     )
 
     # Different samples must not affect any metadata endpoint. Disable shared noise
@@ -639,11 +636,11 @@ def verify_gaussian_deadline_margin() -> None:
 
     set_gaussian_time_noise(
         enabled=True,
-        time_std=time_std,
-        deadline_margin=margin,
+        time_std_fraction=time_std,
+        deadline_margin_std_ratio=margin,
         seed=2026,
     )
-    assert get_gaussian_time_noise().deadline_margin == margin
+    assert get_gaussian_time_noise().deadline_margin_std_ratio == margin
     set_gaussian_time_noise(enabled=False)
 
 
@@ -792,7 +789,7 @@ def verify_exponential_time_constant_scaling() -> None:
                 tau_m=tau_s,
                 normalized=normalized,
             )
-            set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1701)
+            set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=1701)
             gaussian_exp, gaussian_domain = exponential_function(
                 potential_value,
                 potential_domain,
@@ -848,7 +845,7 @@ def verify_exponential_time_constant_scaling() -> None:
             shared_domain,
             tau_s=tau_s,
         )
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1702)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=1702)
         gaussian_difference, _ = exponential_difference_operator(
             t_A,
             shared_domain,
@@ -872,7 +869,7 @@ def verify_exponential_time_constant_scaling() -> None:
             ratio_domain,
             tau_s=tau_s,
         )
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1703)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=1703)
         gaussian_ratio, _ = division_function(
             numerator,
             denominator,
@@ -897,7 +894,7 @@ def verify_exponential_time_constant_scaling() -> None:
             score_domain,
             tau=tau_s,
         )
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1705)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=1705)
         gaussian_softmin, _ = softmin_function(
             scores,
             score_domain,
@@ -923,9 +920,8 @@ def verify_exponential_time_constant_scaling() -> None:
             domain_v,
             beta=beta,
             tau_s=tau_s,
-            theta=8.0,
         )
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1706)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=1706)
         gaussian_swiglu, _ = swiglu_function(
             u,
             domain_u,
@@ -933,7 +929,6 @@ def verify_exponential_time_constant_scaling() -> None:
             domain_v,
             beta=beta,
             tau_s=tau_s,
-            theta=8.0,
         )
         assert torch.allclose(deterministic_swiglu, expected_swiglu)
         assert torch.allclose(gaussian_swiglu, expected_swiglu)
@@ -947,17 +942,17 @@ def verify_exponential_time_constant_scaling() -> None:
         expected_tanh = torch.tanh(activation)
         set_gaussian_time_noise(enabled=False)
         deterministic_gelu, _ = gelu_approximation_sigmoid(
-            activation, activation_domain, tau_s=tau_s, theta=8.0
+            activation, activation_domain, tau_s=tau_s
         )
         deterministic_tanh, _ = tanh(
-            activation, activation_domain, tau_s=tau_s, theta=8.0
+            activation, activation_domain, tau_s=tau_s
         )
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1707)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=1707)
         gaussian_gelu, _ = gelu_approximation_sigmoid(
-            activation, activation_domain, tau_s=tau_s, theta=8.0
+            activation, activation_domain, tau_s=tau_s
         )
         gaussian_tanh, _ = tanh(
-            activation, activation_domain, tau_s=tau_s, theta=8.0
+            activation, activation_domain, tau_s=tau_s
         )
         assert torch.allclose(deterministic_gelu, expected_gelu)
         assert torch.allclose(gaussian_gelu, expected_gelu)
@@ -973,7 +968,6 @@ def verify_exponential_time_constant_scaling() -> None:
         layernorm = SpikingLayerNorm(
             4,
             eps=1.0e-5,
-            theta=4.0,
             tau_s=tau_s,
             clip_margin=0.1,
             use_spiking_mul=True,
@@ -993,7 +987,7 @@ def verify_exponential_time_constant_scaling() -> None:
         )
         set_gaussian_time_noise(enabled=False)
         deterministic_layernorm = layernorm(layernorm_input)
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1707)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=1707)
         gaussian_layernorm = layernorm(layernorm_input)
         assert torch.allclose(
             gaussian_layernorm.value,
@@ -1033,7 +1027,7 @@ def verify_exponential_time_constant_scaling() -> None:
 
     # Invalid Gaussian scales are rejected before the internal encoder. Snapshot the
     # generator to prove validation does not consume a sample or shift later events.
-    set_gaussian_time_noise(enabled=True, time_std=1.0, seed=1704)
+    set_gaussian_time_noise(enabled=True, time_std_fraction=1.0, seed=1704)
     try:
         generator = get_gaussian_time_noise().generator
         assert generator is not None
@@ -1137,7 +1131,7 @@ def verify_gaussian_encoder_boundary() -> None:
 
         # Zero scale enters the physical event path without perturbing timestamps.
         # The endpoint at the deadline is delivered because equality is inclusive.
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=101)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=101)
         generator = get_gaussian_time_noise().generator
         assert generator is not None
         state_before = generator.get_state().clone()
@@ -1195,7 +1189,7 @@ def verify_gaussian_encoder_boundary() -> None:
         # shifts the deadline codeword late while the opening codeword still fires.
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=0.5,
             seed=202,
         )
@@ -1266,18 +1260,18 @@ def verify_gaussian_encoder_specific_scales() -> None:
 
     set_gaussian_time_noise(
         enabled=True,
-        time_std=0.5,
-        linear_time_std=0.1,
-        log_time_std=0.3,
+        time_std_fraction=0.5,
+        linear_time_std_fraction=0.1,
+        log_time_std_fraction=0.3,
         seed=111,
     )
     try:
         config = get_gaussian_time_noise()
         generator = config.generator
         assert generator is not None
-        assert config.time_std == 0.5
-        assert config.linear_time_std == 0.1
-        assert config.log_time_std == 0.3
+        assert config.time_std_fraction == 0.5
+        assert config.linear_time_std_fraction == 0.1
+        assert config.log_time_std_fraction == 0.3
 
         initial_state = generator.get_state().clone()
         linear = neg_linear_transform(
@@ -1303,15 +1297,15 @@ def verify_gaussian_encoder_specific_scales() -> None:
 
         linear_std = float(linear.time.std(unbiased=True).item())
         log_std = float(logarithmic.time.std(unbiased=True).item())
-        assert 0.09 < linear_std < 0.11
-        assert 0.27 < log_std < 0.33
+        assert 0.36 < linear_std < 0.44
+        assert 1.08 < log_std < 1.32
         assert log_std > 2.5 * linear_std
 
         # Reconfiguration without overrides retains the prior public behavior.
-        set_gaussian_time_noise(enabled=True, time_std=0.2, seed=112)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.2, seed=112)
         fallback = get_gaussian_time_noise()
-        assert fallback.linear_time_std is None
-        assert fallback.log_time_std is None
+        assert fallback.linear_time_std_fraction is None
+        assert fallback.log_time_std_fraction is None
     finally:
         set_gaussian_time_noise(enabled=False)
 
@@ -1350,7 +1344,7 @@ def verify_gaussian_statistics_contract() -> None:
 
         # Enable one replica and record raw outputs. Values exactly on either rail
         # remain representable; only strict excursions increment saturation counts.
-        set_gaussian_time_noise(enabled=True, time_std=0.25, seed=303)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.25, seed=303)
         enabled_clamp = clamp_gaussian_output(
             raw_output,
             domain,
@@ -1424,7 +1418,7 @@ def verify_gaussian_multiplication_operator() -> None:
             bounds, per-site counters, or rail saturation behavior regresses.
     """
     domain = PotentialBounds(-2.0, 2.0)
-    theta = 2.0
+    range_radius = 2.0
 
     # Establish the public operator's deterministic value and ideal product rails.
     # This is the reference contract the event-aware zero-noise path must preserve.
@@ -1437,14 +1431,13 @@ def verify_gaussian_multiplication_operator() -> None:
             domain,
             operand,
             domain,
-            theta,
         )
         assert torch.equal(deterministic, drive * operand)
         assert deterministic_domain == PotentialBounds(-4.0, 4.0)
 
         # A fixed coefficient still uses the full identity-encoder time window, but
         # its ideal product rail must retain the declared singleton factor instead of
-        # acquiring a spurious full-theta multiplier.
+        # acquiring a spurious full-range_radius multiplier.
         fixed_factor = torch.full_like(drive, 0.25)
         fixed_factor_domain = PotentialBounds(0.25, 0.25)
         fixed_deterministic, fixed_domain = multiplication_operator(
@@ -1452,20 +1445,18 @@ def verify_gaussian_multiplication_operator() -> None:
             domain,
             fixed_factor,
             fixed_factor_domain,
-            theta,
         )
         assert torch.equal(fixed_deterministic, drive * fixed_factor)
         assert fixed_domain == PotentialBounds(-0.5, 0.5)
 
         # Zero timing scale still enters both decorated event encoders. Its physical
         # readout and declared rails must exactly match the deterministic operator.
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=401)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=401)
         zero_noise, zero_noise_domain = multiplication_operator(
             drive,
             domain,
             operand,
             domain,
-            theta,
         )
         assert torch.equal(zero_noise, deterministic)
         assert zero_noise_domain == deterministic_domain
@@ -1478,26 +1469,24 @@ def verify_gaussian_multiplication_operator() -> None:
             domain,
             fixed_factor,
             fixed_factor_domain,
-            theta,
         )
         assert torch.equal(fixed_zero_noise, fixed_deterministic)
         assert fixed_zero_noise_domain == fixed_domain
 
-        # With B=-theta the data codeword is nominally at the deadline. A small
+        # With B=-range_radius the data codeword is nominally at the deadline. A small
         # positive mean misses only that rail, while the delivered reference rail
         # contributes -V * (T_obs - t_reference) to the differential readout.
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=0.5,
             seed=402,
         )
         data_miss, data_miss_domain = multiplication_operator(
             torch.tensor([1.5], dtype=torch.float64),
             domain,
-            torch.tensor([-theta], dtype=torch.float64),
+            torch.tensor([-range_radius], dtype=torch.float64),
             domain,
-            theta,
         )
         assert torch.equal(
             data_miss,
@@ -1508,21 +1497,20 @@ def verify_gaussian_multiplication_operator() -> None:
         assert data_stats["multiplication.data"]["misses"] == 1
         assert data_stats["multiplication.reference"]["misses"] == 0
 
-        # With B=+theta the data codeword starts at zero. A larger positive mean
+        # With B=+range_radius the data codeword starts at zero. A larger positive mean
         # keeps that rail on time but pushes the scalar reference beyond the deadline,
         # leaving +V * (T_obs - t_data) on the differential readout.
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=2.5,
             seed=403,
         )
         reference_miss, reference_miss_domain = multiplication_operator(
             torch.tensor([1.5], dtype=torch.float64),
             domain,
-            torch.tensor([theta], dtype=torch.float64),
+            torch.tensor([range_radius], dtype=torch.float64),
             domain,
-            theta,
         )
         assert torch.equal(
             reference_miss,
@@ -1536,13 +1524,12 @@ def verify_gaussian_multiplication_operator() -> None:
         # This seeded high-variance case produces an early opening and a missing
         # reference. The raw duration exceeds the ideal factor rail, so the output
         # clamps at +4 while recording exactly one pre-clamp overflow.
-        set_gaussian_time_noise(enabled=True, time_std=10.0, seed=4)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=10.0, seed=4)
         saturated, saturated_domain = multiplication_operator(
             torch.tensor([2.0], dtype=torch.float64),
             domain,
             torch.tensor([0.0], dtype=torch.float64),
             domain,
-            theta,
         )
         assert torch.equal(saturated, torch.tensor([4.0], dtype=torch.float64))
         assert saturated_domain == deterministic_domain
@@ -1597,7 +1584,7 @@ def verify_gaussian_exponential_function() -> None:
         # Zero timing scale enters the event-aware implementation without changing
         # values. Its lower rail becomes zero because later noisy calls can miss and
         # physically leave the exponential state at reset.
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=501)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=501)
         zero_noise, zero_noise_domain = exponential_function(
             input_value,
             domain,
@@ -1618,7 +1605,7 @@ def verify_gaussian_exponential_function() -> None:
         # decoding therefore returns the Gaussian path's minimum positive response.
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=-0.5,
             seed=502,
         )
@@ -1640,7 +1627,7 @@ def verify_gaussian_exponential_function() -> None:
         # sole opening event miss, so the physical exponential response stays zero.
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=0.5,
             seed=503,
         )
@@ -1707,7 +1694,7 @@ def verify_gaussian_exponential_difference_operator() -> None:
         # With zero scale, tensor inputs are wrapped as delivered events and only
         # the internal decorated encoder is sampled. Values remain identical while
         # the physical lower rail expands to include internal-event reset zero.
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=601)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=601)
         zero_noise, zero_noise_domain = exponential_difference_operator(
             opening_time,
             time_domain,
@@ -1726,7 +1713,7 @@ def verify_gaussian_exponential_difference_operator() -> None:
 
         # A missing A event leaves only the delivered B rail. Under the fixed -1
         # drive this produces intermediate +(T_obs-t_B)=+2 and response exp(-2).
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=602)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=602)
         opening_miss = SpikeSample(
             time=torch.tensor([4.0], dtype=torch.float64),
             domain=time_domain,
@@ -1752,7 +1739,7 @@ def verify_gaussian_exponential_difference_operator() -> None:
 
         # A missing B event leaves only the delivered A rail. Under the fixed -1
         # drive this yields intermediate -(T_obs-t_A)=-3 and response exp(3).
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=603)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=603)
         delivered_open = SpikeSample(
             time=torch.tensor([1.0], dtype=torch.float64),
             domain=time_domain,
@@ -1781,7 +1768,7 @@ def verify_gaussian_exponential_difference_operator() -> None:
         # only that internal event miss, forcing the final exponential response to zero.
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=0.5,
             seed=604,
         )
@@ -1851,7 +1838,7 @@ def verify_gaussian_division_function() -> None:
         # Zero scale samples both external log events and the internal exponential
         # event without changing values. Public metadata remains identical across
         # noise modes, and representable ratios create no saturation.
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=701)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=701)
         zero_noise, zero_noise_domain = division_function(
             numerator,
             denominator,
@@ -1881,7 +1868,7 @@ def verify_gaussian_division_function() -> None:
         # be confused with the opposite one-sided miss that overflows the public rail.
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=0.5,
             seed=702,
         )
@@ -1914,7 +1901,7 @@ def verify_gaussian_division_function() -> None:
         # event, and on-time internal event. The raw result exceeds one, must count
         # exactly one overflow, and must be delivered on the public upper rail.
         equal_value = torch.tensor([1.0], dtype=torch.float64)
-        set_gaussian_time_noise(enabled=True, time_std=5.0, seed=9)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.5, seed=9)
         denominator_miss, denominator_miss_domain = division_function(
             equal_value,
             equal_value,
@@ -1941,7 +1928,7 @@ def verify_gaussian_division_function() -> None:
         # Seed 4 keeps both log events on time but misses the internal re-encoding.
         # That stage owns the final exponential response, so its miss must remain
         # reset zero inside the same public rail and must not count as saturation.
-        set_gaussian_time_noise(enabled=True, time_std=5.0, seed=4)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.5, seed=4)
         internal_miss, internal_miss_domain = division_function(
             equal_value,
             equal_value,
@@ -2015,7 +2002,6 @@ def verify_gaussian_tanh_function() -> None:
             value,
             domain,
             tau_s=1.0,
-            theta=4.0,
         )
         assert torch.allclose(
             deterministic,
@@ -2028,12 +2014,11 @@ def verify_gaussian_tanh_function() -> None:
         # Zero standard deviation traverses fixed scaling, exponential, division,
         # and the public tanh clamp without perturbing any carrier. It must preserve
         # both values and rails while counting every final activation exactly once.
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=851)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=851)
         zero_noise, zero_noise_domain = tanh(
             value,
             domain,
             tau_s=1.0,
-            theta=4.0,
         )
         assert torch.allclose(
             zero_noise,
@@ -2057,7 +2042,7 @@ def verify_gaussian_tanh_function() -> None:
         # tightened division first or by tanh itself, but it must remain observable.
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=0.5,
             seed=852,
         )
@@ -2065,7 +2050,6 @@ def verify_gaussian_tanh_function() -> None:
             value,
             domain,
             tau_s=1.0,
-            theta=4.0,
         )
         shifted_stats = get_gaussian_noise_stats()
         assert shifted_domain == expected_domain
@@ -2131,7 +2115,6 @@ def verify_gaussian_sigmoid_gelu_function() -> None:
             value,
             domain,
             tau_s=1.0,
-            theta=8.0,
         )
         assert torch.allclose(
             deterministic,
@@ -2144,12 +2127,11 @@ def verify_gaussian_sigmoid_gelu_function() -> None:
         # Zero-noise event-aware execution must preserve the complete composition.
         # Fixed scaling adds no event; one multiplication gates the input. One counter
         # is recorded per activation without underflow or overflow.
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=861)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=861)
         zero_noise, zero_noise_domain = gelu_approximation_sigmoid(
             value,
             domain,
             tau_s=1.0,
-            theta=8.0,
         )
         assert torch.allclose(
             zero_noise,
@@ -2173,7 +2155,7 @@ def verify_gaussian_sigmoid_gelu_function() -> None:
         # a future tighter division contract does not invalidate this public check.
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=0.5,
             seed=862,
         )
@@ -2181,7 +2163,6 @@ def verify_gaussian_sigmoid_gelu_function() -> None:
             value,
             domain,
             tau_s=1.0,
-            theta=8.0,
         )
         shifted_stats = get_gaussian_noise_stats()
         assert shifted_domain == expected_domain
@@ -2261,7 +2242,7 @@ def verify_gaussian_softmin_function() -> None:
         # decoder. It must preserve values while returning exactly the same public
         # structural rails as deterministic execution, independent of the wider
         # ratio metadata used inside the composed division operator.
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=801)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=801)
         zero_noise, zero_noise_domain = softmin_function(scores, domain)
         assert torch.allclose(zero_noise, deterministic, atol=1e-12, rtol=1e-12)
         assert zero_noise_domain == expected_domain
@@ -2282,7 +2263,7 @@ def verify_gaussian_softmin_function() -> None:
         # finite rail-bounded readout and the precise sampling topology here.
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=5.0,
             seed=802,
         )
@@ -2387,7 +2368,6 @@ def verify_gaussian_swiglu_function() -> None:
             domain_v,
             beta=beta,
             tau_s=1.0,
-            theta=8.0,
         )
         assert torch.allclose(deterministic, expected, atol=1e-12, rtol=1e-12)
         assert deterministic_domain == expected_domain
@@ -2395,7 +2375,7 @@ def verify_gaussian_swiglu_function() -> None:
         # Zero Gaussian scale traverses the event-aware implementation without
         # perturbing any carrier. It must match both the corrected deterministic
         # values and output rails while sampling every nested encoder exactly once.
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=901)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=901)
         zero_noise, zero_noise_domain = swiglu_function(
             u,
             domain_u,
@@ -2403,7 +2383,6 @@ def verify_gaussian_swiglu_function() -> None:
             domain_v,
             beta=beta,
             tau_s=1.0,
-            theta=8.0,
         )
         assert torch.allclose(zero_noise, deterministic, atol=1e-12, rtol=1e-12)
         assert zero_noise_domain == expected_domain
@@ -2424,7 +2403,7 @@ def verify_gaussian_swiglu_function() -> None:
         # division or at the explicit SwiGLU gate, but it cannot widen final metadata.
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=0.5,
             seed=902,
         )
@@ -2435,7 +2414,6 @@ def verify_gaussian_swiglu_function() -> None:
             domain_v,
             beta=beta,
             tau_s=1.0,
-            theta=8.0,
         )
         gate_stats = get_gaussian_noise_stats()
         assert gate_shifted_domain == expected_domain
@@ -2467,7 +2445,7 @@ def verify_gaussian_swiglu_function() -> None:
         # miss. Bias cancellation must not turn the missed exponential reset nonzero.
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=20.0,
             seed=903,
         )
@@ -2478,7 +2456,6 @@ def verify_gaussian_swiglu_function() -> None:
             domain_v,
             beta=beta,
             tau_s=1.0,
-            theta=8.0,
         )
         forced_stats = get_gaussian_noise_stats()
         assert forced_stats["swiglu.exponential_input"]["misses"] == u.numel()
@@ -2518,7 +2495,7 @@ def verify_gaussian_spiking_linear() -> None:
         AssertionError: If dense parity, output-specific frozen bounds, mutation
             rejection, event counts, miss readout, or output finiteness regresses.
     """
-    layer = SpikingLinear(3, 2, bias=True, theta=2.0, dtype=torch.float64)
+    layer = SpikingLinear(3, 2, bias=True, dtype=torch.float64)
     with torch.no_grad():
         layer.weight.copy_(
             torch.tensor(
@@ -2543,8 +2520,8 @@ def verify_gaussian_spiking_linear() -> None:
         assert torch.allclose(deterministic.value, expected, atol=1e-12, rtol=1e-12)
 
         # Reconstruct the output-specific safety rail independently. Each row has
-        # radius theta*sum(abs(weight)), then its own bias translates both endpoints.
-        linear_radius = layer.theta * layer.weight.detach().abs().sum(dim=1)
+        # Declared input radius times each row's absolute weight sum gives the rail.
+        linear_radius = 2.0 * layer.weight.detach().abs().sum(dim=1)
         expected_domain = PotentialBounds(
             (layer.bias.detach() - linear_radius).min().item(),
             (layer.bias.detach() + linear_radius).max().item(),
@@ -2552,7 +2529,7 @@ def verify_gaussian_spiking_linear() -> None:
         assert deterministic.domain == expected_domain
 
         # A second fixed domain proves the affine adapter consumes upstream metadata
-        # instead of silently replacing it with [-theta, theta]. Exact interval
+        # instead of silently replacing it with a process-wide interval. Exact interval
         # arithmetic must retain the asymmetric endpoint selected by each weight sign.
         asymmetric_domain = PotentialBounds(-1.0, 2.0)
         asymmetric_value = value.clamp(
@@ -2584,7 +2561,7 @@ def verify_gaussian_spiking_linear() -> None:
         # Zero scale enters the event-aware implementation without changing either
         # data or scalar reference times. Verify exact value/domain parity and that
         # the reference is sampled once rather than once per batch or feature.
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1001)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=1001)
         zero_noise = layer(potential)
         zero_stats = get_gaussian_noise_stats()
         assert torch.allclose(zero_noise.value, deterministic.value)
@@ -2600,7 +2577,7 @@ def verify_gaussian_spiking_linear() -> None:
         lower_value = torch.full((2, 3), -2.0, dtype=torch.float64)
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=0.5,
             seed=1002,
         )
@@ -2621,7 +2598,7 @@ def verify_gaussian_spiking_linear() -> None:
         upper_value = torch.full((2, 3), 2.0, dtype=torch.float64)
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=2.5,
             seed=1003,
         )
@@ -2660,8 +2637,8 @@ def verify_gaussian_spiking_linear() -> None:
 def verify_static_mismatch_rng_contract() -> None:
     """Verify dedicated mismatch replay, independence, and frozen offsets."""
     base = torch.nn.Sequential(
-        SpikingLinear(3, 2, bias=True, theta=2.0, dtype=torch.float64),
-        SpikingLinear(2, 1, bias=True, theta=2.0, dtype=torch.float64),
+        SpikingLinear(3, 2, bias=True, dtype=torch.float64),
+        SpikingLinear(2, 1, bias=True, dtype=torch.float64),
     )
     same_a = copy.deepcopy(base)
     same_b = copy.deepcopy(base)
@@ -2671,15 +2648,15 @@ def verify_static_mismatch_rng_contract() -> None:
     # data reproducibility. Equal dedicated seeds reproduce every module offset.
     torch.manual_seed(1701)
     global_state = torch.random.get_rng_state().clone()
-    handles_a = install_device_mismatch(same_a, 0.05, seed=11)
+    handles_a = install_range_mismatch(same_a, 0.05, seed=11)
     assert torch.equal(global_state, torch.random.get_rng_state())
-    handles_b = install_device_mismatch(same_b, 0.05, seed=11)
-    handles_different = install_device_mismatch(different, 0.05, seed=12)
+    handles_b = install_range_mismatch(same_b, 0.05, seed=11)
+    handles_different = install_range_mismatch(different, 0.05, seed=12)
     assert len(handles_a) == len(handles_b) == len(handles_different) == 2
 
-    offsets_a = [module._mismatch_offset.clone() for module in same_a]
-    offsets_b = [module._mismatch_offset.clone() for module in same_b]
-    offsets_different = [module._mismatch_offset.clone() for module in different]
+    offsets_a = [module._range_mismatch_unit_offset.clone() for module in same_a]
+    offsets_b = [module._range_mismatch_unit_offset.clone() for module in same_b]
+    offsets_different = [module._range_mismatch_unit_offset.clone() for module in different]
     assert all(
         torch.equal(first, second)
         for first, second in zip(offsets_a, offsets_b, strict=True)
@@ -2688,7 +2665,7 @@ def verify_static_mismatch_rng_contract() -> None:
         not torch.equal(first, second)
         for first, second in zip(offsets_a, offsets_different, strict=True)
     )
-    assert not any("_mismatch_offset" in key for key in same_a.state_dict())
+    assert not any("_range_mismatch_unit_offset" in key for key in same_a.state_dict())
 
     # Repeated forwards reuse the installed buffers rather than resampling them.
     set_gaussian_time_noise(enabled=False)
@@ -2700,15 +2677,15 @@ def verify_static_mismatch_rng_contract() -> None:
     second_output = same_a(potential)
     assert torch.equal(first_output.value, second_output.value)
     assert all(
-        torch.equal(before, module._mismatch_offset)
+        torch.equal(before, module._range_mismatch_unit_offset)
         for before, module in zip(offsets_a, same_a, strict=True)
     )
 
     # Disabled installation is a no-op, while malformed seeds fail before sampling.
-    assert install_device_mismatch(copy.deepcopy(base), 0.05, enabled=False) == []
+    assert install_range_mismatch(copy.deepcopy(base), 0.05, enabled=False) == []
     for invalid_seed, expected_error in ((True, TypeError), (-1, ValueError)):
         try:
-            install_device_mismatch(
+            install_range_mismatch(
                 copy.deepcopy(base),
                 0.05,
                 seed=invalid_seed,
@@ -2738,7 +2715,6 @@ def verify_gaussian_spiking_conv2d() -> None:
         stride=1,
         padding=1,
         bias=True,
-        theta=2.0,
         dtype=torch.float64,
     )
     with torch.no_grad():
@@ -2776,7 +2752,7 @@ def verify_gaussian_spiking_conv2d() -> None:
 
         # Each output channel owns one kernel absolute-sum radius. Padding cannot
         # enlarge this full-receptive-field safety rail, and bias shifts endpoints.
-        conv_radius = layer.theta * layer.weight.detach().abs().sum(dim=(1, 2, 3))
+        conv_radius = 2.0 * layer.weight.detach().abs().sum(dim=(1, 2, 3))
         expected_domain = PotentialBounds(
             (layer.bias.detach() - conv_radius).min().item(),
             (layer.bias.detach() + conv_radius).max().item(),
@@ -2825,7 +2801,7 @@ def verify_gaussian_spiking_conv2d() -> None:
         # Zero scale samples every spatial activation once and one reference once.
         # Its direct duration convolution must preserve both values and propagated
         # fan-in rails from the explicit deterministic implementation.
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1101)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=1101)
         zero_noise = layer(potential)
         zero_stats = get_gaussian_noise_stats()
         assert torch.allclose(zero_noise.value, deterministic.value)
@@ -2841,7 +2817,7 @@ def verify_gaussian_spiking_conv2d() -> None:
         lower_value = torch.full_like(value, -2.0)
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=0.5,
             seed=1102,
         )
@@ -2866,7 +2842,7 @@ def verify_gaussian_spiking_conv2d() -> None:
         upper_value = torch.full_like(value, 2.0)
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=2.5,
             seed=1103,
         )
@@ -2920,7 +2896,7 @@ def verify_gaussian_spiking_conv1d() -> None:
             frozen bounds, mutation rejection, event counts, misses, or finiteness
             regresses.
     """
-    layer = SpikingConv1D(2, 3, theta=2.0).to(dtype=torch.float64)
+    layer = SpikingConv1D(2, 3).to(dtype=torch.float64)
     with torch.no_grad():
         layer.weight.copy_(
             torch.tensor(
@@ -2949,7 +2925,7 @@ def verify_gaussian_spiking_conv1d() -> None:
 
         # Conv1D stores fan-in on dimension zero, so each output column's absolute
         # sum defines its safety radius before learned bias translates the endpoints.
-        conv1d_radius = layer.theta * layer.weight.detach().abs().sum(dim=0)
+        conv1d_radius = 2.0 * layer.weight.detach().abs().sum(dim=0)
         expected_domain = PotentialBounds(
             (layer.bias.detach() - conv1d_radius).min().item(),
             (layer.bias.detach() + conv1d_radius).max().item(),
@@ -2957,7 +2933,7 @@ def verify_gaussian_spiking_conv1d() -> None:
         assert deterministic.domain == expected_domain
 
         # A zero-containing asymmetric calibration rail must pass through the
-        # transposed projection without being replaced by ``[-theta, theta]``.
+        # transposed projection without being replaced by a process-wide interval.
         # Independent interval arithmetic verifies the output metadata as well.
         asymmetric_domain = PotentialBounds(-1.0, 2.0)
         asymmetric_value = value.clamp(
@@ -2991,7 +2967,7 @@ def verify_gaussian_spiking_conv1d() -> None:
 
         # Zero scale enters addmm-based Gaussian execution. All data carriers remain
         # exact and the one scalar reference must not be replicated per token.
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1201)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=1201)
         zero_noise = layer(potential)
         zero_stats = get_gaussian_noise_stats()
         assert torch.allclose(zero_noise.value, deterministic.value)
@@ -3007,7 +2983,7 @@ def verify_gaussian_spiking_conv1d() -> None:
         lower_value = torch.full_like(value, -2.0)
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=0.5,
             seed=1202,
         )
@@ -3027,7 +3003,7 @@ def verify_gaussian_spiking_conv1d() -> None:
         upper_value = torch.full_like(value, 2.0)
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=2.5,
             seed=1203,
         )
@@ -3116,7 +3092,6 @@ def verify_gaussian_spiking_layernorm() -> None:
     dense_layer = SpikingLayerNorm(
         4,
         eps=1.0e-5,
-        theta=4.0,
         tau_s=1.0,
         clip_margin=0.1,
         use_spiking_mul=False,
@@ -3127,7 +3102,7 @@ def verify_gaussian_spiking_layernorm() -> None:
         dense_layer.weight.copy_(weight)
         dense_layer.bias.copy_(bias)
 
-    set_gaussian_time_noise(enabled=True, time_std=2.0, seed=1300)
+    set_gaussian_time_noise(enabled=True, time_std_fraction=2.0, seed=1300)
     try:
         dense_output = dense_layer(potential)
         dense_expected = torch.nn.functional.layer_norm(
@@ -3146,7 +3121,6 @@ def verify_gaussian_spiking_layernorm() -> None:
         direct_exp_layer = SpikingLayerNorm(
             4,
             eps=1.0e-5,
-            theta=4.0,
             tau_s=1.0,
             clip_margin=0.1,
             use_spiking_mul=False,
@@ -3160,7 +3134,7 @@ def verify_gaussian_spiking_layernorm() -> None:
         mean_shift = 0.75
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=mean_shift,
             seed=1301,
         )
@@ -3225,7 +3199,6 @@ def verify_gaussian_spiking_layernorm() -> None:
         full_layer = SpikingLayerNorm(
             4,
             eps=1.0e-5,
-            theta=4.0,
             tau_s=1.0,
             clip_margin=0.1,
             use_spiking_mul=True,
@@ -3238,7 +3211,7 @@ def verify_gaussian_spiking_layernorm() -> None:
 
         set_gaussian_time_noise(enabled=False)
         deterministic = full_layer(potential)
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1301)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=1301)
         zero_noise = full_layer(potential)
         zero_stats = get_gaussian_noise_stats()
         assert torch.allclose(zero_noise.value, deterministic.value)
@@ -3271,7 +3244,7 @@ def verify_gaussian_spiking_layernorm() -> None:
         # remain at reset, so only the learned LayerNorm bias reaches the output.
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=20.0,
             seed=1302,
         )
@@ -3300,7 +3273,6 @@ def verify_gaussian_spiking_layernorm() -> None:
                     ablation_layer = SpikingLayerNorm(
                         4,
                         eps=1.0e-5,
-                        theta=4.0,
                         tau_s=1.0,
                         clip_margin=0.1,
                         use_spiking_mul=use_spiking_mul,
@@ -3336,14 +3308,7 @@ def verify_gaussian_spiking_layernorm() -> None:
                         effective_weight = weight
                     else:
                         result_limit = math.sqrt(value.shape[-1])
-                        effective_weight = (
-                            weight.clamp(
-                                -ablation_layer.theta,
-                                ablation_layer.theta,
-                            )
-                            if use_spiking_expdiff
-                            else weight
-                        )
+                        effective_weight = weight
 
                     # Match each feature's scale and bias before reducing endpoints;
                     # final output clamping enforces this interval in every branch.
@@ -3373,7 +3338,7 @@ def verify_gaussian_spiking_layernorm() -> None:
                     deterministic_ablation = ablation_layer(potential)
                     set_gaussian_time_noise(
                         enabled=True,
-                        time_std=0.0,
+                        time_std_fraction=0.0,
                         seed=1310,
                     )
                     gaussian_ablation = ablation_layer(potential)
@@ -3396,7 +3361,6 @@ def verify_gaussian_spiking_layernorm() -> None:
         mutation_layer = SpikingLayerNorm(
             4,
             eps=1.0e-5,
-            theta=4.0,
             tau_s=1.0,
             clip_margin=0.1,
             use_spiking_mul=True,
@@ -3477,10 +3441,9 @@ def verify_gaussian_spiking_attention() -> None:
     # Configure five source positions even though this request uses only three.
     # The resulting rail must remain tied to configuration rather than request shape.
     source_length_max = 5
-    output_domain = attention_output_bounds(
-        theta=2.0,
-        source_length_max=source_length_max,
-    )
+    query_domain = PotentialBounds(-1.0, 1.0)
+    key_domain = PotentialBounds(-1.0, 1.0)
+    output_domain = PotentialBounds(-2.0, 2.0)
     assert output_domain == PotentialBounds(-2.0, 2.0)
 
     # With all tensors inside the symmetric rail and scores below the softmin cap,
@@ -3491,9 +3454,11 @@ def verify_gaussian_spiking_attention() -> None:
             query,
             key,
             value,
-            theta=2.0,
             tau=1.0,
             source_length_max=source_length_max,
+            query_bounds=query_domain,
+            key_bounds=key_domain,
+            value_bounds=output_domain,
         )
         dense_weight = torch.softmax(
             torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(query.size(-1)),
@@ -3502,9 +3467,8 @@ def verify_gaussian_spiking_attention() -> None:
         expected = torch.matmul(dense_weight, value)
         assert torch.allclose(deterministic, expected, atol=1e-12, rtol=1e-12)
 
-        # A small theta still sets the outer score ceiling. Masked positions must use
-        # the resulting fixed upper endpoint, rather than a larger independent value,
-        # and pass the operator's declared-domain validation.
+        # Masked positions use the dtype-derived score ceiling and pass the
+        # operator's declared-domain validation.
         keep_mask = torch.tensor(
             [[[[True, True, False], [True, False, False]]]],
             dtype=torch.bool,
@@ -3514,23 +3478,27 @@ def verify_gaussian_spiking_attention() -> None:
             key,
             value,
             attn_mask=keep_mask,
-            theta=2.0,
             tau=1.0,
             source_length_max=source_length_max,
+            query_bounds=query_domain,
+            key_bounds=key_domain,
+            value_bounds=output_domain,
         )
         assert torch.isfinite(masked).all()
 
         # Zero scale traverses all score and normalization encoders before reaching
         # the value PWM. The final output must remain exact while sampling each value
         # once and a single scalar closing event for the complete attention call.
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1401)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=1401)
         zero_noise = spiking_scaled_dot_product_attention(
             query,
             key,
             value,
-            theta=2.0,
             tau=1.0,
             source_length_max=source_length_max,
+            query_bounds=query_domain,
+            key_bounds=key_domain,
+            value_bounds=output_domain,
         )
         zero_stats = get_gaussian_noise_stats()
         assert torch.allclose(zero_noise, deterministic, atol=1e-12, rtol=1e-12)
@@ -3551,18 +3519,22 @@ def verify_gaussian_spiking_attention() -> None:
             cap_query,
             cap_key,
             cap_value,
-            theta=2000.0,
             tau=1.0,
             source_length_max=2,
+            query_bounds=PotentialBounds(-2000.0, 2000.0),
+            key_bounds=PotentialBounds(-2000.0, 2000.0),
+            value_bounds=PotentialBounds(-1.0, 1.0),
         )
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=1404)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=1404)
         gaussian_cap = spiking_scaled_dot_product_attention(
             cap_query,
             cap_key,
             cap_value,
-            theta=2000.0,
             tau=1.0,
             source_length_max=2,
+            query_bounds=PotentialBounds(-2000.0, 2000.0),
+            key_bounds=PotentialBounds(-2000.0, 2000.0),
+            value_bounds=PotentialBounds(-1.0, 1.0),
         )
         assert torch.isfinite(deterministic_cap).all()
         assert torch.isfinite(gaussian_cap).all()
@@ -3579,7 +3551,7 @@ def verify_gaussian_spiking_attention() -> None:
         value_domain = PotentialBounds(-2.0, 2.0)
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=0.5,
             seed=1402,
         )
@@ -3601,7 +3573,7 @@ def verify_gaussian_spiking_attention() -> None:
         upper_value = torch.full_like(value, 2.0)
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             time_mean=2.5,
             seed=1403,
         )

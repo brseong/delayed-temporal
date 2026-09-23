@@ -69,14 +69,14 @@ def build_commands(args: argparse.Namespace, output: Path) -> dict[str, list[str
         args.python_bin, "-u", str(args.source_root / "scripts/evaluation" / f"error_analysis_{args.family}.py"),
         "--model_id", args.model_id, "--task", "wikitext2" if args.family == "gpt2" else "sst2",
         "--cache-dir", args.cache_dir, "--device", "cuda", "--dtype", "float64",
-        "--theta", "40", "--batch_size", str(BATCH_SIZE), "--max_length", "128",
+        "--batch_size", str(BATCH_SIZE), "--max_length", "128",
         "--no-tensorboard", "--no-gaussian-time-noise",
         "--spiking-layernorm", "--spiking-attention", "--spiking-mlp",
         "--spiking-ln-mul", "--spiking-ln-log", "--spiking-ln-expdiff",
         "--activation", "gelu_new" if args.family == "gpt2" else "gelu",
     ]
     if args.family == "gpt2":
-        common += ["--tau-s", "1", "--attention-theta", "40"]
+        common += ["--tau-s", "1"]
     calibration = [
         "--calibration-path", str(output / "calibration.json"),
         "--calibration-samples", str(SAMPLES), "--calibration-seed", "0",
@@ -237,7 +237,8 @@ def main() -> None:
             "calibration_split": "train", "calibration_order": "existing seeded training subset",
             "text_filter": "nonempty stripped text" if args.family == "gpt2" else "none",
             "tokenizer_model_id": args.model_id, "padding": "max_length", "truncation": True,
-            "max_length": 128, "theta": 40, "dtype": "float64", "calibration_seed": 0,
+            "max_length": 128, "range_contract": "operator_local_v1",
+            "dtype": "float64", "calibration_seed": 0,
             "diagnostic_only": True, "paper_reuse_allowed": False, "runtime_dir": str(runtime),
             "runtime_filesystem": filesystem, "wandb_mode": "disabled", "tensorboard": False,
         })

@@ -103,7 +103,6 @@ class ViTConfig(PreTrainedConfig):
         pooler_output_size=None,
         pooler_act="tanh",
         tau_s=1.0,
-        theta=400.0,
         use_spiking_layernorm=True,
         spiking_ln_mul=False,
         spiking_ln_log=True,
@@ -128,7 +127,6 @@ class ViTConfig(PreTrainedConfig):
             num_attention_heads: Number of attention heads per block.
             intermediate_size: Width of the feed-forward hidden layer.
             tau_s: Model-wide temporal scale used by logarithmic compositions and supplied to attention as its unified tau.
-            theta: Fixed symmetric potential rail for spiking operators.
             use_spiking_layernorm: Replace dense LayerNorm with its spiking form.
             spiking_ln_mul: Use spiking variance multiplication in LayerNorm.
             spiking_ln_log: Use logarithmic spike encoding in LayerNorm.
@@ -144,6 +142,10 @@ class ViTConfig(PreTrainedConfig):
         if "tau_m" in kwargs:
             raise TypeError(
                 "ViTConfig accepts only tau_s; attention derives its unified tau from it"
+            )
+        if "theta" in kwargs:
+            raise TypeError(
+                "ViTConfig no longer accepts a global theta; operators use their declared ranges"
             )
 
         # Let the upstream configuration base consume serialization metadata and
@@ -172,7 +174,6 @@ class ViTConfig(PreTrainedConfig):
         # Spiking fields are deterministic operator construction parameters. Direct
         # Gaussian timing configuration deliberately remains process-wide elsewhere.
         self.tau_s = tau_s
-        self.theta = theta
         self.use_spiking_layernorm = use_spiking_layernorm
         self.spiking_ln_mul = spiking_ln_mul
         self.spiking_ln_log = spiking_ln_log

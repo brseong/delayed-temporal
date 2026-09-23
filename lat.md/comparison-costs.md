@@ -100,7 +100,7 @@ The B/L energy cells must be marked as derived values under that paper's tempora
 
 Only a complete, validated comparison bundle may fill the four Ours rows. Paper preparation leaves unrelated prose and user changes untouched and exposes a reviewable patch before any paper file is modified.
 
-[[scripts/analysis/summarize_vit_comparison.py#verify_publication_bundle]] checks all four calibration and eight evaluation records, their common identities, generated file hashes and reproducibility of CSV and LaTeX content. [[scripts/analysis/publish_vit_comparison.py#prepare_paper_update]] creates a proposed table and comparison-protocol update without writing the paper.
+`scripts/analysis/summarize_vit_comparison.py#verify_publication_bundle` checks all four calibration and eight evaluation records, their common identities, generated file hashes and reproducibility of CSV and LaTeX content. `scripts/analysis/publish_vit_comparison.py#prepare_paper_update` creates a proposed table and comparison-protocol update without writing the paper.
 
 The table caption must identify our CIFAR test 10k and ImageNet fixed validation 5k populations, preserve literature provenance, correct SpikeZIP quantization levels, and distinguish derived energy from measured energy. A comparison-specific paragraph records the training-only selected threshold for each model, float64, training seed-0 5k calibration, min/max with 5% range margin, frozen bounds and disabled noise. It also discloses the dense runtime classifier and assumed TTFS head in the estimate.
 
@@ -110,10 +110,10 @@ The existing general experiment prose separately needs review: its calibration p
 
 The corrected ImageNet rows must use the explicit timm evaluation transform recorded in [[conversion-comparison#ViT Conversion Comparison#ImageNet Preprocessing Correction]]. Their fixed validation 5k population remains distinct from full-validation literature results, so the table caption and discussion must identify that difference.
 
-The methodology table writes the cubic term as $v^3$ and links it to the existing signed power construction in `sec:power-operator`. The $\phi_{\mathrm{NL}}$ encoding time constant is three times the $\psi_{\mathrm{ED}}$ decoding time constant; the established fixed synaptic-gain notation and final variable $f_{\mathrm{Mul}}$ product remain. The verified accuracy bundle is now available in [[conversion-comparison#Results]], but manuscript insertion remains a separate reviewed step.
+The methodology table writes the cubic term as $v^3$ and links it to the existing signed power construction in `sec:power-operator`. The $\phi_{\mathrm{NL}}$ encoding time constant is three times the $\psi_{\mathrm{ED}}$ decoding time constant; the established fixed synaptic-gain notation and final variable $f_{\mathrm{Mul}}$ product remain. The verified accuracy bundle is now available in [[conversion-comparison#Superseded Results]], but manuscript insertion remains a separate reviewed step.
 
 ## Verification
 
 An independently enumerated small circuit checks every data and global destination. Bundle checks reject incomplete, duplicate or mismatched evidence before a generated table can reach the manuscript.
 
-[[scripts/verification/verify_vit_comparison_costs.py#CostTests#test_enumerated_oracle]] checks every component against nested loops over a small model rather than reusing estimator formulas. Other tests cover geometry, class count, head multiplicity, energy units, missing runs, numerical conditions, calibration linkage, exact accuracy counts and generated artifact integrity. Publication tests preserve untouched text and reject unexpected table structure.
+`scripts/verification/verify_vit_comparison_costs.py#CostTests#test_enumerated_oracle` checks every component against nested loops over a small model rather than reusing estimator formulas. Other tests cover geometry, class count, head multiplicity, energy units, missing runs, numerical conditions, calibration linkage, exact accuracy counts and generated artifact integrity. Publication tests preserve untouched text and reject unexpected table structure.

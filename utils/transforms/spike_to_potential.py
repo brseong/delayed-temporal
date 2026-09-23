@@ -415,16 +415,16 @@ def exponential_difference_operator(
 
     # Re-encode the bounded intermediate potential with the negative-identity map;
     # this is the deterministic counterpart of the helper's internal event stage.
-    # s = theta - p, where theta = domain_p.max
+    # s = domain_p.max - p
     s, domain_s = neg_identity_transform(p, domain_p)
 
     # Shift out the encoder's fixed upper-bound offset before normalized decoding,
     # preserving the existing finite exponential input and its propagated rails.
-    # scaling_factor = exp(-domain_p.max / tau_s) = exp(-theta / tau_s)
+    # scaling_factor = exp(-domain_p.max / tau_s)
     # p' = exp(-(T - s) / tau_s)
-    #    = exp(-(T - theta + p) / tau_s)
-    #    = exp(-T / tau_s) * exp(theta / tau_s) * exp(-p / tau_s)
-    # Subtracting theta before normalized decoding removes the fixed encoder offset.
+    #    = exp(-(T - domain_p.max + p) / tau_s)
+    #    = exp(-T / tau_s) * exp(domain_p.max / tau_s) * exp(-p / tau_s)
+    # Subtracting the upper endpoint before decoding removes the encoder offset.
     if get_clock_driven().enabled:
         scaled_endpoints = clocked_difference(
             s.new_tensor([float(domain_s.min), float(domain_s.max)]),

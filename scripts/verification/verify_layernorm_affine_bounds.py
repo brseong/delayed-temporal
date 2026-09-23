@@ -27,7 +27,6 @@ from utils.transforms.types import Potential, PotentialBounds
 def _layer(flags: tuple[bool, bool, bool], dtype=torch.float64) -> SpikingLayerNorm:
     layer = SpikingLayerNorm(
         4,
-        theta=4.0,
         clip_margin=0.1,
         use_spiking_mul=flags[0],
         use_spiking_log=flags[1],
@@ -51,7 +50,7 @@ def _input(dtype=torch.float64) -> Potential:
 
 # @lat: [[bounds-audit#2026-09-14 Bound Corrections#LayerNorm Affine Bounds]]
 def verify_paired_bounds_and_parity() -> None:
-    """Check every ablation, signed scales, theta clipping, and clean parity."""
+    """Check every ablation, signed scales, local ranges, and clean parity."""
     original_clamp = spiking_ops.clamp_gaussian_output
 
     def skip_final(value, domain, *, site, name):
@@ -65,7 +64,7 @@ def verify_paired_bounds_and_parity() -> None:
         weight = layer.weight.detach().to(torch.float64)
         bias = layer.bias.detach().to(torch.float64)
         limit = math.sqrt(4 if any(flags) else 3)
-        effective_weight = weight.clamp(-4.0, 4.0) if flags[2] else weight
+        effective_weight = weight
         radius = effective_weight.abs() * limit
         expected = PotentialBounds(
             (bias - radius).min().item(), (bias + radius).max().item()
@@ -74,11 +73,7 @@ def verify_paired_bounds_and_parity() -> None:
         assert frozen[2] == expected
         assert layer.freeze_parameter_bounds() is frozen
         if flags[2]:
-            assert expected == PotentialBounds(-8.0, 8.0)
-            old_lower = -radius.max().item() + bias.min().item()
-            old_upper = radius.max().item() + bias.max().item()
-            assert old_lower == -14.0 and old_upper == 14.0
-            assert expected.min > old_lower and expected.max < old_upper
+            assert expected == PotentialBounds(-12.0, 12.0)
 
         set_gaussian_time_noise(enabled=False)
         with patch.object(spiking_ops, "clamp_gaussian_output", skip_final):
@@ -88,7 +83,7 @@ def verify_paired_bounds_and_parity() -> None:
         torch.testing.assert_close(clean.value, prior.value, rtol=0, atol=2.0e-6)
         assert clean.domain is frozen[2]
         assert get_gaussian_noise_stats() == {}
-        set_gaussian_time_noise(enabled=True, time_std=0.0, seed=804)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=804)
         zero = layer(value)
         tolerance = 2.0e-5 if dtype == torch.float32 else 2.0e-12
         torch.testing.assert_close(zero.value, clean.value, rtol=tolerance, atol=tolerance)
@@ -122,12 +117,12 @@ def verify_noisy_clamp_and_random_stream() -> None:
             continue
         layer = _layer(flags)
         value = _input()
-        set_gaussian_time_noise(enabled=True, time_std=0.4, seed=805)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.4, seed=805)
         with patch.object(spiking_ops, "clamp_gaussian_output", skip_final):
             raw = layer(value)
         prior_stats = get_gaussian_noise_stats()
         prior_state = get_gaussian_time_noise().generator.get_state().clone()
-        set_gaussian_time_noise(enabled=True, time_std=0.4, seed=805)
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.4, seed=805)
         bounded = layer(value)
         stats = get_gaussian_noise_stats()
         final = stats.pop("layernorm.affine_output")
@@ -150,19 +145,19 @@ def verify_forced_output_violations() -> None:
     value = _input()
     original_multiplication = spiking_ops.multiplication_operator
 
-    def forced_product(first, first_domain, second, second_domain, theta):
+    def forced_product(first, first_domain, second, second_domain):
         if second is layer.weight:
             # These products remain inside [-8, 8], the shared multiplication
             # interval. Adding each matching bias creates two strict violations.
             scaled = first.new_tensor([0.0, 8.0, -8.0, 0.0]).expand_as(first)
             return scaled, PotentialBounds(-8.0, 8.0)
-        return original_multiplication(first, first_domain, second, second_domain, theta)
+        return original_multiplication(first, first_domain, second, second_domain)
 
     for enabled in (False, True):
-        set_gaussian_time_noise(enabled=enabled, time_std=0.0, seed=806)
+        set_gaussian_time_noise(enabled=enabled, time_std_fraction=0.0, seed=806)
         with patch.object(spiking_ops, "multiplication_operator", forced_product):
             output = layer(value)
-        expected = output.value.new_tensor([0.0, 8.0, -8.0, 0.0]).expand_as(output.value)
+        expected = output.value.new_tensor([0.0, 12.0, -12.0, 0.0]).expand_as(output.value)
         assert torch.equal(output.value, expected)
         if enabled:
             final = get_gaussian_noise_stats()["layernorm.affine_output"]
@@ -189,14 +184,14 @@ def verify_cache_and_single_feature() -> None:
         raise AssertionError("LayerNorm accepted changed parameters without refresh")
     after = layer.freeze_parameter_bounds(refresh=True)
     assert after is not before
-    assert after[2] == PotentialBounds(-7.75, 8.25)
-    layer.theta = 8.0
+    assert after[2] == PotentialBounds(-11.75, 12.25)
+    layer.clip_margin = 0.2
     try:
         layer(_input())
     except RuntimeError:
         pass
     else:
-        raise AssertionError("LayerNorm accepted changed theta without refresh")
+        raise AssertionError("LayerNorm accepted changed range configuration without refresh")
     assert layer.freeze_parameter_bounds(refresh=True)[2] == PotentialBounds(-11.75, 12.25)
     assert not any("bounds" in name for name in layer.state_dict())
 
@@ -206,7 +201,7 @@ def verify_cache_and_single_feature() -> None:
     with torch.no_grad():
         dense.bias.fill_(0.5)
     for enabled in (False, True):
-        set_gaussian_time_noise(enabled=enabled, time_std=0.1, seed=807)
+        set_gaussian_time_noise(enabled=enabled, time_std_fraction=0.1, seed=807)
         output = dense(Potential(torch.tensor([[3.0], [-2.0]], dtype=torch.float64), PotentialBounds(-4, 4)))
         assert output.domain == PotentialBounds(0.5, 0.5)
         assert torch.equal(output.value, torch.full_like(output.value, 0.5))

@@ -84,7 +84,7 @@ class Arguments:
 
     Direct Gaussian spike-time error is the sole dynamic event-noise interface.
     Evaluation converts its dimensionless standard-deviation fraction with the
-    base identity window ``2 * theta`` and uses the absolute mean and seed for one
+    declared encoder window and uses the absolute mean and seed for one
     evaluation-wide seeded noise state.
     """
 
@@ -110,8 +110,6 @@ class Arguments:
     spiking_ln_expdiff: bool
     spiking_mlp: bool
     activation: str
-    theta: float
-    attention_theta: float
     tau_s: float
 
     # Layer-wise calibration uses a deterministic training subset for collection and
@@ -198,14 +196,6 @@ def parse_arguments() -> Arguments:
                         help="Use SpikingConv1D in MLP layers when --model_backend spiking is selected.")
     parser.add_argument("--activation", type=str, default="gelu_new",
                         help="Activation function for the spiking backend (default: gelu_new).")
-    parser.add_argument("--theta", type=float, default=100.0,
-                        help="Domain bound theta used by spiking backend modules.")
-    parser.add_argument(
-        "--attention-theta",
-        type=float,
-        default=None,
-        help="Attention-only theta; defaults to the global --theta value.",
-    )
     parser.add_argument("--tau-s", type=float, default=1.0,
                         help="Spike-time constant tau_s used by SpikingLayerNorm.")
 
@@ -276,7 +266,7 @@ def parse_arguments() -> Arguments:
         "--time-noise-std-frac",
         type=float,
         default=0.0,
-        help="Gaussian time std as a fraction of the identity window 2*theta.",
+        help="Gaussian time std as a fraction of each encoder's declared window.",
     )
     parser.add_argument(
         "--time-noise-mean",
@@ -298,16 +288,13 @@ def parse_arguments() -> Arguments:
                         help="Record optional TensorBoard summaries.")
 
     # Resolve dataset defaults first and copy all Gaussian values without changing
-    # units; evaluation will perform the single 2*theta conversion.
+    # units; each encoder performs its own window-relative conversion.
     args = parser.parse_args()
     preset = DATASET_PRESETS[args.task]
     model_id = cast(str, args.model_id or preset["model_id"])
     dataset_name = cast(str | None, args.dataset_name or preset["dataset_name"])
     dataset_config_name = cast(str | None, args.dataset_config_name if args.dataset_config_name is not None else preset["dataset_config_name"])
     dataset_split = cast(str, args.dataset_split or preset["dataset_split"])
-    attention_theta = args.theta if args.attention_theta is None else args.attention_theta
-    if not math.isfinite(attention_theta) or attention_theta <= 0.0:
-        parser.error("--attention-theta must be finite and positive")
 
     return Arguments(
         experiment_name=args.experiment_name,
@@ -330,8 +317,6 @@ def parse_arguments() -> Arguments:
         spiking_ln_expdiff=args.spiking_ln_expdiff,
         spiking_mlp=args.spiking_mlp,
         activation=args.activation,
-        theta=args.theta,
-        attention_theta=attention_theta,
         tau_s=args.tau_s,
         calibration_mode=args.calibration_mode,
         calibration_path=args.calibration_path,
@@ -531,8 +516,8 @@ def infer_text_column(column_names: list[str], preferred: str | None = None) -> 
 def evaluate_gpt2_model(args: Arguments) -> None:
     """Evaluate one GPT-2 backend with optional direct Gaussian event timing.
 
-    The evaluator converts ``time_noise_std_frac`` to absolute time using the base
-    identity-code window ``2 * theta`` and installs one seeded process-wide noise
+    The evaluator applies ``time_noise_std_frac`` to each encoder's declared
+    time window and installs one seeded process-wide noise
     state. Causal-language-model loss and perplexity aggregation remain unchanged;
     Gaussian event and saturation diagnostics are emitted after the task loop.
 
@@ -559,10 +544,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
     torch_dtype = torch.float32 if args.dtype == "float32" else torch.float64
     calibration_mode = validate_gpt2_calibration_arguments(args)
 
-    # Convert the common user-facing fraction exactly once. tau_s does not rescale
-    # this value; every encoder receives the same absolute sigma based on 2*theta.
-    identity_time_window = 2.0 * float(args.theta)
-    time_noise_std = float(args.time_noise_std_frac) * identity_time_window
+    # Every encoder derives an absolute standard deviation from its own time window.
     gaussian_enabled = bool(
         model_backend == "spiking" and args.gaussian_time_noise
     )
@@ -571,19 +553,17 @@ def evaluate_gpt2_model(args: Arguments) -> None:
     # Explicitly disable it for the dense HF backend in reused Python processes.
     set_gaussian_time_noise(
         enabled=gaussian_enabled,
-        time_std=time_noise_std,
+        time_std_fraction=float(args.time_noise_std_frac),
         time_mean=args.time_noise_mean,
         seed=args.time_noise_seed,
         device=torch_device,
     )
 
-    # Log both relative and absolute timing scales so theta sweeps do not obscure
-    # the physical perturbation applied by the shared encoder boundary.
+    # Log the shared dimensionless scale and encoder-local normalization.
     cfg = {
         **vars(args),
         "gaussian_time_noise_effective": gaussian_enabled,
-        "identity_time_window": identity_time_window,
-        "time_noise_std": time_noise_std,
+        "time_noise_window_normalization": "encoder_local",
     }
     effective_attn_impl = "eager"
     if model_backend == "spiking" and torch_device.type != "cpu" and args.spiking_attention:
@@ -597,8 +577,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         "Gaussian time noise — "
         f"enabled: {gaussian_enabled}, "
         f"std_frac: {args.time_noise_std_frac}, "
-        f"identity_window: {identity_time_window}, "
-        f"std_abs: {time_noise_std}, "
+        "window_normalization: encoder_local, "
         f"mean_abs: {args.time_noise_mean}, "
         f"seed: {args.time_noise_seed}"
     )
@@ -608,8 +587,7 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             f"ln:{args.spiking_layernorm}, attn:{args.spiking_attention}, "
             f"mul:{args.spiking_ln_mul}, log:{args.spiking_ln_log}, "
             f"expdiff:{args.spiking_ln_expdiff}, mlp:{args.spiking_mlp}, "
-            f"act:{args.activation}, theta:{args.theta}, "
-            f"attention_theta:{args.attention_theta}, tau_s:{args.tau_s}"
+            f"act:{args.activation}, tau_s:{args.tau_s}"
         )
 
     # Evaluation and calibration use disjoint splits. Collection never loads test
@@ -794,8 +772,6 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         config.spiking_ln_expdiff = args.spiking_ln_expdiff
         config.use_spiking_mlp = args.spiking_mlp
         config.activation_function = args.activation
-        config.theta = args.theta
-        config.attention_theta = args.attention_theta
         config.tau_s = args.tau_s
         model = GPT2LMHeadModel.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl)
 

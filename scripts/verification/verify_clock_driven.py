@@ -320,8 +320,10 @@ def verify_optimized_model_kernels() -> None:
             query,
             key,
             value,
-            theta=1.0,
             source_length_max=2,
+            query_bounds=PotentialBounds(-1.0, 1.0),
+            key_bounds=PotentialBounds(-1.0, 1.0),
+            value_bounds=PotentialBounds(-1.0, 1.0),
         )
     torch.testing.assert_close(
         attention_output,
@@ -374,6 +376,8 @@ def _runtime_args(**overrides: object) -> SimpleNamespace:
         "model_backend": "spiking",
         "gaussian_time_noise": False,
         "time_noise_std_frac": 0.0,
+        "linear_time_noise_std_frac": None,
+        "log_time_noise_std_frac": None,
         "time_noise_mean": 0.0,
         "time_noise_deadline_margin_std": 0.0,
     }
@@ -863,7 +867,7 @@ def verify_completed_sweep_reporting() -> None:
 # @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Composed Encoder Statistics]]
 def verify_composed_encoder_statistics() -> None:
     log = """GPU model: NVIDIA RTX A6000
-Evaluation metadata — model: checkpoint, dataset: imagenet-1k, split: validation, samples: 62, theta: 20.0, precision: float64, source: disk:/tmp/validation_first_500, fingerprint: abcdef
+Evaluation metadata — model: checkpoint, dataset: imagenet-1k, split: validation, samples: 62, precision: float64, source: disk:/tmp/validation_first_500, fingerprint: abcdef
 Evaluation shard — index: 4, count: 8, start: 252, stop: 314, population: 500
 Correct: 52
 Evaluated samples: 62

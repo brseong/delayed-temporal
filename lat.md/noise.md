@@ -6,11 +6,11 @@ The maintained noise model adds Gaussian error directly to TTFS spike times and 
 
 Direct timing noise uses one process-wide configuration and a dedicated random generator seeded once per experiment replica.
 
-The process-wide configuration stores the absolute time mean and standard deviation, seed, and generator, and validates them before installation.
+The process-wide configuration stores a dimensionless time-window fraction, optional per-encoder-kind fractions, the absolute time mean, deadline-margin ratio, seed, and generator, and validates them before installation.
 
 The generator advances across forward calls. Reconfiguring it restarts a replica; an individual forward must not reseed it. Because this state is process-wide, the maintained path rejects `DataParallel` execution.
 
-Evaluation entry points expose a dimensionless standard-deviation fraction $r_t$ and convert it once using the base identity-code window, $\sigma_t=r_t(2\theta)$. The shared value remains the default, while measured sensitivity runs may supply distinct linear and logarithmic encoding overrides normalized by the same window.
+Evaluation entry points expose a dimensionless standard-deviation fraction $r_t$. For an encoder with declared time-window length $T$, that invocation uses $\sigma_t=r_tT$; optional linear and logarithmic overrides follow the same local rule. There is no global absolute conversion scale.
 
 ## Direct Gaussian Spike-Time Noise
 
@@ -118,13 +118,13 @@ An affine layer treats its zero-reference timing signal as a physical spike shar
 
 If a data event is absent, its contribution remains at the reset value. If the reference event is absent, integration continues to the observation deadline. These are direct applications of [[noise#Observation-Time Potential Invariant]], not operator-specific fallback policies.
 
-## Static Threshold Mismatch
+## Static Range Mismatch
 
-Static threshold mismatch remains separate from trial-to-trial timing noise.
+Static range mismatch remains separate from trial-to-trial timing noise.
 
-[[utils/transforms/noise.py#install_device_mismatch]] samples one frozen potential-offset proxy per supported spiking module from a dedicated seeded generator and installs it with forward pre-hooks. The offset remains fixed within a replica, equal seeds replay the complete draw, and installation does not consume the model's global RNG stream.
+[[utils/transforms/noise.py#install_range_mismatch]] samples one frozen normalized offset per supported spiking module from a dedicated seeded generator and scales it by the module's declared input range in a forward pre-hook. Equal seeds replay the complete draw without consuming the model's global RNG stream.
 
-This proxy is not Stanojevic-style neuron-slope perturbation and should not be reported as calibrated device mismatch. Timing noise and static mismatch remain separate experiment axes and are not enabled in the same evaluation replica.
+This proxy is not Stanojevic-style neuron-slope perturbation and should not be reported as calibrated device mismatch. Timing noise and static range mismatch remain separate experiment axes and are not enabled in the same evaluation replica.
 
 ## Static Weight and Bias Perturbation
 
@@ -154,23 +154,23 @@ The event-aware migration is complete across the shared sampler and encoder boun
 
 Affine, multiplication, exponential, exponential-difference/division, activation, softmin, and attention value paths use decorated events and retain noise-off parity references. Verification exercises opening, closing/reference, and internal exp-temporal cases.
 
-The authoritative ViT-B/16 evidence is the completed calibrated campaign `vit_base_calibrated_theta_rt_ratio_float64_bounds3_v2` at source `f7b74c1aef38502caccf532d1e58a7cf321833d6`. It uses calibration policy 2, output bounds policy 3, float64, batch size 32, and the fixed 5,000-image ImageNet-1k validation subset. The threshold is $\theta=20$, selected on the separate training 5k artifact and confirmed by replay and neighboring validation candidates.
+The previous ViT-B/16 campaign used the removed global-range contract and is superseded for manuscript support. Its immutable artifacts remain provenance, but maintained evaluators reject its calibration schema and do not combine it with new replicas.
 
-The maintained order is threshold calibration and selection, deterministic dense and spiking references, the timing-noise sweep at deadline margin ratio 4, and the deadline margin ratio sweep at $r_t=10^{-5}$. The later high-scale extension changes only the timing-noise grid. Static threshold mismatch, parameter perturbation, 50k validation, W&B, and TensorBoard are excluded from this evidence.
+The maintained order is one schema-2 training calibration, deterministic dense and spiking references, a timing-noise fraction sweep at deadline-margin ratio 4, and a deadline-margin ratio sweep at one fixed fraction. Static range mismatch, parameter perturbation, 50k validation, W&B, and TensorBoard are excluded.
 
 Until timing error draws for inactive members of signed pairs are removed, site counts are simulator diagnostics and are not interpreted as physical event totals or energy estimates.
 
 Every stage keeps the noise-free tensor path as a parity reference. No stage may introduce `gaussian_multiplication_operator`, an operator-specific sampler, or invalid-result propagation.
 
-## Sigma and Deadline-Margin Grid
+## Superseded Sigma and Deadline-Margin Grid
 
 The earlier 12 by 13 joint grid and its 470-run manifest are historical tooling, not the current result or an active queue.
 
-The completed campaign separates the two questions into one-dimensional sweeps after selecting $\theta$. A new joint grid, static threshold mismatch, or another uncertainty axis requires a separate protocol under [[deferred-experiments#Additional Robustness Axes]]. The former threshold-40 and uncalibrated designs are summarized in [[deprecated#과거 실험과 범위 감사#과거 ViT Timing Noise Campaigns]].
+The historical campaign separated the two questions into one-dimensional sweeps under its selected global range. A new joint grid, static range mismatch, or another uncertainty axis requires a separate protocol under [[deferred-experiments#Additional Robustness Axes]]. Historical designs are summarized in [[deprecated#과거 실험과 범위 감사#과거 ViT Timing Noise Campaigns]].
 
-## Timing Noise Scale Sweep at Ratio 4
+## Superseded Timing Noise Scale Sweep at Ratio 4
 
-The completed sweep fixes the deadline margin/noise standard deviation ratio at 4 and varies $r_t$ with the selected $\theta=20$.
+This section records historical results from the removed global-range contract; it is not an executable or manuscript-supporting protocol.
 
 For the base campaign, $r_t=10^{-5}10^{i/8}$ for integer indices 0 through 8. Each point uses seeds 0, 1, and 2. The mean top-1 accuracies are 85.9200, 85.8133, 85.8133, 85.7667, 85.5467, 85.2600, 84.3933, 82.9667, and 79.8733 percent in increasing $r_t$ order. The clean spiking reference is 86.00 percent.
 
@@ -178,21 +178,33 @@ The completed high-scale extension keeps the same source, checkpoint, data, sele
 
 The combined display uses nine logarithmically spaced values $10^{-5}10^{i/4}$ over two decades, reusing the five exact matching base points and adding the four extension points. It does not pool source identities or interpolate unexecuted conditions. The extension is a diagnostic stress test on the fixed 5k subset and is not a full ImageNet-1k validation result.
 
-## 마진과 노이즈의 비율 실험
+## 폐기된 마진과 노이즈의 비율 실험
 
-선택된 $\theta=20$과 $r_t=10^{-5}$를 고정하고 deadline margin/noise standard deviation ratio만 바꾸어 정확도와 deadline miss를 측정한다.
+이 절은 제거된 전역 범위 계약에서 얻은 과거 결과를 보존하며, 새 원고 근거로 재사용하지 않는다.
 
 비율은 0, 1, 2, 2.5, 3, 3.5, 4, 5, 6이고 각 조건은 seed 0, 1, 2로 반복한다. 증가하는 비율 순서의 평균 top-1 정확도는 77.3200, 85.3467, 85.9267, 85.9733, 85.9267, 85.9400, 85.9200, 85.9133, 85.9133 percent이다. 비율 2 이상에서는 clean spiking 기준 86.00 percent와 거의 같은 plateau를 보인다.
 
 Deadline margin은 calibration의 5% 구간 여유와 다른 설정이며 frozen range를 다시 선택하지 않는다. 정확도와 deadline miss의 관계는 simulator robustness로 해석하고 calibrated hardware behavior로 해석하지 않는다.
 
-## Calibrated Threshold and Noise Sweeps
+## Superseded Calibrated Threshold and Noise Sweeps
 
-The completed campaign selects $\theta$ with calibration and output bounds policy 3 before evaluating the two separate noise axes; threshold-40 uncalibrated results are historical evidence only.
+The old campaign selected a global range before evaluating two noise axes. The maintained local-range contract has no corresponding selection step, and these numbers remain historical only.
 
 The exact threshold candidates are $10\,2^{i/2}$ for integer indices 0 through 8. Each candidate receives a separate 109-site calibration table from the training 5k artifact. The smallest candidate within 0.5 percentage points of the best training accuracy is $\theta=20$: it records 4,590/5,000 correct, replays with the same count and prediction digest, and records 4,300/5,000 on validation. The dense validation reference is 4,303/5,000. All candidates from 20 through 160 record the same 86.00 percent validation accuracy; 10 and $10\sqrt{2}$ record 76.86 and 84.68 percent.
 
-For $\theta=20$, $\sigma_t=2\theta r_t=40r_t$ and the deadline margin is the requested ratio multiplied by $\sigma_t$. [[evaluation#Calibrated Three Sweep Campaign]] defines the selection and identity contract, while [[evaluation#Calibrated Three Sweep Reporting]] defines final three-replica aggregation. The campaign completed nine calibration collections and 71 evaluations; 50k confirmation and automatic manuscript promotion were deliberately omitted.
+For $\theta=20$, $\sigma_t=2\theta r_t=40r_t$ and the deadline margin is the requested ratio multiplied by $\sigma_t$. [[evaluation#Historical Calibrated Three Sweep Campaign]] defines the selection and identity contract, while [[evaluation#Historical Calibrated Three Sweep Reporting]] defines final three-replica aggregation. The campaign completed nine calibration collections and 71 evaluations; 50k confirmation and automatic manuscript promotion were deliberately omitted.
+
+## Local-Window Timing Noise Sweep
+
+The replacement campaign varies a dimensionless timing-noise fraction at fixed deadline-margin ratio 4 after one frozen ViT-B calibration.
+
+Each encoder uses $\sigma_t=r_tT$ for its own declared time-window length $T$. Nine logarithmically spaced fractions and seeds 0, 1, and 2 provide the accuracy curve and its 95% Student-$t$ interval. Exact points are fixed in the new manifest and are not inherited from the superseded campaign.
+
+## Deadline-Margin Ratio Sweep
+
+The replacement campaign fixes one local-window noise fraction and varies the nonnegative ratio between deadline margin and local timing-noise standard deviation.
+
+For each encoder, $m=k\sigma_t$ uses that encoder's local $\sigma_t$. Calibration's 5% range margin is unrelated and remains frozen. Accuracy and deadline misses are simulator robustness diagnostics rather than calibrated hardware behavior.
 
 ## Gaussian Noise Statistics
 

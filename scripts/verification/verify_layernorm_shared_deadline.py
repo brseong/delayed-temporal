@@ -64,7 +64,7 @@ def _capture(layer, potential, *, enabled, std=0.0, seed=19):
             sampled.append(kwargs["domain"])
         return original_sampler(value, **kwargs)
 
-    set_gaussian_time_noise(enabled=enabled, time_std=std, seed=seed)
+    set_gaussian_time_noise(enabled=enabled, time_std_fraction=std, seed=seed)
     with patch.object(spiking_ops, "neg_log_transform", log), \
          patch.object(noise, "_sample_gaussian_spike_time", sample):
         output = layer(potential)
@@ -72,13 +72,14 @@ def _capture(layer, potential, *, enabled, std=0.0, seed=19):
 
 
 def verify_rounding_directions():
-    """Both orders of independently rounded endpoints must remain covered."""
+    """The common epsilon-aware radius gives both encoders one exact deadline."""
     directions = []
     for radius in RADII:
-        magnitude = math.log(radius) - math.log(1e-5)
-        variance = 0.5 * (math.log(radius**2) - math.log(1e-5**2))
+        log_radius = math.sqrt(radius**2 + 1.0e-12)
+        magnitude = math.log(log_radius) - math.log(1e-5)
+        variance = 0.5 * (math.log(log_radius**2) - math.log(1e-5**2))
         directions.append((magnitude - variance) / math.ulp(magnitude))
-    assert directions == [-1.0, 1.0], directions
+    assert directions == [0.0, 0.0], directions
 
 
 # @lat: [[calibration#Layer-wise Calibration#Frozen Execution#LayerNorm Shared Log Deadline]]
@@ -102,7 +103,7 @@ def verify_layernorm_shared_deadline():
             )
             assert output.domain is output_domain
             assert torch.isfinite(output.value).all()
-            assert layer.theta == 40 and layer.eps == 1e-12 and layer.clip_margin == 1e-5
+            assert layer.eps == 1e-12 and layer.clip_margin == 1e-5
             if not enabled:
                 clean = output.value
                 torch.testing.assert_close(
@@ -124,12 +125,13 @@ def verify_layernorm_shared_deadline():
                 shared = records[0][1]
                 assert isinstance(shared, TimeBounds)
                 assert shared.min == 0.0
-                assert shared.max == math.log(radius) - math.log(layer.clip_margin)
+                log_radius = math.sqrt(radius**2 + layer.eps)
+                assert shared.max == math.log(log_radius) - math.log(layer.clip_margin)
                 assert all(supplied is returned is shared for _, supplied, returned in records)
                 assert [row[0] for row in records] == [
-                    PotentialBounds(layer.clip_margin**2, radius**2),
-                    PotentialBounds(layer.clip_margin, radius),
-                    PotentialBounds(layer.clip_margin, radius),
+                    PotentialBounds(layer.clip_margin**2, log_radius**2),
+                    PotentialBounds(layer.clip_margin, log_radius),
+                    PotentialBounds(layer.clip_margin, log_radius),
                 ]
                 assert len(sampled) == (3 if enabled else 0)
                 assert all(domain is shared for domain in sampled)
@@ -152,7 +154,7 @@ def verify_encoder_validation_and_rng():
     assert explicit_domain is shared
     torch.testing.assert_close(native, explicit, rtol=0, atol=math.ulp(shared.max))
 
-    set_gaussian_time_noise(enabled=True, time_std=1e-6, seed=23)
+    set_gaussian_time_noise(enabled=True, time_std_fraction=1e-6, seed=23)
     generator = get_gaussian_time_noise().generator
     for invalid in (
         "invalid", PotentialBounds(0.0, shared.max),

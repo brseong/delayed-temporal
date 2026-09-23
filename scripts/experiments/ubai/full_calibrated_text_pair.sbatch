@@ -20,7 +20,7 @@ set -euo pipefail
 : "${PORTABLE_ENV_ARCHIVE:?PORTABLE_ENV_ARCHIVE is required}"
 : "${CONTAINER_IMAGE:?CONTAINER_IMAGE is required}"
 
-tag=conversion_comparison_theta40_calibrated_float64_bounds3_v3
+tag=conversion_comparison_local_ranges_calibrated_float64_bounds4_v1
 runtime="/enroot/${UID}/${tag}/${SLURM_JOB_ID}"
 mkdir -p "$runtime/dt" "$runtime/tmp" "$runtime/bert" "$runtime/roberta"
 filesystem=$(findmnt -n -o FSTYPE -T "$runtime")

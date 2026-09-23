@@ -49,10 +49,13 @@ class RobertaConfig(PreTrainedConfig):
         spiking_ln_log=True,
         spiking_ln_expdiff=True,
         use_spiking_mlp=True,
-        theta=10.0,
         tau_s=1.0,
         **kwargs,
     ):
+        if "theta" in kwargs:
+            raise TypeError(
+                "RobertaConfig no longer accepts a global theta; operators use declared ranges"
+            )
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
@@ -81,7 +84,6 @@ class RobertaConfig(PreTrainedConfig):
         self.spiking_ln_log = spiking_ln_log
         self.spiking_ln_expdiff = spiking_ln_expdiff
         self.use_spiking_mlp = use_spiking_mlp
-        self.theta = theta
         self.tau_s = tau_s
 
 

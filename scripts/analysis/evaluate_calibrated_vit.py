@@ -155,7 +155,7 @@ def validate_arguments(
         raise ValueError("checkpoint SHA-256 is required")
 
 
-# @lat: [[evaluation#Evaluation and Verification#Calibrated ViT Noise Comparison]]
+# @lat: [[evaluation#Evaluation and Verification#Historical Calibrated ViT Noise Comparison]]
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--source-root", type=Path, required=True)

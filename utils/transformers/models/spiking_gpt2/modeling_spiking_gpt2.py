@@ -60,7 +60,6 @@ from utils.transformers.calibration import (
     calibration_uses_explicit_bounds,
     model_calibration_is_bound,
 )
-from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import (
     SpikingLayerNorm,
     SpikingLinear,
@@ -92,30 +91,9 @@ def resolve_gpt2_mlp_activation_implementation(config) -> str:
     return f"dense_{activation_name}"
 
 
-def resolve_gpt2_attention_theta(config) -> float:
-    """Resolve GPT-2's operator-local attention threshold.
-
-    ``attention_theta=None`` retains the historical model-wide ``theta``. A
-    distinct positive value narrows only score coding, softmin, and attention
-    value readout; LayerNorm and affine/MLP operators continue to use ``theta``.
-    """
-    configured = getattr(config, "attention_theta", None)
-    value = getattr(config, "theta", 10.0) if configured is None else configured
-    if isinstance(value, bool):
-        raise TypeError("GPT-2 attention_theta must be a real scalar")
-    try:
-        resolved = float(value)
-    except (TypeError, ValueError) as error:
-        raise TypeError("GPT-2 attention_theta must be a real scalar") from error
-    if not math.isfinite(resolved) or resolved <= 0.0:
-        raise ValueError("GPT-2 attention_theta must be finite and positive")
-    return resolved
-
-
 class SpikingConv1D(Conv1D):
-    def __init__(self, nf, nx, theta=400.0, **kwargs):
+    def __init__(self, nf, nx, **kwargs):
         super().__init__(nf, nx, **kwargs)
-        self.theta = theta
 
     def freeze_parameter_bounds(
         self,
@@ -446,10 +424,8 @@ class GPT2Attention(nn.Module):
         self.layer_idx = layer_idx
         self.reorder_and_upcast_attn = config.reorder_and_upcast_attn
 
-        _theta = getattr(config, "theta", 400.0)
-        self.attention_theta = resolve_gpt2_attention_theta(config)
-        self.c_attn = SpikingConv1D(3 * self.embed_dim, self.embed_dim, theta=_theta)
-        self.c_proj = SpikingConv1D(self.embed_dim, self.embed_dim, theta=_theta)
+        self.c_attn = SpikingConv1D(3 * self.embed_dim, self.embed_dim)
+        self.c_proj = SpikingConv1D(self.embed_dim, self.embed_dim)
 
         self.attn_dropout = nn.Dropout(config.attn_pdrop)
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
@@ -506,7 +482,7 @@ class GPT2Attention(nn.Module):
         """Apply cache-aware GPT-2 attention with analytic domain propagation.
 
         The combined Q/K/V projection supplies the eager value envelope. Spiking
-        attention replaces it with the memoized rail derived from ``theta`` and
+        attention uses the declared projected ranges and configured
         ``max_position_embeddings``. Projection and dropout then propagate that
         fixed envelope analytically, eliminating both runtime output-extrema ranges
         previously constructed inside this method.
@@ -531,12 +507,24 @@ class GPT2Attention(nn.Module):
             self.split_size,
             dim=2,
         )
-        selected_bounds = None
+        radius = max(
+            abs(float(projected_qkv.domain.min)),
+            abs(float(projected_qkv.domain.max)),
+        )
+        analytic_projection_bounds = PotentialBounds(-radius, radius)
+        selected_bounds = (
+            analytic_projection_bounds,
+            analytic_projection_bounds,
+            analytic_projection_bounds,
+        )
         if calibration_uses_explicit_bounds(self):
-            radius = max(abs(float(projected_qkv.domain.min)), abs(float(projected_qkv.domain.max)))
-            collection_bounds = PotentialBounds(-radius, radius)
             projected = tuple(
-                calibrated_potential(self, name, value, collection_bounds=collection_bounds)
+                calibrated_potential(
+                    self,
+                    name,
+                    value,
+                    collection_bounds=analytic_projection_bounds,
+                )
                 for name, value in zip(
                     ("query", "key", "value"),
                     (query_states, key_states, value_states),
@@ -544,6 +532,10 @@ class GPT2Attention(nn.Module):
             )
             query_states, key_states, value_states = (item.value for item in projected)
             selected_bounds = tuple(item.domain for item in projected)
+        else:
+            query_states = analytic_projection_bounds.clamp(query_states, name="query")
+            key_states = analytic_projection_bounds.clamp(key_states, name="key")
+            value_states = analytic_projection_bounds.clamp(value_states, name="value")
         shape_kv = (*key_states.shape[:-1], -1, self.head_dim)
         key_states = key_states.view(shape_kv).transpose(1, 2)
         value_states = value_states.view(shape_kv).transpose(1, 2)
@@ -552,14 +544,13 @@ class GPT2Attention(nn.Module):
         query_states = query_states.view(shape_q).transpose(1, 2)
 
         if past_key_values is not None:
-            if selected_bounds is not None:
-                identity = tuple((float(item.min), float(item.max)) for item in selected_bounds)
-                cache_bounds = getattr(past_key_values, "_delayed_temporal_calibration_bounds", {})
-                previous = cache_bounds.get(self.layer_idx)
-                if past_key_values.get_seq_length(self.layer_idx) > 0 and previous != identity:
-                    raise ValueError("GPT-2 cache does not match the selected calibration bounds")
-                cache_bounds[self.layer_idx] = identity
-                past_key_values._delayed_temporal_calibration_bounds = cache_bounds
+            identity = tuple((float(item.min), float(item.max)) for item in selected_bounds)
+            cache_bounds = getattr(past_key_values, "_delayed_temporal_calibration_bounds", {})
+            previous = cache_bounds.get(self.layer_idx)
+            if past_key_values.get_seq_length(self.layer_idx) > 0 and previous != identity:
+                raise ValueError("GPT-2 cache does not match the selected attention bounds")
+            cache_bounds[self.layer_idx] = identity
+            past_key_values._delayed_temporal_calibration_bounds = cache_bounds
             key_states, value_states = past_key_values.update(
                 key_states, value_states, self.layer_idx, {"cache_position": cache_position}
             )
@@ -579,16 +570,11 @@ class GPT2Attention(nn.Module):
             )
         else:
             if using_spiking:
-                theta = self.attention_theta
                 source_length_max = int(self.config.max_position_embeddings)
-                kwargs["theta"] = theta
                 kwargs["tau"] = getattr(self.config, "tau_s", 1.0)
                 kwargs["source_length_max"] = source_length_max
-                if selected_bounds is not None:
-                    kwargs.update(zip(("query_bounds", "key_bounds", "value_bounds"), selected_bounds))
-                    context_domain = selected_bounds[2]
-                else:
-                    context_domain = attention_output_bounds(theta, source_length_max)
+                kwargs.update(zip(("query_bounds", "key_bounds", "value_bounds"), selected_bounds))
+                context_domain = selected_bounds[2]
 
             attn_output, attn_weights = attention_interface(
                 self,
@@ -650,15 +636,13 @@ class GPT2MLP(nn.Module):
         super().__init__()
         embed_dim = config.hidden_size
         self.use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
-        _theta = getattr(config, "theta", 400.0)
-        self.theta = float(_theta)
         self.tau_s = float(getattr(config, "tau_s", 1.0))
         self.activation_implementation = resolve_gpt2_mlp_activation_implementation(config)
         # SpikingConv1D preserves the Hugging Face Conv1D parameter layout. Dense
         # ablation calls its inherited tensor forward directly, while both paths can
         # reuse the same transposed-weight interval cache.
-        self.c_fc = SpikingConv1D(intermediate_size, embed_dim, theta=_theta)
-        self.c_proj = SpikingConv1D(embed_dim, intermediate_size, theta=_theta)
+        self.c_fc = SpikingConv1D(intermediate_size, embed_dim)
+        self.c_proj = SpikingConv1D(embed_dim, intermediate_size)
         self._activation_name = str(config.activation_function)
         self.act = ACT2FN[config.activation_function]
         self.dropout = nn.Dropout(config.resid_pdrop)
@@ -703,7 +687,6 @@ class GPT2MLP(nn.Module):
             activated_value, activated_domain = gelu_approximation(
                 projected.value,
                 projected.domain,
-                theta=self.theta,
                 tau_s=self.tau_s,
             )
         else:
@@ -779,12 +762,11 @@ class GPT2Block(GradientCheckpointingLayer):
         hidden_size = config.hidden_size
         inner_dim = config.n_inner if config.n_inner is not None else 4 * hidden_size
 
-        _theta = getattr(config, "theta", 10.0)
         _tau_s = getattr(config, "tau_s", 1.0)
         _use_spiking_ln = getattr(config, "use_spiking_layernorm", True)
         if _use_spiking_ln:
             _sln_kwargs = dict(
-                theta=_theta, tau_s=_tau_s,
+                tau_s=_tau_s,
                 clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
                 use_spiking_log=getattr(config, "spiking_ln_log", True),
@@ -1114,12 +1096,11 @@ class GPT2Model(GPT2PreTrainedModel):
 
         self.drop = nn.Dropout(config.embd_pdrop)
         self.h = nn.ModuleList([GPT2Block(config, layer_idx=i) for i in range(config.num_hidden_layers)])
-        _theta = getattr(config, "theta", 10.0)
         _tau_s = getattr(config, "tau_s", 1.0)
         _use_spiking_ln = getattr(config, "use_spiking_layernorm", True)
         if _use_spiking_ln:
             _sln_kwargs = dict(
-                theta=_theta, tau_s=_tau_s,
+                tau_s=_tau_s,
                 clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
                 use_spiking_log=getattr(config, "spiking_ln_log", True),
@@ -1918,7 +1899,6 @@ class GPT2ForQuestionAnswering(GPT2PreTrainedModel):
 
 
 __all__ = [
-    "resolve_gpt2_attention_theta",
     "GPT2DoubleHeadsModel",
     "GPT2ForQuestionAnswering",
     "GPT2ForSequenceClassification",

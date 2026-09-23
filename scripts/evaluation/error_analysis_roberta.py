@@ -76,7 +76,7 @@ class Arguments:
 
     Direct Gaussian spike-time error is the only dynamic event-noise model. Its
     standard-deviation fraction remains dimensionless until evaluation converts it
-    with ``2 * theta``; the absolute mean and seed identify one evaluation-wide
+    with each encoder's declared time window; the absolute mean and seed identify one evaluation-wide
     seeded noise state.
     """
 
@@ -101,7 +101,6 @@ class Arguments:
     spiking_ln_expdiff: bool
     spiking_mlp: bool
     activation: Literal["relu", "gelu"]
-    theta: float
 
     # Keep the same four Gaussian fields across every evaluator so scripts can
     # configure replicas without model-specific timing parameters.
@@ -179,8 +178,6 @@ def parse_arguments() -> Arguments:
                         help="Use spiking MLP when --model_backend spiking is selected.")
     parser.add_argument("--activation", type=str, choices=["relu", "gelu"], default="gelu",
                         help="Activation function used by the spiking backend config.")
-    parser.add_argument("--theta", type=float, default=100.0,
-                        help="Domain bound theta used by spiking backend modules.")
 
     # Use the common Gaussian-only CLI. BooleanOptionalAction also supplies the
     # explicit --no-gaussian-time-noise form without a compatibility alias.
@@ -194,7 +191,7 @@ def parse_arguments() -> Arguments:
         "--time-noise-std-frac",
         type=float,
         default=0.0,
-        help="Gaussian time std as a fraction of the identity window 2*theta.",
+        help="Gaussian time std as a fraction of each encoder's declared window.",
     )
     parser.add_argument(
         "--time-noise-mean",
@@ -243,7 +240,6 @@ def parse_arguments() -> Arguments:
         spiking_ln_expdiff=args.spiking_ln_expdiff,
         spiking_mlp=args.spiking_mlp,
         activation=args.activation,
-        theta=args.theta,
         gaussian_time_noise=args.gaussian_time_noise,
         time_noise_std_frac=args.time_noise_std_frac,
         time_noise_mean=args.time_noise_mean,
@@ -268,7 +264,7 @@ def evaluate_roberta_model(args: Arguments) -> None:
     """Evaluate one RoBERTa backend with optional Gaussian event timing.
 
     The dimensionless noise fraction is converted once with the identity-code
-    window ``2 * theta`` and installed with one seeded process-wide generator.
+    window and installed with one seeded process-wide generator.
     Gaussian execution rejects this evaluator's multi-GPU ``DataParallel`` path,
     while deterministic and Hugging Face evaluations retain existing behavior.
 
@@ -297,8 +293,6 @@ def evaluate_roberta_model(args: Arguments) -> None:
 
     # Convert the shared relative CLI scale exactly once; all decorated encoders in
     # this evaluation use the resulting absolute timing standard deviation.
-    identity_time_window = 2.0 * float(args.theta)
-    time_noise_std = float(args.time_noise_std_frac) * identity_time_window
     gaussian_enabled = bool(
         model_backend == "spiking" and args.gaussian_time_noise
     )
@@ -318,19 +312,18 @@ def evaluate_roberta_model(args: Arguments) -> None:
     # or dataset work. HF execution explicitly installs the disabled state.
     set_gaussian_time_noise(
         enabled=gaussian_enabled,
-        time_std=time_noise_std,
+        time_std_fraction=float(args.time_noise_std_frac),
         time_mean=args.time_noise_mean,
         seed=args.time_noise_seed,
         device=torch_device,
     )
 
     # Preserve both relative and absolute timing scales in W&B configuration so
-    # theta sweeps can be interpreted directly.
+    # Absolute standard deviation is derived independently at each encoder boundary.
     cfg = {
         **vars(args),
         "gaussian_time_noise_effective": gaussian_enabled,
-        "identity_time_window": identity_time_window,
-        "time_noise_std": time_noise_std,
+        "time_noise_window_normalization": "encoder_local",
     }
     effective_attn_impl = "eager"
     if model_backend == "spiking" and args.spiking_attention:
@@ -343,8 +336,7 @@ def evaluate_roberta_model(args: Arguments) -> None:
         "Gaussian time noise — "
         f"enabled: {gaussian_enabled}, "
         f"std_frac: {args.time_noise_std_frac}, "
-        f"identity_window: {identity_time_window}, "
-        f"std_abs: {time_noise_std}, "
+        "window_normalization: encoder_local, "
         f"mean_abs: {args.time_noise_mean}, "
         f"seed: {args.time_noise_seed}"
     )
@@ -354,7 +346,7 @@ def evaluate_roberta_model(args: Arguments) -> None:
             f"ln:{args.spiking_layernorm}, attn:{args.spiking_attention}, "
             f"mul:{args.spiking_ln_mul}, log:{args.spiking_ln_log}, "
             f"expdiff:{args.spiking_ln_expdiff}, mlp:{args.spiking_mlp}, "
-            f"act:{args.activation}, theta:{args.theta}"
+            f"act:{args.activation}"
         )
 
     assert dataset_name is not None
@@ -390,7 +382,6 @@ def evaluate_roberta_model(args: Arguments) -> None:
         config.spiking_ln_expdiff = args.spiking_ln_expdiff
         config.use_spiking_mlp = args.spiking_mlp
         config.hidden_act = args.activation
-        config.theta = args.theta
         config.use_cache = False
         model = RobertaForSequenceClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl)
     model = model.to(dtype=torch_dtype)

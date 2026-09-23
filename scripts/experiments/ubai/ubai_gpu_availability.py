@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report currently free UBAI GPUs by theta-selection hardware family."""
+"""Report currently free UBAI GPUs by hardware family."""
 
 from __future__ import annotations
 

@@ -67,7 +67,6 @@ def gpt2_calibration_specs(
         GPT2Block,
         GPT2MLP,
         GPT2Model,
-        resolve_gpt2_attention_theta,
     )
 
     if not isinstance(model, nn.Module):
@@ -157,11 +156,9 @@ def gpt2_calibration_specs(
         # current token batch. The combined Q/K/V projection weight supplies the
         # execution dtype that determines the exponential representability floor.
         ceiling = attention_score_representability_bounds(
-            resolve_gpt2_attention_theta(module.config),
             float(getattr(module.config, "tau_s", 1.0)),
             int(module.config.max_position_embeddings),
             module.c_attn.weight.dtype,
-            cap_by_theta=False,
         )
         specs.append(
             LayerCalibrationSpec(
@@ -311,11 +308,8 @@ def build_gpt2_calibration_metadata(
             "tokenizer calibration metadata must be finite and JSON-compatible"
         ) from error
 
-    # Resolve the operator-local rail through the same validation used by model
-    # construction, including the backward-compatible fallback to global theta.
     from utils.transformers.models.spiking_gpt2.modeling_spiking_gpt2 import (
         resolve_gpt2_mlp_activation_implementation,
-        resolve_gpt2_attention_theta,
     )
 
     # Persist all configured paths that alter residual distributions. Training-only
@@ -332,10 +326,6 @@ def build_gpt2_calibration_metadata(
                 ),
                 ("checkpoint_sha256", checkpoint_sha256),
                 ("config_sha256", config_sha256),
-                (
-                    "attention_theta",
-                    resolve_gpt2_attention_theta(config),
-                ),
                 ("attention_implementation", attention_implementation),
                 ("gelu_output_min", GELU_OUTPUT_MIN),
                 ("output_bounds_version", OUTPUT_BOUNDS_VERSION),
@@ -355,7 +345,6 @@ def build_gpt2_calibration_metadata(
     )
 
     # The metadata records the evaluator dtype and the single configured time scale.
-    theta = float(getattr(config, "theta"))
     tau_s = float(getattr(config, "tau_s"))
     return CalibrationMetadata(
         model_family="gpt2",
@@ -364,7 +353,6 @@ def build_gpt2_calibration_metadata(
         dataset_split=calibration_split,
         preprocessing=preprocessing,
         dtype=dtype,
-        theta=theta,
         tau_s=tau_s,
         tau_m=tau_s,
         clip_margin=float(getattr(config, "clip_margin", 1.0e-5)),
@@ -446,8 +434,7 @@ def collect_gpt2_calibration_table(
     if type(version) is not int or version != TEXT_CALIBRATION_POLICY_VERSION:
         raise ValueError("calibration requires the current text calibration policy")
     if (
-        metadata.theta != float(config.theta)
-        or metadata.tau_s != float(config.tau_s)
+        metadata.tau_s != float(config.tau_s)
         or metadata.tau_m != float(config.tau_s)
         or metadata.clip_margin != float(getattr(config, "clip_margin", 1.0e-5))
         or options.get("config_sha256") != _gpt2_config_sha256(config)

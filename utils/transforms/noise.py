@@ -1,4 +1,4 @@
-"""Gaussian spike-time noise and static threshold mismatch for TTFS models.
+"""Gaussian spike-time noise and static range mismatch for TTFS models.
 
 Dynamic non-ideality is represented by one additive Gaussian error in absolute
 time units at each event-aware potential-to-spike boundary. The sampled raw time
@@ -6,7 +6,7 @@ jointly determines the delivered timestamp and whether the event arrived after
 the encoder's fixed observation deadline. All encoder sites share one seeded,
 advancing generator per evaluation replica.
 
-Static threshold mismatch remains an independent experimental axis. It is sampled
+Static range mismatch remains an independent experimental axis. It is sampled
 once per supported module, stored as a frozen non-persistent buffer, and applied by
 forward pre-hooks. Gaussian event timing and static mismatch therefore have distinct
 configuration, sampling, and reporting paths.
@@ -36,22 +36,22 @@ from .types import ClosedBounds, Potential, SpikeSample, TimeBounds
 class GaussianTimeNoiseConfig:
     """Process-wide configuration for direct Gaussian spike-time noise.
 
-    ``time_mean`` and ``time_std`` are absolute time quantities shared by every
-    encoder unless the linear or logarithmic encoding has an explicit
-    override. ``generator`` is seeded once during configuration and then advances
+    Standard deviations are fractions of each encoder's declared time window;
+    linear and logarithmic encoders may override the shared fraction. Deadline
+    grace is expressed in standard deviations. ``generator`` is seeded once and advances
     across calls, making a seed identify a complete replica rather than restarting
     the random sequence for each layer. A disabled configuration holds no generator
     so accidental sampling cannot silently consume an unrelated global RNG stream.
     """
 
     enabled: bool = False  # Select the event-aware Gaussian path at encoder boundaries.
-    time_std: float = 0.0  # Absolute standard deviation applied to every encoded time.
-    linear_time_std: float | None = None  # Optional linear-encoding override.
-    log_time_std: float | None = None  # Optional logarithmic-encoding override.
+    time_std_fraction: float = 0.0  # Standard deviation divided by the local window.
+    linear_time_std_fraction: float | None = None  # Optional linear-code override.
+    log_time_std_fraction: float | None = None  # Optional logarithmic-code override.
     time_mean: float = 0.0  # Absolute additive bias applied before deadline classification.
-    deadline_margin: float = 0.0  # Absolute late-arrival grace before declaring a miss.
-    linear_deadline_margin: float | None = None  # Optional linear grace override.
-    log_deadline_margin: float | None = None  # Optional logarithmic grace override.
+    deadline_margin_std_ratio: float = 0.0  # Grace measured in local noise stds.
+    linear_deadline_margin_std_ratio: float | None = None
+    log_deadline_margin_std_ratio: float | None = None
     seed: int = 0  # Replica seed used once when constructing the dedicated generator.
     generator: torch.Generator | None = None  # Stateful RNG owned by this configuration.
 
@@ -219,13 +219,13 @@ def clamp_gaussian_output(
 def set_gaussian_time_noise(
     *,
     enabled: bool,
-    time_std: float = 0.0,
-    linear_time_std: float | None = None,
-    log_time_std: float | None = None,
+    time_std_fraction: float = 0.0,
+    linear_time_std_fraction: float | None = None,
+    log_time_std_fraction: float | None = None,
     time_mean: float = 0.0,
-    deadline_margin: float = 0.0,
-    linear_deadline_margin: float | None = None,
-    log_deadline_margin: float | None = None,
+    deadline_margin_std_ratio: float = 0.0,
+    linear_deadline_margin_std_ratio: float | None = None,
+    log_deadline_margin_std_ratio: float | None = None,
     seed: int = 0,
     device: torch.device | str = "cpu",
 ) -> None:
@@ -238,19 +238,19 @@ def set_gaussian_time_noise(
 
     Args:
         enabled: Whether event-aware encoders apply direct Gaussian timing noise.
-        time_std: Non-negative default standard deviation in absolute time units.
-        linear_time_std: Optional non-negative override for linear encoding.
-        log_time_std: Optional non-negative override for logarithmic encoding.
+        time_std_fraction: Non-negative default fraction of each code window.
+        linear_time_std_fraction: Optional non-negative linear-code override.
+        log_time_std_fraction: Optional non-negative logarithmic-code override.
         time_mean: Additive Gaussian mean in absolute time units.
-        deadline_margin: Non-negative default absolute late-arrival grace.
-        linear_deadline_margin: Optional non-negative linear-encoding grace.
-        log_deadline_margin: Optional non-negative logarithmic-encoding grace.
+        deadline_margin_std_ratio: Non-negative grace measured in local standard deviations.
+        linear_deadline_margin_std_ratio: Optional linear-code grace ratio.
+        log_deadline_margin_std_ratio: Optional logarithmic-code grace ratio.
         seed: Integer seed used once to initialize the replica generator.
         device: Device on which the encoder's spike-time samples will be drawn.
 
     Raises:
         TypeError: If ``enabled`` is not boolean or ``seed`` is not an integer.
-        ValueError: If a timing parameter is non-finite or ``time_std`` is negative.
+        ValueError: If a timing parameter is non-finite or a fraction is negative.
         RuntimeError: If PyTorch cannot create or seed a generator on ``device``.
     """
     global _GLOBAL_GAUSSIAN_TIME_CONFIG
@@ -264,20 +264,20 @@ def set_gaussian_time_noise(
 
     # Normalize numeric inputs once, then require finite physical parameters before
     # creating random state or disturbing the currently installed configuration.
-    normalized_std = float(time_std)
+    normalized_std = float(time_std_fraction)
     normalized_linear_std = (
-        None if linear_time_std is None else float(linear_time_std)
+        None if linear_time_std_fraction is None else float(linear_time_std_fraction)
     )
-    normalized_log_std = None if log_time_std is None else float(log_time_std)
+    normalized_log_std = None if log_time_std_fraction is None else float(log_time_std_fraction)
     normalized_mean = float(time_mean)
-    normalized_margin = float(deadline_margin)
+    normalized_margin = float(deadline_margin_std_ratio)
     normalized_linear_margin = (
         None
-        if linear_deadline_margin is None
-        else float(linear_deadline_margin)
+        if linear_deadline_margin_std_ratio is None
+        else float(linear_deadline_margin_std_ratio)
     )
     normalized_log_margin = (
-        None if log_deadline_margin is None else float(log_deadline_margin)
+        None if log_deadline_margin_std_ratio is None else float(log_deadline_margin_std_ratio)
     )
     optional_values = (
         normalized_linear_std,
@@ -296,7 +296,7 @@ def set_gaussian_time_noise(
         value is not None and value < 0.0
         for value in (normalized_std, normalized_linear_std, normalized_log_std)
     ):
-        raise ValueError("time standard deviations must be non-negative")
+        raise ValueError("time standard-deviation fractions must be non-negative")
     if any(
         value is not None and value < 0.0
         for value in (
@@ -318,13 +318,13 @@ def set_gaussian_time_noise(
     # validation, device, or seed failure preserves both the old replica and counts.
     new_config = GaussianTimeNoiseConfig(
         enabled=enabled,
-        time_std=normalized_std,
-        linear_time_std=normalized_linear_std,
-        log_time_std=normalized_log_std,
+        time_std_fraction=normalized_std,
+        linear_time_std_fraction=normalized_linear_std,
+        log_time_std_fraction=normalized_log_std,
         time_mean=normalized_mean,
-        deadline_margin=normalized_margin,
-        linear_deadline_margin=normalized_linear_margin,
-        log_deadline_margin=normalized_log_margin,
+        deadline_margin_std_ratio=normalized_margin,
+        linear_deadline_margin_std_ratio=normalized_linear_margin,
+        log_deadline_margin_std_ratio=normalized_log_margin,
         seed=seed,
         generator=generator,
     )
@@ -664,15 +664,21 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
 
             # An omitted override preserves the historical shared-parameter path.
             if encoding == "linear":
-                time_std = gaussian_cfg.linear_time_std
-                deadline_margin = gaussian_cfg.linear_deadline_margin
+                time_std_fraction = gaussian_cfg.linear_time_std_fraction
+                deadline_margin_std_ratio = gaussian_cfg.linear_deadline_margin_std_ratio
             else:
-                time_std = gaussian_cfg.log_time_std
-                deadline_margin = gaussian_cfg.log_deadline_margin
-            if time_std is None:
-                time_std = gaussian_cfg.time_std
-            if deadline_margin is None:
-                deadline_margin = gaussian_cfg.deadline_margin
+                time_std_fraction = gaussian_cfg.log_time_std_fraction
+                deadline_margin_std_ratio = gaussian_cfg.log_deadline_margin_std_ratio
+            if time_std_fraction is None:
+                time_std_fraction = gaussian_cfg.time_std_fraction
+            if deadline_margin_std_ratio is None:
+                deadline_margin_std_ratio = gaussian_cfg.deadline_margin_std_ratio
+
+            window_length = float(out_domain.max) - float(out_domain.min)
+            if not math.isfinite(window_length) or window_length < 0.0:
+                raise ValueError("Gaussian encoder window must be finite and non-negative")
+            time_std = float(time_std_fraction) * window_length
+            deadline_margin = float(deadline_margin_std_ratio) * time_std
 
             nominal_time = out_domain.clamp(output)
             sample = _sample_gaussian_spike_time(
@@ -724,31 +730,31 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
 # C — static device mismatch (per-neuron frozen threshold offset)
 # ---------------------------------------------------------------------------
 
-def _mismatch_pre_hook(module, args):
-    """forward_pre_hook: add the module's frozen per-neuron offset to the input potential."""
+def _range_mismatch_pre_hook(module, args):
+    """Add one frozen normalized offset scaled by the module's input range."""
     pot: Potential = args[0]
-    return (Potential(pot.value + module._mismatch_offset, pot.domain),) + tuple(args[1:])
+    radius = 0.5 * (float(pot.domain.max) - float(pot.domain.min))
+    offset = module._range_mismatch_unit_offset * radius
+    return (Potential(pot.value + offset, pot.domain),) + tuple(args[1:])
 
 
-def install_device_mismatch(
+def install_range_mismatch(
     model,
-    theta_std: float,
+    range_std_fraction: float,
     enabled: bool = True,
     *,
     seed: int = 0,
 ):
-    """Attach static device mismatch to every spiking encoder module via forward pre-hooks.
+    """Attach static range-relative offsets to every spiking encoder module.
 
-    θ_i = θ·(1+N(0,σ_θ)) is realised as a fixed potential shift −δ_i per encoding neuron, so the
-    interval-arithmetic / domain-clamp machinery keeps a scalar θ (per-neuron *saturation* is
-    intentionally not modelled). Offsets are sampled once from a dedicated generator seeded by
-    ``seed`` and frozen as non-persistent buffers — not resampled per forward, excluded from
-    ``state_dict``, and independent of the caller's global RNG stream. Call after the model is
-    built, weights loaded, and moved to its device.
+    A unit Gaussian offset is sampled once per supported module and multiplied by
+    half of that module's declared input-range width. The normalized offset is a
+    frozen non-persistent buffer, is not resampled per forward, and remains
+    independent of the caller's global RNG stream.
 
     Returns the list of hook handles (for optional removal); empty when disabled.
     """
-    if not enabled or theta_std <= 0.0:
+    if not enabled or range_std_fraction <= 0.0:
         return []
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise TypeError("mismatch seed must be an integer")
@@ -786,13 +792,13 @@ def install_device_mismatch(
     for m, shape in targets:
 
         w = m.weight
-        offset = torch.randn(
+        unit_offset = torch.randn(
             *shape,
             device=w.device,
             dtype=w.dtype,
             generator=generator,
-        ) * (float(m.theta) * float(theta_std))
-        m.register_buffer("_mismatch_offset", offset, persistent=False)
-        handles.append(m.register_forward_pre_hook(_mismatch_pre_hook))
+        ) * float(range_std_fraction)
+        m.register_buffer("_range_mismatch_unit_offset", unit_offset, persistent=False)
+        handles.append(m.register_forward_pre_hook(_range_mismatch_pre_hook))
 
     return handles

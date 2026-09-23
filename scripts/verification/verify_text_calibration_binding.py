@@ -57,9 +57,13 @@ def verify_text_layernorm_binding():
             elif std == 0:
                 torch.testing.assert_close(result.value, clean, rtol=2e-10, atol=2e-10)
             if any(flags):
-                expected = ([radius, radius] if flags[0] else []) + ([40] if flags[2] else [])
+                expected = ([radius, radius] if flags[0] else []) + ([6] if flags[2] else [])
                 assert multiplications == expected
-                assert clamps["var_x"][0] == PotentialBounds(layer.clip_margin**2, radius**2)
+                log_radius = (radius**2 + layer.eps) ** 0.5
+                assert clamps["var_x"][0] == PotentialBounds(
+                    layer.clip_margin**2,
+                    log_radius**2,
+                )
                 if flags[1]:
                     assert all(abs(item[2].max - logs[0][2].max) < 1e-12 for item in logs)
         assert state.clipping_counts[KEY].num_values == (24 if any(flags) else 0)

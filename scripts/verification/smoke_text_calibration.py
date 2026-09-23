@@ -56,7 +56,7 @@ def build_commands(args, output: Path) -> dict[str, list[str]]:
         "--experiment_name", output.name, "--model_backend", "spiking",
         "--model_id", args.model_id, "--task", task,
         "--cache-dir", args.cache_dir, "--device", "cuda",
-        "--dtype", "float64", "--theta", "40", "--batch_size", str(args.batch_size),
+        "--dtype", "float64", "--batch_size", str(args.batch_size),
         "--max_length", str(args.max_length), "--no-tensorboard",
         "--calibration-samples", str(args.calibration_samples),
         "--calibration-seed", "0", "--calibration-bins", "2048",

@@ -46,7 +46,6 @@ def _layer(
 ) -> SpikingLayerNorm:
     layer = SpikingLayerNorm(
         size,
-        theta=4.0,
         tau_s=tau_s,
         clip_margin=margin,
         use_spiking_mul=flags[0],
@@ -90,7 +89,7 @@ def _capture(
         trace.differences.append((first_domain, second_domain))
         return original_difference(first, first_domain, second, second_domain, **kwargs)
 
-    set_gaussian_time_noise(enabled=enabled, time_std=std, seed=4107)
+    set_gaussian_time_noise(enabled=enabled, time_std_fraction=std, seed=4107)
     with (
         patch.object(PotentialBounds, "clamp", capture_clamp),
         patch.object(spiking_ops, "neg_log_transform", capture_log),
@@ -106,19 +105,20 @@ def _assert_interval(domain, lower: float, upper: float) -> None:
 
 
 def _assert_ranges(layer: SpikingLayerNorm, trace: _Trace) -> None:
+    log_radius = math.sqrt(16.0**2 + layer.eps)
     for name in ("x_err_pos_magnitude", "x_err_neg_magnitude"):
-        _assert_interval(trace.clamps[name][0], 0.0, 4.0)
+        _assert_interval(trace.clamps[name][0], 0.0, 16.0)
     for name in ("x_err_pos_log_carrier", "x_err_neg_log_carrier"):
-        _assert_interval(trace.clamps[name][0], layer.clip_margin, 4.0)
-    _assert_interval(trace.clamps["var_x"][0], layer.clip_margin**2, 16.0)
-    deadline = layer.tau_s * math.log(4.0 / layer.clip_margin)
+        _assert_interval(trace.clamps[name][0], layer.clip_margin, log_radius)
+    _assert_interval(trace.clamps["var_x"][0], layer.clip_margin**2, log_radius**2)
+    deadline = layer.tau_s * math.log(log_radius / layer.clip_margin)
     if layer.use_spiking_log:
         assert len(trace.logs) == 3
         variance, positive, negative = trace.logs
-        _assert_interval(variance[0], layer.clip_margin**2, 16.0)
+        _assert_interval(variance[0], layer.clip_margin**2, log_radius**2)
         assert variance[1] == layer.tau_s / 2.0
         for entry in (positive, negative):
-            _assert_interval(entry[0], layer.clip_margin, 4.0)
+            _assert_interval(entry[0], layer.clip_margin, log_radius)
             assert entry[1] == layer.tau_s
         for entry in trace.logs:
             _assert_interval(entry[2], 0.0, deadline)
@@ -132,7 +132,7 @@ def _assert_ranges(layer: SpikingLayerNorm, trace: _Trace) -> None:
 
 # @lat: [[calibration#Layer-wise Calibration#Frozen Execution#LayerNorm Positive Input Range]]
 def verify_upper_endpoint_and_ablations() -> None:
-    """Observe actual domains at and beyond theta in all eight ablations."""
+    """Observe local input-derived domains in all eight ablations."""
     noisy_misses = 0
     for flags, dtype, tau_s in product(FLAGS, DTYPES, (1.0, 0.75)):
         layer = _layer(flags, dtype, tau_s=tau_s)
@@ -165,19 +165,19 @@ def verify_upper_endpoint_and_ablations() -> None:
                 continue
             _assert_ranges(layer, trace)
             for suffix, expected in (
-                ("pos", [[0, 0, 1, 4], [0, 0, 1, 4], [0, 0, 4, 4]]),
-                ("neg", [[4, 1, 0, 0], [4, 1, 0, 0], [4, 4, 0, 0]]),
+                ("pos", [[0, 0, 1, 4], [0, 0, 1, 5], [0, 0, 4, 4]]),
+                ("neg", [[4, 1, 0, 0], [5, 1, 0, 0], [4, 4, 0, 0]]),
             ):
                 magnitude = trace.clamps[f"x_err_{suffix}_magnitude"]
                 carrier = trace.clamps[f"x_err_{suffix}_log_carrier"]
                 assert torch.equal(magnitude[2], value.new_tensor(expected))
                 assert magnitude[1].max().item() == 5.0
-                assert magnitude[2].max().item() == 4.0
-                assert carrier[2].max().item() == 4.0
+                assert magnitude[2].max().item() == 5.0
+                assert carrier[2].max().item() == 5.0
             if not enabled or std == 0:
-                # The final row reaches theta squared before epsilon is clamped.
+                # The final row reaches its observed squared magnitude.
                 torch.testing.assert_close(
-                    trace.clamps["var_x"][2][-1], value.new_tensor([16.0]),
+                    trace.clamps["var_x"][2][-1], value.new_tensor([16.0 + layer.eps]),
                     rtol=0, atol=3e-5 if dtype == torch.float32 else 3e-12,
                 )
             if enabled:
@@ -192,9 +192,9 @@ def verify_upper_endpoint_and_ablations() -> None:
                 assert stats == {}
         # With direct variance and division, the endpoint effect has a simple reference.
         if flags == (False, True, False):
-            centered = value.clamp(-4.0, 4.0)
+            centered = value
             variance = (centered.square().mean(-1, keepdim=True) + layer.eps).clamp(
-                layer.clip_margin**2, 16.0
+                layer.clip_margin**2, 256.0
             )
             expected = centered / variance.sqrt() + layer.bias
             tolerance = 3e-5 if dtype == torch.float32 else 3e-12
@@ -251,7 +251,7 @@ def verify_positive_floor_and_inactive_values() -> None:
 
 
 def verify_margin_validation_and_cache() -> None:
-    """Allow every finite positive floor below theta and reject stale caches."""
+    """Allow every finite positive floor below the local range and reject stale caches."""
     for margin in (2.0, 3.0):
         layer = _layer((True, True, True), torch.float64, margin=margin)
         layer.freeze_parameter_bounds()
@@ -263,7 +263,7 @@ def verify_margin_validation_and_cache() -> None:
             assert bool(torch.isfinite(output.value).all())
             _assert_ranges(layer, trace)
 
-    for margin in (0.0, -0.1, 4.0, 4.1, math.nan, math.inf, -math.inf):
+    for margin in (0.0, -0.1, math.nan, math.inf, -math.inf):
         try:
             _layer((True, True, True), torch.float64, margin=margin)
         except ValueError:

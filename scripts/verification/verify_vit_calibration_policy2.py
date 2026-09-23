@@ -52,8 +52,7 @@ from utils.transformers.models.spiking_vit.modeling_spiking_vit import (
 def config(**changes):
     values = dict(
         image_size=4, patch_size=2, hidden_size=8, intermediate_size=16,
-        num_hidden_layers=1, num_attention_heads=2, num_labels=3,
-        theta=40.0, tau_s=1.0, layer_norm_eps=1e-12, clip_margin=1e-5,
+        num_hidden_layers=1, num_attention_heads=2, num_labels=3, tau_s=1.0, layer_norm_eps=1e-12, clip_margin=1e-5,
         hidden_dropout_prob=0.0, attention_probs_dropout_prob=0.0,
         pixel_value_min=-1.0, pixel_value_max=1.0,
     )
@@ -105,7 +104,7 @@ def verify_topology_and_ablations():
                 assert (prefix + ".attention.attention", name) in keys
             for suffix in ("layernorm_before", "layernorm_after"):
                 assert (prefix + "." + suffix, "centered_input") in keys
-        assert all(row.fixed_max > cfg.theta for row in rows if row.tensor_name == "attention_score")
+        assert all(row.fixed_max > 0 for row in rows if row.tensor_name == "attention_score")
 
     for attention, mlp, exact, layernorm, flags in itertools.product(
         ("eager", "spiking_sdpa"), (False, True), (False, True), (False, True),
@@ -153,7 +152,7 @@ def verify_range_validation_and_identity():
     identity = metadata(cfg)
     options = dict(identity.model_options)
     assert options["vit_calibration_policy_version"] == VIT_CALIBRATION_POLICY_VERSION == 2
-    assert options["output_bounds_version"] == 3
+    assert options["output_bounds_version"] == 4
     assert options["layer_norm_eps"] == 1e-12
     assert options["layer_norm_clip_margin"] == identity.clip_margin == 1e-5
     for name in ("vit_calibration_policy_version", "layer_norm_eps", "layer_norm_clip_margin"):
@@ -163,7 +162,7 @@ def verify_range_validation_and_identity():
         ), "model_options")
     validate_calibration_metadata(identity, identity)
 
-    norm = SpikingLayerNorm(4, theta=40, eps=1e-12).double()
+    norm = SpikingLayerNorm(4, eps=1e-12).double()
     model = nn.Module()
     model.add_module("norm", norm)
     spec = LayerCalibrationSpec("norm", "centered_input", CalibrationRangePolicy.SIGNED_SYMMETRIC,
@@ -224,7 +223,7 @@ def verify_centered_collection_and_reuse():
     class Model(nn.Module):
         def __init__(self):
             super().__init__()
-            self.norm = SpikingLayerNorm(4, theta=40, eps=1e-12).double()
+            self.norm = SpikingLayerNorm(4, eps=1e-12).double()
 
         def forward(self, pixel_values):
             return self.norm(Potential(pixel_values, PotentialBounds(-30, 30))).value

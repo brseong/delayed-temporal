@@ -44,7 +44,7 @@ def validate_family(root: Path, family: str) -> tuple[list[dict[str, Any]], dict
         raise ValueError(f"{family} is not a completed member of {expected_tag}")
     if manifest.get("evaluation_samples") != config["evaluation_samples"]:
         raise ValueError(f"{family} evaluation population differs")
-    if manifest.get("theta") != 40.0 or manifest.get("dtype") != "float64":
+    if manifest.get("range_contract") != "operator_local_v1" or manifest.get("dtype") != "float64":
         raise ValueError(f"{family} numerical contract differs")
     phases = result.get("phases", {})
     expected_phases = {"ann", "snn"} if calibration_reuse is not None else {"collect", "ann", "snn"}
@@ -87,7 +87,7 @@ def validate_family(root: Path, family: str) -> tuple[list[dict[str, Any]], dict
                 "calibration_dataset" if phase == "collect" else "evaluation_dataset"
             ]["fingerprint"],
             "calibration_sha256": calibration_sha, "log_sha256": evidence["log_sha256"],
-            "elapsed_seconds": evidence["elapsed_seconds"], "theta": 40.0,
+            "elapsed_seconds": evidence["elapsed_seconds"],
             "dtype": "float64", "batch_size": manifest["batch_size"],
         }
         if phase == "collect":

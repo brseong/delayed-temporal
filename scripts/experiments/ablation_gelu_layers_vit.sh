@@ -19,7 +19,6 @@ force="${FORCE:-0}"
 time_noise_std_frac="${TIME_NOISE_STD_FRAC:-3.162e-10}"
 model_id="${MODEL_ID:-/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k}"
 batch_size="${BATCH_SIZE:-32}"
-theta="${THETA:-2000}"
 
 mkdir -p "${log_dir}"
 
@@ -70,7 +69,6 @@ run_condition() {
         --batch_size "${batch_size}" \
         --device cuda \
         --precision float32 \
-        --theta "${theta}" \
         --spiking-layernorm \
         --spiking-attention \
         --spiking-mlp \

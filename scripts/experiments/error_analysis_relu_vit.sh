@@ -66,7 +66,7 @@ for index in "${!expr_names[@]}"; do
         --experiment_name ${model_backend}-${expr_names[$index]} --device ${device} \
         --batch_size ${batch_sizes[$index]} \
         --model_id ${model_ids[$index]} --dataset_id ${dataset_id} \
-        ${flags[$index]} ${ln_flags[$index]} --theta 2000"
+        ${flags[$index]} ${ln_flags[$index]}"
     echo $script
     eval $script
 done

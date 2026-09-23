@@ -36,8 +36,7 @@ def _model(eps: float, flags: tuple[bool, bool, bool], *, spiking: bool = True) 
     """Build actual small ViT modules without loading weights, images, or a device."""
     config = ViTConfig(
         hidden_size=4, intermediate_size=8, num_hidden_layers=2, num_attention_heads=2,
-        image_size=16, patch_size=8, num_channels=3, layer_norm_eps=eps,
-        theta=40.0, tau_s=1.0, use_spiking_layernorm=spiking,
+        image_size=16, patch_size=8, num_channels=3, layer_norm_eps=eps, tau_s=1.0, use_spiking_layernorm=spiking,
         spiking_ln_mul=flags[0], spiking_ln_log=flags[1], spiking_ln_expdiff=flags[2],
     )
     with redirect_stdout(StringIO()):
@@ -67,7 +66,7 @@ def verify_checkpoint_epsilon_all_sites() -> None:
             if spiking:
                 assert isinstance(norm, SpikingLayerNorm)
                 assert norm.clip_margin == 1.0e-5
-                assert norm.theta == 40.0 and norm.tau_s == 1.0
+                assert norm.tau_s == 1.0
                 assert (norm.use_spiking_mul, norm.use_spiking_log,
                         norm.use_spiking_expdiff) == flags
             else:
@@ -115,34 +114,33 @@ def verify_epsilon_is_not_log_floor() -> None:
         assert len(calls) == 3
         variance, positive, negative = calls
         assert layer.eps == eps and layer.clip_margin == 1.0e-5
-        assert variance[1] == PotentialBounds(layer.clip_margin ** 2, 1600.0)
+        log_radius = (0.02 ** 2 + eps) ** 0.5
+        assert variance[1] == PotentialBounds(layer.clip_margin ** 2, log_radius ** 2)
         assert variance[2] == 0.5
         torch.testing.assert_close(variance[0], values.new_tensor([[1.0e-6 + eps]]),
                                    rtol=2.0e-10, atol=1.0e-16)
         for value, domain, tau_s in (positive, negative):
-            assert domain == PotentialBounds(1.0e-5, 40.0)
+            assert domain == PotentialBounds(1.0e-5, log_radius)
             assert tau_s == 1.0
             assert float(value.min()) == 1.0e-5
             assert float(value.max()) == 0.001
 
 
-def verify_centering_clamp_unchanged() -> None:
-    """Preserve the existing magnitude-before-variance approximation unchanged."""
-    values = torch.tensor([[-30.0, 30.0, 30.0, 30.0]], dtype=torch.float64)
-    potential = Potential(values, PotentialBounds(-30.0, 30.0))
+def verify_centering_uses_declared_range() -> None:
+    """Derive the centered interval from the input range without a global cap."""
+    values = torch.tensor([[-60.0, 60.0, 60.0, 60.0]], dtype=torch.float64)
+    potential = Potential(values, PotentialBounds(-60.0, 60.0))
     eps = 1.0e-12
-    centered = (values - values.mean(dim=-1, keepdim=True)).clamp(-40.0, 40.0)
-    variance = (centered.square().mean(dim=-1, keepdim=True) + eps).clamp(1.0e-5 ** 2, 1600.0)
-    clipped_reference = centered / variance.sqrt()
+    centered = values - values.mean(dim=-1, keepdim=True)
+    variance = centered.square().mean(dim=-1, keepdim=True) + eps
+    composed_reference = centered / variance.sqrt()
     dense_reference = nn.functional.layer_norm(values, (4,), eps=eps)
     for flags in FLAGS:
         layer = _model(eps, flags).layernorm
         with torch.no_grad():
             actual = layer(potential).value
-        expected = clipped_reference if any(flags) else dense_reference
+        expected = composed_reference if any(flags) else dense_reference
         torch.testing.assert_close(actual, expected, rtol=2.0e-11, atol=2.0e-11)
-        if any(flags):
-            assert float((actual - dense_reference).abs().max()) > 0.05
 
 
 def main() -> None:
@@ -150,7 +148,7 @@ def main() -> None:
     set_gaussian_time_noise(enabled=False)
     try:
         for check in (verify_checkpoint_epsilon_all_sites, verify_low_variance_reference,
-                      verify_epsilon_is_not_log_floor, verify_centering_clamp_unchanged):
+                      verify_epsilon_is_not_log_floor, verify_centering_uses_declared_range):
             check()
         print("ViT LayerNorm epsilon: four verification groups passed")
     finally:

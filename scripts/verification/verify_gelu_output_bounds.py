@@ -116,7 +116,7 @@ def verify_gelu_output_clamp_counts() -> None:
     """Check strict clipping counts without introducing events or random draws."""
     domain = PotentialBounds(-2.0, 2.0)
     raw = torch.tensor([-0.5, GELU_OUTPUT_MIN, 0.0, 2.0, 2.5], dtype=torch.float64)
-    set_gaussian_time_noise(enabled=True, time_std=0.1, seed=91, device="cpu")
+    set_gaussian_time_noise(enabled=True, time_std_fraction=0.1, seed=91, device="cpu")
     try:
         generator = get_gaussian_time_noise().generator
         before = generator.get_state().clone()
@@ -153,19 +153,19 @@ def verify_gelu_variants() -> None:
             with patch.object(
                 owner, "clamp_gelu_output", lambda raw, bounds: (raw, gelu_output_bounds(bounds))
             ):
-                prior, _ = evaluate(value, domain, theta=40.0, **options)
-            clean, clean_domain = evaluate(value, domain, theta=40.0, **options)
+                prior, _ = evaluate(value, domain, **options)
+            clean, clean_domain = evaluate(value, domain, **options)
             assert torch.equal(clean, prior)
             # Identity-code subtraction retains its existing float32 roundoff.
             tolerance = 2.0e-5 if dtype == torch.float32 else 2.0e-12
             torch.testing.assert_close(clean, expected, rtol=tolerance, atol=tolerance)
             assert clean_domain == PotentialBounds(GELU_OUTPUT_MIN, 3.0)
-            set_gaussian_time_noise(enabled=True, time_std=0.0, seed=92)
-            zero, zero_domain = evaluate(value, domain, theta=40.0, **options)
+            set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=92)
+            zero, zero_domain = evaluate(value, domain, **options)
             torch.testing.assert_close(zero, clean, rtol=tolerance, atol=tolerance)
             assert zero_domain == clean_domain
             set_gaussian_time_noise(enabled=False)
-            replay, replay_domain = evaluate(value, domain, theta=40.0, **options)
+            replay, replay_domain = evaluate(value, domain, **options)
             assert torch.equal(replay, clean) and replay_domain == clean_domain
 
         value = torch.linspace(-3.0, 3.0, 257, dtype=torch.float64)
@@ -176,13 +176,13 @@ def verify_gelu_variants() -> None:
         try:
             # Both calls see the same random stream. Bypassing only the new output
             # clamp must retain every prior event counter and the final RNG state.
-            set_gaussian_time_noise(enabled=True, time_std=0.2, seed=93)
+            set_gaussian_time_noise(enabled=True, time_std_fraction=0.2, seed=93)
             with patch.object(owner, "clamp_gelu_output", unclamped):
-                raw, raw_domain = evaluate(value, domain, theta=40.0, **options)
+                raw, raw_domain = evaluate(value, domain, **options)
             raw_stats = get_gaussian_noise_stats()
             raw_rng = get_gaussian_time_noise().generator.get_state().clone()
-            set_gaussian_time_noise(enabled=True, time_std=0.2, seed=93)
-            noisy, noisy_domain = evaluate(value, domain, theta=40.0, **options)
+            set_gaussian_time_noise(enabled=True, time_std_fraction=0.2, seed=93)
+            noisy, noisy_domain = evaluate(value, domain, **options)
             stats = get_gaussian_noise_stats()
             assert torch.equal(raw_rng, get_gaussian_time_noise().generator.get_state())
             output_stats = stats.pop("gelu.output")
@@ -209,7 +209,6 @@ def verify_vit_gelu_output_bounds() -> None:
             intermediate_size=4,
             num_hidden_layers=1,
             num_attention_heads=1,
-            theta=40.0,
             use_spiking_mlp=use_spiking_mlp,
             spiking_mlp_exact_gelu=exact_gelu,
             hidden_act="gelu",

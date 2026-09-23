@@ -63,8 +63,7 @@ def expect_error(exception, action, message=""):
 
 def config(**changes):
     values = dict(
-        vocab_size=32, n_positions=8, n_embd=8, n_layer=1, n_head=2, n_inner=16,
-        theta=40.0, tau_s=1.0, layer_norm_epsilon=1e-5, clip_margin=1e-5,
+        vocab_size=32, n_positions=8, n_embd=8, n_layer=1, n_head=2, n_inner=16, tau_s=1.0, layer_norm_epsilon=1e-5, clip_margin=1e-5,
         use_spiking_layernorm=True, use_spiking_mlp=True,
         spiking_ln_mul=True, spiking_ln_log=True, spiking_ln_expdiff=True,
         activation_function="gelu_new", resid_pdrop=0.0, embd_pdrop=0.0, attn_pdrop=0.0,
@@ -117,7 +116,7 @@ def verify_topology_and_metadata():
         keys = {(row.module_name, row.tensor_name) for row in rows}
         assert len(rows) == len(keys) == 9 * depth + 1
         assert ("transformer.ln_f", "centered_input") in keys
-        assert all(row.fixed_max > cfg.theta for row in rows if row.tensor_name == "attention_score")
+        assert all(row.fixed_max > 0 for row in rows if row.tensor_name == "attention_score")
         for index in range(depth):
             prefix = f"transformer.h.{index}"
             for name in ("query", "key", "value", "attention_score"):
@@ -141,7 +140,7 @@ def verify_topology_and_metadata():
     assert options["text_calibration_policy_version"] == TEXT_CALIBRATION_POLICY_VERSION
     assert options["layer_norm_eps"] == cfg.layer_norm_epsilon
     assert options["layer_norm_clip_margin"] == cfg.clip_margin
-    assert options["output_bounds_version"] == 3
+    assert options["output_bounds_version"] == 4
     assert options["mlp_activation_implementation"] == GPT2_COMPOSED_GELU_IMPLEMENTATION
     assert identity.dtype == "float64"
     changed = metadata(cfg, dtype="float32")
@@ -243,7 +242,7 @@ def verify_collection_and_replay():
             assert calibration_table_to_dict(state.table) == calibration_table_to_dict(table)
             assert all(item.num_values > 0 for item in get_calibration_clipping_report(state))
             if dtype == torch.float64:
-                set_gaussian_time_noise(enabled=True, time_std=0.0, seed=0, device=torch.device("cpu"))
+                set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=0, device=torch.device("cpu"))
                 with torch.no_grad():
                     zero_noise = model(input_ids=tokens, attention_mask=mask, use_cache=False).logits
                 assert torch.isfinite(zero_noise).all()
@@ -384,7 +383,7 @@ def verify_strict_collection_and_outputs():
         (replace(identity, model_family="bert"), rows, "family"),
         (replace(identity, dtype="float32"), rows, "dtype"),
         (replace(identity, model_options=old_options), rows, "policy"),
-        (replace(identity, theta=20.0), rows, "configuration"),
+        (replace(identity, tau_s=2.0), rows, "configuration"),
     )
     set_gaussian_time_noise(enabled=False)
     for invalid_identity, invalid_rows, message in cases:

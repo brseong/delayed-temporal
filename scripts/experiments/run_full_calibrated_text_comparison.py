@@ -29,8 +29,8 @@ from utils.transforms.functions import GELU_CUBIC_IMPLEMENTATION
 
 
 ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", "/data/delayed-temporal/artifacts"))
-TAG = "conversion_comparison_theta40_calibrated_float64_bounds3_v3"
-GPT2_COMPOSED_GELU_TAG = "gpt2_theta40_calibrated_float64_bounds3_composed_gelu_v1"
+TAG = "conversion_comparison_local_ranges_calibrated_float64_bounds4_v1"
+GPT2_COMPOSED_GELU_TAG = "gpt2_local_ranges_calibrated_float64_bounds4_v1"
 FAMILY_CONFIG = {
     "bert": {"task": "sst2", "evaluation_samples": 872, "sites": 110, "activation": "gelu"},
     "roberta": {"task": "sst2", "evaluation_samples": 872, "sites": 110, "activation": "gelu"},
@@ -40,8 +40,8 @@ FAMILY_CONFIG = {
         "activation_implementation": "composed_gelu_new_v1",
     },
 }
-ROBERTA_LARGE_TAG = "roberta_large_theta40_calibrated_float64_bounds3_v1"
-POWER_REUSE_TAG = "text_power_gelu_theta40_float64_reused_calibration_v1"
+ROBERTA_LARGE_TAG = "roberta_large_local_ranges_calibrated_float64_bounds4_v1"
+POWER_REUSE_TAG = "text_power_gelu_local_ranges_float64_reused_calibration_v1"
 MODEL_CONFIG = {
     **{
         name: {**config, "evaluator_family": name, "tag": TAG}
@@ -162,7 +162,7 @@ def build_commands(args: argparse.Namespace, output: Path) -> dict[str, list[str
     common = [
         args.python_bin, "-u", str(evaluator), "--model_id", args.model_id,
         "--task", family["task"], "--cache-dir", args.cache_dir,
-        "--device", "cuda", "--dtype", "float64", "--theta", "40",
+        "--device", "cuda", "--dtype", "float64",
         "--batch_size", str(BATCH_SIZE), "--max_length", "128",
         "--no-tensorboard", "--no-gaussian-time-noise", "--report-clamp-stats",
         "--spiking-layernorm", "--spiking-attention", "--spiking-mlp",
@@ -174,7 +174,7 @@ def build_commands(args: argparse.Namespace, output: Path) -> dict[str, list[str
         "--evaluation-dataset-fingerprint", args.evaluation_dataset_fingerprint,
     ]
     if evaluator_family == "gpt2":
-        common += ["--tau-s", "1", "--attention-theta", "40"]
+        common += ["--tau-s", "1"]
     calibration = [
         "--calibration-path", str(output / "calibration.json"),
         "--calibration-samples", str(CALIBRATION_SAMPLES), "--calibration-seed", "0",
@@ -198,7 +198,7 @@ def parse_sites(path: Path, expected: int) -> tuple[dict[str, Any], set[str]]:
     if len(rows) != expected or len(sites) != expected:
         raise ValueError("calibration site population differs from the full comparison")
     metadata = table["metadata"]
-    if metadata["dtype"] != "float64" or metadata["theta"] != 40.0:
+    if metadata["dtype"] != "float64":
         raise ValueError("calibration numerical contract differs")
     if dict(metadata["model_options"])["text_calibration_policy_version"] != 1:
         raise ValueError("text calibration policy differs")
@@ -237,7 +237,6 @@ def reused_calibration_evidence(
         } != {
             key: value for key, value in calibration_dataset.items() if key != "path"
         }
-        or source_manifest.get("theta") != 40.0
         or source_manifest.get("dtype") != "float64"
     ):
         raise ValueError("reused calibration identity differs from the evaluation")
@@ -497,11 +496,11 @@ def main() -> None:
         "evaluation_dataset": evaluation_dataset_identity,
         "calibration_samples": CALIBRATION_SAMPLES,
         "evaluation_samples": config["evaluation_samples"],
-        "batch_size": BATCH_SIZE, "theta": 40.0, "dtype": "float64",
+        "batch_size": BATCH_SIZE, "range_contract": "operator_local_v1", "dtype": "float64",
         "tau_s": 1.0, "tau_m": 1.0, "calibration_seed": 0,
         "calibration_bins": 2048, "calibration_quantiles": [0.0, 1.0],
         "calibration_margin_fraction": 0.05, "text_calibration_policy_version": 1,
-        "output_bounds_version": 3, "noise": False, "wandb": False,
+        "output_bounds_version": 4, "noise": False, "wandb": False,
         "tensorboard": False, "host_label": args.host_label, "physical_gpu": args.gpu,
         "activation": config["activation"],
         "activation_implementation": config.get("activation_implementation", "model_default"),

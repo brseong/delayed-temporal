@@ -15,7 +15,7 @@ import torch
 from torch import Tensor
 
 
-CALIBRATION_FORMAT_VERSION = 1
+CALIBRATION_FORMAT_VERSION = 2
 CALIBRATION_COMPATIBLE_SOURCE_COMMIT_ENV = (
     "DT_CALIBRATION_COMPATIBLE_SOURCE_COMMIT"
 )
@@ -1336,7 +1336,6 @@ class CalibrationMetadata:
     # Numerical and TTFS parameters affect representable activations and therefore
     # must match before a persisted table can be reused.
     dtype: str
-    theta: float
     tau_s: float
     tau_m: float
     clip_margin: float
@@ -1402,7 +1401,7 @@ def _validate_calibration_metadata(metadata: CalibrationMetadata) -> None:
 
     # Numerical settings identify the physical and floating-point configuration.
     # Booleans are excluded even though Python treats them as integer subclasses.
-    positive_fields = ("theta", "tau_s", "tau_m")
+    positive_fields = ("tau_s", "tau_m")
     for field_name in positive_fields:
         value = getattr(metadata, field_name)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -1416,11 +1415,8 @@ def _validate_calibration_metadata(metadata: CalibrationMetadata) -> None:
     if (
         not math.isfinite(metadata.clip_margin)
         or metadata.clip_margin < 0.0
-        or metadata.clip_margin >= metadata.theta
     ):
-        raise ValueError(
-            "metadata clip_margin must be finite, non-negative, and below theta"
-        )
+        raise ValueError("metadata clip_margin must be finite and non-negative")
 
     # Capacity fields are optional across model families, but supplied dimensions
     # must be strictly positive integers and remain transitively immutable tuples.
@@ -1942,7 +1938,6 @@ def calibration_table_from_dict(payload: object) -> CalibrationTable:
             metadata_payload["preprocessing"], "metadata.preprocessing"
         ),
         dtype=require_string(metadata_payload["dtype"], "metadata.dtype"),
-        theta=require_number(metadata_payload["theta"], "metadata.theta"),
         tau_s=require_number(metadata_payload["tau_s"], "metadata.tau_s"),
         tau_m=require_number(metadata_payload["tau_m"], "metadata.tau_m"),
         clip_margin=require_number(

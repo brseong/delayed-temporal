@@ -46,13 +46,11 @@ def verify_gelu_operator_ablation() -> None:
     reference_value, reference_domain = gelu_approximation(
         input_value,
         domain,
-        theta=2000.0,
     )
     exact_input = input_value.to(torch.float64)
     exact_value, _ = gelu_approximation(
         exact_input,
         domain,
-        theta=2000.0,
     )
     cubic_argument = (2.0 / torch.pi) ** 0.5 * (
         exact_input + 0.044715 * exact_input.pow(3)
@@ -71,7 +69,7 @@ def verify_gelu_operator_ablation() -> None:
     for tau_s in (0.5, 1.0, 2.0):
         set_gaussian_time_noise(
             enabled=True,
-            time_std=0.0,
+            time_std_fraction=0.0,
             seed=5,
             device="cpu",
         )
@@ -79,7 +77,6 @@ def verify_gelu_operator_ablation() -> None:
             exact_input,
             domain,
             tau_s=tau_s,
-            theta=2000.0,
         )
         torch.testing.assert_close(
             scaled_value,
@@ -101,7 +98,6 @@ def verify_gelu_operator_ablation() -> None:
                 input_value,
                 domain,
                 dense_operators=frozenset(selected),
-                theta=2000.0,
             )
             torch.testing.assert_close(
                 actual_value,
@@ -122,7 +118,6 @@ def verify_gelu_operator_ablation() -> None:
             input_value,
             domain,
             dense_operators=frozenset({"multiplicaton"}),
-            theta=2000.0,
         )
     except ValueError:
         pass
@@ -154,7 +149,7 @@ def verify_gelu_operator_event_selection() -> None:
             selected = frozenset(selected_tuple)
             set_gaussian_time_noise(
                 enabled=True,
-                time_std=0.0,
+                time_std_fraction=0.0,
                 seed=7,
                 device="cpu",
             )
@@ -162,7 +157,6 @@ def verify_gelu_operator_event_selection() -> None:
                 input_value,
                 domain,
                 dense_operators=selected,
-                theta=2000.0,
             )
             stats = get_gaussian_noise_stats()
 
@@ -217,7 +211,7 @@ def verify_gelu_operator_event_selection() -> None:
             selected = frozenset(selected_tuple)
             set_gaussian_time_noise(
                 enabled=True,
-                time_std=1.2648e-6,
+                time_std_fraction=1.2648e-6,
                 seed=11,
                 device="cpu",
             )
@@ -225,7 +219,6 @@ def verify_gelu_operator_event_selection() -> None:
                 input_value,
                 domain,
                 dense_operators=selected,
-                theta=2000.0,
             )
             generator = get_gaussian_time_noise().generator
             assert isinstance(generator, torch.Generator)

@@ -34,7 +34,7 @@ def _inputs():
     key = torch.tensor([[[[6.0, -1.0], [-2.0, 5.0], [1.0, 1.0]]]], dtype=torch.float64)
     value = torch.tensor([[[[9.0, -7.0], [-5.0, 8.0], [3.0, -1.0]]]], dtype=torch.float64)
     options = dict(
-        theta=2.0, source_length_max=3,
+        source_length_max=3,
         query_bounds=PotentialBounds(-4.0, 4.0),
         key_bounds=PotentialBounds(-8.0, 8.0),
         value_bounds=PotentialBounds(-12.0, 12.0),
@@ -44,7 +44,7 @@ def _inputs():
 
 # @lat: [[calibration#Layer-wise Calibration#Frozen Execution#ViT Attention Bound Transfer]]
 def verify_explicit_attention_bounds() -> None:
-    """Retain distinct bounds above global theta without an extra key clamp."""
+    """Retain distinct query, key, and value bounds without an extra shared clamp."""
     query, key, value, options = _inputs()
     expected = torch.softmax(query @ key.transpose(-2, -1) / math.sqrt(2.0), -1) @ value
     with patch.object(
@@ -55,31 +55,28 @@ def verify_explicit_attention_bounds() -> None:
     arguments = multiply.call_args.args
     assert arguments[1] == options["query_bounds"]
     assert arguments[3] == options["key_bounds"]
-    assert arguments[4] == 8.0
     torch.testing.assert_close(result, expected, rtol=1.0e-11, atol=1.0e-11)
     assert bool((result.abs() > 2.0).any())
-    legacy = attention.spiking_scaled_dot_product_attention(
-        query, key, value, theta=2.0, source_length_max=3,
-    )
-    assert bool((legacy.abs() <= 2.0).all())
-    assert not torch.allclose(result, legacy)
+    try:
+        attention.spiking_scaled_dot_product_attention(
+            query, key, value, source_length_max=3,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("attention accepted tensors without declared local bounds")
     assert get_gaussian_noise_stats() == {}
 
 
 def verify_score_numeric_ceiling() -> None:
-    """Remove only the new path's global threshold cap, retaining numeric safety."""
+    """Retain a dtype-derived score ceiling independent of potential ranges."""
     for dtype in (torch.float32, torch.float64):
-        legacy = attention.attention_score_representability_bounds(2.0, 1.0, 197, dtype)
-        numerical = attention.attention_score_representability_bounds(
-            2.0, 1.0, 197, dtype, cap_by_theta=False,
-        )
+        numerical = attention.attention_score_representability_bounds(1.0, 197, dtype)
         expected = (-math.log(torch.finfo(dtype).tiny) - math.log(197) - 2.0) / 2.0
-        assert legacy == PotentialBounds(-2.0, 2.0)
         assert math.isclose(numerical.max, expected)
         assert numerical.min == -numerical.max
-        assert numerical.max > legacy.max
         assert numerical is attention.attention_score_representability_bounds(
-            2.0, 1.0, 197, dtype, cap_by_theta=False,
+            1.0, 197, dtype,
         )
 
 
@@ -88,14 +85,14 @@ def verify_explicit_gaussian_replay() -> None:
     query, key, value, options = _inputs()
     clean = attention.spiking_scaled_dot_product_attention(query, key, value, **options)
     try:
-        set_gaussian_time_noise(enabled=True, time_std=0.0, deadline_margin=0.0,
+        set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, deadline_margin_std_ratio=0.0,
                                 seed=0, device="cpu")
         zero = attention.spiking_scaled_dot_product_attention(query, key, value, **options)
         torch.testing.assert_close(zero, clean, rtol=1.0e-10, atol=1.0e-10)
         for seed in (0, 1, 2):
             results, statistics, states = [], [], []
             for _ in range(2):
-                set_gaussian_time_noise(enabled=True, time_std=0.01, deadline_margin=0.04,
+                set_gaussian_time_noise(enabled=True, time_std_fraction=0.01, deadline_margin_std_ratio=0.04,
                                         seed=seed, device="cpu")
                 results.append(attention.spiking_scaled_dot_product_attention(
                     query, key, value, **options,
@@ -124,7 +121,7 @@ def verify_invalid_input_bounds() -> None:
     ]
     try:
         for bad in invalid:
-            set_gaussian_time_noise(enabled=True, time_std=0.01, seed=0, device="cpu")
+            set_gaussian_time_noise(enabled=True, time_std_fraction=0.01, seed=0, device="cpu")
             state = get_gaussian_time_noise().generator.get_state().clone()
             try:
                 attention.spiking_scaled_dot_product_attention(query, key, value, **bad)
@@ -144,7 +141,7 @@ def verify_vit_projection_collection_and_transfer() -> None:
     from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
 
     config = ViTConfig(hidden_size=2, num_attention_heads=1, image_size=4,
-                       patch_size=2, theta=2.0, tau_s=1.0)
+                       patch_size=2, tau_s=1.0)
     config._attn_implementation = "spiking_sdpa"
     module = modeling.ViTSelfAttention(config).double().eval()
     with torch.no_grad():
@@ -154,14 +151,11 @@ def verify_vit_projection_collection_and_transfer() -> None:
             projection.bias.zero_()
     metadata = CalibrationMetadata(
         model_family="vit", model_id="tiny-attention", dataset_id="test",
-        dataset_split="train", preprocessing="fixed", dtype="float64",
-        theta=2.0, tau_s=1.0, tau_m=1.0, clip_margin=1.0e-5,
+        dataset_split="train", preprocessing="fixed", dtype="float64", tau_s=1.0, tau_m=1.0, clip_margin=1.0e-5,
         max_sequence_length=None, input_shape=(3, 4, 4),
         model_options=(("vit_calibration_policy_version", 2),),
     )
-    numeric = attention.attention_score_representability_bounds(
-        2.0, 1.0, 5, torch.float64, cap_by_theta=False,
-    )
+    numeric = attention.attention_score_representability_bounds(1.0, 5, torch.float64)
     specs = [
         LayerCalibrationSpec("", name, CalibrationRangePolicy.SIGNED_SYMMETRIC,
                              0.0, 1.0, 0.05)
@@ -203,7 +197,7 @@ def verify_vit_projection_collection_and_transfer() -> None:
         finally:
             clear_model_calibration(module, expected_state=runtime)
         legacy, _ = module(hidden)
-        assert legacy.domain == PotentialBounds(-2.0, 2.0)
+        assert legacy.domain == PotentialBounds(-12.0, 12.0)
         assert not vit_calibration_uses_explicit_bounds(module)
 
 

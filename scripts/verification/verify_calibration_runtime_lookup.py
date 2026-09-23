@@ -26,8 +26,7 @@ from utils.transforms.types import PotentialBounds
 def _table(site_count=1, bins=8):
     metadata = core.CalibrationMetadata(
         model_family="bert", model_id="fixture", dataset_id="fixture",
-        dataset_split="train", preprocessing="none", dtype="float64",
-        theta=40.0, tau_s=1.0, tau_m=1.0, clip_margin=1e-5,
+        dataset_split="train", preprocessing="none", dtype="float64", tau_s=1.0, tau_m=1.0, clip_margin=1e-5,
         max_sequence_length=4, input_shape=None, model_options=(),
     )
     histogram = core.CalibrationHistogram(

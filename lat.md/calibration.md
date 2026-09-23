@@ -12,6 +12,14 @@ Calibration is also a deliberate range-reset mechanism across depth. When a laye
 
 If layer $i$ has Lipschitz constant $L_i$ and introduces clipping error $e_i$, the local error satisfies $\lVert\delta x_{i+1}\rVert\le L_i\lVert\delta x_i\rVert+\lVert e_i\rVert$. Layer-wise clipping rates and end-to-end validation therefore determine whether each fixed rail is acceptable.
 
+## Global Range Removal
+
+The maintained implementation has no model-wide `theta` or attention-specific threshold setting; every temporal operator consumes an analytic or frozen calibrated local range.
+
+ViT, BERT, RoBERTa, and GPT-2 configs reject legacy `theta` keys, and GPT-2 also rejects `attention_theta`. Evaluator parsers expose neither option. [[scripts/verification/verify_no_global_theta.py#verify_production_surface]] audits active code for forbidden arguments, assignments, keywords, and CLI flags so later code cannot silently restore the removed setting.
+
+Calibration schema version 2 omits the former scalar identity. Old calibration tables and results remain historical artifacts but cannot be loaded by maintained evaluators. This range-contract change requires fresh calibration before new accuracy or robustness evidence is promoted.
+
 ## Two-pass Collection
 
 The first pass records signed extrema and the second pass replays the same activation population into histogram bins fixed by those extrema.
@@ -116,13 +124,13 @@ GELU outputs use a constant lower endpoint and the nonnegative input upper endpo
 
 The fixed clean minimum is enforced as an output limit under timing noise, not assumed to follow automatically from a perturbed gate. This changes noisy output clamping and can change later approximation through narrower bounds. ViT and GPT-2 calibration metadata include `gelu_output_min`, rejecting tables collected under the former output rule. Existing frozen experiment checkouts and their results remain unchanged and must not be combined with results from this policy; a new calibrated evaluation requires new collection.
 
-ViT and GPT-2 metadata require `output_bounds_version=3`. Version 2 introduced the attention, LayerNorm affine, Swish, and intermediate activation bounds in [[bounds-audit#2026-09-14 Bound Corrections]]; version 3 additionally changes the LayerNorm log upper endpoint as described below. Matching only the GELU floor is insufficient: missing, older, or unknown policy versions fail metadata comparison.
+ViT and GPT-2 metadata require `output_bounds_version=4`. Version 2 introduced the attention, LayerNorm affine, Swish, and intermediate activation bounds in [[bounds-audit#2026-09-14 Bound Corrections]]; version 3 changed the LayerNorm upper endpoint, and version 4 removes the global range setting. Missing, older, or unknown policy versions fail metadata comparison.
 
 Verification checks the safe lower endpoint, upper-endpoint propagation and the all-negative-input case, batch-independent domains, clean reference values, noisy clipping counts, unchanged random state, and matching GELU variants on CPU.
 
 ### LayerNorm Positive Input Range
 
-LayerNorm uses `[0, theta]` for actual magnitudes and `[clip_margin, theta]` for logarithmic inputs. The positive floor does not reduce the upper endpoint; constructor and frozen bounds require `0 < clip_margin < theta`.
+LayerNorm uses `[0, r]` for actual magnitudes, where $r$ is the selected centered-input radius. Logarithmic inputs use `[clip_margin, sqrt(r^2 + eps)]`, preserving a common residual/variance reference without clipping away the added stabilizer.
 
 Both Gaussian and deterministic execution use these domains in [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm]]. The variance range and log time window continue to derive from the log input endpoints, with half the magnitude encoder's time constant for variance. The default floor `1e-5`, variance `eps`, inactive output masks, final normalized and affine bounds, and GELU settings are unchanged. The fully dense ablation retains ordinary PyTorch normalization without timing events.
 
@@ -130,7 +138,7 @@ Both Gaussian and deterministic execution use these domains in [[utils/transform
 
 Direct logarithms may round just beyond the declared time window in float32, including at `tau_s=0.75`. Both direct-log ablations clamp their computed times to the existing window before use; the endpoint formulas and observation deadline do not change. Verification includes `tau_s=1` and `0.75`.
 
-[[utils/transforms/functions.py#OUTPUT_BOUNDS_VERSION]] is 3 in ViT and GPT-2 metadata. Verification also checks persisted current-table reuse and rejection of version 2 tables under the new implementation. Existing frozen checkouts, calibration tables, and experiment results retain their earlier definition. New evaluation requires new calibration collection; this code change does not restart experiments or change manuscript claims.
+[[utils/transforms/functions.py#OUTPUT_BOUNDS_VERSION]] is 4 in ViT and GPT-2 metadata. Verification checks current-table reuse and rejection of earlier tables. Existing frozen checkouts and experiment results retain their earlier definition, but new evaluation requires new calibration collection.
 
 ### ViT LayerNorm Epsilon
 
@@ -152,27 +160,27 @@ The existing two residual ranges, first MLP affine output and attention score re
 
 Both training passes with noise disabled observe unclamped values and use the same static collection domains. Q/K/V use symmetric envelopes of their projection bounds computed from parameters; the input after mean subtraction uses the incoming interval width as a conservative symmetric radius. Final ranges are installed together only after both passes finish. Min/max selection adds 5% of the full symmetric width on each side. There is no sequential calibration or adjustment based on accuracy.
 
-The metadata key `vit_calibration_policy_version=2`, checkpoint `layer_norm_eps`, and actual `layer_norm_clip_margin` distinguish new execution from archived tables. Output bounds version 3 is unchanged. Nonfinite intervals, intervals with zero width, asymmetric intervals and intervals not representable in the execution dtype fail with the site name; a LayerNorm upper endpoint must exceed its positive log floor. Frozen installation validates these limits and actual LayerNorm settings before publishing bindings. Missing or different policy metadata is rejected by the current evaluator.
+The metadata key `vit_calibration_policy_version=2`, checkpoint `layer_norm_eps`, and actual `layer_norm_clip_margin` distinguish execution from archived tables. Output bounds version 4 and calibration schema version 2 identify the local-range contract. Nonfinite, zero-width, asymmetric, or dtype-unrepresentable intervals fail with the site name.
 
 [[scripts/verification/verify_vit_calibration_policy2.py#verify_topology_and_ablations]] checks actual model discovery, counts for active paths and final LayerNorm coverage. Other checks in the same verifier cover invalid ranges and identity, raw collection, counts for both passes, reuse of fixed domains and persistence. The separate execution and smoke contract is [[vit-calibration-policy2#ViT Calibration Policy 2 Implementation]].
 
 ### ViT Attention Bound Transfer
 
-Calibrated ViT attention consumes the Q/K/V ranges passed from its projections rather than replacing them with the global theta interval. Omitted explicit bounds retain the existing uncalibrated behavior and behavior of other model families.
+Maintained attention consumes the Q/K/V ranges passed from its projections and never replaces them with a global interval. The three explicit ranges are required together.
 
-`query_bounds`, `key_bounds` and `value_bounds` are optional together and invalid when only partly supplied. The selected K radius drives its multiplication encoder; V uses its selected interval and matching zero-reference time for reconstruction. The attention output retains the selected V interval. This does not change the general multiplication operator or redefine the global noise standard deviation from local windows.
+The selected K range drives its multiplication encoder; V uses its selected interval and matching zero-reference time for reconstruction. The attention output retains the selected V interval. Timing-noise fractions are applied separately to each resulting local encoder window.
 
-Policy 2 attention score calibration retains the dtype, temporal scale and numerical ceiling for the maximum token count but removes its additional global theta ceiling. The old helper behavior remains the default for callers without explicit ranges. Clean execution, Gaussian execution with zero standard deviation, and stochastic execution all consume the same fixed input and output bounds.
+Policy 2 attention score calibration retains the dtype, temporal scale, and numerical ceiling for the maximum token count. Clean execution, Gaussian execution with zero standard deviation, and stochastic execution all consume the same fixed input and output bounds.
 
-[[scripts/verification/verify_vit_attention_calibrated_bounds.py#verify_explicit_attention_bounds]] checks distinct ranges exceeding global theta and correct reconstruction. The companion cases cover the numerical score limit, seeded replay, invalid inputs rejected before random draws, projection collection before clamping and actual ViT range transfer.
+[[scripts/verification/verify_vit_attention_calibrated_bounds.py#verify_explicit_attention_bounds]] checks distinct projection ranges and correct reconstruction. Companion cases cover the numerical score limit, seeded replay, invalid inputs rejected before random draws, projection collection before clamping, and actual ViT range transfer.
 
 ### ViT LayerNorm Internal Calibration
 
 Each active ViT LayerNorm uses one selected bound for the input after mean subtraction and all dependent square, variance and log domains. The learned affine stage and final output bounds keep their separate existing configuration.
 
-[[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#_centered_input_domains]] resolves static collection or frozen selected ranges for both deterministic and Gaussian execution. The nonnegative value range starts at zero; the log input lower endpoint stays `1e-5`, with variance lower endpoint `1e-10`. Squaring uses the selected internal radius, not global theta. The same limited values supply the square/variance and log paths, preserving intentional clipping.
+[[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#_centered_input_domains]] resolves static collection or frozen selected ranges for both deterministic and Gaussian execution. The nonnegative value range starts at zero; the log input lower endpoint stays `1e-5`, with variance lower endpoint `1e-10`. Squaring uses the selected internal radius. The epsilon-aware log upper endpoint prevents the stabilizer from exceeding its declared range.
 
-The selected radius never overwrites `self.theta`, so a narrow internal interval cannot newly clip the pretrained affine scale. Checkpoint eps is added to variance independently of the log floor. Fully dense ablations retain ordinary LayerNorm and have no unused internal calibration site. Unbound paths and paths in other model families retain their old interval behavior.
+The selected radius affects only normalization internals; the learned affine scale retains its own frozen parameter range. Fully dense ablations retain ordinary LayerNorm and have no unused internal calibration site.
 
 [[scripts/verification/verify_layernorm_calibrated_bounds.py#verify_selected_ranges_and_ablations]] checks broad and narrow selected bounds, all eight ablations and a scale larger than the internal radius. Additional cases cover raw collection, partitioning, old behavior, epsilon/floor separation, invalid intervals, noisy replay and unchanged final output bounds.
 
@@ -250,11 +258,11 @@ $$
 c_{\mathrm{repr}}=\frac{\tau}{2}\left(-\log f_{\min}-\log S_{\max}-\eta\right).
 $$
 
-For legacy callers the frozen layer radius is $c_\ell=\min(c_{\ell,\mathrm{cal}},c_{\mathrm{repr}},\theta)$. ViT policy 2 and text policy 1 omit the final theta limit, while retaining the statistical and numerical limits. Collection observes raw scores but executes softmin on the representable interval; validation and inference clamp directly to $[-c_\ell,c_\ell]$ and count strict excursions without updating it.
+The frozen layer radius is $c_\ell=\min(c_{\ell,\mathrm{cal}},c_{\ell,\mathrm{repr}})$. Collection observes raw scores but executes softmin on the representable interval; validation and inference clamp directly to $[-c_\ell,c_\ell]$ and count strict excursions without updating it.
 
 Masked positions are overwritten with $+c_\ell$ after score clamping in the negated-score convention. The artifact persists endpoint-selection parameters, margin, symmetric analytic ceiling, dtype, model-wide `tau_s`, and $S_{\max}$; attention uses $\tau=\tau_s$, and the common metadata schema mirrors that value in its `tau_m` slot. A precision, scale, or capacity change invalidates reuse.
 
-Without a calibration binding, attention uses the symmetric interval limited by its analytic score bounds, configured theta, dtype, time constant, and maximum source count. It does not measure current scores to choose that interval.
+Without a calibration binding, attention uses the symmetric interval limited by analytic Q/K bounds, dtype, time constant, and maximum source count. It does not measure current scores to choose that interval.
 
 The maintained scalar bound contract supports one calibrated radius per attention layer. Per-head calibration would require vector-valued domain metadata and is outside this lifecycle.
 

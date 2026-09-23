@@ -31,7 +31,7 @@ from utils.transforms.noise import (
 from utils.transforms.types import PotentialBounds
 
 
-# @lat: [[evaluation#Evaluation and Verification#Noise and Ablation Sweeps#GELU Cubic Construction Comparison]]
+# @lat: [[evaluation#Evaluation and Verification#Historical Noise and Ablation Sweeps#GELU Cubic Construction Comparison]]
 def verify_phi_nl_psi_ed_cube() -> None:
     """Check signed values, scale invariance, bounds, and ViT patch isolation."""
     set_gaussian_time_noise(enabled=False)
@@ -44,7 +44,6 @@ def verify_phi_nl_psi_ed_cube() -> None:
             input64,
             domain,
             tau_s=tau_s,
-            theta=2000.0,
             magnitude_floor=1.0e-5,
         )
         torch.testing.assert_close(
@@ -66,36 +65,32 @@ def verify_phi_nl_psi_ed_cube() -> None:
         near_zero,
         domain,
         tau_s=1.0,
-        theta=2000.0,
         magnitude_floor=1.0e-5,
     )
     torch.testing.assert_close(zeroed, torch.zeros_like(zeroed))
 
-    threshold_limited, threshold_limited_domain = phi_nl_psi_ed_cube(
+    range_limited, range_limited_domain = phi_nl_psi_ed_cube(
         torch.tensor([-3.0, -2.0, 0.0, 2.0, 3.0], dtype=torch.float64),
         domain,
         tau_s=1.0,
-        theta=2.0,
         magnitude_floor=1.0e-5,
     )
     torch.testing.assert_close(
-        threshold_limited,
-        torch.tensor([-8.0, -8.0, 0.0, 8.0, 8.0], dtype=torch.float64),
+        range_limited,
+        torch.tensor([-27.0, -8.0, 0.0, 8.0, 27.0], dtype=torch.float64),
         rtol=2.0e-13,
         atol=3.0e-13,
     )
-    assert threshold_limited_domain == PotentialBounds(-8.0, 8.0)
+    assert range_limited_domain == PotentialBounds(-27.0, 27.0)
 
     input32 = torch.linspace(-3.0, 3.0, 6001, dtype=torch.float32)
     alternative, alternative_domain = gelu_with_phi_nl_psi_ed_cube(
         input32,
         domain,
-        theta=2000.0,
     )
     baseline, baseline_domain = gelu_approximation(
         input32,
         domain,
-        theta=2000.0,
     )
     torch.testing.assert_close(
         alternative,
@@ -108,7 +103,6 @@ def verify_phi_nl_psi_ed_cube() -> None:
     multiplication, multiplication_domain = gelu_with_multiplication_cube(
         input32,
         domain,
-        theta=2000.0,
     )
     torch.testing.assert_close(
         baseline,
@@ -136,13 +130,12 @@ def verify_phi_nl_psi_ed_cube() -> None:
     finally:
         modeling_spiking_vit.gelu_approximation = original_vit_symbol
 
-    set_gaussian_time_noise(enabled=True, time_std=0.0, seed=0, device="cpu")
+    set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=0, device="cpu")
     try:
         gaussian_zero, gaussian_domain = phi_nl_psi_ed_cube(
             input32,
             domain,
             tau_s=1.0,
-            theta=2000.0,
             magnitude_floor=1.0e-5,
         )
         stats = get_gaussian_noise_stats()
@@ -156,7 +149,6 @@ def verify_phi_nl_psi_ed_cube() -> None:
             input32,
             domain,
             tau_s=1.0,
-            theta=2000.0,
             magnitude_floor=1.0e-5,
         )
         torch.testing.assert_close(gaussian_zero, deterministic)
@@ -166,8 +158,8 @@ def verify_phi_nl_psi_ed_cube() -> None:
         for seed in (17, 17, 18):
             set_gaussian_time_noise(
                 enabled=True,
-                time_std=1.0e-3,
-                deadline_margin=4.0e-3,
+                time_std_fraction=1.0e-3,
+                deadline_margin_std_ratio=4.0e-3,
                 seed=seed,
                 device="cpu",
             )
@@ -175,7 +167,6 @@ def verify_phi_nl_psi_ed_cube() -> None:
                 input32,
                 domain,
                 tau_s=1.0,
-                theta=2000.0,
                 magnitude_floor=1.0e-5,
             )
             noisy_replicas.append(noisy)

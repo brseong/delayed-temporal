@@ -101,10 +101,8 @@ def text_calibration_specs(
                 for tensor in ("query", "key", "value"):
                     add(name, tensor)
                 ceiling = attention_score_representability_bounds(
-                    float(getattr(config, "theta", 10.0)),
                     float(getattr(config, "tau_s", 1.0)),
                     int(config.max_position_embeddings), module.query.weight.dtype,
-                    cap_by_theta=False,
                 )
                 add(name, "attention_score", ceiling)
         elif isinstance(module, (BertIntermediate, RobertaIntermediate)):
@@ -208,7 +206,7 @@ def build_text_calibration_metadata(
         model_family=model_family, model_id=model_id, dataset_id=dataset_id,
         dataset_split=calibration_split,
         preprocessing=json.dumps(preprocessing, sort_keys=True, separators=(",", ":"), allow_nan=False),
-        dtype=dtype, theta=float(getattr(config, "theta")), tau_s=float(getattr(config, "tau_s")),
+        dtype=dtype, tau_s=float(getattr(config, "tau_s")),
         tau_m=float(getattr(config, "tau_s")), clip_margin=float(getattr(config, "clip_margin", 1.0e-5)),
         max_sequence_length=max_length, input_shape=(max_length,),
         model_options=tuple(sorted(options.items())),

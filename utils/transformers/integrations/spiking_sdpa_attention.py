@@ -1,7 +1,7 @@
 import torch
 import math
 import wandb
-from functools import cache, lru_cache
+from functools import cache
 from typing import cast
 
 from transformers.utils.import_utils import is_torch_greater_or_equal
@@ -46,53 +46,11 @@ def use_gqa_in_sdpa(attention_mask: torch.Tensor | None, key: torch.Tensor) -> b
     return _is_torch_greater_or_equal_than_2_5 and attention_mask is None
 
 
-@lru_cache(maxsize=None, typed=True)
-def attention_output_bounds(
-    theta: float,
-    source_length_max: int,
-) -> PotentialBounds:
-    """Return the fixed value interval for attention output.
-
-    With noise and dropout disabled, normalized nonnegative weights preserve the
-    encoded value interval ``[-theta, theta]``. Both execution paths enforce that
-    same interval on the output; noisy weights and value readouts need not preserve
-    a weighted average. Source capacity remains validated but does not widen the
-    output interval. Identical configuration pairs reuse one immutable object.
-
-    Args:
-        theta: Positive finite magnitude of the symmetric value rail.
-        source_length_max: Positive configured maximum number of source positions.
-
-    Returns:
-        The symmetric fixed output interval ``[-theta, theta]``.
-
-    Raises:
-        TypeError: If ``source_length_max`` is not an integer.
-        ValueError: If either input cannot define finite, non-empty output rails.
-    """
-    # Keep source-capacity validation even though only theta defines this interval.
-    theta_value = float(theta)
-    if not math.isfinite(theta_value) or theta_value <= 0.0:
-        raise ValueError("attention theta must be finite and positive")
-    if isinstance(source_length_max, bool) or not isinstance(
-        source_length_max,
-        int,
-    ):
-        raise TypeError("attention source_length_max must be an integer")
-    if source_length_max <= 0:
-        raise ValueError("attention source_length_max must be positive")
-
-    return PotentialBounds(-theta_value, theta_value)
-
-
 @cache
 def attention_score_representability_bounds(
-    theta: float,
     tau: float,
     source_length_max: int,
     dtype: torch.dtype,
-    *,
-    cap_by_theta: bool = True,
 ) -> PotentialBounds:
     """Return the largest symmetric softmin score rail representable by a dtype.
 
@@ -102,16 +60,12 @@ def attention_score_representability_bounds(
     a configuration-derived ceiling for calibration and fallback execution.
 
     Args:
-        theta: Positive legacy score cap, used only when ``cap_by_theta`` is true.
         tau: Positive temporal scale used by exponential normalization.
         source_length_max: Configured maximum denominator population.
         dtype: Floating payload dtype used by the softmin implementation.
-        cap_by_theta: Retain the legacy global threshold ceiling when true. Explicit
-            calibrated ViT bounds use only the numerical representability ceiling.
 
     Returns:
-        A symmetric immutable range limited by numerical representability and,
-        optionally, the legacy global threshold.
+        A symmetric immutable range limited by numerical representability.
 
     Raises:
         TypeError: If capacity or dtype has an invalid type.
@@ -121,12 +75,7 @@ def attention_score_representability_bounds(
     # Validate all configuration scalars before evaluating logarithms. The maximum
     # source length is used instead of the current request so one attention layer
     # retains the same cap for short and full-capacity sequences.
-    theta_value = float(theta)
     tau_value = float(tau)
-    if not isinstance(cap_by_theta, bool):
-        raise TypeError("attention score cap_by_theta must be boolean")
-    if not math.isfinite(theta_value) or theta_value <= 0.0:
-        raise ValueError("attention score theta must be finite and positive")
     if not math.isfinite(tau_value) or tau_value <= 0.0:
         raise ValueError("attention score tau must be finite and positive")
     if isinstance(source_length_max, bool) or not isinstance(source_length_max, int):
@@ -146,7 +95,7 @@ def attention_score_representability_bounds(
         - _SOFTMIN_LOG_SAFETY_MARGIN
     )
     representable_radius = 0.5 * tau_value * log_budget
-    radius = min(theta_value, representable_radius) if cap_by_theta else representable_radius
+    radius = representable_radius
 
     # A non-positive budget means this dtype and sequence capacity cannot represent
     # even a nontrivial symmetric softmin rail under the current temporal scale.
@@ -268,7 +217,6 @@ def spiking_scaled_dot_product_attention(
     is_causal: bool = False,
     enable_gqa: bool = False,
     tau: float = 1.0,
-    theta: float = 10.0,
     training: bool = False,
     source_length_max: int | None = None,
     score_calibration_module: torch.nn.Module | None = None,
@@ -294,15 +242,13 @@ def spiking_scaled_dot_product_attention(
         is_causal: Whether to suppress source positions after each target index.
         enable_gqa: Request grouped-query attention, which is not implemented here.
         tau: Temporal scale used by the softmin composition.
-        theta: Global threshold used for legacy input bounds when explicit bounds
-            are omitted. Explicit bounds set their own fixed encoding intervals.
         training: Training-state flag forwarded to deterministic value encoding.
         source_length_max: Configured source-position maximum used for capacity
             validation and the representable score interval, not output widening.
         score_calibration_module: Optional bound attention module owning the frozen
             ``attention_score`` calibration site.
         query_bounds: Explicit symmetric query bounds. All three input bounds must
-            be supplied together; omission preserves the legacy global interval.
+            be supplied together.
         key_bounds: Explicit symmetric bounds defining the key encoding interval.
         value_bounds: Explicit symmetric bounds shared by value encoding and output.
 
@@ -324,26 +270,20 @@ def spiking_scaled_dot_product_attention(
     # Output bounds never depend on the current tensor length.
     if source_length_max is None:
         raise ValueError("attention source_length_max must be configured")
-    output_domain = attention_output_bounds(theta, source_length_max)
     supplied_bounds = (query_bounds, key_bounds, value_bounds)
     explicit_bounds = all(bounds is not None for bounds in supplied_bounds)
-    if any(bounds is not None for bounds in supplied_bounds) and not explicit_bounds:
+    if not explicit_bounds:
         raise ValueError("attention query, key, and value bounds must be supplied together")
-    if explicit_bounds:
-        domain_q = validate_symmetric_encoder_bounds(
-            query_bounds, query.dtype, name="query",
-        )
-        domain_k = validate_symmetric_encoder_bounds(
-            key_bounds, key.dtype, name="key",
-        )
-        domain_v = validate_symmetric_encoder_bounds(
-            value_bounds, value.dtype, name="value",
-        )
-        output_domain = domain_v
-        key_encoder_radius = float(domain_k.max)
-    else:
-        domain_q = domain_k = domain_v = PotentialBounds(-theta, theta)
-        key_encoder_radius = float(theta)
+    domain_q = validate_symmetric_encoder_bounds(
+        query_bounds, query.dtype, name="query",
+    )
+    domain_k = validate_symmetric_encoder_bounds(
+        key_bounds, key.dtype, name="key",
+    )
+    domain_v = validate_symmetric_encoder_bounds(
+        value_bounds, value.dtype, name="value",
+    )
+    output_domain = domain_v
     if int(value.size(-2)) != S:
         raise ValueError("attention key and value source lengths must match")
     if S > source_length_max:
@@ -366,8 +306,8 @@ def spiking_scaled_dot_product_attention(
             masked_from_attn = attn_mask < 0
         masked_pos = masked_from_attn if masked_pos is None else (masked_pos | masked_from_attn)
 
-    # The key interval also sets multiplication's encoder radius: passing global
-    # theta here would silently clamp keys again after their calibrated input clamp.
+    # The key interval is the multiplication encoder domain; no separate global
+    # rail may clamp the already selected projection range.
     q_exp = domain_q.clamp(query, name="query").unsqueeze(-2)   # (B,H,L,1,D)
     k_exp = domain_k.clamp(key, name="key").unsqueeze(-3)     # (B,H,1,S,D)
 
@@ -377,7 +317,6 @@ def spiking_scaled_dot_product_attention(
         domain_q,
         k_exp,
         domain_k,
-        key_encoder_radius,
     )
 
     # # Debug: Compare scores with torch.matmul
@@ -390,17 +329,13 @@ def spiking_scaled_dot_product_attention(
     # source capacity. It is static for this module and prevents the downstream
     # normalized exponential from underflowing even before an artifact is installed.
     representability_ceiling = attention_score_representability_bounds(
-        float(theta),
         float(tau),
         source_length_max,
         attn_score.dtype,
-        cap_by_theta=not explicit_bounds,
     )
 
     # Intersect the numerical ceiling with the symmetric portion of the operator's
-    # static analytic interval. Normally the dot-product envelope is much broader;
-    # this intersection also handles small theta configurations without returning a
-    # collection rail wider than the analytic bound that validated the raw score.
+    # static analytic interval. Normally the dot-product envelope is much broader.
     execution_radius = min(
         float(representability_ceiling.max),
         float(analytic_score_bound.max),
@@ -595,7 +530,6 @@ def spiking_sdpa_attention_forward(
         dropout_p=dropout_prob,
         is_causal=is_causal_flag,
         tau=kwargs.get("tau", 1.0),
-        theta=kwargs.get("theta", 10.0),
         training=module.training,
         source_length_max=source_length_max,
         score_calibration_module=module,

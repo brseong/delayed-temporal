@@ -6,7 +6,7 @@ Small diagnostic comparisons inspect performance before full evaluation. They re
 
 The first check uses ViT-S ImageNet, 256 fixed training images for calibration and 256 fixed validation images for matched ANN/SNN evaluation. The current float64, theta 40 and ViT policy 2 implementation remain fixed.
 
-[[scripts/experiments/quick_vit_check.py#main]] derives evaluator commands from the current comparison manifest, verifies frozen source and assets, and records the helper hash separately. It acquires one idle GPU from 4–7 using the shared lock and stores runtime on real disk under artifacts. All logs and phase exit status are preserved; no paper table is changed.
+`scripts/experiments/quick_vit_check.py#main` derives evaluator commands from the current comparison manifest, verifies frozen source and assets, and records the helper hash separately. It acquires one idle GPU from 4–7 using the shared lock and stores runtime on real disk under artifacts. All logs and phase exit status are preserved; no paper table is changed.
 
 ## Text Calibration Readiness
 

@@ -36,13 +36,12 @@ from utils.transforms.types import PotentialBounds
 _CUBIC_IMPLEMENTATIONS = ("multiplication", "phi_nl_psi_ed")
 
 
-# @lat: [[evaluation#Evaluation and Verification#Noise and Ablation Sweeps#GELU Cubic Construction Comparison]]
+# @lat: [[evaluation#Evaluation and Verification#Historical Noise and Ablation Sweeps#GELU Cubic Construction Comparison]]
 def phi_nl_psi_ed_cube(
     input_value: torch.Tensor,
     domain: PotentialBounds,
     *,
     tau_s: float,
-    theta: float,
     magnitude_floor: float,
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Compatibility entry point for the canonical signed cubic power operator."""
@@ -50,7 +49,6 @@ def phi_nl_psi_ed_cube(
         input_value,
         domain,
         tau_s=tau_s,
-        theta=theta,
         magnitude_floor=magnitude_floor,
     )
 
@@ -60,7 +58,6 @@ def gelu_with_phi_nl_psi_ed_cube(
     domain: PotentialBounds,
     *,
     tau_s: float = 1.0,
-    theta: float = 400.0,
     magnitude_floor: float = GELU_CUBIC_MAGNITUDE_FLOOR,
     **kwargs: object,
 ) -> tuple[torch.Tensor, PotentialBounds]:
@@ -69,7 +66,6 @@ def gelu_with_phi_nl_psi_ed_cube(
         input_value,
         domain,
         tau_s=tau_s,
-        theta=theta,
         magnitude_floor=magnitude_floor,
         **kwargs,
     )
@@ -80,19 +76,18 @@ def gelu_with_multiplication_cube(
     domain: PotentialBounds,
     *,
     tau_s: float = 1.0,
-    theta: float = 400.0,
     **_: object,
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Retain the repeated multiplication cubic only as a comparison condition."""
     input_clamped = domain.clamp(input_value, name="gelu_x")
     square, square_domain = multiplication_operator(
-        input_clamped, domain, input_clamped, domain, theta,
+        input_clamped, domain, input_clamped, domain,
     )
     square, square_domain = clamp_gelu_square_output(
-        square, domain, theta=theta,
+        square, domain,
     )
     cube, cube_domain = multiplication_operator(
-        square, square_domain, input_clamped, domain, theta,
+        square, square_domain, input_clamped, domain,
     )
     scaled_cube, scaled_cube_domain = _constant_synaptic_scale(
         cube,
@@ -115,14 +110,12 @@ def gelu_with_multiplication_cube(
         tanh_input,
         tanh_input_domain,
         tau_s=tau_s,
-        theta=theta,
     )
     result, _ = multiplication_operator(
         input_clamped,
         domain,
         gate,
         gate_domain,
-        theta,
     )
     return clamp_gelu_output(result, domain)
 

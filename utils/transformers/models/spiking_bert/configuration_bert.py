@@ -51,10 +51,13 @@ class BertConfig(PreTrainedConfig):
         spiking_ln_log=True,
         spiking_ln_expdiff=True,
         use_spiking_mlp=True,
-        theta=10.0,
         tau_s=1.0,
         **kwargs,
     ):
+        if "theta" in kwargs:
+            raise TypeError(
+                "BertConfig no longer accepts a global theta; operators use declared ranges"
+            )
         super().__init__(**kwargs)
         self.pad_token_id = pad_token_id
         self.is_decoder = is_decoder
@@ -84,7 +87,6 @@ class BertConfig(PreTrainedConfig):
         self.spiking_ln_log = spiking_ln_log
         self.spiking_ln_expdiff = spiking_ln_expdiff
         self.use_spiking_mlp = use_spiking_mlp
-        self.theta = theta
         self.tau_s = tau_s
 
 __all__ = ["BertConfig"]

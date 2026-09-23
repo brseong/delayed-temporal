@@ -77,7 +77,7 @@ def verify_metadata(source):
 
     base = CalibrationMetadata(
         model_family="vit", model_id="/local/model", dataset_id="imagenet-1k",
-        dataset_split="train", preprocessing="{}", dtype="float64", theta=40.0,
+        dataset_split="train", preprocessing="{}", dtype="float64",
         tau_s=1.0, tau_m=1.0, clip_margin=1e-5, max_sequence_length=None,
         input_shape=(3, 224, 224), model_options=(("use_spiking_mlp", True),),
     )
@@ -100,7 +100,12 @@ def verify_metadata(source):
         other = bind_metadata_identity(base, {**identity, key: changed})
         must_reject(lambda: validate_calibration_metadata(collected, other))
         must_reject(lambda: bind_metadata_identity(collected, {key: changed}))
-    must_reject(lambda: validate_calibration_metadata(collected, replace(collected, theta=80.0)))
+    must_reject(
+        lambda: validate_calibration_metadata(
+            collected,
+            replace(collected, tau_s=2.0),
+        )
+    )
     assert not any("noise" in key for key, _ in collected.model_options)
 
 

@@ -47,7 +47,7 @@ from utils.transforms.calibration import (
 )
 from utils.transforms.noise import (
     get_gaussian_noise_stats,
-    install_device_mismatch,
+    install_range_mismatch,
     set_gaussian_time_noise,
 )
 from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
@@ -74,10 +74,9 @@ class Arguments:
     """Command-line configuration consumed by the ViT evaluator.
 
     Dynamic event noise is represented only by direct Gaussian spike-time error.
-    Timing-noise fractions are dimensionless and are converted later by the
-    evaluation function using the identity-code window ``2 * theta``. Optional
-    linear and logarithmic values override the shared default without introducing
-    another sampling path. Static mismatch remains an independent experiment axis.
+    Timing-noise fractions are dimensionless and applied to each encoder's declared
+    time window. Optional linear and logarithmic values override the shared default
+    without introducing another sampling path.
     """
 
     # Evaluation, backend, and model-conversion controls are independent of the
@@ -106,7 +105,6 @@ class Arguments:
     spiking_mlp_exact_gelu: bool
     spiking_mlp_exact_gelu_layers: tuple[int, ...]
     activation: Literal["relu", "gelu"]
-    theta: float
     clock_driven: bool
     clock_time_step: float
     clock_time_steps_per_window: int
@@ -136,7 +134,7 @@ class Arguments:
     # Static device and parameter non-idealities remain separate from event timing
     # so their effects can be swept and attributed independently.
     mismatch_enabled: bool
-    mismatch_theta_std: float
+    mismatch_range_std_frac: float
     mismatch_seed: int
     weight_noise_std: float
     bias_noise_std: float
@@ -246,8 +244,6 @@ def parse_arguments() -> Arguments:
     )
     parser.add_argument("--activation", type=str, choices=["relu", "gelu"], default="gelu",
                         help="Activation function to use when --no-spiking-mlp is set (default: gelu).")
-    parser.add_argument("--theta", type=float, default=100.0,
-                        help="Domain bound θ for SpikingLayerNorm clamping (default: 100.0).")
     parser.add_argument(
         "--clock-driven",
         action=argparse.BooleanOptionalAction,
@@ -354,7 +350,7 @@ def parse_arguments() -> Arguments:
         "--time-noise-std-frac",
         type=float,
         default=0.0,
-        help="Gaussian time std as a fraction of the identity window 2*theta.",
+        help="Gaussian time std as a fraction of each encoder's declared time window.",
     )
     parser.add_argument(
         "--linear-time-noise-std-frac",
@@ -396,17 +392,17 @@ def parse_arguments() -> Arguments:
         help="Seed for the evaluator replica's dedicated timing-noise generator.",
     )
 
-    # Static threshold mismatch and learned-parameter perturbations deliberately
+    # Static range mismatch and learned-parameter perturbations deliberately
     # remain separate controls rather than being folded into event timing noise.
     parser.add_argument("--mismatch-enabled", action=argparse.BooleanOptionalAction, default=False,
-                        help="[C] Static per-neuron threshold mismatch (frozen).")
-    parser.add_argument("--mismatch-theta-std", type=float, default=0.0,
-                        help="[C] σ_θ: per-neuron θ offset std, relative to θ.")
+                        help="[C] Static per-module range-relative offset (frozen).")
+    parser.add_argument("--mismatch-range-std-frac", type=float, default=0.0,
+                        help="[C] Frozen offset std relative to half the local potential range.")
     parser.add_argument(
         "--mismatch-seed",
         type=int,
         default=0,
-        help="Seed for the dedicated frozen threshold-mismatch replica.",
+        help="Seed for the dedicated frozen range-mismatch replica.",
     )
     parser.add_argument("--weight-noise-std", type=float, default=0.0,
                         help="Standard deviation of Gaussian noise to add to weights (default: 0.0).")
@@ -469,7 +465,6 @@ def parse_arguments() -> Arguments:
         spiking_mlp_exact_gelu=args.spiking_mlp_exact_gelu,
         spiking_mlp_exact_gelu_layers=tuple(args.spiking_mlp_exact_gelu_layers),
         activation=args.activation,
-        theta=args.theta,
         clock_driven=args.clock_driven,
         clock_time_step=args.clock_time_step,
         clock_time_steps_per_window=args.clock_time_steps_per_window,
@@ -489,7 +484,7 @@ def parse_arguments() -> Arguments:
         time_noise_deadline_margin_std=args.time_noise_deadline_margin_std,
         time_noise_seed=args.time_noise_seed,
         mismatch_enabled=args.mismatch_enabled,
-        mismatch_theta_std=args.mismatch_theta_std,
+        mismatch_range_std_frac=args.mismatch_range_std_frac,
         mismatch_seed=args.mismatch_seed,
         weight_noise_std=args.weight_noise_std,
         bias_noise_std=args.bias_noise_std,
@@ -584,7 +579,7 @@ def validate_vit_calibration_arguments(
         args.gaussian_time_noise
         or args.clock_driven
         or args.mismatch_enabled
-        or args.mismatch_theta_std != 0.0
+        or args.mismatch_range_std_frac != 0.0
         or args.weight_noise_std != 0.0
         or args.bias_noise_std != 0.0
     ):
@@ -932,10 +927,9 @@ def apply_parameter_noise(model: nn.Module, weight_std: float, bias_std: float):
 def evaluate_vit_model(args: Arguments) -> None:
     """Evaluate one ViT backend under the requested non-idealities.
 
-    The evaluator converts the dimensionless timing-noise fraction to one absolute
-    Gaussian standard deviation using the base identity-code window ``2 * theta``.
-    That absolute value and one seeded generator are installed once for the whole
-    replica. Because the configuration and generator are process-wide mutable
+    The evaluator installs dimensionless timing-noise fractions once per replica;
+    each encoder converts them using its own declared time window. Because the
+    configuration and generator are process-wide mutable
     state, Gaussian execution explicitly rejects multi-GPU ``DataParallel``.
 
     Args:
@@ -988,11 +982,6 @@ def evaluate_vit_model(args: Arguments) -> None:
     # GPU 사용 가능 여부 확인
     device = torch.device(device_str)
 
-    # Convert all user-facing fractions from the same identity-code duration. The
-    # measured hardware summaries use that shared normalization even though the two
-    # encoder families receive different absolute standard deviations.
-    identity_time_window = 2.0 * float(args.theta)
-    time_noise_std = float(args.time_noise_std_frac) * identity_time_window
     linear_time_noise_std_frac = (
         float(args.time_noise_std_frac)
         if args.linear_time_noise_std_frac is None
@@ -1010,32 +999,6 @@ def evaluate_vit_model(args: Arguments) -> None:
     ):
         if not math.isfinite(value) or value < 0.0:
             raise ValueError(f"{name} must be finite and non-negative")
-    linear_time_noise_std = linear_time_noise_std_frac * identity_time_window
-    log_time_noise_std = log_time_noise_std_frac * identity_time_window
-    time_noise_deadline_margin = (
-        float(args.time_noise_deadline_margin_std) * time_noise_std
-    )
-    linear_time_noise_deadline_margin = (
-        float(args.time_noise_deadline_margin_std) * linear_time_noise_std
-    )
-    log_time_noise_deadline_margin = (
-        float(args.time_noise_deadline_margin_std) * log_time_noise_std
-    )
-    identity_deadline = torch.tensor(identity_time_window, dtype=dtype)
-    identity_deadline_ulp = float(
-        (
-            torch.nextafter(
-                identity_deadline,
-                identity_deadline.new_tensor(math.inf),
-            )
-            - identity_deadline
-        ).item()
-    )
-    time_noise_std_to_identity_ulp = (
-        time_noise_std / identity_deadline_ulp
-        if identity_deadline_ulp > 0.0
-        else math.inf
-    )
     gaussian_enabled = bool(
         model_backend == "spiking" and args.gaussian_time_noise
     )
@@ -1045,12 +1008,12 @@ def evaluate_vit_model(args: Arguments) -> None:
     mismatch_enabled = bool(
         model_backend == "spiking"
         and args.mismatch_enabled
-        and args.mismatch_theta_std > 0.0
+        and args.mismatch_range_std_frac > 0.0
     )
 
     if gaussian_enabled and mismatch_enabled:
         raise ValueError(
-            "Gaussian timing noise and static threshold mismatch must be "
+            "Gaussian timing noise and static range mismatch must be "
             "evaluated as separate experiment axes"
         )
     if clock_driven_enabled and (
@@ -1096,7 +1059,7 @@ def evaluate_vit_model(args: Arguments) -> None:
         )
     if mismatch_enabled and use_data_parallel:
         raise RuntimeError(
-            "static threshold mismatch does not support DataParallel; "
+            "static range mismatch does not support DataParallel; "
             "run one evaluation process per GPU"
         )
     if calibration_mode is not None and use_data_parallel:
@@ -1119,13 +1082,11 @@ def evaluate_vit_model(args: Arguments) -> None:
     # prior Gaussian counters. HF evaluation installs the disabled state explicitly.
     set_gaussian_time_noise(
         enabled=gaussian_enabled,
-        time_std=time_noise_std,
-        linear_time_std=linear_time_noise_std,
-        log_time_std=log_time_noise_std,
+        time_std_fraction=float(args.time_noise_std_frac),
+        linear_time_std_fraction=linear_time_noise_std_frac,
+        log_time_std_fraction=log_time_noise_std_frac,
         time_mean=args.time_noise_mean,
-        deadline_margin=time_noise_deadline_margin,
-        linear_deadline_margin=linear_time_noise_deadline_margin,
-        log_deadline_margin=log_time_noise_deadline_margin,
+        deadline_margin_std_ratio=float(args.time_noise_deadline_margin_std),
         seed=args.time_noise_seed,
         device=device,
     )
@@ -1137,22 +1098,13 @@ def evaluate_vit_model(args: Arguments) -> None:
         ),
     )
 
-    # Log both the dimensionless input and the derived absolute quantity so runs at
-    # different theta values remain interpretable without reconstructing the CLI.
+    # Every encoder derives its absolute noise scale from its own declared window.
     cfg = {
         **vars(args),
         "gaussian_time_noise_effective": gaussian_enabled,
-        "identity_time_window": identity_time_window,
-        "time_noise_std": time_noise_std,
+        "time_noise_window_normalization": "encoder_local",
         "linear_time_noise_std_frac_effective": linear_time_noise_std_frac,
         "log_time_noise_std_frac_effective": log_time_noise_std_frac,
-        "linear_time_noise_std": linear_time_noise_std,
-        "log_time_noise_std": log_time_noise_std,
-        "time_noise_deadline_margin": time_noise_deadline_margin,
-        "linear_time_noise_deadline_margin": linear_time_noise_deadline_margin,
-        "log_time_noise_deadline_margin": log_time_noise_deadline_margin,
-        "identity_deadline_ulp": identity_deadline_ulp,
-        "time_noise_std_to_identity_ulp": time_noise_std_to_identity_ulp,
         "mismatch_effective": mismatch_enabled,
         "clock_driven_effective": clock_driven_enabled,
     }
@@ -1179,23 +1131,15 @@ def evaluate_vit_model(args: Arguments) -> None:
         f"std_frac: {args.time_noise_std_frac}, "
         f"linear_std_frac: {linear_time_noise_std_frac}, "
         f"log_std_frac: {log_time_noise_std_frac}, "
-        f"identity_window: {identity_time_window}, "
-        f"std_abs: {time_noise_std}, "
-        f"linear_std_abs: {linear_time_noise_std}, "
-        f"log_std_abs: {log_time_noise_std}, "
+        "window_normalization: encoder_local, "
         f"mean_abs: {args.time_noise_mean}, "
         f"seed: {args.time_noise_seed}, "
-        f"identity_deadline_ulp: {identity_deadline_ulp}, "
-        f"std_to_identity_ulp: {time_noise_std_to_identity_ulp}, "
-        f"deadline_margin_std: {args.time_noise_deadline_margin_std}, "
-        f"deadline_margin_abs: {time_noise_deadline_margin}, "
-        f"linear_deadline_margin_abs: {linear_time_noise_deadline_margin}, "
-        f"log_deadline_margin_abs: {log_time_noise_deadline_margin}"
+        f"deadline_margin_std: {args.time_noise_deadline_margin_std}"
     )
     print(
-        "Static threshold mismatch — "
+        "Static range-relative mismatch — "
         f"enabled: {mismatch_enabled}, "
-        f"theta_std: {args.mismatch_theta_std}, "
+        f"range_std_frac: {args.mismatch_range_std_frac}, "
         f"seed: {args.mismatch_seed}"
     )
     print(
@@ -1251,7 +1195,7 @@ def evaluate_vit_model(args: Arguments) -> None:
         print(
             "Evaluation metadata — "
             f"model: {model_id}, dataset: {dataset_id}, split: {split}, "
-            f"samples: {len(dataset)}, theta: {args.theta}, "
+            f"samples: {len(dataset)}, "
             f"precision: {args.precision}, source: {dataset_source}, "
             f"fingerprint: {dataset._fingerprint}"
         )
@@ -1338,7 +1282,6 @@ def evaluate_vit_model(args: Arguments) -> None:
             use_spiking_mlp=args.spiking_mlp,
             spiking_mlp_exact_gelu=args.spiking_mlp_exact_gelu,
             hidden_act=args.activation,
-            theta=args.theta,
         )
         pixel_domain = image_processor_pixel_bounds(
             processor,
@@ -1389,16 +1332,16 @@ def evaluate_vit_model(args: Arguments) -> None:
         and model_backend == "spiking"
         and mismatch_enabled
     ):
-        handles = install_device_mismatch(
+        handles = install_range_mismatch(
             model,
-            theta_std=args.mismatch_theta_std,
+            range_std_fraction=args.mismatch_range_std_frac,
             enabled=True,
             seed=args.mismatch_seed,
         )
         print(
             "Installed static device mismatch on "
             f"{len(handles)} spiking modules "
-            f"(σ_θ={args.mismatch_theta_std}, seed={args.mismatch_seed})."
+            f"(range std fraction={args.mismatch_range_std_frac}, seed={args.mismatch_seed})."
         )
 
     # Collection executes the deterministic training subset twice and terminates
@@ -1474,7 +1417,7 @@ def evaluate_vit_model(args: Arguments) -> None:
     log_step = [0]
     hooks = []
 
-    def make_ln_hook(tag, theta):
+    def make_ln_hook(tag):
         def hook_fn(module, inp, out):
             if log_step[0] < _TB_LOG_BATCHES:
                 inp_val = inp[0].value if isinstance(inp[0], Potential) else inp[0]
@@ -1487,16 +1430,13 @@ def evaluate_vit_model(args: Arguments) -> None:
                 max_abs_err = x_err.abs().max().item()
                 std_err = x_err.std().item()
                 
-                if max_abs_err > theta:
-                    print(f"[CLAMPING ALERT] {tag}: max_abs_err={max_abs_err:.2f} > theta={theta:.2f}, std={std_err:.2f}")
-                
                 tb_writer.add_histogram(f"{tag}/input",  inp_val.detach().cpu().float(), log_step[0])
                 tb_writer.add_histogram(f"{tag}/output", out_val.detach().cpu().float(),  log_step[0])
         return hook_fn
 
     for name, module in model.named_modules():
         if isinstance(module, (nn.LayerNorm, SpikingLayerNorm)):
-            hooks.append(module.register_forward_hook(make_ln_hook(name, args.theta)))
+            hooks.append(module.register_forward_hook(make_ln_hook(name)))
 
     # Attribute every explicit physical clamp to its leaf affine/normalization
     # module while restoring the outer encoder or attention context after nested
@@ -1745,17 +1685,13 @@ def evaluate_vit_model(args: Arguments) -> None:
             if not math.isfinite(ulp_min):
                 ulp_min = 0.0
             ulp_max = counts["deadline_ulp_max"]
-            std_to_ulp_min = time_noise_std / ulp_max if ulp_max > 0.0 else math.inf
-            std_to_ulp_max = time_noise_std / ulp_min if ulp_min > 0.0 else math.inf
             print(
                 f"Gaussian[{site}] events={events}, misses={counts['misses']} "
                 f"(rate={miss_rate:.6g}), "
                 f"deadline_events={counts['deadline_events']} "
                 f"(rate={deadline_rate:.6g}), "
                 f"deadline_ulp_min={ulp_min:.9g}, "
-                f"deadline_ulp_max={ulp_max:.9g}, "
-                f"std_to_ulp_min={std_to_ulp_min:.9g}, "
-                f"std_to_ulp_max={std_to_ulp_max:.9g}, outputs={outputs}, "
+                f"deadline_ulp_max={ulp_max:.9g}, outputs={outputs}, "
                 f"underflows={counts['output_underflows']} "
                 f"(rate={underflow_rate:.6g}), "
                 f"overflows={counts['output_overflows']} "

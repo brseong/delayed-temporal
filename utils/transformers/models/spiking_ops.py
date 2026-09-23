@@ -27,7 +27,7 @@ class SpikingLayerNorm(nn.Module):
     Computes (x - mean) / std using ψ_M for variance and ψ_ED for division,
     with dual-rail encoding to handle signed activations.
     Matched logarithmic references cancel the finite-domain upper endpoint, so the
-    normalized result has no residual theta scale before pretrained affine weights.
+    normalized result has no residual range scale before pretrained affine weights.
 
     Each of the three SNN stages can be replaced with its standard-PyTorch equivalent
     for ablation analysis:
@@ -40,7 +40,6 @@ class SpikingLayerNorm(nn.Module):
         self,
         normalized_shape: int | tuple[int, ...],
         eps: float = 1.0e-5,
-        theta: float = 200.0,
         tau_s: float = 1.0,
         clip_margin: float = 1.0e-5,
         use_spiking_mul: bool = False,
@@ -51,22 +50,20 @@ class SpikingLayerNorm(nn.Module):
 
         ``eps`` is exclusively the numerical stabilizer added to the feature
         variance. ``clip_margin`` independently sets the positive logarithmic
-        input floor. Actual magnitudes include zero, and both magnitude and
-        logarithmic input domains retain ``theta`` as their upper endpoint.
+        input floor. Actual magnitudes include zero, and their upper endpoint comes
+        from the frozen centered-input range.
 
         Args:
             normalized_shape: Feature shape normalized by LayerNorm.
             eps: Non-negative variance stabilizer used by LayerNorm arithmetic.
-            theta: Upper scale from which the positive encoding rail is formed.
             tau_s: Temporal scale used by logarithmic and exponential operators.
-            clip_margin: Positive logarithmic input floor, strictly below theta.
+            clip_margin: Positive logarithmic input floor.
             use_spiking_mul: Whether variance squaring uses the spiking product.
             use_spiking_log: Whether magnitudes use the logarithmic encoder.
             use_spiking_expdiff: Whether normalization uses exponential difference.
 
         Raises:
-            ValueError: If ``clip_margin`` is non-finite, non-positive, or too
-                large to leave a non-empty interval ending at ``theta``.
+            ValueError: If ``clip_margin`` is non-finite or non-positive.
         """
         # Normalize the feature shape exactly once so scalar and tuple construction
         # retain the parameter layout expected by pretrained LayerNorm checkpoints.
@@ -74,25 +71,17 @@ class SpikingLayerNorm(nn.Module):
         if isinstance(normalized_shape, int):
             normalized_shape = (normalized_shape,)
 
-        # Logarithmic inputs use [margin, theta]. Keeping the margin strictly below
-        # theta guarantees an ordered positive domain without reducing its maximum.
+        # The upper logarithmic endpoint is supplied by the centered-input domain at
+        # execution time; construction owns only the strictly positive lower floor.
         normalized_margin = float(clip_margin)
-        if (
-            not math.isfinite(normalized_margin)
-            or normalized_margin <= 0.0
-            or normalized_margin >= float(theta)
-        ):
-            raise ValueError(
-                "clip_margin must be finite and satisfy "
-                "0 < clip_margin < theta"
-            )
+        if not math.isfinite(normalized_margin) or normalized_margin <= 0.0:
+            raise ValueError("clip_margin must be finite and positive")
 
         # Store the variance stabilizer and clipping margin separately so changing a
         # pretrained model's LayerNorm epsilon cannot silently alter its TTFS window.
         self.normalized_shape = tuple(normalized_shape)
         self.eps = eps
         self.clip_margin = normalized_margin
-        self.theta = theta
         self.tau_s = tau_s
         self.use_spiking_mul = use_spiking_mul
         self.use_spiking_log = use_spiking_log
@@ -136,18 +125,11 @@ class SpikingLayerNorm(nn.Module):
         # Validate every scalar that determines the active mathematical envelope
         # before consulting the cache. A configuration change must never reuse rails
         # computed for a different TTFS window or ablation topology.
-        if isinstance(self.theta, bool):
-            raise ValueError("SpikingLayerNorm theta must be finite and positive")
-        theta = float(self.theta)
         margin = float(self.clip_margin)
         tau_s = float(self.tau_s)
         eps = float(self.eps)
-        if not math.isfinite(theta) or theta <= 0.0:
-            raise ValueError("SpikingLayerNorm theta must be finite and positive")
-        if not math.isfinite(margin) or margin <= 0.0 or margin >= theta:
-            raise ValueError(
-                "SpikingLayerNorm clip_margin must satisfy 0 < clip_margin < theta"
-            )
+        if not math.isfinite(margin) or margin <= 0.0:
+            raise ValueError("SpikingLayerNorm clip_margin must be finite and positive")
         if not math.isfinite(tau_s) or tau_s <= 0.0:
             raise ValueError("SpikingLayerNorm tau_s must be finite and positive")
         if not math.isfinite(eps) or eps < 0.0:
@@ -159,7 +141,6 @@ class SpikingLayerNorm(nn.Module):
         identity = (
             self.weight._version,
             self.bias._version,
-            theta,
             margin,
             tau_s,
             eps,
@@ -202,11 +183,7 @@ class SpikingLayerNorm(nn.Module):
             effective_weight = weight
         else:
             result_limit = math.sqrt(feature_count)
-            effective_weight = (
-                weight.clamp(-theta, theta)
-                if self.use_spiking_expdiff
-                else weight
-            )
+            effective_weight = weight
         if not math.isfinite(result_limit) or result_limit < 0.0:
             raise ValueError("SpikingLayerNorm normalized bound must be finite")
 
@@ -230,7 +207,6 @@ class SpikingLayerNorm(nn.Module):
         final_identity = (
             self.weight._version,
             self.bias._version,
-            float(self.theta),
             float(self.clip_margin),
             float(self.tau_s),
             float(self.eps),
@@ -261,13 +237,16 @@ class SpikingLayerNorm(nn.Module):
     ) -> tuple[torch.Tensor, PotentialBounds, PotentialBounds]:
         """Resolve one fixed bound for magnitude, variance, and log encoding.
 
-        Only an explicitly bound input-range calibration policy changes the legacy theta
-        interval. Collection uses the incoming interval width as a conservative
-        bound for the centered input, without measuring the current batch. Frozen
-        execution uses the persisted centered-input record. Learned affine scaling
-        and final output bounds remain independent of this internal interval.
+        Collection and uncalibrated execution use the incoming interval width as a
+        conservative centered-input bound without measuring the current batch.
+        Frozen execution uses the persisted centered-input record. Learned affine
+        scaling and final output bounds remain independent of this interval.
         """
-        radius = float(self.theta)
+        radius = float(pot.domain.max) - float(pot.domain.min)
+        if not math.isfinite(radius) or radius <= self.clip_margin:
+            raise ValueError(
+                "LayerNorm incoming interval width must be finite and exceed the positive floor"
+            )
         if calibration_uses_explicit_bounds(self):
             name = (
                 f"{self.__dict__['_delayed_temporal_calibration_module_name']}"
@@ -304,10 +283,15 @@ class SpikingLayerNorm(nn.Module):
             )
             centered = selected.value
             radius = float(bounds.max)
+        # The logarithmic carrier is widened just enough for the variance
+        # stabilizer: ``var(centered) + eps`` can exceed ``radius**2``. Using
+        # sqrt(radius**2 + eps) for both residual and sigma references preserves
+        # the shared-reference identity while avoiding an epsilon-dependent clamp.
+        log_radius = math.sqrt(radius * radius + self.eps)
         return (
             centered,
             PotentialBounds(0.0, radius),
-            PotentialBounds(self.clip_margin, radius),
+            PotentialBounds(self.clip_margin, log_radius),
         )
 
     def _gaussian_forward(self, pot: Potential) -> Potential:
@@ -366,7 +350,6 @@ class SpikingLayerNorm(nn.Module):
 
         eps = self.eps
         clip_margin = self.clip_margin
-        theta = self.theta
         tau_s = self.tau_s
 
         # LayerNorm first forms exact non-negative magnitudes for the two signed
@@ -397,14 +380,12 @@ class SpikingLayerNorm(nn.Module):
                 magnitude_domain,
                 x_err_pos_magnitude,
                 magnitude_domain,
-                magnitude_domain.max,
             )
             M_neg, _ = multiplication_operator(
                 x_err_neg_magnitude,
                 magnitude_domain,
                 x_err_neg_magnitude,
                 magnitude_domain,
-                magnitude_domain.max,
             )
             var_x = (M_pos + M_neg).mean(dim=-1, keepdim=True)
         else:
@@ -513,7 +494,6 @@ class SpikingLayerNorm(nn.Module):
                 result_domain,
                 self.weight,
                 weight_domain,
-                theta,
             )
             out = scaled + self.bias
         else:
@@ -645,7 +625,6 @@ class SpikingLayerNorm(nn.Module):
 
         eps = self.eps
         clip_margin = self.clip_margin
-        theta = self.theta
         tau_s = self.tau_s
 
         x_err = x - x.mean(dim=-1, keepdim=True)
@@ -674,14 +653,12 @@ class SpikingLayerNorm(nn.Module):
                 magnitude_domain,
                 x_err_pos_magnitude,
                 magnitude_domain,
-                magnitude_domain.max,
             )
             M_neg, _ = multiplication_operator(
                 x_err_neg_magnitude,
                 magnitude_domain,
                 x_err_neg_magnitude,
                 magnitude_domain,
-                magnitude_domain.max,
             )
             var_x = (M_pos + M_neg).mean(dim=-1, keepdim=True)
         else:
@@ -764,7 +741,6 @@ class SpikingLayerNorm(nn.Module):
                 result_domain,
                 self.weight,
                 weight_domain,
-                theta,
             )
             out = scaled + self.bias
         else:
@@ -852,9 +828,8 @@ class SpikingLinear(nn.Linear):
     """Linear layer via ψ_PWM operator. Numerically identical to nn.Linear."""
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True,
-                 theta: float = 400.0, device=None, dtype=None):
+                 device=None, dtype=None):
         super().__init__(in_features, out_features, bias=bias, device=device, dtype=dtype)
-        self.theta = theta
 
     def freeze_parameter_bounds(
         self,
@@ -1136,11 +1111,10 @@ class SpikingConv2d(nn.Conv2d):
 
     def __init__(self, in_channels: int, out_channels: int, kernel_size, stride=1,
                  padding=0, dilation=1, groups=1, bias=True,
-                 theta: float = 400.0, device=None, dtype=None):
+                 device=None, dtype=None):
         super().__init__(in_channels, out_channels, kernel_size, stride=stride,
                          padding=padding, dilation=dilation, groups=groups,
                          bias=bias, device=device, dtype=dtype)
-        self.theta = theta
 
     def freeze_parameter_bounds(
         self,
@@ -1591,11 +1565,10 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     
     dim = 768
-    theta = 400.0
     
     # Initialize layers
     ln = nn.LayerNorm(dim)
-    sln = SpikingLayerNorm(dim, theta=theta)
+    sln = SpikingLayerNorm(dim)
     
     # Sync weights
     with torch.no_grad():
@@ -1606,7 +1579,7 @@ if __name__ == "__main__":
     worst_std = -1
     max_x_err_at_worst = 0.0
     
-    print(f"Testing standard deviations from 1 to 128 for dim={dim}, theta={theta}...")
+    print(f"Testing standard deviations from 1 to 128 for dim={dim}...")
     
     for std in range(1, 129):
         # Create input tensor with mean 0 and current std
@@ -1631,4 +1604,4 @@ if __name__ == "__main__":
     print("\n=== Result ===")
     print(f"Standard deviation with maximum difference: {worst_std}")
     print(f"Maximum absolute difference: {max_diff:.6e}")
-    print(f"Max abs(x_err) at worst std: {max_x_err_at_worst:.2f} (theta={theta})")
+    print(f"Max abs(x_err) at worst std: {max_x_err_at_worst:.2f}")

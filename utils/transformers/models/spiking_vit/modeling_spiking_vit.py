@@ -50,9 +50,7 @@ from utils.transformers.calibration import (
     calibrated_potential,
     model_calibration_is_bound,
     validate_symmetric_encoder_bounds,
-    vit_calibration_uses_explicit_bounds,
 )
-from utils.transformers.integrations.spiking_sdpa_attention import attention_output_bounds
 from utils.transformers.models.spiking_ops import SpikingConv2d, SpikingLayerNorm, SpikingLinear, _apply_norm
 
 
@@ -72,6 +70,47 @@ class ViTEmbeddings(nn.Module):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.patch_size = config.patch_size
         self.config = config
+
+    def freeze_embedding_bounds(
+        self,
+        position: torch.Tensor,
+        *,
+        refresh: bool = False,
+    ) -> tuple[PotentialBounds, PotentialBounds]:
+        """Freeze checkpoint-owned token and position envelopes outside data flow."""
+        versions = (
+            int(self.cls_token._version),
+            int(self.mask_token._version) if self.mask_token is not None else None,
+            int(self.position_embeddings._version),
+            tuple(position.shape),
+        )
+        cached = self.__dict__.get("_frozen_embedding_bounds")
+        if cached is not None and not refresh:
+            cached_versions, token_bounds, position_bounds = cached
+            if cached_versions != versions:
+                raise RuntimeError(
+                    "ViT embedding parameters changed after bounds were frozen; "
+                    "call freeze_embedding_bounds(..., refresh=True)"
+                )
+            return token_bounds, position_bounds
+
+        token_lower = float(self.cls_token.detach().min().item())
+        token_upper = float(self.cls_token.detach().max().item())
+        if self.mask_token is not None:
+            token_lower = min(token_lower, float(self.mask_token.detach().min().item()))
+            token_upper = max(token_upper, float(self.mask_token.detach().max().item()))
+        token_bounds = PotentialBounds(token_lower, token_upper)
+        position_bounds = PotentialBounds(
+            float(position.detach().min().item()),
+            float(position.detach().max().item()),
+        )
+        if not refresh:
+            self.__dict__["_frozen_embedding_bounds"] = (
+                versions,
+                token_bounds,
+                position_bounds,
+            )
+        return token_bounds, position_bounds
 
     def interpolate_pos_encoding(self, embeddings: torch.Tensor, height: int, width: int) -> torch.Tensor:
         """
@@ -118,9 +157,24 @@ class ViTEmbeddings(nn.Module):
         pixel_values: torch.Tensor,
         bool_masked_pos: Optional[torch.BoolTensor] = None,
         interpolate_pos_encoding: bool = False,
-    ) -> torch.Tensor:
+    ) -> Potential:
         batch_size, num_channels, height, width = pixel_values.shape
-        embeddings = self.patch_embeddings(pixel_values, interpolate_pos_encoding=interpolate_pos_encoding)
+        patch_potential = self.patch_embeddings(
+            pixel_values,
+            interpolate_pos_encoding=interpolate_pos_encoding,
+        )
+        embeddings = patch_potential.value
+        lower = float(patch_potential.domain.min)
+        upper = float(patch_potential.domain.max)
+
+        if interpolate_pos_encoding:
+            position = self.interpolate_pos_encoding(embeddings, height, width)
+        else:
+            position = self.position_embeddings
+        token_bounds, position_bounds = self.freeze_embedding_bounds(
+            position,
+            refresh=interpolate_pos_encoding,
+        )
 
         if bool_masked_pos is not None:
             seq_length = embeddings.shape[1]
@@ -128,20 +182,28 @@ class ViTEmbeddings(nn.Module):
             # replace the masked visual tokens by mask_tokens
             mask = bool_masked_pos.unsqueeze(-1).type_as(mask_tokens)
             embeddings = embeddings * (1.0 - mask) + mask_tokens * mask
+            lower = min(lower, float(token_bounds.min))
+            upper = max(upper, float(token_bounds.max))
 
         # add the [CLS] token to the embedded patch tokens
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)
         embeddings = torch.cat((cls_tokens, embeddings), dim=1)
+        lower = min(lower, float(token_bounds.min))
+        upper = max(upper, float(token_bounds.max))
 
         # add positional encoding to each token
-        if interpolate_pos_encoding:
-            embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
-        else:
-            embeddings = embeddings + self.position_embeddings
+        embeddings = embeddings + position
+        lower += float(position_bounds.min)
+        upper += float(position_bounds.max)
 
         embeddings = self.dropout(embeddings)
+        if self.training and self.dropout.p > 0.0:
+            scale = 1.0 / (1.0 - float(self.dropout.p))
+            lower = min(0.0, lower * scale)
+            upper = max(0.0, upper * scale)
 
-        return embeddings
+        bounds = PotentialBounds(min(lower, 0.0), max(upper, 0.0))
+        return Potential(embeddings, bounds)
 
 
 class ViTPatchEmbeddings(nn.Module):
@@ -179,11 +241,51 @@ class ViTPatchEmbeddings(nn.Module):
         )
 
         if self._use_spiking_mlp:
-            self.projection = SpikingConv2d(num_channels, hidden_size, kernel_size=patch_size, stride=patch_size, theta=getattr(config, "theta", 400.0))
+            self.projection = SpikingConv2d(num_channels, hidden_size, kernel_size=patch_size, stride=patch_size)
         else:
             self.projection = nn.Conv2d(num_channels, hidden_size, kernel_size=patch_size, stride=patch_size)
 
-    def forward(self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = False) -> torch.Tensor:
+    def freeze_parameter_bounds(
+        self,
+        *,
+        refresh: bool = False,
+    ) -> PotentialBounds:
+        """Freeze the dense-ablation convolution envelope for the fixed pixel range."""
+        if self._pixel_value_domain is None:
+            raise RuntimeError("pixel preprocessing bounds are unavailable")
+        versions = (
+            int(self.projection.weight._version),
+            int(self.projection.bias._version) if self.projection.bias is not None else None,
+        )
+        cached = self.__dict__.get("_frozen_parameter_bounds")
+        if cached is not None and not refresh:
+            cached_versions, bounds = cached
+            if cached_versions != versions:
+                raise RuntimeError(
+                    "ViT patch projection parameters changed after bounds were frozen; "
+                    "call freeze_parameter_bounds(refresh=True)"
+                )
+            return bounds
+
+        weight = self.projection.weight.detach().to(dtype=torch.float64)
+        lower_input = float(self._pixel_value_domain.min)
+        upper_input = float(self._pixel_value_domain.max)
+        lower_terms = torch.minimum(weight * lower_input, weight * upper_input)
+        upper_terms = torch.maximum(weight * lower_input, weight * upper_input)
+        lower = lower_terms.sum(dim=(1, 2, 3))
+        upper = upper_terms.sum(dim=(1, 2, 3))
+        if self.projection.bias is not None:
+            bias = self.projection.bias.detach().to(dtype=torch.float64)
+            lower = lower + bias
+            upper = upper + bias
+        bounds = PotentialBounds(
+            min(0.0, float(lower.min().item())),
+            max(0.0, float(upper.max().item())),
+        )
+        self.__dict__["_frozen_parameter_bounds"] = (versions, bounds)
+        return bounds
+
+    def forward(self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = False) -> Potential:
         """Project preprocessed pixels with a preprocessing-defined fixed range.
 
         The spiking convolution must receive the same finite PWM input rail for every
@@ -220,21 +322,23 @@ class ViTPatchEmbeddings(nn.Module):
         # The converted patch projection may not fall back to current-batch extrema.
         # A missing range means preprocessing and model calibration are incompatible,
         # so fail before any PWM event is encoded or parameter-bound cache is created.
+        if self._pixel_value_domain is None:
+            raise RuntimeError(
+                "ViT patch projection requires fixed pixel_value_min and "
+                "pixel_value_max from image preprocessing"
+            )
         if self._use_spiking_mlp:
-            if self._pixel_value_domain is None:
-                raise RuntimeError(
-                    "spiking ViT patch projection requires fixed pixel_value_min "
-                    "and pixel_value_max from image preprocessing"
-                )
             projected = self.projection(
                 Potential(pixel_values, self._pixel_value_domain)
             )
             embeddings = projected.value.flatten(2).transpose(1, 2)
+            output_domain = projected.domain
         else:
             # The dense ablation performs the same checkpoint-compatible convolution
             # but does not invoke a temporal encoder, so it needs no PWM input rail.
             embeddings = self.projection(pixel_values).flatten(2).transpose(1, 2)
-        return embeddings
+            output_domain = self.freeze_parameter_bounds()
+        return Potential(embeddings, output_domain)
 
 
 # Copied from transformers.models.bert.modeling_bert.eager_attention_forward
@@ -279,10 +383,9 @@ class ViTSelfAttention(nn.Module):
         self.dropout_prob = config.attention_probs_dropout_prob
         self.is_causal = False
 
-        _theta = getattr(config, "theta", 400.0)
-        self.query = SpikingLinear(config.hidden_size, self.all_head_size, bias=config.qkv_bias, theta=_theta)
-        self.key = SpikingLinear(config.hidden_size, self.all_head_size, bias=config.qkv_bias, theta=_theta)
-        self.value = SpikingLinear(config.hidden_size, self.all_head_size, bias=config.qkv_bias, theta=_theta)
+        self.query = SpikingLinear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
+        self.key = SpikingLinear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
+        self.value = SpikingLinear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
 
     def forward(self, pot: Potential) -> tuple[Potential, torch.Tensor]:
         """Apply ViT self-attention and preserve the selected backend's domain.
@@ -311,11 +414,7 @@ class ViTSelfAttention(nn.Module):
         pot_v: Potential = self.value(pot)
         pot_q: Potential = self.query(pot)
 
-        explicit_bounds = (
-            self.config._attn_implementation == "spiking_sdpa"
-            and vit_calibration_uses_explicit_bounds(self)
-        )
-        if explicit_bounds:
+        if self.config._attn_implementation == "spiking_sdpa" and model_calibration_is_bound(self):
             calibrated_projections: list[Potential] = []
             for tensor_name, projected in (("query", pot_q), ("key", pot_k), ("value", pot_v)):
                 # Collection uses only the projection's declared analytic interval,
@@ -350,8 +449,6 @@ class ViTSelfAttention(nn.Module):
         kwargs = {}
         context_domain = pot_v.domain
         if self.config._attn_implementation == "spiking_sdpa":
-            theta = float(getattr(self.config, "theta", 10.0))
-            kwargs["theta"] = theta
             # The model-wide logarithmic scale supplies attention's single tau;
             # attention itself exposes no tau_s or tau_m distinction.
             kwargs["tau"] = getattr(self.config, "tau_s", 1.0)
@@ -377,15 +474,12 @@ class ViTSelfAttention(nn.Module):
                 + 1
             )
             kwargs["source_length_max"] = source_length_max
-            if explicit_bounds:
-                kwargs.update(
-                    query_bounds=pot_q.domain,
-                    key_bounds=pot_k.domain,
-                    value_bounds=pot_v.domain,
-                )
-                context_domain = pot_v.domain
-            else:
-                context_domain = attention_output_bounds(theta, source_length_max)
+            kwargs.update(
+                query_bounds=pot_q.domain,
+                key_bounds=pot_k.domain,
+                value_bounds=pot_v.domain,
+            )
+            context_domain = pot_v.domain
 
         # Dense attention dropout independently removes normalized weights and
         # scales survivors. During training its weighted sum includes zero and both
@@ -431,7 +525,7 @@ class ViTSelfOutput(nn.Module):
 
     def __init__(self, config: ViTConfig):
         super().__init__()
-        self.dense = SpikingLinear(config.hidden_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
+        self.dense = SpikingLinear(config.hidden_size, config.hidden_size)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(self, pot: Potential) -> Potential:
@@ -454,10 +548,9 @@ class ViTAttention(nn.Module):
 class ViTIntermediate(nn.Module):
     def __init__(self, config: ViTConfig):
         super().__init__()
-        self.dense = SpikingLinear(config.hidden_size, config.intermediate_size, theta=getattr(config, "theta", 400.0))
+        self.dense = SpikingLinear(config.hidden_size, config.intermediate_size)
         self._use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
         self._spiking_mlp_exact_gelu = getattr(config, "spiking_mlp_exact_gelu", False)
-        self._theta = getattr(config, "theta", 400.0)
         self._eps = 1e-5
         self._hidden_act_name = config.hidden_act if isinstance(config.hidden_act, str) else None
         # 항상 활성 함수 초기화 (spiking 경로도 GELU 먼저 적용)
@@ -510,7 +603,7 @@ class ViTIntermediate(nn.Module):
                 out = 0.5 * x * (1.0 + torch.tanh(sqrt_2_over_pi * (x + 0.044715 * x ** 3)))
                 return Potential(*clamp_gelu_output(out, pot_z.domain))
             else:
-                return Potential(*gelu_approximation(*pot_z, theta=self._theta))
+                return Potential(*gelu_approximation(*pot_z))
 
         # GELU and SiLU use their fixed lower bounds and input upper endpoints.
         out = self.intermediate_act_fn(pot_z.value)
@@ -543,7 +636,7 @@ class ViTIntermediate(nn.Module):
 class ViTOutput(nn.Module):
     def __init__(self, config: ViTConfig):
         super().__init__()
-        self.dense = SpikingLinear(config.intermediate_size, config.hidden_size, theta=getattr(config, "theta", 400.0))
+        self.dense = SpikingLinear(config.intermediate_size, config.hidden_size)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(self, pot_inter: Potential, pot_skip: Potential) -> Potential:
@@ -568,12 +661,11 @@ class ViTLayer(GradientCheckpointingLayer):
         self.attention = ViTAttention(config)
         self.intermediate = ViTIntermediate(config)
         self.output = ViTOutput(config)
-        _theta = getattr(config, "theta", 10.0)
         _tau_s = getattr(config, "tau_s", 1.0)
         _use_spiking_ln = getattr(config, "use_spiking_layernorm", True)
         if _use_spiking_ln:
             _sln_kwargs = dict(
-                theta=_theta, tau_s=_tau_s, eps=config.layer_norm_eps,
+                tau_s=_tau_s, eps=config.layer_norm_eps,
                 clip_margin=getattr(config, "clip_margin", 1.0e-5),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
                 use_spiking_log=getattr(config, "spiking_ln_log", True),
@@ -643,38 +735,30 @@ class ViTEncoder(nn.Module):
     def __init__(self, config: ViTConfig):
         super().__init__()
         self.config = config
-        self._theta = float(getattr(config, "theta", 10.0))
         self.layer = nn.ModuleList([ViTLayer(config) for _ in range(config.num_hidden_layers)])
         print("Number of layers:", config.num_hidden_layers)
         self.gradient_checkpointing = False
 
-    def forward(self, hidden_states: torch.Tensor) -> Potential:
-        """Enter the ViT stack through the analytic signed theta range.
+    def forward(self, hidden_states: Potential) -> Potential:
+        """Enter the ViT stack through the embedding-derived potential range.
 
-        The configured symmetric ``theta`` interval is the fixed physical rail for
-        embeddings before the first block. Calibration is reserved for recursively
-        widening residuals and nonlinear operator boundaries later in the stack.
+        Patch projection, class-token, and position-embedding bounds are propagated
+        into this method, so the first block needs no independent global range.
 
         Args:
-            hidden_states: Patch, class-token, and position embeddings.
+            hidden_states: Patch, class-token, and position embeddings with bounds.
 
         Returns:
             Final encoder output after fixed-domain block propagation.
 
         Raises:
-            ValueError: If ``theta`` cannot define a finite positive safety rail.
+            TypeError: If embeddings arrive without their declared bounds.
         """
-        # Validate configuration rather than current activations. This rail exists to
-        # make collection independent of batch composition and gives the first affine
-        # projection a stable zero-containing PWM interval.
-        if not math.isfinite(self._theta) or self._theta <= 0.0:
-            raise ValueError("ViT encoder theta must be finite and positive")
-        entry_bounds = PotentialBounds(-self._theta, self._theta)
-
-        # Clamp against the fixed theta rail instead of measuring batch extrema.
+        if not isinstance(hidden_states, Potential):
+            raise TypeError("ViT encoder requires embeddings with declared bounds")
         pot = Potential(
-            entry_bounds.clamp(hidden_states, name="vit_encoder_input"),
-            entry_bounds,
+            hidden_states.domain.clamp(hidden_states.value, name="vit_encoder_input"),
+            hidden_states.domain,
         )
 
         # Every block receives an analytic fixed range; selected internal boundaries
@@ -738,7 +822,6 @@ class ViTModel(ViTPreTrainedModel):
                 config.hidden_size,
                 eps=config.layer_norm_eps,
                 clip_margin=getattr(config, "clip_margin", 1.0e-5),
-                theta=getattr(config, "theta", 10.0),
                 tau_s=getattr(config, "tau_s", 1.0),
                 use_spiking_mul=getattr(config, "spiking_ln_mul", True),
                 use_spiking_log=getattr(config, "spiking_ln_log", True),

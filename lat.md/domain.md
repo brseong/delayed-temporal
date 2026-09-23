@@ -30,7 +30,7 @@ A finite interval computed from a restricted input is not automatically the firs
 
 Spiking linear layers derive output intervals from fixed input bounds and loaded weights. With frozen layer-wise calibration enabled, selected residual boundaries replace interval sums with persisted ranges after counting values outside the interval and clamping. With calibration disabled, those boundaries retain analytic interval addition. Both modes avoid bounds derived from the current batch, but only the former applies the layer-wise limits intended to control growth.
 
-The three cases describe why a range needs attention, not the signed or one-sided record policies used to select its endpoints; see [[calibration#Two-pass Collection#Quantile and Margin Policy]]. Current experiment settings are recorded separately in [[noise#Timing Noise Scale Sweep at Ratio 4]].
+The three cases describe why a range needs attention, not the signed or one-sided record policies used to select its endpoints; see [[calibration#Two-pass Collection#Quantile and Margin Policy]]. Current experiment settings are recorded separately in [[noise#Local-Window Timing Noise Sweep]].
 
 Maintained paths no longer construct bounds from observed forward-output extrema. Analytic intervals and frozen calibration records now define every production envelope; some remain intentionally conservative and require empirical clipping and accuracy validation.
 
@@ -78,17 +78,17 @@ Operations with positive-only logarithmic encoding represent a signed centered v
 
 [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm]] centers the input, creates positive and negative rails, processes each through logarithmic and exponential-difference stages, and subtracts the results. This allows signed normalization while keeping each logarithmic encoder input positive.
 
-Actual magnitudes use `[0, theta]`; `clip_margin` supplies only the positive floor of logarithmic inputs, `[clip_margin, theta]`. Zero magnitudes remain zero in the variance; positive magnitudes below the floor still enter the variance but their normalized output contribution is masked to zero. The separate `eps` stabilizes the variance. See [[calibration#Layer-wise Calibration#Frozen Execution#LayerNorm Positive Input Range]] for the versioned policy and checks.
+Actual magnitudes use `[0, r]`, where $r$ is the frozen centered-input radius selected by calibration or derived from the incoming interval width. `clip_margin` supplies only the positive floor of logarithmic inputs. The log upper endpoint is $\sqrt{r^2+\mathrm{eps}}$, so adding the variance stabilizer cannot introduce a hidden upper clamp. Zero magnitudes remain zero in the variance, and below-floor numerator rails are masked after decoding.
 
 ## Scale Parameters
 
-`theta`, the applicable temporal scale, and finite domain endpoints jointly determine representable magnitude, latency, clipping, and numerical conditioning.
+Declared finite domains and temporal scales determine representable magnitude, latency, clipping, and numerical conditioning; there is no model-wide potential threshold setting.
 
-- `theta` remains the default symmetric calibration scale and the basis of the global absolute Gaussian time-noise standard deviation. Affine adapters themselves consume the upstream fixed potential interval and derive the zero-reference time from that interval.
-- GPT-2 may override that default with `attention_theta` for Q/K score coding, softmin, and V readout only. LayerNorm, affine/MLP paths, and the global Gaussian-noise conversion continue to use `theta`; omission makes the two thresholds identical.
+- Each identity encoder consumes the zero-containing `PotentialBounds` carried by its operand and derives its zero-reference time from those endpoints.
+- Attention consumes explicit Q/K/V bounds and limits scores only by frozen calibration plus the dtype/source-length representability ceiling.
 - `tau_s` controls log-encoding and exponential-difference scale.
 - `tau_m` remains the generic exponential-operator parameter. Softmin and attention expose one `tau`, derived from the model-wide `tau_s`, and have no separate `tau_m` or `tau_s` keyword.
-- `clip_margin` keeps LayerNorm logarithmic inputs away from zero without reducing their `theta` upper endpoint, while `eps` independently stabilizes its variance denominator.
+- `clip_margin` keeps LayerNorm logarithmic inputs away from zero, while `eps` independently stabilizes its variance denominator and participates in the shared log upper endpoint.
 
 These quantities are configuration and calibration assumptions, not learned circuit characteristics. Their trade-offs are discussed in [[decisions#Explicit Finite Domains and Clamping]].
 

@@ -51,7 +51,7 @@ def main() -> None:
     config = ViTConfig.from_pretrained(
         checkpoint, use_spiking_layernorm=True, spiking_ln_mul=True,
         spiking_ln_log=True, spiking_ln_expdiff=True, use_spiking_mlp=True,
-        spiking_mlp_exact_gelu=False, hidden_act='gelu', theta=experiment['selected_theta'],
+        spiking_mlp_exact_gelu=False, hidden_act='gelu',
         local_files_only=True,
     )
     processor = ViTImageProcessor.from_pretrained(checkpoint, local_files_only=True)
@@ -81,8 +81,8 @@ def main() -> None:
     checks = []
     for label, fill, noisy in [('clean_zero', 0.0, False), ('clean_one', 1.0, False), ('gaussian_zero', 0.0, True)]:
         records.clear()
-        set_gaussian_time_noise(enabled=noisy, time_std=80e-5, time_mean=0.0,
-                                deadline_margin=4 * 80e-5, seed=0, device=torch.device('cpu'))
+        set_gaussian_time_noise(enabled=noisy, time_std_fraction=80e-5, time_mean=0.0,
+                                deadline_margin_std_ratio=4 * 80e-5, seed=0, device=torch.device('cpu'))
         with torch.inference_mode():
             output = model(pixel_values=torch.full((1, 3, 224, 224), fill, dtype=torch.float64))
         assert bool(torch.isfinite(output.logits).all())
@@ -122,7 +122,7 @@ def main() -> None:
                 writer.writerow([layer + 1, stage, *bounds])
     metadata = dict(source_commit=head, evaluator_sha256=experiment['evaluator_sha256'],
                     experiment_sha256=sha256(args.experiment_json), checkpoint_identity=checkpoint_identity,
-                    diagnostic_sha256=sha256(Path(__file__)), theta=config.theta,
+                    diagnostic_sha256=sha256(Path(__file__)),
                     dtype='float64', calibration_mode='none', attention='spiking_sdpa',
                     device='cpu', sequence_length=197, samples_from_dataset=0,
                     checks=checks, module_bound_count=len(reference),

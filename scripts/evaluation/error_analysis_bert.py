@@ -75,9 +75,8 @@ class Arguments:
     """Command-line configuration consumed by the BERT evaluator.
 
     Direct Gaussian spike-time error is the only dynamic event-noise model. The
-    dimensionless standard-deviation fraction is converted by evaluation to an
-    absolute value using the common identity-code window ``2 * theta``; mean and
-    seed identify the evaluation-wide seeded noise state.
+    dimensionless standard-deviation fraction is applied to each encoder's declared
+    time window; mean and seed identify the evaluation-wide seeded noise state.
     """
 
     # Dataset, backend, and conversion fields define the deterministic evaluation
@@ -101,7 +100,6 @@ class Arguments:
     spiking_ln_expdiff: bool
     spiking_mlp: bool
     activation: Literal["relu", "gelu"]
-    theta: float
 
     # The Gaussian interface is shared verbatim across all four model evaluators,
     # keeping replica configuration identical across model families.
@@ -180,8 +178,6 @@ def parse_arguments() -> Arguments:
                         help="Use spiking MLP when --model_backend spiking is selected.")
     parser.add_argument("--activation", type=str, choices=["relu", "gelu"], default="gelu",
                         help="Activation function used by the spiking backend config.")
-    parser.add_argument("--theta", type=float, default=100.0,
-                        help="Domain bound theta used by spiking backend modules.")
 
     # Direct Gaussian timing uses the shared interface without distribution aliases
     # or a separate train/eval switch; evaluators are inference-only entry points.
@@ -195,7 +191,7 @@ def parse_arguments() -> Arguments:
         "--time-noise-std-frac",
         type=float,
         default=0.0,
-        help="Gaussian time std as a fraction of the identity window 2*theta.",
+        help="Gaussian time std as a fraction of each encoder's declared window.",
     )
     parser.add_argument(
         "--time-noise-mean",
@@ -244,7 +240,6 @@ def parse_arguments() -> Arguments:
         spiking_ln_expdiff=args.spiking_ln_expdiff,
         spiking_mlp=args.spiking_mlp,
         activation=args.activation,
-        theta=args.theta,
         gaussian_time_noise=args.gaussian_time_noise,
         time_noise_std_frac=args.time_noise_std_frac,
         time_noise_mean=args.time_noise_mean,
@@ -268,9 +263,8 @@ def infer_text_column(column_names: list[str], preferred: str | None = None) -> 
 def evaluate_bert_model(args: Arguments) -> None:
     """Evaluate one BERT backend with optional direct Gaussian event timing.
 
-    The user-facing standard deviation is converted once from a fraction of the
-    base identity-code window ``2 * theta`` to absolute time. Evaluation installs
-    one seeded process-wide generator, preserves deterministic execution when the
+    The user-facing standard deviation is applied to each encoder's declared time
+    window. Evaluation installs one seeded process-wide generator and preserves deterministic execution when the
     Gaussian flag is disabled, and reports event misses separately from output
     saturation after the task loop.
 
@@ -297,10 +291,6 @@ def evaluate_bert_model(args: Arguments) -> None:
     torch_dtype = torch.float32 if args.dtype == "float32" else torch.float64
     torch_device = torch.device(device_str)
 
-    # Convert the dimensionless CLI scale exactly once using the common identity
-    # encoder window; every supported spike-time encoder receives this same absolute sigma.
-    identity_time_window = 2.0 * float(args.theta)
-    time_noise_std = float(args.time_noise_std_frac) * identity_time_window
     gaussian_enabled = bool(
         model_backend == "spiking" and args.gaussian_time_noise
     )
@@ -309,19 +299,17 @@ def evaluate_bert_model(args: Arguments) -> None:
     # The HF backend explicitly disables it to avoid stale state in reused processes.
     set_gaussian_time_noise(
         enabled=gaussian_enabled,
-        time_std=time_noise_std,
+        time_std_fraction=float(args.time_noise_std_frac),
         time_mean=args.time_noise_mean,
         seed=args.time_noise_seed,
         device=torch_device,
     )
 
-    # Preserve both the input fraction and derived absolute value in W&B so theta
-    # sweeps remain interpretable without reconstructing the command line.
+    # Absolute standard deviation is derived independently at each encoder boundary.
     cfg = {
         **vars(args),
         "gaussian_time_noise_effective": gaussian_enabled,
-        "identity_time_window": identity_time_window,
-        "time_noise_std": time_noise_std,
+        "time_noise_window_normalization": "encoder_local",
     }
     effective_attn_impl = "eager"
     if model_backend == "spiking" and args.spiking_attention:
@@ -334,8 +322,7 @@ def evaluate_bert_model(args: Arguments) -> None:
         "Gaussian time noise — "
         f"enabled: {gaussian_enabled}, "
         f"std_frac: {args.time_noise_std_frac}, "
-        f"identity_window: {identity_time_window}, "
-        f"std_abs: {time_noise_std}, "
+        "window_normalization: encoder_local, "
         f"mean_abs: {args.time_noise_mean}, "
         f"seed: {args.time_noise_seed}"
     )
@@ -345,7 +332,7 @@ def evaluate_bert_model(args: Arguments) -> None:
             f"ln:{args.spiking_layernorm}, attn:{args.spiking_attention}, "
             f"mul:{args.spiking_ln_mul}, log:{args.spiking_ln_log}, "
             f"expdiff:{args.spiking_ln_expdiff}, mlp:{args.spiking_mlp}, "
-            f"act:{args.activation}, theta:{args.theta}"
+            f"act:{args.activation}"
         )
 
     assert dataset_name is not None
@@ -383,7 +370,6 @@ def evaluate_bert_model(args: Arguments) -> None:
         config.spiking_ln_expdiff = args.spiking_ln_expdiff
         config.use_spiking_mlp = args.spiking_mlp
         config.hidden_act = args.activation
-        config.theta = args.theta
         config.use_cache = False
         model = BertForSequenceClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl)
 

@@ -79,7 +79,7 @@ def family_arguments(family, path):
         experiment_name="unit_text_" + family + "_" + path.parent.name,
         dtype="float64", batch_size=2, max_length=8,
         calibration_mode="collect", calibration_path=str(path),
-        calibration_samples=4, calibration_bins=32, theta=40.0,
+        calibration_samples=4, calibration_bins=32,
     )
     return module, args
 
@@ -162,7 +162,7 @@ def verify_family_lifecycle(root, family):
             num_hidden_layers=1, num_attention_heads=2,
             max_position_embeddings=32, num_labels=2,
             hidden_dropout_prob=0.0, attention_probs_dropout_prob=0.0,
-            layer_norm_eps=1.0e-12, theta=40.0, tau_s=1.0,
+            layer_norm_eps=1.0e-12, tau_s=1.0,
             pad_token_id=0,
         )
 

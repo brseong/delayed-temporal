@@ -262,9 +262,9 @@ Deprecated. Calibration 정책 2와 $\theta=20$을 적용하기 전의 threshold
 
 Source `bc973317`의 초기 threshold 선택은 layer-wise calibration 없이 40을 선택했다. Source `648af9bb`의 `log-grid-9`와 `ratio-grid-13`, 그 이전 `v3`/`v5` 적응형 실행, 12 by 13 sigma-margin 계획, 48-site 65-condition 비교는 서로 다른 GELU·calibration·bound 계약을 사용한다. 완료 로그와 그림은 provenance로 보존하지만 현재 source `f7b74c1aef38502caccf532d1e58a7cf321833d6`의 109-site policy-2 결과를 보충하는 replica가 아니다.
 
-[[scripts/analysis/plot_iclr_timing_noise.py#main]]은 당시 `log-grid-9`와 `ratio-grid-13`의 identity를 확인해 ICLR 부록용 2-panel 그림을 만들었다. 이 도구와 생성물은 source `648af9bb`의 역사 자료이며 현재 calibrated 그림 생성기로 승격하지 않는다.
+`scripts/analysis/plot_iclr_timing_noise.py#main`은 당시 `log-grid-9`와 `ratio-grid-13`의 identity를 확인해 ICLR 부록용 2-panel 그림을 만들었다. 이 도구와 생성물은 source `648af9bb`의 역사 자료이며 현재 calibrated 그림 생성기로 승격하지 않는다.
 
-현재 근거는 [[noise#Calibrated Threshold and Noise Sweeps]]의 training 5k 선택, fixed validation 5k의 두 one-dimensional sweep, 그리고 같은 identity의 high-scale timing-noise extension이다. 과거 $\theta=2000$, static threshold mismatch, 470-run joint grid와 자동 W&B 동기화 계획은 현재 표나 그림의 근거가 아니다.
+현재 근거는 [[noise#Superseded Calibrated Threshold and Noise Sweeps]]의 training 5k 선택, fixed validation 5k의 두 one-dimensional sweep, 그리고 같은 identity의 high-scale timing-noise extension이다. 과거 $\theta=2000$, static threshold mismatch, 470-run joint grid와 자동 W&B 동기화 계획은 현재 표나 그림의 근거가 아니다.
 
 ### 과거 ViT Conversion Comparison
 
@@ -341,7 +341,7 @@ Deprecated. 원본은 미정의, 늦은 정의, 의미 충돌과 구현 전용 �
 
 사용하는 원고의 정의와 승인된 기호를 먼저 대조하고, 맞는 정의가 없으면 설명을 풀어 쓰거나 승인을 받아야 한다. 소스·CSV·로그에서 자주 쓰는 말이라고 그림·캡션에 자동 승격하지 않는다. [[evaluation#Manuscript Terminology and Notation Check]]는 편집 전 후보 검사와 편집 후 정확한 추가 diff 검사의 계약이다.
 
-감사에서 발견한 임계값 선택 상태와 원고 실험 설정의 차이는 용어만 바꿔 해결할 수 없다. [[evaluation#ViT-B/16 Global Theta Selection]], [[deprecated#과거 실험과 범위 감사]]의 원본 근거와 함께 확인한다.
+감사에서 발견한 임계값 선택 상태와 원고 실험 설정의 차이는 용어만 바꿔 해결할 수 없다. [[evaluation#Historical ViT-B/16 Global Range Selection]], [[deprecated#과거 실험과 범위 감사]]의 원본 근거와 함께 확인한다.
 
 ### 후속 원고의 선행연구와 예비 정의
 
@@ -633,8 +633,8 @@ theta=40과 양의 하한 $10^{-5}$에서 float32/float64 모두 상한의 log �
 
 - [x] 이전 threshold-40 실행기와 해당 evaluator만 중단했다. 완료·부분 로그는 삭제하거나 새 결과와 합치지 않았다.
 - [x] LayerNorm 상한 변경을 `c9f4e40`으로 별도 커밋하고 UBAI의 clean checkout에 동기화했다.
-- [x] [[evaluation#Calibrated Three Sweep Campaign]]에 71회 평가, 9회 calibration, training 선택과 validation 분리 및 경계 중단 규칙을 정의했다.
-- [x] [[evaluation#Calibrated Three Sweep Scheduling]]의 seed 0 전체 → seed 1 전체 → seed 2 전체 순서와 완료 결과 재사용을 구현했다.
+- [x] [[evaluation#Historical Calibrated Three Sweep Campaign]]에 71회 평가, 9회 calibration, training 선택과 validation 분리 및 경계 중단 규칙을 정의했다.
+- [x] [[evaluation#Historical Calibrated Three Sweep Scheduling]]의 seed 0 전체 → seed 1 전체 → seed 2 전체 순서와 완료 결과 재사용을 구현했다.
 - [x] 실행기와 집계기를 `36615ab`으로 별도 커밋하고 양쪽 clean checkout을 같은 commit으로 고정했다. 기존 사용자 문서 변경은 포함하지 않았다.
 - [x] 새 계약 4그룹, 실행 순서 5그룹, 집계 4그룹, UBAI 안전성 19개 검증 및 관련 연산자·calibration·문서 검사를 통과했다.
 - [x] Slurm 준비 작업 `984373`에서 자산·의존성 해시와 Python 3.12.13을 확인했다. 첫 준비 작업 `984371`의 경로 연결 실패 로그는 보존했다.
@@ -654,6 +654,14 @@ UBAI의 새 clean checkout에는 읽기 전용 source를 mount하기 전에 내�
 - [x] LayerNorm의 세 log 인코딩에 동일하게 계산한 공통 시간창을 sampling 전에 적용했다. 이후 event의 domain만 바꾸는 처리는 하지 않는다.
 - [x] 일반 primitive의 deadline 검사를 유지했다. 상한 40.007과 반대 방향 반올림 사례, 8개 ablation, noise-off·Gaussian 표준편차 0·seeded 경로의 회귀 검증을 추가했다.
 - [x] 전역 threshold 초과와 선택된 범위의 실제 clipping을 구분하고, 새 source의 109-site ViT-B 수집과 평가로 실행 경로를 재검사했다.
+
+### 2026-09-23 Global Range Campaign Retirement
+
+The model-wide range parameter and its accuracy-based selection workflows were removed after local calibrated and analytic bounds became the complete execution contract.
+
+Historical ViT threshold-selection, three-axis sweep, noise-scan, comparison-controller, GPT-2 precision-sweep, and UBAI deployment scripts were deleted from the maintained source tree. Their logs and artifacts remain immutable provenance. They cannot be resumed, aggregated with schema-2 results, or cited as current manuscript evidence.
+
+The replacement contract rejects legacy `theta` and `attention_theta` configuration keys, uses calibration format version 2 and output bounds version 4, and applies timing-noise fractions per local encoder time window. The discrete-time simulation remains a separate retained experiment and is not part of the continuous-time rerun.
 
 ### 2026-08-31 Session Handoff
 
