@@ -121,7 +121,7 @@ def gpu_lock_filename(
     slurm_job_id: str | None,
 ) -> str:
     """Return a lock identity that follows the host's GPU namespace."""
-    if host_label == "local":
+    if host_label in {"local", "poseidon"}:
         return f"gpu-{physical_gpu}.lock"
     if not slurm_job_id or not slurm_job_id.isdigit():
         raise ValueError("UBAI GPU locks require a Slurm job identifier")
@@ -428,7 +428,9 @@ def main() -> None:
     parser.add_argument("--evaluation-dataset-fingerprint", required=True)
     parser.add_argument("--gpu", type=int, choices=range(8), required=True)
     parser.add_argument("--campaign-extra-local-gpus", action="store_true")
-    parser.add_argument("--host-label", choices=("local", "ubai"), default="local")
+    parser.add_argument(
+        "--host-label", choices=("local", "poseidon", "ubai"), default="local",
+    )
     parser.add_argument("--python-bin", default="/opt/conda/envs/dt/bin/python")
     parser.add_argument("--cache-dir", default="/root/.cache/huggingface/datasets")
     parser.add_argument("--output-root", type=Path, required=True)
@@ -438,6 +440,10 @@ def main() -> None:
 
     if args.host_label == "local" and socket.gethostname() != "baekryun-cuda129":
         raise ValueError("local comparison must run on baekryun")
+    if args.host_label == "poseidon" and socket.gethostname() != "poseidon1":
+        raise ValueError("poseidon comparison must run on poseidon1")
+    if args.host_label == "poseidon" and args.gpu not in range(4):
+        raise ValueError("poseidon1 exposes physical GPUs 0 through 3")
     if args.host_label == "local" and args.gpu < 4 and not args.campaign_extra_local_gpus:
         raise ValueError("GPU 0 through 3 require the campaign-specific override")
     args.source_root = args.source_root.resolve(strict=True)
@@ -457,10 +463,10 @@ def main() -> None:
         raise ValueError("output path differs from the fixed full comparison layout")
     runtime = ((args.runtime_root / args.family) if args.runtime_root is not None else
                ARTIFACTS / "runtime" / run_tag / "text" / args.family).resolve()
-    if args.host_label == "local":
+    if args.host_label in {"local", "poseidon"}:
         required_runtime = (ARTIFACTS / "runtime" / run_tag / "text").resolve()
         if runtime.parent != required_runtime:
-            raise ValueError("local runtime differs from the fixed comparison layout")
+            raise ValueError("direct-host runtime differs from the fixed comparison layout")
     else:
         if "SLURM_JOB_ID" not in os.environ or not runtime.is_relative_to(Path("/enroot")):
             raise ValueError("UBAI runtime must be a Slurm-owned path below /enroot")
@@ -539,7 +545,7 @@ def main() -> None:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if args.host_label == "local":
+        if args.host_label in {"local", "poseidon"}:
             for check in range(2):
                 sample = local_gpu.gpu_activity(gpu_ids=(args.gpu,))[args.gpu]
                 if not local_gpu.gpu_available(sample):

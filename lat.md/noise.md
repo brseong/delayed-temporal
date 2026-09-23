@@ -200,11 +200,15 @@ The replacement campaign varies a dimensionless timing-noise fraction at fixed d
 
 Each encoder uses $\sigma_t=r_tT$ for its own declared time-window length $T$. Nine logarithmically spaced fractions and seeds 0, 1, and 2 provide the accuracy curve and its 95% Student-$t$ interval. Exact points are fixed in the new manifest and are not inherited from the superseded campaign.
 
+The exact fractions are $r_t=10^{-5}10^{i/8}$ for integer indices 0 through 8. The numerical grid matches the earlier display, but its maintained meaning is now a fraction of each encoder's own window rather than a fraction of one global range.
+
 ## Deadline-Margin Ratio Sweep
 
 The replacement campaign fixes one local-window noise fraction and varies the nonnegative ratio between deadline margin and local timing-noise standard deviation.
 
 For each encoder, $m=k\sigma_t$ uses that encoder's local $\sigma_t$. Calibration's 5% range margin is unrelated and remains frozen. Accuracy and deadline misses are simulator robustness diagnostics rather than calibrated hardware behavior.
+
+The fixed fraction is $r_t=10^{-5}$ and the ratios are $k\in\{0,0.5,1,1.5,2,2.5,3,4,5,6,8,10,12\}$. The condition $r_t=10^{-5},k=4$ is shared with the timing-noise fraction sweep and is executed only once per seed.
 
 ## Gaussian Noise Statistics
 

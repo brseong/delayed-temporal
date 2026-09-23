@@ -170,6 +170,18 @@ The audited BERT, RoBERTa, and GPT-2 configurations use the same explicit LayerN
 | Normalized dual-rail readout | Temporal exponential difference, `spiking_ln_expdiff=True` |
 | Learned affine | Temporal product when exponential difference is active |
 
+## Local-Range Paper Re-evaluation
+
+The active paper campaign regenerates continuous-time task results after replacing the global range setting with explicit operator-local bounds.
+
+[[scripts/experiments/run_full_calibrated_vit_comparison.py#main]] owns the ViT `collect → ANN → SNN` path. It authenticates source, checkpoint, self-contained dataset, preprocessing, and calibration identities; preserves per-phase logs; and resumes only completed phases with matching hashes.
+
+[[scripts/experiments/run_full_calibrated_text_comparison.py#main]] is the corresponding text-model owner. Direct execution on `poseidon1` uses the same GPU lock and occupancy checks as local execution, while UBAI retains its separate Slurm and `/enroot` rules.
+
+[[scripts/experiments/run_poseidon_local_range_paper_campaign.py#main]] schedules the four Table 3 ViT rows and the Table 4 RoBERTa-B, RoBERTa-L, and GPT-2 rows across explicitly selected free `poseidon1` devices. Runtime files and logs stay below `/data/delayed-temporal/artifacts`; tmpfs and ramfs are rejected.
+
+After the ViT-B result authenticates its frozen calibration, the supervisor releases the 63 unique Figure 4 stochastic replicas through [[scripts/experiments/run_vit_local_range_noise_condition.py#main]]. The noise stage contains nine timing-noise fractions and thirteen deadline-margin ratios with three seeds, evaluating their shared condition once per seed. The discrete-time simulation is outside this campaign.
+
 ## Historical ViT-B/16 Global Range Selection
 
 This section preserves the removed global-range workflow for provenance only; maintained execution has no corresponding setting or selection gate.
