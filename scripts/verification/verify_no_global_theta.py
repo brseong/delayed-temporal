@@ -31,6 +31,22 @@ PRODUCTION_ROOTS = (
     ROOT / "scripts" / "experiments",
     ROOT / "scripts" / "setup",
 )
+ACTIVE_RANGE_GUIDANCE = (
+    ROOT / "lat.md" / "bounds-audit.md",
+    ROOT / "lat.md" / "calibration.md",
+    ROOT / "lat.md" / "comparison-costs.md",
+    ROOT / "lat.md" / "domain.md",
+    ROOT / "lat.md" / "models.md",
+    ROOT / "lat.md" / "text-calibration.md",
+)
+FORBIDDEN_RETIRED_RANGE_GUIDANCE = (
+    "training-only selected threshold",
+    "selected threshold for each model",
+    "ranges above and below the global threshold",
+    "model threshold and time constant",
+)
+
+
 def _terminal_name(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
         return node.id
@@ -222,6 +238,12 @@ def verify_maintained_guidance() -> None:
     ):
         text = path.read_text(encoding="utf-8")
         for fragment in forbidden_fragments:
+            if fragment in text:
+                violations.append(f"{path.relative_to(ROOT)}:{fragment}")
+
+    for path in ACTIVE_RANGE_GUIDANCE:
+        text = path.read_text(encoding="utf-8")
+        for fragment in FORBIDDEN_RETIRED_RANGE_GUIDANCE:
             if fragment in text:
                 violations.append(f"{path.relative_to(ROOT)}:{fragment}")
 
