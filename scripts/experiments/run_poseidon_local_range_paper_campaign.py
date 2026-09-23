@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -136,7 +137,9 @@ def text_tasks(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 
 def noise_tasks(args: argparse.Namespace) -> list[dict[str, Any]]:
-    base = ARTIFACTS / "logs/conversion_comparison" / VIT_TAG / "vit/imagenet_vit_base"
+    base = args.noise_calibration_source or (
+        ARTIFACTS / "logs/conversion_comparison" / VIT_TAG / "vit/imagenet_vit_base"
+    )
     model = Path("/data/nas/vit_base_patch16_224.augreg2_in21k_ft_in1k")
     calibration_dataset = ARTIFACTS / "assets/theta-selection-v1/datasets/imagenet_theta_selection_v1/train_seed0_5000"
     evaluation_dataset = ARTIFACTS / "assets/theta-selection-v1/datasets/imagenet_theta_selection_v1/validation_50000"
@@ -189,26 +192,39 @@ def main() -> None:
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--gpus", type=int, nargs="+", default=(1, 2, 3))
     parser.add_argument("--python-bin", default="/opt/conda/envs/dt/bin/python")
+    parser.add_argument("--campaign-tag", default=CAMPAIGN_TAG)
+    parser.add_argument("--noise-only", action="store_true")
+    parser.add_argument("--noise-calibration-source", type=Path)
     args = parser.parse_args()
     if os.uname().nodename != "poseidon1":
         raise ValueError("campaign supervisor must run on poseidon1")
     if len(set(args.gpus)) != len(args.gpus) or not args.gpus or any(gpu not in range(4) for gpu in args.gpus):
         raise ValueError("poseidon GPU list must contain unique indices from 0 through 3")
+    if not re.fullmatch(r"[a-z0-9_.-]+", args.campaign_tag):
+        raise ValueError("campaign tag contains unsupported characters")
+    if args.noise_only and args.noise_calibration_source is None:
+        raise ValueError("noise-only execution requires an explicit calibration source")
     args.source_root = args.source_root.resolve(strict=True)
+    if args.noise_calibration_source is not None:
+        args.noise_calibration_source = args.noise_calibration_source.resolve(strict=True)
     actual_commit = subprocess.check_output(
         ["git", "-C", str(args.source_root), "rev-parse", "HEAD"], text=True,
     ).strip()
     if actual_commit != args.expected_commit:
         raise ValueError("campaign source commit differs")
-    output = ARTIFACTS / "logs" / CAMPAIGN_TAG
-    runtime = ARTIFACTS / "runtime" / CAMPAIGN_TAG
+    output = ARTIFACTS / "logs" / args.campaign_tag
+    runtime = ARTIFACTS / "runtime" / args.campaign_tag
     output.mkdir(parents=True, exist_ok=True)
     runtime.mkdir(parents=True, exist_ok=True)
     if subprocess.check_output(["findmnt", "-n", "-o", "FSTYPE", "-T", str(runtime)], text=True).strip() in {"tmpfs", "ramfs"}:
         raise RuntimeError("campaign runtime must use a disk filesystem")
     manifest = {
-        "schema_version": 1, "tag": CAMPAIGN_TAG, "source_root": str(args.source_root),
+        "schema_version": 1, "tag": args.campaign_tag, "source_root": str(args.source_root),
         "source_commit": args.expected_commit, "gpus": list(args.gpus),
+        "noise_only": args.noise_only,
+        "noise_calibration_source": (
+            str(args.noise_calibration_source) if args.noise_calibration_source else None
+        ),
         "discrete_time_experiment": False, "wandb": False, "tensorboard": False,
         "runtime_root": str(runtime), "tmpfs": False,
     }
@@ -219,13 +235,13 @@ def main() -> None:
     else:
         runtime_files.new_json(manifest_path, manifest)
 
-    table = vit_tasks(args) + text_tasks(args)
+    table = [] if args.noise_only else vit_tasks(args) + text_tasks(args)
     noise = noise_tasks(args)
     pending = [task for task in table if not complete(task["result"])]
     finished = [task for task in table if complete(task["result"])]
     failed: list[dict[str, Any]] = []
     running: dict[int, dict[str, Any]] = {}
-    noise_released = complete(
+    noise_released = args.noise_only or complete(
         ARTIFACTS / "logs/conversion_comparison" / VIT_TAG / "vit/imagenet_vit_base/result.json"
     )
     if noise_released:

@@ -178,7 +178,7 @@ The active paper campaign regenerates continuous-time task results after replaci
 
 [[scripts/experiments/run_full_calibrated_text_comparison.py#main]] is the corresponding text-model owner. Direct execution on `poseidon1` uses the same GPU lock and occupancy checks as local execution, while UBAI retains its separate Slurm and `/enroot` rules.
 
-[[scripts/experiments/run_poseidon_local_range_paper_campaign.py#main]] schedules the four Table 3 ViT rows and the Table 4 RoBERTa-B, RoBERTa-L, and GPT-2 rows across explicitly selected free `poseidon1` devices. Runtime files and logs stay below `/data/delayed-temporal/artifacts`; tmpfs and ramfs are rejected.
+[[scripts/experiments/run_poseidon_local_range_paper_campaign.py#main]] schedules the four Table 3 ViT rows and the Table 4 RoBERTa-B, RoBERTa-L, and GPT-2 rows across explicitly selected free `poseidon1` devices. It can resume only the noise tasks from an explicit completed ViT-B calibration source. Runtime files and logs stay below `/data/delayed-temporal/artifacts`; tmpfs and ramfs are rejected.
 
 After the ViT-B result authenticates its frozen calibration, the supervisor releases the 63 unique Figure 4 stochastic replicas through [[scripts/experiments/run_vit_local_range_noise_condition.py#main]]. The noise stage contains nine timing-noise fractions and thirteen deadline-margin ratios with three seeds, evaluating their shared condition once per seed. The discrete-time simulation is outside this campaign.
 

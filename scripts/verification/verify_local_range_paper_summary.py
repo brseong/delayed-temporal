@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from argparse import Namespace
 import json
 import math
 from pathlib import Path
@@ -18,6 +19,7 @@ from scripts.analysis.summarize_local_range_paper_campaign import (
     validate_metric,
 )
 from scripts.runtime import identity
+from scripts.experiments import run_poseidon_local_range_paper_campaign as campaign
 
 
 def expect_value_error(callback: Callable[[], object]) -> None:
@@ -98,6 +100,23 @@ def main() -> None:
     assert contains_legacy_range_key({"command": ["python", "--theta", "40"]})
     assert not contains_legacy_range_key({"range_contract": "operator_local_v1"})
     assert len(expected_noise_cells()) == 21
+    original_checkpoint_hash = campaign.checkpoint_hash
+    campaign.checkpoint_hash = lambda _: "2" * 64
+    try:
+        explicit_calibration = Path("/data/calibration-source")
+        tasks = campaign.noise_tasks(Namespace(
+            source_root=Path("/data/source"),
+            expected_commit=source_commit,
+            python_bin="python",
+            noise_calibration_source=explicit_calibration,
+        ))
+    finally:
+        campaign.checkpoint_hash = original_checkpoint_hash
+    assert len(tasks) == 63
+    for task in tasks:
+        command = task["command"]
+        index = command.index("--calibration-source")
+        assert command[index + 1] == str(explicit_calibration)
     validate_metric(0.0, accuracy=True)
     validate_metric(1.0, accuracy=True)
     validate_metric(1.0, accuracy=False)
