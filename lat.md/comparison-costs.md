@@ -84,11 +84,15 @@ The retained accuracy pairs agree with the primary tables; the cited values are 
 
 ### SpikeZIP Corrections
 
-The old table combines quantities with different denominators and contains unsupported ViT-S costs. The corrected table omits SpikeZIP Ops. and only retains energies that can be explicitly derived from reported power and duration.
+The old table combines quantities with different denominators and contains unsupported ViT-S costs. The audited target table omits SpikeZIP Ops. and retains only quantities supported by the cited source.
+
+The current ICLR draft comments out the rendered Energy column but still displays the legacy SpikeZIP one-step activity counts in Ops. Source comments preserve their derivation and flag them as provisional rather than inference SOP.
 
 [SpikeZIP-TF, Tables 4, 5 and 8; Equation 6](https://arxiv.org/html/2406.03470v1) verifies CIFAR-10 $99.2/98.7$ at 32 steps and ImageNet ViT-S/B/L $82.34/81.45$, $83.75/82.71$, $85.41/83.82$ at 64 steps. CIFAR uses a 16-level configuration; ImageNet uses 32 levels. Its ANN column is the baseline before quantization-aware training, not the quantized network immediately before conversion.
 
-Table 8 reports ViT-B/L power of 6.30/19.85 W. Equation 6 specifies one millisecond per step, permitting derived 64-step energies of 403.2/1270.4 mJ. Previously listed 7.0/about 22 billion spikes instead correspond to a single step. They must not be presented as inference SOP counts. No ViT-S power value supporting the existing 1.78 billion/100.8 mJ entries was found in these primary tables; both ViT-S costs remain `--`, including CIFAR.
+Table 8 reports ViT-B/L power of 6.30/19.85 W. Equation 6 specifies one millisecond per step, permitting derived 64-step energies of 403.2/1270.4 mJ. Previously listed 7.0/about 22 billion spikes instead correspond to a single step and must not be presented as inference SOP counts.
+
+The ViT-S value is a parameter-ratio estimate rather than a reported result. Table 5 gives 22.05M parameters for ViT-S and 86.57M for ViT-B, so scaling the 7.00 billion ViT-B activities per step gives $7.00\times22.05/86.57=1.78295$ billion per step. At 64 steps this is 114.109 billion activities and 102.70 mJ under the paper's model. The legacy 100.8 mJ instead uses a rounded 1:4 ratio; at CIFAR's 32 steps, reusing the same per-step estimate would give 57.054 billion activities and 51.35 mJ. These estimates are not directly reported SpikeZIP-TF costs and remain outside the audited target table.
 
 The B/L energy cells must be marked as derived values under that paper's temporal power model, not quoted measurements or directly comparable physical device energy.
 
@@ -98,7 +102,7 @@ Only a complete, validated comparison bundle may fill the four Ours rows. Paper 
 
 [[scripts/analysis/summarize_vit_comparison.py#verify_publication_bundle]] checks all four calibration and eight evaluation records, their common identities, generated file hashes and reproducibility of CSV and LaTeX content. [[scripts/analysis/publish_vit_comparison.py#prepare_paper_update]] creates a proposed table and comparison-protocol update without writing the paper.
 
-The table caption must identify our CIFAR test 10k and ImageNet fixed validation 5k populations, preserve literature provenance, correct SpikeZIP quantization levels, and distinguish derived energy from measured energy. A comparison-specific paragraph records fixed $\theta=40$, float64, training seed-0 5k calibration, min/max with 5% range margin, frozen bounds and disabled noise. It also discloses the dense runtime classifier and assumed TTFS head in the estimate.
+The table caption must identify our CIFAR test 10k and ImageNet fixed validation 5k populations, preserve literature provenance, correct SpikeZIP quantization levels, and distinguish derived energy from measured energy. A comparison-specific paragraph records the training-only selected threshold for each model, float64, training seed-0 5k calibration, min/max with 5% range margin, frozen bounds and disabled noise. It also discloses the dense runtime classifier and assumed TTFS head in the estimate.
 
 The ICLR appendix now derives affine projection, GELU, LayerNorm, multi-head self-attention, MLP, complete block, stem, final LayerNorm and assumed TTFS head costs under `vit_composed_sop_v1`. It distinguishes 196 image patches from 197 tokens and reports the exact SOP totals that generate the rounded table values. The comparison section links directly to this derivation.
 

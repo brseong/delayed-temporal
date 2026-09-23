@@ -70,6 +70,8 @@ An additional evaluation used 384 and 768 time steps per time window under the s
 
 The original benchmark remains unchanged. The combined summary for nine conditions, 189 shard records, verification hashes, and diagnostic figure are stored separately under `artifacts/logs/clock_driven/vit_base_clock_driven_window_steps_384_768_imagenet500_theta20_float64_v1/`.
 
+[[scripts/analysis/plot_clock_discretization.py#main]] verifies the fine sweep over global time-step width and the combined summary over time steps per window before regenerating the ICLR figure under `artifacts/figures/` and `paper/iclr_2027/figures/`.
+
 The first attempt for this sweep was rejected because subtracting a large nonzero time-window origin exposed floating-point cancellation in an otherwise aligned duration. The completed execution admits only bounded arithmetic drift accumulated by explicit state updates and origin subtraction, while still rejecting a displacement of one quarter of a time step.
 
 It shares the earlier calibration table only after confirming that every changed path is unable to affect calibration. Runtime validation substitutes the recorded source revision and the calibration table's recorded ViT evaluator digest, while requiring every other metadata field to match exactly.

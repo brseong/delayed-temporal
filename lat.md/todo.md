@@ -25,7 +25,7 @@ The active comparison must finish all four model-specific selections and held-ou
 - [x] Freeze the eleven-candidate grid and select each threshold only from training seed-0 5k accuracy.
 - [x] Preserve the failed UBAI identity checks and reassign only terminal, non-duplicated work to local GPU devices 4--7.
 - [x] Complete and validate CIFAR-10 ViT-S, ImageNet ViT-S, and ImageNet ViT-B.
-- [ ] Complete ImageNet ViT-L, regenerate the four-row summary, archive provenance, and update the manuscript only from the complete bundle.
+- [x] Complete ImageNet ViT-L, regenerate the four-row summary, archive provenance, and update the manuscript only from the complete bundle.
 
 ## Manuscript Revision Master Checklist
 
@@ -61,6 +61,7 @@ The central claim must describe the demonstrated fixed-form operator composition
 - [ ] Describe the MatMul $O(3MKN)$ to $O(MKN)$ change as a constant-factor operation-count reduction, not an asymptotic complexity improvement.
 - [ ] Fairly describe the latency and efficient-simulation benefits of small-$T$ discrete-time methods.
 - [ ] Rebuild the paper in the order: problem and gap, model and assumptions, fixed operators, constructive composition, deterministic error, conversion evidence, perturbation sensitivity, and hardware limitations.
+- [x] Replace “quantifying the resulting clipping error” with “accounting for clipping introduced by the finite ranges”; do not add a separate layer-wise activation/logit error study solely to support clipping-error quantification.
 - [ ] Map each current paragraph, theorem, table, and figure to keep, shorten, move to appendix, delete, or rewrite before polishing the abstract and introduction.
 
 ### P0 Mathematical and Operator Audit
@@ -68,14 +69,14 @@ The central claim must describe the demonstrated fixed-form operator composition
 Every retained theorem and operator claim must match the implemented equations, domains, finite-window behavior, and failure conditions.
 
 - [ ] Reclassify Theorem 1 as a quantitative theorem with conditions and bounds, a conditional theorem, or a constructive proposition.
-- [ ] Tabulate each primitive and composition with input domain, clipping condition, scale, zero-error condition, and worst-case or empirical error.
+- [ ] Tabulate each primitive and composition with input domain, clipping condition, scale, and zero-error condition; keep quantitative claims within the reported ANN--SNN task fidelity rather than introducing a separate layer-wise clipping-error study.
 - [ ] Derive an $L$-block error relation where defensible; otherwise state why no useful end-to-end bound is available and limit the claim to empirical evidence.
 - [ ] Present all four signed multiplication sign cases and the causal source--sink routing used by the two parallel causal integration paths.
 - [ ] Define $\psi_{\mathrm{Int}}$ as a time-window integration mechanism based on an NMDA plateau rather than equating it with a validated biological spike or completed circuit.
 - [ ] Update the signed multiplication definition, proof, and SOP accounting for two parallel causal paths without duplicating encoder spikes.
-- [ ] Recheck softmax stability, exponent scaling, normalization, lower and upper clipping, deadline behavior, and the meaning and calibration of $\alpha$ against the implementation.
+- [ ] Add the complete Softmax composition and recheck stability, exponent scaling, normalization, lower and upper clipping, deadline behavior, and the meaning and calibration of $\alpha$ against the implementation.
 - [ ] Re-derive the GELU relation involving $1/(1+\kappa e^{-\beta x})$, state the required $\kappa$ and time-constant conditions, and quantify finite-window error.
-- [ ] Write LayerNorm's actual target as $\sqrt{v+\epsilon_{\mathrm{LN}}}$ and keep $\epsilon_{\mathrm{LN}}$ distinct from the encoder floor $\epsilon_{\mathrm{enc}}$.
+- [ ] Add the complete LayerNorm dual-rail derivation, state that it uses unrestricted $\psi_{\mathrm{ED}}$ rather than public $f_{\mathrm{Div}}$, and distinguish the variance stabilizer from the positive log input floor.
 - [ ] Unify the LayerNorm references as $H$ and $H^2$, including the finite-domain definition used in code.
 - [ ] Resolve the residual $1/\sqrt{\theta}$ explanation against any statement that no residual scale remains.
 - [ ] Add deterministic boundary tests for zero variance, centered values close to zero, symmetric inputs of both signs, and declared upper bounds in the LayerNorm configuration used for publication.

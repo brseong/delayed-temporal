@@ -521,7 +521,9 @@ The automated pass provides locations and explanations; it cannot determine whet
 
 Conference-specific manuscript material is isolated by venue and year so archived submissions and new templates can coexist without ambiguous relative paths.
 
-The withdrawn NeurIPS snapshot, review notes, bibliography, and publication figures live under `paper/neurips_2026/`. The official ICLR 2027 LaTeX template and its original ZIP live under `paper/iclr_2027/`. The complete `paper/` tree remains intentionally untracked.
+The withdrawn NeurIPS snapshot, review notes, bibliography, and publication figures live under `paper/neurips_2026/`. The official ICLR 2027 LaTeX template and its original ZIP live under `paper/iclr_2027/`.
+
+The parent repository still ignores the complete `paper/` tree, while `paper/` itself is an independent Git checkout connected to Overleaf. Its `main` branch tracks the ICLR tree and retains the existing Overleaf NeurIPS snapshot. `paper/.gitignore` excludes new untracked NeurIPS files, LaTeX build outputs, local reference PDFs, archives, and raster previews; tracked NeurIPS paths use a local `skip-worktree` guard against accidental staging.
 
 The ICLR entry point `paper/iclr_2027/iclr2027_conference.tex` retains the preamble, submission metadata, abstract, bibliography, and ordered inputs. Introduction, Related Work, Preliminaries, Methodology, and Appendix content live in matching `iclr2027_conference_<section>.tex` files, each declaring the entry point as its TeX root.
 

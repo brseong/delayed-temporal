@@ -45,10 +45,9 @@ The active campaign is frozen as `conversion_comparison_training_selected_theta_
 | CIFAR-10 ViT-S/16 | 7.0710678119 | 4,959/5,000 | 4,969/5,000 | test 10k | 9,848 | 9,836 | 98.48% | 98.36% | -0.12 pp |
 | ImageNet-1k ViT-S/16 | 7.0710678119 | 4,377/5,000 | 4,389/5,000 | fixed validation 5k | 4,114 | 4,053 | 82.28% | 81.06% | -1.22 pp |
 | ImageNet-1k ViT-B/16 | 20 | 4,590/5,000 | 4,590/5,000 | fixed validation 5k | 4,303 | 4,300 | 86.06% | 86.00% | -0.06 pp |
+| ImageNet-1k ViT-L/16 | 10 | 4,605/5,000 | 4,609/5,000 | fixed validation 5k | 4,319 | 4,300 | 86.38% | 86.00% | -0.38 pp |
 
-ViT-L remains incomplete. Four of eleven training candidates are complete; the best observed count is 4,608/5,000 at $\theta=14.1421356237$. This interim value does not select a threshold and is not a held-out accuracy result.
-
-The three complete rows are accepted by the campaign result validator, but the aggregate bundle remains incomplete until ViT-L finishes. Therefore these rows are progress evidence rather than authorization to update the manuscript table.
+All 44 calibration collections, 44 training evaluations, and eight held-out ANN/SNN evaluations passed the campaign validator. Table 3 uses these four rows; validation and test labels were excluded from threshold selection and calibration.
 
 ### Retained Common-Threshold Evidence
 
