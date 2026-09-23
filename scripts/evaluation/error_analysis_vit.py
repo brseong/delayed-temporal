@@ -1705,8 +1705,6 @@ def evaluate_vit_model(args: Arguments) -> None:
                 f"Gaussian/{site}/deadline_event_rate": deadline_rate,
                 f"Gaussian/{site}/deadline_ulp_min": ulp_min,
                 f"Gaussian/{site}/deadline_ulp_max": ulp_max,
-                f"Gaussian/{site}/std_to_ulp_min": std_to_ulp_min,
-                f"Gaussian/{site}/std_to_ulp_max": std_to_ulp_max,
                 f"Gaussian/{site}/outputs": outputs,
                 f"Gaussian/{site}/output_underflows": counts["output_underflows"],
                 f"Gaussian/{site}/output_underflow_rate": underflow_rate,

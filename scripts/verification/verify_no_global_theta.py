@@ -17,6 +17,12 @@ if str(ROOT) not in sys.path:
 
 
 FORBIDDEN_NAMES = {"theta", "attention_theta", "selected_theta"}
+FORBIDDEN_GLOBAL_NOISE_REPORT_FRAGMENTS = {
+    "identity_time_window",
+    "time_noise_std_to_identity_ulp",
+    "std_to_ulp_min",
+    "std_to_ulp_max",
+}
 PRODUCTION_ROOTS = (
     ROOT / "utils" / "transforms",
     ROOT / "utils" / "transformers",
@@ -192,6 +198,17 @@ def verify_evaluator_help() -> None:
         assert "--theta" not in result.stdout
 
 
+def verify_no_global_noise_resolution_reporting() -> None:
+    """Evaluator reports cannot reconstruct noise resolution from a global window."""
+    violations: list[str] = []
+    for path in sorted((ROOT / "scripts" / "evaluation").glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for fragment in FORBIDDEN_GLOBAL_NOISE_REPORT_FRAGMENTS:
+            if fragment in text:
+                violations.append(f"{path.relative_to(ROOT)}:{fragment}")
+    assert not violations, "global-window noise reporting returned:\n" + "\n".join(violations)
+
+
 def verify_maintained_guidance() -> None:
     """Examples and executable notebook cells cannot advertise the retired knob."""
     forbidden_fragments = (
@@ -243,6 +260,7 @@ def main() -> None:
     verify_operator_signatures()
     verify_model_instance_attributes()
     verify_evaluator_help()
+    verify_no_global_noise_resolution_reporting()
     verify_maintained_guidance()
     verify_no_tracked_calibration_fallback()
     print("Global theta removal verification passed")

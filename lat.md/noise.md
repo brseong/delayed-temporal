@@ -216,4 +216,6 @@ Maintained experiments expose event delivery and readout saturation counters for
 
 The statistics interface reports event count, deadline misses, nominal deadline events, deadline ULP range, output count, and lower/upper rail saturation for each named site. Reconfiguring the Gaussian generator starts a new replica and clears these counters; callers can also clear them explicitly.
 
+Reports retain only the fields named above. Derived resolution ratios are not part of this schema because the timing noise standard deviation is defined separately for each encoder.
+
 Output saturation is counted from the raw physical readout before its required rail clamp. Both denominators must be reported: event rates use event count, while saturation rates use output count.
