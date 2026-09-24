@@ -445,9 +445,8 @@ def render_figure(
             axis.legend(
                 handles + extra_handles,
                 labels + extra_labels,
-                loc="lower center",
-                bbox_to_anchor=(0.5, 1.02),
-                ncol=2,
+                loc="center right",
+                bbox_to_anchor=(0.98, 0.5),
                 borderaxespad=0.0,
             )
     fig.tight_layout()
