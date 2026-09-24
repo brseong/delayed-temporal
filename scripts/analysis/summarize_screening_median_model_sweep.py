@@ -315,7 +315,7 @@ def render(summary: list[dict[str, Any]], output: Path) -> None:
     )
     axis.set_xlabel("Noise scale multiplier")
     axis.set_ylabel("Top-1 accuracy change from deterministic baseline (pp)")
-    axis.set_title("Accuracy under measured encoder timing noise")
+    axis.set_title("Robustness across converted Transformer models")
     axis.grid(alpha=0.25, which="both")
     axis.legend(frameon=False)
     output.parent.mkdir(parents=True, exist_ok=True)
