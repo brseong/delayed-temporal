@@ -22,6 +22,12 @@ Experiment modules own manifests, scientific condition grids, scheduling, retrie
 
 Completed manifests identify their historical source commit and file hashes. Reproduction uses that commit; the current implementation does not keep duplicate policy or compatibility wrappers solely to preserve an old source path. Generated outputs remain under `artifacts/`.
 
+### BrainScaleS-2 Artifact Retention
+
+BrainScaleS-2 experiment artifacts are protected evidence and remain outside ordinary cleanup scope.
+
+Any artifact whose directory name, tag, or manifest identifies BrainScaleS-2 or `bss2` must be preserved, including incomplete and superseded runs. Ambiguity resolves to preservation. Deletion requires a new explicit user instruction naming the exact BSS2 targets.
+
 ## Dependency Boundary Verification
 
 The layout check prevents stable evaluators and generic runtime helpers from depending on campaign controllers.

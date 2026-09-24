@@ -110,6 +110,7 @@ Each temporal operator consumes an analytic or frozen calibrated local potential
 - Comments and diagnostic output may be Korean or English. Follow the surrounding file's language and style.
 - Add type annotations where practical.
 - Preserve user-generated artifacts and unrelated worktree changes.
+- BrainScaleS-2 experiment artifacts are protected evidence. Cleanup must preserve every path whose manifest, tag, or directory name identifies BrainScaleS-2 or `bss2`; deletion requires a new explicit user instruction naming the exact BSS2 targets.
 
 ## Paper-review discussions
 
