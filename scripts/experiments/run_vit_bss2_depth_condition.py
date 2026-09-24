@@ -185,9 +185,17 @@ def parse_scoped_counts(log: str, first_block_count: int) -> dict[str, Any]:
 
 
 def validate_condition_arguments(args: argparse.Namespace) -> None:
+    if not math.isfinite(args.measured_noise_scale) or not (
+        0.0 < args.measured_noise_scale <= 1.0
+    ):
+        raise ValueError("measured_noise_scale must be in (0, 1]")
     if args.condition == "clean":
-        if args.first_block_count != 0 or args.seed != 0:
-            raise ValueError("clean condition requires K=0 and seed 0")
+        if (
+            args.first_block_count != 0
+            or args.seed != 0
+            or args.measured_noise_scale != 1.0
+        ):
+            raise ValueError("clean condition requires K=0, seed 0, and scale 1")
     elif not 1 <= args.first_block_count <= 12:
         raise ValueError("noisy condition requires K between 1 and 12")
     if args.evaluation_samples not in (500, 5000):
@@ -208,10 +216,12 @@ def main() -> None:
     parser.add_argument("--image-preprocessing-config", type=Path, required=True)
     parser.add_argument("--hardware-summary", type=Path, required=True)
     parser.add_argument("--condition", choices=CONDITIONS, required=True)
+    parser.add_argument("--measured-noise-scale", type=float, default=1.0)
     parser.add_argument("--first-block-count", type=int, required=True)
     parser.add_argument("--seed", type=int, choices=(0, 1, 2), required=True)
     parser.add_argument("--evaluation-samples", type=int, required=True)
-    parser.add_argument("--gpu", type=int, choices=range(4, 8), required=True)
+    parser.add_argument("--gpu", type=int, choices=range(8), required=True)
+    parser.add_argument("--calibration-source-commit")
     parser.add_argument("--python-bin", default="/opt/conda/envs/dt/bin/python")
     args = parser.parse_args()
     validate_condition_arguments(args)
@@ -233,8 +243,9 @@ def main() -> None:
         identity.sha256_file(Path(__file__).resolve())
     )
     checkpoint_sha256 = identity.artifact_identity(args.model_id)["aggregate_sha256"]
+    calibration_source_commit = args.calibration_source_commit or args.expected_commit
     calibration_path, calibration_sha256, sites = completed_calibration(
-        args.calibration_source, args.expected_commit
+        args.calibration_source, calibration_source_commit
     )
     evaluation_dataset = dataset_identity(
         args.evaluation_dataset_path,
@@ -247,14 +258,28 @@ def main() -> None:
         measured_condition: dict[str, Any] | None = None
     else:
         measured_condition = measured[args.condition]
-        linear_fraction = float(measured_condition["linear_time_std_fraction"])
-        log_fraction = float(measured_condition["log_time_std_fraction"])
+        linear_fraction = (
+            float(measured_condition["linear_time_std_fraction"])
+            * args.measured_noise_scale
+        )
+        log_fraction = (
+            float(measured_condition["log_time_std_fraction"])
+            * args.measured_noise_scale
+        )
 
     phase = "pilot" if args.evaluation_samples == 500 else "formal"
+    scale_suffix = (
+        ""
+        if args.measured_noise_scale == 1.0
+        else "_scale" + format(args.measured_noise_scale, ".12g").replace(".", "p")
+    )
     run_id = (
         "clean_k00_seed0"
         if args.condition == "clean"
-        else f"{args.condition}_k{args.first_block_count:02d}_seed{args.seed}"
+        else (
+            f"{args.condition}{scale_suffix}_k{args.first_block_count:02d}"
+            f"_seed{args.seed}"
+        )
     )
     output = ARTIFACTS / "logs/bss2_vit_depth" / TAG / phase / "runs" / run_id
     runtime = ARTIFACTS / "runtime" / TAG / phase / run_id
@@ -395,6 +420,10 @@ def main() -> None:
         "runtime_dir": str(runtime),
         "command": command,
     }
+    if calibration_source_commit != args.expected_commit:
+        manifest["calibration_source_commit"] = calibration_source_commit
+    if args.measured_noise_scale != 1.0:
+        manifest["measured_noise_scale"] = args.measured_noise_scale
     manifest_path = output / "manifest.json"
     if manifest_path.exists():
         if canonical(json.loads(manifest_path.read_text())) != canonical(manifest):

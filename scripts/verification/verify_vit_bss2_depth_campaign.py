@@ -58,7 +58,11 @@ def verify_fixed_conditions() -> None:
     assert conditions["screening-median"]["log_time_std_fraction"] == 0.024617376541590685
     validate_condition_arguments(
         SimpleNamespace(
-            condition="clean", first_block_count=0, seed=0, evaluation_samples=500
+            condition="clean",
+            first_block_count=0,
+            seed=0,
+            evaluation_samples=500,
+            measured_noise_scale=1.0,
         )
     )
     validate_condition_arguments(
@@ -67,27 +71,51 @@ def verify_fixed_conditions() -> None:
             first_block_count=12,
             seed=2,
             evaluation_samples=5000,
+            measured_noise_scale=0.1,
         )
     )
     for candidate in (
-        SimpleNamespace(condition="clean", first_block_count=1, seed=0, evaluation_samples=500),
+        SimpleNamespace(
+            condition="clean",
+            first_block_count=1,
+            seed=0,
+            evaluation_samples=500,
+            measured_noise_scale=1.0,
+        ),
         SimpleNamespace(
             condition="best-measured-coordinate",
             first_block_count=0,
             seed=0,
             evaluation_samples=500,
+            measured_noise_scale=1.0,
         ),
         SimpleNamespace(
             condition="screening-median",
             first_block_count=13,
             seed=0,
             evaluation_samples=500,
+            measured_noise_scale=1.0,
         ),
         SimpleNamespace(
             condition="screening-median",
             first_block_count=1,
             seed=0,
             evaluation_samples=501,
+            measured_noise_scale=1.0,
+        ),
+        SimpleNamespace(
+            condition="screening-median",
+            first_block_count=1,
+            seed=0,
+            evaluation_samples=500,
+            measured_noise_scale=0.0,
+        ),
+        SimpleNamespace(
+            condition="clean",
+            first_block_count=0,
+            seed=0,
+            evaluation_samples=500,
+            measured_noise_scale=0.1,
         ),
     ):
         must_reject(lambda candidate=candidate: validate_condition_arguments(candidate))
