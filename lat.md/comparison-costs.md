@@ -100,7 +100,7 @@ The B/L energy cells must be marked as derived values under that paper's tempora
 
 Only a complete, validated comparison bundle may fill the four Ours rows. Paper preparation leaves unrelated prose and user changes untouched and exposes a reviewable patch before any paper file is modified.
 
-`scripts/analysis/summarize_vit_comparison.py#verify_publication_bundle` checks all four calibration and eight evaluation records, their common identities, generated file hashes and reproducibility of CSV and LaTeX content. `scripts/analysis/publish_vit_comparison.py#prepare_paper_update` creates a proposed table and comparison-protocol update without writing the paper.
+[[scripts/analysis/summarize_local_range_paper_campaign.py#table_rows]] checks the four ViT and three text pipelines, exact sample counts, log hashes, calibration-policy identities, and a common source commit. [[scripts/analysis/summarize_local_range_paper_campaign.py#noise_rows]] accepts Figure 4 only when all 63 stochastic replicas match the completed ViT-B source, checkpoint, dataset, and calibration identities. Manuscript values and the final Figure 4 artifact are promoted only from these validated outputs.
 
 The table caption must identify our CIFAR test 10k and ImageNet fixed validation 5k populations, preserve literature provenance, correct SpikeZIP quantization levels, and distinguish derived energy from measured energy. A comparison-specific paragraph records float64, training seed-0 5k calibration, min/max with 5% range margin, frozen local ranges and disabled noise. The classifier counted by the estimate is the same TTFS linear composition executed by evaluation.
 
@@ -114,6 +114,6 @@ The methodology table writes the cubic term as $v^3$ and links it to the existin
 
 ## Verification
 
-An independently enumerated small circuit checks every data and global destination. Bundle checks reject incomplete, duplicate or mismatched evidence before a generated table can reach the manuscript.
+An independently enumerated small circuit checks every data and global destination. Bundle checks reject incomplete, duplicate or mismatched evidence before a generated table or figure can reach the manuscript.
 
-`scripts/verification/verify_vit_comparison_costs.py#CostTests#test_enumerated_oracle` checks every component against nested loops over a small model rather than reusing estimator formulas. Other tests cover geometry, class count, head multiplicity, energy units, missing runs, numerical conditions, calibration linkage, exact accuracy counts and generated artifact integrity. Publication tests preserve untouched text and reject unexpected table structure.
+[[scripts/verification/verify_vit_comparison_costs.py#CostTests#test_enumerated_oracle]] checks every component against nested loops over a small model rather than reusing estimator formulas. The same verifier checks the TTFS classification-head mapping, invalid geometry, energy units, and exact CIFAR ViT-S and ImageNet ViT-S/B/L totals that round to the table values.
