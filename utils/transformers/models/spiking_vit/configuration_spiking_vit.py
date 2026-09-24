@@ -109,6 +109,7 @@ class ViTConfig(PreTrainedConfig):
         spiking_ln_expdiff=True,
         use_spiking_mlp=True,
         spiking_mlp_exact_gelu=False,
+        time_noise_vit_first_block_count=None,
         pixel_value_min=None,
         pixel_value_max=None,
         **kwargs,
@@ -133,6 +134,8 @@ class ViTConfig(PreTrainedConfig):
             spiking_ln_expdiff: Use exponential-difference LayerNorm decoding.
             use_spiking_mlp: Enable the converted spiking MLP path.
             spiking_mlp_exact_gelu: Select exact GELU inside that MLP ablation.
+            time_noise_vit_first_block_count: Number of encoder blocks, starting
+                from the input, selected by an explicitly scoped timing-noise run.
             pixel_value_min: Fixed lower endpoint produced by image preprocessing.
             pixel_value_max: Fixed upper endpoint produced by image preprocessing.
             **kwargs: Standard ``PreTrainedConfig`` metadata and output controls.
@@ -180,6 +183,7 @@ class ViTConfig(PreTrainedConfig):
         self.spiking_ln_expdiff = spiking_ln_expdiff
         self.use_spiking_mlp = use_spiking_mlp
         self.spiking_mlp_exact_gelu = spiking_mlp_exact_gelu
+        self.time_noise_vit_first_block_count = time_noise_vit_first_block_count
 
         # Pixel bounds describe evaluator preprocessing rather than a checkpoint
         # parameter. They remain optional for dense compatibility, while the spiking
