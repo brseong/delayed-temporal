@@ -60,7 +60,7 @@ def source_identity(source: Path, expected_commit: str) -> dict[str, str]:
         source / "scripts/analysis/evaluate_calibrated_vit.py",
         source / "scripts/analysis/gelu_cubic_phi_nl_vit.py",
         source / "scripts/runtime/ann_baseline.py",
-        Path(__file__).resolve(),
+        source / "scripts/experiments/run_full_calibrated_vit_comparison.py",
     ]
     return {str(path.relative_to(source)): identity.sha256_file(path) for path in sorted(set(paths))}
 

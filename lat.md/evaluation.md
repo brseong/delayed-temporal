@@ -202,7 +202,7 @@ Each run authenticates source, checkpoint, calibration, evaluation data, preproc
 
 [[scripts/experiments/run_vit_bss2_depth_condition.py#main]] evaluates exactly 500 or 5,000 examples, fixes float64 and deadline-margin ratio 4, and records block-prefixed Gaussian counters. The clean reference uses $k=0$; noisy conditions use seeds 0--2.
 
-An optional factor in $(0,1]$ may attenuate both measured fractions without merging them: each encoder retains its own measured $r_t$ and local signal span. Scaled runs use distinct identities, and their manifests retain the original condition, factor, and calibration revision.
+An optional factor in $(0,1]$ may attenuate both measured fractions without merging them: each encoder retains its own measured $r_t$ and local signal span. Scaled runs use distinct identities, and their manifests retain the original condition, factor, runner revision, and frozen evaluator revision.
 
 ### Campaign Protocol
 

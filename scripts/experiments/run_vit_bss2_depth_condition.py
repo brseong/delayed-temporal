@@ -221,7 +221,6 @@ def main() -> None:
     parser.add_argument("--seed", type=int, choices=(0, 1, 2), required=True)
     parser.add_argument("--evaluation-samples", type=int, required=True)
     parser.add_argument("--gpu", type=int, choices=range(8), required=True)
-    parser.add_argument("--calibration-source-commit")
     parser.add_argument("--python-bin", default="/opt/conda/envs/dt/bin/python")
     args = parser.parse_args()
     validate_condition_arguments(args)
@@ -239,13 +238,24 @@ def main() -> None:
     args.image_preprocessing_config = args.image_preprocessing_config.resolve(strict=True)
     args.hardware_summary = args.hardware_summary.resolve(strict=True)
     source_hashes = source_identity(args.source_root, args.expected_commit)
-    source_hashes[str(Path(__file__).resolve().relative_to(args.source_root))] = (
-        identity.sha256_file(Path(__file__).resolve())
+    runner_commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True
+    ).strip()
+    runner_dirty = subprocess.check_output(
+        ["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
+        text=True,
+    ).strip()
+    if runner_dirty:
+        raise ValueError("depth-condition runner requires a clean source checkout")
+    runner_key = (
+        str(Path(__file__).resolve().relative_to(args.source_root))
+        if ROOT.resolve() == args.source_root
+        else "runner:scripts/experiments/run_vit_bss2_depth_condition.py"
     )
+    source_hashes[runner_key] = identity.sha256_file(Path(__file__).resolve())
     checkpoint_sha256 = identity.artifact_identity(args.model_id)["aggregate_sha256"]
-    calibration_source_commit = args.calibration_source_commit or args.expected_commit
     calibration_path, calibration_sha256, sites = completed_calibration(
-        args.calibration_source, calibration_source_commit
+        args.calibration_source, args.expected_commit
     )
     evaluation_dataset = dataset_identity(
         args.evaluation_dataset_path,
@@ -420,8 +430,8 @@ def main() -> None:
         "runtime_dir": str(runtime),
         "command": command,
     }
-    if calibration_source_commit != args.expected_commit:
-        manifest["calibration_source_commit"] = calibration_source_commit
+    if runner_commit != args.expected_commit:
+        manifest["runner_source_commit"] = runner_commit
     if args.measured_noise_scale != 1.0:
         manifest["measured_noise_scale"] = args.measured_noise_scale
     manifest_path = output / "manifest.json"
