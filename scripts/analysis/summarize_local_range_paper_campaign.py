@@ -442,7 +442,14 @@ def render_figure(
             secondary.set_ylabel("Deadline-miss rate (%)")
             handles, labels = axis.get_legend_handles_labels()
             extra_handles, extra_labels = secondary.get_legend_handles_labels()
-            axis.legend(handles + extra_handles, labels + extra_labels, loc="best")
+            axis.legend(
+                handles + extra_handles,
+                labels + extra_labels,
+                loc="lower center",
+                bbox_to_anchor=(0.5, 1.02),
+                ncol=2,
+                borderaxespad=0.0,
+            )
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
