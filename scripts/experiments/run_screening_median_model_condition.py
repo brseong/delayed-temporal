@@ -98,6 +98,12 @@ def _verify_model_resources(model: str, resource: dict[str, Any]) -> None:
     if model != "cct7":
         from datasets import Dataset, load_from_disk
 
+        preprocessing = Path(resource["image_preprocessing_config"]).resolve(strict=True)
+        if (
+            identity.sha256_file(preprocessing)
+            != resource["image_preprocessing_sha256"]
+        ):
+            raise ValueError("ViT preprocessing identity differs")
         dataset = load_from_disk(resource["evaluation_dataset_path"])
         if (
             not isinstance(dataset, Dataset)

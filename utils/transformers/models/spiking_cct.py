@@ -241,6 +241,17 @@ class CCTEncoder(ViTEncoder):
             CCTLayer(config) for _ in range(config.num_hidden_layers)
         )
         self.gradient_checkpointing = False
+        first_block_count = getattr(config, "time_noise_vit_first_block_count", None)
+        if first_block_count is not None:
+            if isinstance(first_block_count, bool) or not isinstance(
+                first_block_count, int
+            ):
+                raise TypeError("time_noise_vit_first_block_count must be an integer")
+            if not 0 <= first_block_count <= len(self.layer):
+                raise ValueError(
+                    "time_noise_vit_first_block_count must be inside the encoder depth"
+                )
+        self.time_noise_vit_first_block_count = first_block_count
 
 
 def load_official_cct7_checkpoint(

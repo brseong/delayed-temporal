@@ -41,6 +41,7 @@ from scripts.experiments.run_poseidon_screening_median_model_sweep import (
     _cell_gpu,
     _verify_smoke_gate,
 )
+from utils.transformers.models.spiking_cct import CCT7ForImageClassification
 
 
 def must_reject(callable_) -> None:
@@ -97,6 +98,18 @@ def verify_measurement_and_grid(hardware_summary: Path) -> None:
         }
     )
     assert counts["underflows"] == 3 and counts["overflows"] == 4
+
+    cct = CCT7ForImageClassification(converted=True)
+    assert cct.encoder.time_noise_vit_first_block_count is None
+    preprocessing = json.loads(
+        (ROOT / "scripts/configs/vit_timm_preprocessing.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert {
+        "vit_small_patch16_224.augreg_in21k_ft_in1k",
+        "vit_base_patch16_224.augreg2_in21k_ft_in1k",
+    }.issubset(preprocessing["models"])
 
 
 def verify_smoke_gate() -> None:

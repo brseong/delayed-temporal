@@ -246,7 +246,12 @@ def _prepare_vit(args: argparse.Namespace, model: str, gpu: int) -> None:
     output, runtime = _vit_prepare_paths(args.output_root, args.runtime_root, model)
     if _complete(output / "result.json"):
         return
-    model_path = args.vit_small_model if model == "imagenet_vit_small" else args.vit_base_model
+    model_path = (
+        args.vit_small_model
+        if model == "imagenet_vit_small"
+        else args.vit_base_model
+    )
+    preprocessing = args.source_root / "scripts/configs/vit_timm_preprocessing.json"
     command = [
         args.python_bin,
         "-u",
@@ -268,7 +273,7 @@ def _prepare_vit(args: argparse.Namespace, model: str, gpu: int) -> None:
         "--evaluation-dataset-fingerprint",
         IMAGENET_EVALUATION_FINGERPRINT,
         "--image-preprocessing-config",
-        str(model_path / "preprocessor_config.json"),
+        str(preprocessing),
         "--batch-size",
         "32",
         "--gpu",
@@ -358,6 +363,9 @@ def _build_protocol(args: argparse.Namespace) -> dict[str, Any]:
             "evaluation_population": manifest["evaluation_dataset"],
             "ann_reference": result["phases"]["ann"]["metrics"],
             "converted_clean": result["phases"]["snn"]["metrics"],
+            "image_preprocessing_sha256": identity.sha256_file(
+                args.source_root / "scripts/configs/vit_timm_preprocessing.json"
+            ),
         }
         models[model] = resource_identity
         resources[model] = {
@@ -369,7 +377,7 @@ def _build_protocol(args: argparse.Namespace) -> dict[str, Any]:
             "evaluation_dataset_path": str(args.evaluation_dataset_path),
             "evaluation_dataset_fingerprint": IMAGENET_EVALUATION_FINGERPRINT,
             "image_preprocessing_config": str(
-                Path(manifest["checkpoint_path"]) / "preprocessor_config.json"
+                args.source_root / "scripts/configs/vit_timm_preprocessing.json"
             ),
         }
     hardware_identity = pair.as_dict()

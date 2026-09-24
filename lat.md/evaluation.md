@@ -202,7 +202,7 @@ The initial formal grid is $\alpha\in\{0.003,0.01,0.03,0.1,0.3,1\}$ with seeds 0
 
 ### Condition Execution
 
-Each cell authenticates the measured pair, source, checkpoint, calibration, and data population before model-wide noise injection.
+Each cell authenticates the measured pair, source, checkpoint, preprocessing, calibration, and data population before model-wide noise injection.
 
 [[scripts/experiments/run_screening_median_model_condition.py#main]] runs one model, multiplier, and seed. It records the separate linear and logarithmic fractions, prediction digest, accuracy, event counts, misses, nominal-deadline occupancy, and pre-clamp output counts.
 
