@@ -15,10 +15,10 @@ The active campaign replaces every manuscript result produced with a global rang
 - [x] Remove global `theta` and GPT-2 `attention_theta` from operators, model configs, evaluators, calibration metadata, and maintained experiment wrappers.
 - [x] Reject legacy config keys and add a production-source verifier that blocks later reintroduction.
 - [x] Define timing-noise standard deviation and deadline margin relative to each encoder's declared local time window.
-- [ ] Recollect schema-2 calibration and rerun Table 3 ViT rows on their complete declared evaluation populations.
-- [ ] Recollect schema-2 calibration and rerun Table 4 RoBERTa-B/L and GPT-2 rows on their complete declared evaluation populations.
-- [ ] Recollect ViT-B calibration and rerun Figure 4 timing-noise and deadline-margin sweeps with three replicas.
-- [ ] Update manuscript numbers and Figure 4 only from verified new artifacts; keep old global-range results as superseded provenance.
+- [x] Recollect schema-2 calibration and rerun Table 3 ViT rows on their complete declared evaluation populations.
+- [x] Recollect schema-2 calibration and rerun Table 4 RoBERTa-B/L and GPT-2 rows on their complete declared evaluation populations.
+- [x] Recollect ViT-B calibration and rerun Figure 4 timing-noise and deadline-margin sweeps with three replicas.
+- [x] Update manuscript numbers and Figure 4 only from verified new artifacts; keep old global-range results as superseded provenance.
 
 ### Historical ViT-B Timing Robustness
 

@@ -202,6 +202,8 @@ Each encoder uses $\sigma_t=r_tT$ for its own declared time-window length $T$. N
 
 The exact fractions are $r_t=10^{-5}10^{i/8}$ for integer indices 0 through 8. The numerical grid matches the earlier display, but its maintained meaning is now a fraction of each encoder's own window rather than a fraction of one global range.
 
+The completed mean top-1 accuracies are 86.0267, 86.0000, 85.9800, 86.0133, 85.9533, 85.8800, 85.8200, 85.6600, and 85.5133 percent in increasing fraction order. At $r_t=10^{-4}$, the 95% Student-$t$ interval is 84.9638--86.0628 percent. The clean spiking reference is 86.00 percent.
+
 ## Deadline-Margin Ratio Sweep
 
 The replacement campaign fixes one local-window noise fraction and varies the nonnegative ratio between deadline margin and local timing-noise standard deviation.
@@ -209,6 +211,10 @@ The replacement campaign fixes one local-window noise fraction and varies the no
 For each encoder, $m=k\sigma_t$ uses that encoder's local $\sigma_t$. Calibration's 5% range margin is unrelated and remains frozen. Accuracy and deadline misses are simulator robustness diagnostics rather than calibrated hardware behavior.
 
 The fixed fraction is $r_t=10^{-5}$ and the ratios are $k\in\{0,0.5,1,1.5,2,2.5,3,4,5,6,8,10,12\}$. The condition $r_t=10^{-5},k=4$ is shared with the timing-noise fraction sweep and is executed only once per seed.
+
+The completed mean top-1 accuracy is 77.32 percent at $k=0$ and reaches 86.02 percent at $k=3$ and 86.0267 percent at $k=4$. The pooled deadline-miss rate falls from 10.1118 percent at $k=0$ to 0.000628 percent at $k=4$; no misses are observed at $k\in\{8,10,12\}$.
+
+The verified bundle contains 63 replica runs and 21 unique cells at source `b1a6bf8f7baa89250201c9af96d05b6154249de5`. `noise_raw_runs.csv` and `noise_summary.csv` have SHA-256 values `5dc9666048d61483c84e8c1af145213803bc2188a6abac003ea4fe42a2542266` and `5af6ea532113ccabf2b187f117387576e4e67f9f2e8cd307d27d2c29a6b1ee10`; the promoted PDF has SHA-256 `9572d722fab9f374db6202bf98cb9b6a0e486bfb6ff8e4cdc527fb9522ee478d`.
 
 ## Gaussian Noise Statistics
 

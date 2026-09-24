@@ -28,6 +28,22 @@ The campaign supervisor and authenticated outputs are defined in [[evaluation#Lo
 
 The earlier local and UBAI scheduling record belongs to the superseded global-range campaign and is retained in [[deprecated#과거 실험과 범위 감사]].
 
+## Current End-to-End Results
+
+The completed campaign keeps declared potential bounds through every learned output projection and evaluates all seven rows from one converted source commit.
+
+| Task and model | Population | ANN | SNN | Difference |
+|---|---|---:|---:|---:|
+| CIFAR-10 ViT-S/16 | test 10k | 98.48% | 98.47% | -0.01 pp |
+| ImageNet-1k ViT-S/16 | fixed validation 5k | 82.28% | 82.28% | 0.00 pp |
+| ImageNet-1k ViT-B/16 | fixed validation 5k | 86.06% | 86.00% | -0.06 pp |
+| ImageNet-1k ViT-L/16 | fixed validation 5k | 86.38% | 86.38% | 0.00 pp |
+| SST-2 RoBERTa-B | validation 872 | 94.50% | 94.38% | -0.11 pp |
+| SST-2 RoBERTa-L | validation 872 | 96.44% | 96.44% | 0.00 pp |
+| WikiText-2 GPT-2 | 2,891 nonempty test texts | 21.984180 PPL | 21.984387 PPL | +0.000207 PPL |
+
+The authenticated bundle uses source `b1a6bf8f7baa89250201c9af96d05b6154249de5`. `table_results.csv` has SHA-256 `dadb127870b16049a68fad3dc8c5e273fee077a1b7c30856fe6074aa3685e62c`; the deterministic table values required no manuscript-number change after rounding.
+
 ## Superseded Results
 
 The rows below preserve completed evidence from the removed global-range contract. They cannot update the paper table; fresh local-range results require new calibration and evaluation.
