@@ -5,7 +5,7 @@ from numbers import Real
 
 from utils.transforms import exp_operator
 
-from .noise import clamp_gaussian_output, get_gaussian_time_noise
+from .noise import clamp_gaussian_output, gaussian_time_noise_is_active
 from .types import PotentialBounds, SpikeSample, TimeBounds, check_domain
 from .primitive import signed_pulse_width_modulation_operator
 from .potential_to_spike import neg_identity_transform, neg_log_transform
@@ -164,7 +164,7 @@ def multiplication_operator(
 
     # Keep stochastic sampling and physical missing-event readout behind a private
     # implementation; downstream callers never select a Gaussian-specific API.
-    if get_gaussian_time_noise().enabled:
+    if gaussian_time_noise_is_active():
         return _gaussian_multiplication_operator(
             V,
             domain_V,
@@ -408,7 +408,7 @@ def exponential_function(
 
     # Keep event sampling, reset behavior, and noisy-output statistics isolated in
     # the private implementation while preserving one public operator API.
-    if get_gaussian_time_noise().enabled:
+    if gaussian_time_noise_is_active():
         return _gaussian_exponential_function(
             input_value,
             domain,
@@ -574,7 +574,7 @@ def softmin_function(
     # isolated from the deterministic composition behind one public API. The helper
     # returns its raw division rail only as internal metadata; it must not escape the
     # stronger structural contract established at this boundary.
-    if get_gaussian_time_noise().enabled:
+    if gaussian_time_noise_is_active():
         weight, _ = _gaussian_softmin_function(
             input_value,
             domain,
@@ -755,7 +755,7 @@ def division_function(
     # Dispatch only after all common preprocessing and validation. The private path
     # retains both delivery masks through its physical exponential-difference readout;
     # importantly, this restriction is not installed on that reusable primitive.
-    if get_gaussian_time_noise().enabled:
+    if gaussian_time_noise_is_active():
         result, _ = _gaussian_division_function(X, Y, joint_domain, tau_s)
     else:
         # Both transforms must use the same domain to synchronize their fixed offsets.
@@ -1001,7 +1001,7 @@ def gelu_cubic_power_operator(
     )
 
     encoder_tau = 3.0 * tau_value
-    gaussian_enabled = get_gaussian_time_noise().enabled
+    gaussian_enabled = gaussian_time_noise_is_active()
     encoder_kwargs: dict[str, object] = {}
     if gaussian_enabled:
         encoder_kwargs["return_spike_sample"] = True
@@ -1456,7 +1456,7 @@ def swiglu_function(
 
     # Keep direct event decoding, miss handling, and nested noisy operators isolated
     # in the private implementation while callers retain this single public surface.
-    if get_gaussian_time_noise().enabled:
+    if gaussian_time_noise_is_active():
         return _gaussian_swiglu_function(
             u,
             domain_u,

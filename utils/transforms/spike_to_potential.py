@@ -4,7 +4,7 @@ from math import exp, isclose, isfinite
 from numbers import Real
 
 from .clock import clocked_difference, clocked_exponential, get_clock_driven
-from .noise import clamp_gaussian_output, get_gaussian_time_noise
+from .noise import clamp_gaussian_output, gaussian_time_noise_is_active
 from .potential_to_spike import neg_identity_transform
 from .types import ClosedBounds, PotentialBounds, SpikeSample, TimeBounds, check_domain
 from .primitive import signed_pulse_width_modulation_operator
@@ -370,7 +370,7 @@ def exponential_difference_operator(
     """
     # Event-aware inputs require observation-time miss semantics before ordinary
     # tensor arithmetic, so keep all such behavior inside the private helper.
-    if get_gaussian_time_noise().enabled:
+    if gaussian_time_noise_is_active():
         return _gaussian_exponential_difference_operator(
             t_A,
             domain_t_A,

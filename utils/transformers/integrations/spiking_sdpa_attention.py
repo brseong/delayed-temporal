@@ -8,7 +8,7 @@ from transformers.utils.import_utils import is_torch_greater_or_equal
 from transformers.utils import logging
 from transformers.utils.import_utils import is_torch_npu_available, is_torch_xpu_available
 from utils.transforms.functions import scaled_dot_product_function, softmin_function
-from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_noise
+from utils.transforms.noise import clamp_gaussian_output, gaussian_time_noise_is_active
 from utils.transforms.potential_to_spike import neg_identity_transform
 from utils.transforms.primitive import signed_pulse_width_duration
 from utils.transforms.types import PotentialBounds, SpikeSample, TimeBounds
@@ -397,7 +397,7 @@ def spiking_scaled_dot_product_attention(
 
     # Gaussian timing noise changes the physical opening/closing event interval.
     # Keep those masks and deadline rules inside the dedicated value-readout helper.
-    if get_gaussian_time_noise().enabled:
+    if gaussian_time_noise_is_active():
         return _gaussian_attention_value_readout(
             value_clamped,
             attn_weight,

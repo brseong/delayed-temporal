@@ -47,6 +47,7 @@ from utils.transforms.functions import (
     tanh,
 )
 from utils.transforms.types import Potential, PotentialBounds
+from utils.transforms.noise import gaussian_time_noise_scope
 from utils.transformers.calibration import (
     calibrated_potential,
     model_calibration_is_bound,
@@ -744,6 +745,15 @@ class ViTEncoder(nn.Module):
         self.layer = nn.ModuleList([ViTLayer(config) for _ in range(config.num_hidden_layers)])
         print("Number of layers:", config.num_hidden_layers)
         self.gradient_checkpointing = False
+        first_block_count = getattr(config, "time_noise_vit_first_block_count", None)
+        if first_block_count is not None:
+            if isinstance(first_block_count, bool) or not isinstance(first_block_count, int):
+                raise TypeError("time_noise_vit_first_block_count must be an integer")
+            if not 0 <= first_block_count <= len(self.layer):
+                raise ValueError(
+                    "time_noise_vit_first_block_count must be inside the encoder depth"
+                )
+        self.time_noise_vit_first_block_count = first_block_count
 
     def forward(self, hidden_states: Potential) -> Potential:
         """Enter the ViT stack through the embedding-derived potential range.
@@ -769,8 +779,15 @@ class ViTEncoder(nn.Module):
 
         # Every block receives an analytic fixed range; selected internal boundaries
         # may replace it with a persisted calibration range without batch reductions.
-        for layer_module in self.layer:
-            pot = layer_module(pot)          # Potential → Potential (전파)
+        for index, layer_module in enumerate(self.layer):
+            if self.time_noise_vit_first_block_count is None:
+                pot = layer_module(pot)          # Potential → Potential (전파)
+                continue
+            with gaussian_time_noise_scope(
+                active=index < self.time_noise_vit_first_block_count,
+                label=f"vit.encoder.block.{index}",
+            ):
+                pot = layer_module(pot)
         return pot
 
 

@@ -54,7 +54,7 @@ from utils.transforms.functions import (
     gelu_approximation,
     tanh,
 )
-from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_noise
+from utils.transforms.noise import clamp_gaussian_output, gaussian_time_noise_is_active
 from utils.transforms.types import Potential, PotentialBounds, SpikeSample
 from utils.transformers.calibration import (
     calibrated_potential,
@@ -334,7 +334,7 @@ class SpikingConv1D(Conv1D):
 
         # Isolate event sampling, shared-reference timing, addmm, and saturation
         # logging inside the private Gaussian implementation.
-        if get_gaussian_time_noise().enabled:
+        if gaussian_time_noise_is_active():
             return self._gaussian_forward(
                 x,
                 encoded_x,

@@ -91,6 +91,7 @@ class Arguments:
     evaluation_shard_index: int
     image_preprocessing_config: str
     batch_size: int
+    evaluation_samples: int
     device: Literal["cuda", "cpu"]
     precision: Literal["float32", "float64", "bfloat16", "float16"]
     max_eval_batches: int
@@ -130,6 +131,7 @@ class Arguments:
     time_noise_mean: float
     time_noise_deadline_margin_std: float
     time_noise_seed: int
+    time_noise_vit_first_block_count: int | None
 
     # Static device and parameter non-idealities remain separate from event timing
     # so their effects can be swept and attributed independently.
@@ -200,6 +202,12 @@ def parse_arguments() -> Arguments:
     )
     parser.add_argument("--batch_size", type=int, default=32,
                         help="Batch size for evaluation.")
+    parser.add_argument(
+        "--evaluation-samples",
+        type=int,
+        default=0,
+        help="Evaluate exactly this many examples from the saved dataset prefix; 0 uses all.",
+    )
     parser.add_argument("--max_eval_batches", type=int, default=0,
                         help="If > 0, stop after this many evaluation batches for smoke testing.")
     parser.add_argument(
@@ -391,6 +399,15 @@ def parse_arguments() -> Arguments:
         default=0,
         help="Seed for the evaluator replica's dedicated timing-noise generator.",
     )
+    parser.add_argument(
+        "--time-noise-vit-first-block-count",
+        type=int,
+        default=None,
+        help=(
+            "Restrict Gaussian timing noise to the first K ViT encoder blocks; "
+            "omission preserves the existing model-wide injection scope."
+        ),
+    )
 
     # Static range mismatch and learned-parameter perturbations deliberately
     # remain separate controls rather than being folded into event timing noise.
@@ -451,6 +468,7 @@ def parse_arguments() -> Arguments:
         evaluation_shard_index=args.evaluation_shard_index,
         image_preprocessing_config=args.image_preprocessing_config,
         batch_size=args.batch_size,
+        evaluation_samples=args.evaluation_samples,
         device=args.device,
         precision=args.precision,
         max_eval_batches=args.max_eval_batches,
@@ -483,6 +501,7 @@ def parse_arguments() -> Arguments:
         time_noise_mean=args.time_noise_mean,
         time_noise_deadline_margin_std=args.time_noise_deadline_margin_std,
         time_noise_seed=args.time_noise_seed,
+        time_noise_vit_first_block_count=args.time_noise_vit_first_block_count,
         mismatch_enabled=args.mismatch_enabled,
         mismatch_range_std_frac=args.mismatch_range_std_frac,
         mismatch_seed=args.mismatch_seed,
@@ -594,12 +613,31 @@ def validate_vit_runtime_arguments(args: Arguments) -> None:
     """Reject ambiguous offline-dataset and benchmark configurations early."""
 
     for name, value in (
+        ("evaluation_samples", args.evaluation_samples),
         ("max_eval_batches", args.max_eval_batches),
         ("benchmark_warmup_batches", args.benchmark_warmup_batches),
         ("benchmark_measure_batches", args.benchmark_measure_batches),
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"{name} must be a non-negative integer")
+    if args.evaluation_samples and args.quick_test:
+        raise ValueError("evaluation_samples and quick_test are mutually exclusive")
+    if args.evaluation_samples and args.max_eval_batches:
+        raise ValueError("evaluation_samples and max_eval_batches are mutually exclusive")
+    if args.evaluation_samples and args.benchmark_measure_batches:
+        raise ValueError(
+            "evaluation_samples and benchmark measure batches are mutually exclusive"
+        )
+    first_block_count = args.time_noise_vit_first_block_count
+    if first_block_count is not None:
+        if isinstance(first_block_count, bool) or not isinstance(first_block_count, int):
+            raise TypeError("time_noise_vit_first_block_count must be an integer")
+        if first_block_count < 0:
+            raise ValueError("time_noise_vit_first_block_count must be non-negative")
+        if args.model_backend != "spiking" or not args.gaussian_time_noise:
+            raise ValueError(
+                "ViT block-scoped timing noise requires a noisy spiking backend"
+            )
     if args.benchmark_warmup_batches and not args.benchmark_measure_batches:
         raise ValueError(
             "benchmark warm-up batches require benchmark measure batches"
@@ -659,6 +697,28 @@ def validate_vit_runtime_arguments(args: Arguments) -> None:
         raise ValueError(
             "clock parameters must be zero when clock-driven is disabled"
         )
+
+
+def select_evaluation_examples(
+    dataset: Any,
+    *,
+    evaluation_samples: int,
+    quick_test: bool,
+) -> Any:
+    """Select one deterministic evaluation prefix without changing its order."""
+    if isinstance(evaluation_samples, bool) or not isinstance(evaluation_samples, int):
+        raise TypeError("evaluation_samples must be an integer")
+    if evaluation_samples < 0:
+        raise ValueError("evaluation_samples must be non-negative")
+    if evaluation_samples and quick_test:
+        raise ValueError("evaluation_samples and quick_test are mutually exclusive")
+    if evaluation_samples > len(dataset):
+        raise ValueError("evaluation_samples exceeds the saved evaluation population")
+    if evaluation_samples:
+        return dataset.select(range(evaluation_samples))
+    if quick_test:
+        return dataset.select(range(min(5000, len(dataset))))
+    return dataset
 
 
 def require_finite_logits(logits: torch.Tensor) -> None:
@@ -1089,6 +1149,7 @@ def evaluate_vit_model(args: Arguments) -> None:
         deadline_margin_std_ratio=float(args.time_noise_deadline_margin_std),
         seed=args.time_noise_seed,
         device=device,
+        explicit_scope_required=args.time_noise_vit_first_block_count is not None,
     )
     set_clock_driven(
         enabled=clock_driven_enabled,
@@ -1105,6 +1166,11 @@ def evaluate_vit_model(args: Arguments) -> None:
         "time_noise_window_normalization": "encoder_local",
         "linear_time_noise_std_frac_effective": linear_time_noise_std_frac,
         "log_time_noise_std_frac_effective": log_time_noise_std_frac,
+        "time_noise_scope": (
+            "vit_first_blocks"
+            if args.time_noise_vit_first_block_count is not None
+            else "model_wide"
+        ),
         "mismatch_effective": mismatch_enabled,
         "clock_driven_effective": clock_driven_enabled,
     }
@@ -1135,6 +1201,10 @@ def evaluate_vit_model(args: Arguments) -> None:
         f"mean_abs: {args.time_noise_mean}, "
         f"seed: {args.time_noise_seed}, "
         f"deadline_margin_std: {args.time_noise_deadline_margin_std}"
+    )
+    print(
+        "Gaussian time-noise scope — "
+        f"vit_first_block_count: {args.time_noise_vit_first_block_count}"
     )
     print(
         "Static range-relative mismatch — "
@@ -1174,8 +1244,11 @@ def evaluate_vit_model(args: Arguments) -> None:
             args,
             configured_split=ds_config["split"],
         )
-        if args.quick_test:
-            dataset = dataset.select(range(min(5000, len(dataset))))
+        dataset = select_evaluation_examples(
+            dataset,
+            evaluation_samples=args.evaluation_samples,
+            quick_test=args.quick_test,
+        )
         evaluation_population = len(dataset)
         shard_start, shard_stop = evaluation_shard_bounds(
             evaluation_population,
@@ -1281,6 +1354,7 @@ def evaluate_vit_model(args: Arguments) -> None:
             spiking_ln_expdiff=args.spiking_ln_expdiff,
             use_spiking_mlp=args.spiking_mlp,
             spiking_mlp_exact_gelu=args.spiking_mlp_exact_gelu,
+            time_noise_vit_first_block_count=args.time_noise_vit_first_block_count,
             hidden_act=args.activation,
         )
         pixel_domain = image_processor_pixel_bounds(

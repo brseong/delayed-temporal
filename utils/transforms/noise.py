@@ -17,6 +17,8 @@ run in one process without DataParallel replication.
 """
 
 import math
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
 from typing import Callable, Literal, TypedDict
@@ -54,6 +56,15 @@ class GaussianTimeNoiseConfig:
     log_deadline_margin_std_ratio: float | None = None
     seed: int = 0  # Replica seed used once when constructing the dedicated generator.
     generator: torch.Generator | None = None  # Stateful RNG owned by this configuration.
+    explicit_scope_required: bool = False
+
+
+@dataclass(frozen=True)
+class GaussianTimeNoiseScope:
+    """One explicit model location in which timing noise may be active."""
+
+    active: bool
+    label: str
 
 
 class GaussianNoiseCounts(TypedDict):
@@ -78,6 +89,14 @@ class GaussianNoiseCounts(TypedDict):
 # encoder in a replica consumes the same stateful random stream. Configuration is
 # replaced atomically by the setter instead of mutating its fields across calls.
 _GLOBAL_GAUSSIAN_TIME_CONFIG = GaussianTimeNoiseConfig()
+
+# Scoped ViT experiments activate timing noise only while a selected encoder block
+# executes. Context-local state restores correctly across nested calls and exceptions,
+# while the process-wide configuration continues to own the single RNG stream.
+_GAUSSIAN_TIME_SCOPE: ContextVar[GaussianTimeNoiseScope | None] = ContextVar(
+    "gaussian_time_noise_scope",
+    default=None,
+)
 
 # Statistics are grouped first by a stable call-site name and then by counter name.
 # Keeping this store separate from the configuration lets a new replica clear its
@@ -114,6 +133,52 @@ def get_gaussian_noise_stats() -> dict[str, GaussianNoiseCounts]:
     # Copy every nested counter mapping as well; an outer-only copy would still let
     # callers overwrite live event, miss, or saturation counts through shared dicts.
     return {site: counts.copy() for site, counts in _GAUSSIAN_NOISE_STATS.items()}
+
+
+@contextmanager
+def gaussian_time_noise_scope(*, active: bool, label: str):
+    """Temporarily identify a model region selected for Gaussian timing noise.
+
+    The scope changes neither the configured generator nor its counters. An inactive
+    region therefore consumes no random draw and creates no statistics entry when
+    ``explicit_scope_required`` is enabled for the current replica.
+    """
+    if not isinstance(active, bool):
+        raise TypeError("Gaussian timing-noise scope active must be a bool")
+    if not isinstance(label, str):
+        raise TypeError("Gaussian timing-noise scope label must be a string")
+    normalized_label = label.strip()
+    if not normalized_label:
+        raise ValueError("Gaussian timing-noise scope label must not be empty")
+    token = _GAUSSIAN_TIME_SCOPE.set(
+        GaussianTimeNoiseScope(active=active, label=normalized_label)
+    )
+    try:
+        yield
+    finally:
+        _GAUSSIAN_TIME_SCOPE.reset(token)
+
+
+def gaussian_time_noise_is_active() -> bool:
+    """Return whether the current call site should use the noisy event path."""
+    config = _GLOBAL_GAUSSIAN_TIME_CONFIG
+    if not config.enabled:
+        return False
+    if not config.explicit_scope_required:
+        return True
+    scope = _GAUSSIAN_TIME_SCOPE.get()
+    return scope is not None and scope.active
+
+
+def _scoped_statistics_site(site: str) -> str:
+    """Prefix a statistics site with its active explicit scope when required."""
+    config = _GLOBAL_GAUSSIAN_TIME_CONFIG
+    if not config.explicit_scope_required:
+        return site
+    scope = _GAUSSIAN_TIME_SCOPE.get()
+    if scope is None or not scope.active:
+        raise RuntimeError("Gaussian statistics require an active explicit scope")
+    return f"{scope.label}/{site}"
 
 
 def _stats_for(site: str) -> GaussianNoiseCounts:
@@ -198,12 +263,12 @@ def clamp_gaussian_output(
 
     # A noise-disabled evaluation must not create statistics sites or alter an
     # existing measurement interval merely because its outputs were clamped.
-    if not _GLOBAL_GAUSSIAN_TIME_CONFIG.enabled:
+    if not gaussian_time_noise_is_active():
         return clamped
 
     # Count every raw output element in the saturation denominator. The live,
     # statically keyed mapping lets repeated calls accumulate at the same site.
-    counts = _stats_for(site)
+    counts = _stats_for(_scoped_statistics_site(site))
     counts["outputs"] += value.numel()
 
     # Compare the raw readout with strict inequalities before returning the clamp.
@@ -228,6 +293,7 @@ def set_gaussian_time_noise(
     log_deadline_margin_std_ratio: float | None = None,
     seed: int = 0,
     device: torch.device | str = "cpu",
+    explicit_scope_required: bool = False,
 ) -> None:
     """Install process-wide direct Gaussian spike-time noise configuration.
 
@@ -247,6 +313,8 @@ def set_gaussian_time_noise(
         log_deadline_margin_std_ratio: Optional logarithmic-code grace ratio.
         seed: Integer seed used once to initialize the replica generator.
         device: Device on which the encoder's spike-time samples will be drawn.
+        explicit_scope_required: Require an active :func:`gaussian_time_noise_scope`
+            before sampling or recording statistics.
 
     Raises:
         TypeError: If ``enabled`` is not boolean or ``seed`` is not an integer.
@@ -259,6 +327,8 @@ def set_gaussian_time_noise(
     # truncating fractional seeds, both of which would obscure replica identity.
     if not isinstance(enabled, bool):
         raise TypeError("enabled must be a bool")
+    if not isinstance(explicit_scope_required, bool):
+        raise TypeError("explicit_scope_required must be a bool")
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise TypeError("seed must be an integer")
 
@@ -327,6 +397,7 @@ def set_gaussian_time_noise(
         log_deadline_margin_std_ratio=normalized_log_margin,
         seed=seed,
         generator=generator,
+        explicit_scope_required=explicit_scope_required,
     )
 
     # Installing a new configuration defines a new measurement interval. Replace
@@ -662,6 +733,17 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
                     "enabled Gaussian time noise requires a torch.Generator"
                 )
 
+            # Explicitly unselected model regions retain the SpikeSample return type
+            # expected by their physical consumers, but execute deterministically and
+            # leave both the shared generator and statistics mapping untouched.
+            if not gaussian_time_noise_is_active():
+                nominal_time = out_domain.clamp(output)
+                return SpikeSample(
+                    time=nominal_time,
+                    domain=out_domain,
+                    fired=torch.ones_like(nominal_time, dtype=torch.bool),
+                )
+
             # An omitted override preserves the historical shared-parameter path.
             if encoding == "linear":
                 time_std_fraction = gaussian_cfg.linear_time_std_fraction
@@ -692,7 +774,7 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
 
             # Attribute sampled events to the physical values consumed downstream.
             site = kwargs.get("noise_site", func.__name__)
-            counts = _stats_for(site)
+            counts = _stats_for(_scoped_statistics_site(site))
             counts["events"] += sample.time.numel()
             deadline = nominal_time.new_tensor(float(out_domain.max))
             miss_and_endpoint_counts = torch.stack(

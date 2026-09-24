@@ -9,7 +9,7 @@ from torch import nn
 from utils.transforms import neg_identity_transform
 from utils.transforms.calibration import CalibrationCollectorState
 from utils.transforms.functions import multiplication_operator, division_function
-from utils.transforms.noise import clamp_gaussian_output, get_gaussian_time_noise
+from utils.transforms.noise import clamp_gaussian_output, gaussian_time_noise_is_active
 from utils.transforms.potential_to_spike import neg_log_transform
 from utils.transforms.primitive import signed_pulse_width_duration
 from utils.transforms.spike_to_potential import exponential_difference_operator
@@ -602,7 +602,7 @@ class SpikingLayerNorm(nn.Module):
         """
         # Keep sampled timestamps and delivery masks confined to the dedicated
         # implementation so deterministic tensor arithmetic remains event-free.
-        if get_gaussian_time_noise().enabled:
+        if gaussian_time_noise_is_active():
             return self._gaussian_forward(pot)
 
         # The deterministic branch retains all three stage-ablation combinations,
@@ -1066,7 +1066,7 @@ class SpikingLinear(nn.Linear):
         # Keep event sampling, shared-reference handling, and saturation statistics
         # isolated in the private Gaussian method. Passing only the frozen output
         # rail avoids every forward-time weight or bias endpoint reduction.
-        if get_gaussian_time_noise().enabled:
+        if gaussian_time_noise_is_active():
             return self._gaussian_forward(
                 x,
                 encoded_x,
@@ -1352,7 +1352,7 @@ class SpikingConv2d(nn.Conv2d):
 
         # Keep event sampling, shared-reference readout, and output saturation logging
         # isolated in the private Gaussian method.
-        if get_gaussian_time_noise().enabled:
+        if gaussian_time_noise_is_active():
             return self._gaussian_forward(
                 x,
                 encoded_x,
