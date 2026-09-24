@@ -33,6 +33,20 @@ Every delivered event retains its sampled timestamp, including an early value be
 
 The same Gaussian draw determines both the stored event time and whether the event misses its deadline; no independent event-dropout channel is sampled.
 
+## Active Signed-Branch Statistics
+
+Gaussian event and output counts exclude the inactive signed log branches of GELU and LayerNorm, including their internal exponential-difference encoding and readout.
+
+[[utils/transforms/noise.py#gaussian_noise_statistics_mask]] limits accounting only. The caller supplies its existing activity mask; the shared noise module applies it to events, misses, nominal endpoint counts, and output saturation counts. Nested masks intersect and restore on exception. Masks may broadcast to an observed tensor but cannot expand a scalar event into several events.
+
+GELU counts its scalar reference once only if at least one signed branch is active. LayerNorm counts its shared variance encoding once per feature row with an active signed branch. The masks surround both log encoding and exponential difference. Variance multiplication and the learned affine multiplication retain their existing event semantics.
+
+Masked carrier computations still consume the same random draws and produce the same tensors, which are removed by the existing output masks. This preserves exact seeded output and generator state. Inactive carrier draws are not reported as observed events.
+
+[[scripts/verification/verify_gaussian_statistics_masks.py#verify_signed_branch_counts]] checks positive, negative, zero and log-floor boundary inputs, the internal event and output counts, and all eight LayerNorm ablations. It compares outputs and generator state against unmasked accounting, not against a second model implementation.
+
+Existing logs cannot be corrected by subtracting a guessed inactive count. Their aggregates remain historical evidence; new statistics require a new evaluation source identity. The Appendix now states that numerical evaluations compose exponential difference internally and inject noise into that internal encoder.
+
 ## Fixed Observation Deadline
 
 Each encoder keeps one nominal code interval and one fixed receiver cutoff for its invocation.

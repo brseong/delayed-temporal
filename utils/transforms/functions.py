@@ -5,7 +5,10 @@ from numbers import Real
 
 from utils.transforms import exp_operator
 
-from .noise import clamp_gaussian_output, gaussian_time_noise_is_active
+from .noise import (
+    clamp_gaussian_output, gaussian_time_noise_is_active,
+    gaussian_noise_statistics_mask,
+)
 from .types import PotentialBounds, SpikeSample, TimeBounds, check_domain
 from .primitive import signed_pulse_width_modulation_operator
 from .potential_to_spike import neg_identity_transform, neg_log_transform
@@ -1005,27 +1008,30 @@ def gelu_cubic_power_operator(
     if gaussian_enabled:
         encoder_kwargs["return_spike_sample"] = True
 
-    positive_time = neg_log_transform(
-        positive_carrier,
-        magnitude_domain,
-        tau_s=encoder_tau,
-        noise_site="gelu.cubic.log_positive",
-        **encoder_kwargs,
-    )
-    negative_time = neg_log_transform(
-        negative_carrier,
-        magnitude_domain,
-        tau_s=encoder_tau,
-        noise_site="gelu.cubic.log_negative",
-        **encoder_kwargs,
-    )
-    reference_time = neg_log_transform(
-        input_value.new_tensor(magnitude_upper),
-        magnitude_domain,
-        tau_s=encoder_tau,
-        noise_site="gelu.cubic.log_reference",
-        **encoder_kwargs,
-    )
+    with gaussian_noise_statistics_mask(positive_active):
+        positive_time = neg_log_transform(
+            positive_carrier,
+            magnitude_domain,
+            tau_s=encoder_tau,
+            noise_site="gelu.cubic.log_positive",
+            **encoder_kwargs,
+        )
+    with gaussian_noise_statistics_mask(negative_active):
+        negative_time = neg_log_transform(
+            negative_carrier,
+            magnitude_domain,
+            tau_s=encoder_tau,
+            noise_site="gelu.cubic.log_negative",
+            **encoder_kwargs,
+        )
+    with gaussian_noise_statistics_mask((positive_active | negative_active).any()):
+        reference_time = neg_log_transform(
+            input_value.new_tensor(magnitude_upper),
+            magnitude_domain,
+            tau_s=encoder_tau,
+            noise_site="gelu.cubic.log_reference",
+            **encoder_kwargs,
+        )
     if gaussian_enabled:
         if not all(
             isinstance(event, SpikeSample)
@@ -1042,20 +1048,22 @@ def gelu_cubic_power_operator(
     if negative_time_domain != time_domain or reference_time_domain != time_domain:
         raise RuntimeError("GELU cubic log encoders require one shared time domain")
 
-    positive_normalized, _ = exponential_difference_operator(
-        positive_time,
-        time_domain,
-        reference_time,
-        reference_time_domain,
-        tau_s=tau_value,
-    )
-    negative_normalized, _ = exponential_difference_operator(
-        negative_time,
-        negative_time_domain,
-        reference_time,
-        reference_time_domain,
-        tau_s=tau_value,
-    )
+    with gaussian_noise_statistics_mask(positive_active):
+        positive_normalized, _ = exponential_difference_operator(
+            positive_time,
+            time_domain,
+            reference_time,
+            reference_time_domain,
+            tau_s=tau_value,
+        )
+    with gaussian_noise_statistics_mask(negative_active):
+        negative_normalized, _ = exponential_difference_operator(
+            negative_time,
+            negative_time_domain,
+            reference_time,
+            reference_time_domain,
+            tau_s=tau_value,
+        )
     unit_domain = PotentialBounds(0.0, 1.0)
     positive_normalized = torch.where(
         positive_active,

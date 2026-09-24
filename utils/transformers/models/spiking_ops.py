@@ -9,7 +9,10 @@ from torch import nn
 from utils.transforms import neg_identity_transform
 from utils.transforms.calibration import CalibrationCollectorState
 from utils.transforms.functions import multiplication_operator, division_function
-from utils.transforms.noise import clamp_gaussian_output, gaussian_time_noise_is_active
+from utils.transforms.noise import (
+    clamp_gaussian_output, gaussian_time_noise_is_active,
+    gaussian_noise_statistics_mask,
+)
 from utils.transforms.potential_to_spike import neg_log_transform
 from utils.transforms.primitive import signed_pulse_width_duration
 from utils.transforms.spike_to_potential import exponential_difference_operator
@@ -405,30 +408,35 @@ class SpikingLayerNorm(nn.Module):
             # The variance code uses tau_s/2 so decoding produces its square root.
             # Since hi_var = hi_err^2, this also gives both log encoders the same
             # bias and fixed deadline: (tau_s/2) log(hi_var) = tau_s log(hi_err).
-            t_sigma = neg_log_transform(
-                var_x,
-                domain_var,
-                tau_s=tau_s / 2.0,
-                shared_time_bounds=shared_time_bounds,
-                return_spike_sample=True,
-                noise_site="layernorm.log_sigma",
-            )
-            t_err_pos = neg_log_transform(
-                x_err_pos,
-                domain_err,
-                tau_s=tau_s,
-                shared_time_bounds=shared_time_bounds,
-                return_spike_sample=True,
-                noise_site="layernorm.log_positive",
-            )
-            t_err_neg = neg_log_transform(
-                x_err_neg,
-                domain_err,
-                tau_s=tau_s,
-                shared_time_bounds=shared_time_bounds,
-                return_spike_sample=True,
-                noise_site="layernorm.log_negative",
-            )
+            with gaussian_noise_statistics_mask(
+                (positive_active | negative_active).any(dim=-1, keepdim=True)
+            ):
+                t_sigma = neg_log_transform(
+                    var_x,
+                    domain_var,
+                    tau_s=tau_s / 2.0,
+                    shared_time_bounds=shared_time_bounds,
+                    return_spike_sample=True,
+                    noise_site="layernorm.log_sigma",
+                )
+            with gaussian_noise_statistics_mask(positive_active):
+                t_err_pos = neg_log_transform(
+                    x_err_pos,
+                    domain_err,
+                    tau_s=tau_s,
+                    shared_time_bounds=shared_time_bounds,
+                    return_spike_sample=True,
+                    noise_site="layernorm.log_positive",
+                )
+            with gaussian_noise_statistics_mask(negative_active):
+                t_err_neg = neg_log_transform(
+                    x_err_neg,
+                    domain_err,
+                    tau_s=tau_s,
+                    shared_time_bounds=shared_time_bounds,
+                    return_spike_sample=True,
+                    noise_site="layernorm.log_negative",
+                )
             if not all(
                 isinstance(event, SpikeSample)
                 for event in (t_sigma, t_err_pos, t_err_neg)
@@ -456,20 +464,22 @@ class SpikingLayerNorm(nn.Module):
         if self.use_spiking_expdiff:
             # The event-aware operator owns both causal external rails, internal
             # exponential misses, and output saturation statistics.
-            y_pos, _ = exponential_difference_operator(
-                t_err_pos,
-                tb_err,
-                t_sigma,
-                tb_sigma,
-                tau_s=tau_s,
-            )
-            y_neg, _ = exponential_difference_operator(
-                t_err_neg,
-                tb_err,
-                t_sigma,
-                tb_sigma,
-                tau_s=tau_s,
-            )
+            with gaussian_noise_statistics_mask(positive_active):
+                y_pos, _ = exponential_difference_operator(
+                    t_err_pos,
+                    tb_err,
+                    t_sigma,
+                    tb_sigma,
+                    tau_s=tau_s,
+                )
+            with gaussian_noise_statistics_mask(negative_active):
+                y_neg, _ = exponential_difference_operator(
+                    t_err_neg,
+                    tb_err,
+                    t_sigma,
+                    tb_sigma,
+                    tau_s=tau_s,
+                )
             y_pos = torch.where(positive_active, y_pos, torch.zeros_like(y_pos))
             y_neg = torch.where(negative_active, y_neg, torch.zeros_like(y_neg))
             result = y_pos - y_neg

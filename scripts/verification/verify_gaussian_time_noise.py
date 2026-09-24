@@ -3220,8 +3220,12 @@ def verify_gaussian_spiking_layernorm() -> None:
         expected_direct_exp = weight * expected_result + bias
         assert torch.allclose(direct_exp_output.value, expected_direct_exp)
         assert direct_exp_stats["layernorm.log_sigma"]["misses"] == 0
-        assert direct_exp_stats["layernorm.log_positive"]["misses"] == 4
-        assert direct_exp_stats["layernorm.log_negative"]["misses"] == 4
+        assert direct_exp_stats["layernorm.log_positive"]["misses"] == int(
+            ((nominal_pos + mean_shift > deadline) & positive_active).sum()
+        )
+        assert direct_exp_stats["layernorm.log_negative"]["misses"] == int(
+            ((nominal_neg + mean_shift > deadline) & negative_active).sum()
+        )
 
         # Enable every spiking stage with identical learned parameters. Zero scale
         # must preserve the established deterministic composition while exposing the
@@ -3255,9 +3259,11 @@ def verify_gaussian_spiking_layernorm() -> None:
         assert zero_stats["multiplication.data"]["events"] == 20
         assert zero_stats["multiplication.reference"]["events"] == 3
         assert zero_stats["layernorm.log_sigma"]["events"] == 2
-        assert zero_stats["layernorm.log_positive"]["events"] == value.numel()
-        assert zero_stats["layernorm.log_negative"]["events"] == value.numel()
-        assert zero_stats["exponential_difference.internal"]["events"] == 16
+        assert zero_stats["layernorm.log_positive"]["events"] == int(positive_active.sum())
+        assert zero_stats["layernorm.log_negative"]["events"] == int(negative_active.sum())
+        assert zero_stats["exponential_difference.internal"]["events"] == int(
+            (positive_active | negative_active).sum()
+        )
         assert all(site_stats["misses"] == 0 for site_stats in zero_stats.values())
 
         # A constant feature vector has zero centered magnitude on both rails. The
@@ -3284,9 +3290,11 @@ def verify_gaussian_spiking_layernorm() -> None:
         assert forced_stats["multiplication.data"]["misses"] == 20
         assert forced_stats["multiplication.reference"]["misses"] == 3
         assert forced_stats["layernorm.log_sigma"]["misses"] == 2
-        assert forced_stats["layernorm.log_positive"]["misses"] == value.numel()
-        assert forced_stats["layernorm.log_negative"]["misses"] == value.numel()
-        assert forced_stats["exponential_difference.internal"]["misses"] == 16
+        assert forced_stats["layernorm.log_positive"]["misses"] == int(positive_active.sum())
+        assert forced_stats["layernorm.log_negative"]["misses"] == int(negative_active.sum())
+        assert forced_stats["exponential_difference.internal"]["misses"] == int(
+            (positive_active | negative_active).sum()
+        )
 
         # Bias is broadcast over the batch after the reset-valued learned-weight
         # product. Noise never narrows the predeclared output rail to observed values.

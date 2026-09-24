@@ -75,7 +75,7 @@ class GaussianNoiseCounts(TypedDict):
     statistical denominators; deadline diagnostics retain scalar timing metadata.
     """
 
-    events: int  # Number of sampled spike events at this site.
+    events: int  # Sampled events excluding explicitly inactive signed branches.
     misses: int  # Number of sampled events arriving after the fixed deadline.
     deadline_events: int  # Nominal codewords exactly at the inclusive deadline.
     deadline_ulp_min: float  # Smallest deadline ULP observed for this site.
@@ -102,6 +102,38 @@ _GAUSSIAN_TIME_SCOPE: ContextVar[GaussianTimeNoiseScope | None] = ContextVar(
 # Keeping this store separate from the configuration lets a new replica clear its
 # measurements without coupling counter mutation to dataclass replacement.
 _GAUSSIAN_NOISE_STATS: dict[str, GaussianNoiseCounts] = {}
+
+# This mask affects accounting only, never sampling or the delivered values.
+_GAUSSIAN_STATISTICS_MASK: ContextVar[Tensor | None] = ContextVar(
+    "gaussian_statistics_mask", default=None,
+)
+
+
+@contextmanager
+def gaussian_noise_statistics_mask(active: Tensor):
+    """Exclude unused signed branches, including their internal readouts, from counts.
+
+    Carrier calculations and random draws are deliberately retained so this change
+    cannot change a seeded model output. Nested masks intersect and restore on exit.
+    """
+    if not isinstance(active, Tensor) or active.dtype != torch.bool:
+        raise TypeError("Gaussian statistics mask must be a boolean tensor")
+    parent = _GAUSSIAN_STATISTICS_MASK.get()
+    token = _GAUSSIAN_STATISTICS_MASK.set(active if parent is None else parent & active)
+    try:
+        yield
+    finally:
+        _GAUSSIAN_STATISTICS_MASK.reset(token)
+
+
+def _statistics_mask_for(value: Tensor) -> Tensor | None:
+    mask = _GAUSSIAN_STATISTICS_MASK.get()
+    if mask is None:
+        return None
+    if mask.device != value.device:
+        raise ValueError("Gaussian statistics mask and value must share a device")
+    # Never expand a scalar reference into one event per consumer.
+    return torch.broadcast_to(mask, value.shape)
 
 
 def clear_gaussian_noise_stats() -> None:
@@ -266,15 +298,19 @@ def clamp_gaussian_output(
     if not gaussian_time_noise_is_active():
         return clamped
 
-    # Count every raw output element in the saturation denominator. The live,
-    # statically keyed mapping lets repeated calls accumulate at the same site.
+    # Count only readouts belonging to active branches, without changing values.
     counts = _stats_for(_scoped_statistics_site(site))
-    counts["outputs"] += value.numel()
-
-    # Compare the raw readout with strict inequalities before returning the clamp.
-    # Values exactly on a rail remain representable and are not saturation events.
-    counts["output_underflows"] += int((value < domain.min).sum().item())
-    counts["output_overflows"] += int((value > domain.max).sum().item())
+    mask = _statistics_mask_for(value)
+    underflows, overflows = value < domain.min, value > domain.max
+    if mask is None:
+        total = value.new_tensor(value.numel(), dtype=torch.int64)
+    else:
+        total = mask.sum()
+        underflows, overflows = underflows & mask, overflows & mask
+    totals = torch.stack((total, underflows.sum(), overflows.sum())).to("cpu").tolist()
+    counts["outputs"] += int(totals[0])
+    counts["output_underflows"] += int(totals[1])
+    counts["output_overflows"] += int(totals[2])
 
     # Return the previously computed bounded tensor; statistics never modify the
     # physical value delivered to the next operator.
@@ -777,13 +813,20 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
             # Attribute sampled events to the physical values consumed downstream.
             site = kwargs.get("noise_site", func.__name__)
             counts = _stats_for(_scoped_statistics_site(site))
-            counts["events"] += sample.time.numel()
             deadline = nominal_time.new_tensor(float(out_domain.max))
+            mask = _statistics_mask_for(sample.time)
+            misses, endpoints = ~sample.fired, nominal_time == deadline
+            if mask is None:
+                total = sample.time.new_tensor(sample.time.numel(), dtype=torch.int64)
+            else:
+                total = mask.sum()
+                misses, endpoints = misses & mask, endpoints & mask
             miss_and_endpoint_counts = torch.stack(
-                ((~sample.fired).sum(), (nominal_time == deadline).sum())
+                (total, misses.sum(), endpoints.sum())
             ).to(device="cpu")
-            counts["misses"] += int(miss_and_endpoint_counts[0].item())
-            counts["deadline_events"] += int(miss_and_endpoint_counts[1].item())
+            counts["events"] += int(miss_and_endpoint_counts[0].item())
+            counts["misses"] += int(miss_and_endpoint_counts[1].item())
+            counts["deadline_events"] += int(miss_and_endpoint_counts[2].item())
             cpu_deadline = torch.tensor(
                 float(out_domain.max),
                 dtype=nominal_time.dtype,

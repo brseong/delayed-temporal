@@ -139,10 +139,10 @@ def verify_phi_nl_psi_ed_cube() -> None:
             magnitude_floor=1.0e-5,
         )
         stats = get_gaussian_noise_stats()
-        assert stats["gelu.cubic.log_positive"]["events"] == input32.numel()
-        assert stats["gelu.cubic.log_negative"]["events"] == input32.numel()
+        assert stats["gelu.cubic.log_positive"]["events"] == int((input32 >= 1e-5).sum())
+        assert stats["gelu.cubic.log_negative"]["events"] == int((input32 <= -1e-5).sum())
         assert stats["gelu.cubic.log_reference"]["events"] == 1
-        assert stats["exponential_difference.internal"]["events"] == 2 * input32.numel()
+        assert stats["exponential_difference.internal"]["events"] == int((input32.abs() >= 1e-5).sum())
 
         set_gaussian_time_noise(enabled=False)
         deterministic, deterministic_domain = phi_nl_psi_ed_cube(

@@ -151,10 +151,10 @@ def verify_gaussian_events_and_replay() -> None:
     domain = PotentialBounds(-3.0, 3.0)
     count = values.numel()
     expected = {
-        "gelu.cubic.log_positive": count,
-        "gelu.cubic.log_negative": count,
+        "gelu.cubic.log_positive": int((values >= 1e-5).sum()),
+        "gelu.cubic.log_negative": int((values <= -1e-5).sum()),
         "gelu.cubic.log_reference": 1,
-        "exponential_difference.internal": 3 * count,
+        "exponential_difference.internal": count + int((values.abs() >= 1e-5).sum()),
         "exponential.input": count,
         "division.numerator": count,
         "division.denominator": count,
