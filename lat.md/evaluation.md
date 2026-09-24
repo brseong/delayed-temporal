@@ -212,6 +212,8 @@ The default campaign enumerates the complete $k=1,\ldots,12$ grid, while an expl
 
 For the stopped run, each measured condition ends at the first $k$ whose three-seed mean accuracy is at most 1%. The 500-image pilot provides this decision; the 5,000-image phase evaluates only the clean reference and the retained condition prefixes.
 
+A separate 500-example seed-0 pilot attenuates the screening-median pair by a factor of 0.1 and evaluates $k\in\{1,2,4,8,12\}$. Top-1 accuracies are 42.2, 38.6, 39.6, 24.2, and 11.4 percent, respectively, against the reused clean value of 86.4 percent. The 1.0 percentage point increase from $k=2$ to $k=4$ is within the declared 2-point tolerance, so this pilot passes its screening gate. No 5,000-example evaluation is launched by this pilot.
+
 ### Summary Artifacts
 
 The reducer reports cumulative sensitivity without assigning a causal failure to one individual block.
