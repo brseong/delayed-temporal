@@ -1,6 +1,6 @@
 # Comparison Costs and Source Audit
 
-The current ViT comparison estimates Data SOP and Global SOP under an explicit mapping. The archival NeurIPS calculation remains separate, and the completed accuracy results still require bundle validation before paper insertion.
+The current ICLR ViT comparison estimates Data SOP and Global SOP under an explicit mapping. The archival NeurIPS calculation remains separate, and the completed accuracy results still require bundle validation before paper insertion.
 
 Experiment conditions and execution identities are defined in [[conversion-comparison]].
 
@@ -47,9 +47,9 @@ For LayerNorm, both magnitude squares use composed multiplication. Log encoding 
 
 The gamma vector has $D$ encoded values, each delivered to $N$ token outputs; it is not re-encoded for every token. Its scalar reference source is synchronized once and delivered to all $ND$ product outputs. The numerical LayerNorm path is not modified to obtain this accounting.
 
-## Network Geometry and Energy
+## Network Geometry
 
-The whole estimate is derived from checkpoint dimensions, with the output projection, final LayerNorm and TTFS classification head included. No evaluation result is needed to determine these structural costs.
+The whole SOP estimate is derived from checkpoint dimensions, with the output projection, final LayerNorm and TTFS classification head included. No evaluation result is needed to determine these structural costs.
 
 | Component | Data SOP | Global SOP |
 | --- | ---: | ---: |
@@ -66,9 +66,7 @@ The whole estimate is derived from checkpoint dimensions, with the output projec
 
 Each block additionally includes one GELU component and two LayerNorm components from the preceding tables. The complete network is patch embedding plus $L$ blocks plus one final LayerNorm over all $N$ tokens plus the classification head on one token. For a $224\times224$ image and $16\times16$ patches, patch embedding processes 196 patches, whereas each Transformer block processes 197 tokens. The head uses 10 classes for CIFAR-10 and 1,000 for ImageNet.
 
-Energy in mJ is total SOP multiplied by $0.9\times10^{-9}$, following the approved $0.9$ pJ/SOP assumption. This is an SOP-based estimate, not a measurement of GPU energy or a fabricated analog chip. The evaluated classifier uses the same TTFS linear composition counted here. Memory access, control, routing, leakage, analog peripheral circuits, accuracy-dependent device requirements and physical feasibility are outside this estimate.
-
-The coefficient agrees with the value used for accumulation in [TTFSFormer, Section 5.2](https://openreview.net/pdf?id=mJAa823xKu). That agreement alone does not make the two complete hardware mappings or excluded costs identical.
+The current comparison reports only Data SOP and Global SOP under the declared mapping. These counts are not measurements of physical hardware cost. The evaluated classifier uses the same TTFS linear composition counted here. The removed absolute energy calculation is preserved in [[deprecated#폐기한 전원 및 절대 에너지 검토]].
 
 ## Literature Table Audit
 
@@ -79,22 +77,20 @@ Original accuracy entries and cost estimates must retain their own evaluation pr
 The retained accuracy pairs agree with the primary tables; the cited values are not results of the new local or UBAI campaign.
 
 - [Stanojevic et al., Table 1](https://lcnwww.epfl.ch/gerstner/PUBLICATIONS/Stanojevic2023.pdf): CIFAR-10 VGG16, ANN/SNN $93.59/93.59$.
-- [TTFSFormer, Tables 1 and 2](https://openreview.net/pdf?id=mJAa823xKu): ViT-S $81.38/81.40$, ViT-B $85.10/85.07$, ViT-L $85.83/85.78$; cited Ops. $5.42/19.2/65.7$ billion and Energy $4.9/17/59$ mJ, respectively.
-- [Wang et al., Table 4](https://ojs.aaai.org/index.php/AAAI/article/download/37195/41157): ViT-B $83.44/83.00$ at 16 steps. Its energy remains unfilled in this comparison.
+- [TTFSFormer, Tables 1 and 2](https://openreview.net/pdf?id=mJAa823xKu): ViT-S $81.38/81.40$, ViT-B $85.10/85.07$, ViT-L $85.83/85.78$; cited Ops. $5.42/19.2/65.7$ billion, respectively.
+- [Wang et al., Table 4](https://ojs.aaai.org/index.php/AAAI/article/download/37195/41157): ViT-B $83.44/83.00$ at 16 steps.
+
+TTFSFormer reports $OP_{\mathrm{SNN}}$ per inference and derives layer operation counts for MatMul, Softmax, LayerNorm, and activations. Its totals and ours use the same unit of synaptic operations induced by spike or reference-event delivery to receiving fan-out. The operator decompositions differ, so `comparable` refers to operation counts under each method's TTFS mapping, not an identical circuit implementation or measured energy.
 
 ### SpikeZIP Corrections
 
 The old table combines quantities with different denominators and contains unsupported ViT-S costs. The audited target table omits SpikeZIP Ops. and retains only quantities supported by the cited source.
 
-The current ICLR draft comments out the rendered Energy column but still displays the legacy SpikeZIP one-step activity counts in Ops. Source comments preserve their derivation and flag them as provisional rather than inference SOP.
+The current ICLR table leaves SpikeZIP Ops blank because the reported activities correspond to one simulation step rather than an inference SOP count. The removed derivation is preserved in [[deprecated#폐기한 전원 및 절대 에너지 검토]].
 
 [SpikeZIP-TF, Tables 4, 5 and 8; Equation 6](https://arxiv.org/html/2406.03470v1) verifies CIFAR-10 $99.2/98.7$ at 32 steps and ImageNet ViT-S/B/L $82.34/81.45$, $83.75/82.71$, $85.41/83.82$ at 64 steps. CIFAR uses a 16-level configuration; ImageNet uses 32 levels. Its ANN column is the baseline before quantization-aware training, not the quantized network immediately before conversion.
 
-Table 8 reports ViT-B/L power of 6.30/19.85 W. Equation 6 specifies one millisecond per step, permitting derived 64-step energies of 403.2/1270.4 mJ. Previously listed 7.0/about 22 billion spikes instead correspond to a single step and must not be presented as inference SOP counts.
-
-The ViT-S value is a parameter-ratio estimate rather than a reported result. Table 5 gives 22.05M parameters for ViT-S and 86.57M for ViT-B, so scaling the 7.00 billion ViT-B activities per step gives $7.00\times22.05/86.57=1.78295$ billion per step. At 64 steps this is 114.109 billion activities and 102.70 mJ under the paper's model. The legacy 100.8 mJ instead uses a rounded 1:4 ratio; at CIFAR's 32 steps, reusing the same per-step estimate would give 57.054 billion activities and 51.35 mJ. These estimates are not directly reported SpikeZIP-TF costs and remain outside the audited target table.
-
-The B/L energy cells must be marked as derived values under that paper's temporal power model, not quoted measurements or directly comparable physical device energy.
+Previously listed 7.0/about 22 billion SpikeZIP activities correspond to a single step and must not be presented as inference SOP counts. The ViT-S value is a parameter ratio estimate rather than a reported result: scaling the 7.00 billion ViT-B activities per step by $22.05/86.57$ gives 1.78295 billion activities per step. These estimates remain outside the audited target table.
 
 ## Paper Integration Contract
 
@@ -102,7 +98,7 @@ Only a complete, validated comparison bundle may fill the four Ours rows. Paper 
 
 [[scripts/analysis/summarize_local_range_paper_campaign.py#table_rows]] checks the four ViT and three text pipelines, exact sample counts, log hashes, calibration-policy identities, and a common source commit. [[scripts/analysis/summarize_local_range_paper_campaign.py#noise_rows]] accepts Figure 4 only when all 63 stochastic replicas match the completed ViT-B source, checkpoint, dataset, and calibration identities. Manuscript values and the final Figure 4 artifact are promoted only from these validated outputs.
 
-The table caption must identify our CIFAR test 10k and ImageNet fixed validation 5k populations, preserve literature provenance, correct SpikeZIP quantization levels, and distinguish derived energy from measured energy. A comparison-specific paragraph records float64, training seed-0 5k calibration, min/max with 5% range margin, frozen local ranges and disabled noise. The classifier counted by the estimate is the same TTFS linear composition executed by evaluation.
+The table caption must identify our CIFAR test 10k and ImageNet fixed validation 5k populations, preserve literature provenance, correct SpikeZIP quantization levels, and omit incomparable cost fields. A comparison-specific paragraph records float64, training seed-0 5k calibration, min/max with 5% range margin, frozen local ranges and disabled noise. The classifier counted by the estimate is the same TTFS linear composition executed by evaluation.
 
 The ICLR appendix derives affine projection, GELU, LayerNorm, multi-head self-attention, MLP, complete block, stem, final LayerNorm and classification-head costs. `vit_composed_sop_v2` identifies the implementation in which evaluation and SOP accounting use the same final projection. It distinguishes 196 image patches from 197 tokens and reports the exact SOP totals that generate the rounded table values.
 
@@ -116,4 +112,4 @@ The methodology table writes the cubic term as $v^3$ and links it to the existin
 
 An independently enumerated small circuit checks every data and global destination. Bundle checks reject incomplete, duplicate or mismatched evidence before a generated table or figure can reach the manuscript.
 
-[[scripts/verification/verify_vit_comparison_costs.py#CostTests#test_enumerated_oracle]] checks every component against nested loops over a small model rather than reusing estimator formulas. The same verifier checks the TTFS classification-head mapping, invalid geometry, energy units, and exact CIFAR ViT-S and ImageNet ViT-S/B/L totals that round to the table values.
+[[scripts/verification/verify_vit_comparison_costs.py#CostTests#test_enumerated_oracle]] checks every component against nested loops over a small model rather than reusing estimator formulas. The same verifier checks the TTFS classification-head mapping, invalid geometry, and exact CIFAR ViT-S and ImageNet ViT-S/B/L totals that round to the table values.

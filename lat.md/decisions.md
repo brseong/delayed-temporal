@@ -100,7 +100,7 @@ Paper-level operation counts treat multiplication by a known scalar as a synapti
 
 The reference code may call a generic multiplication function for constants to keep domain handling uniform, so raw Python call counts intentionally differ from the cost abstraction. [[scripts/verification/verify_sop.py#free_scale]] encodes the paper rule explicitly.
 
-Any reported energy estimate must declare this abstraction and its excluded interface, routing, memory, synchronization, and static costs.
+SOP reporting must declare this abstraction and its excluded interface, routing, memory, synchronization, and other physical hardware operations.
 
 ## Separate Complete Reasoning from Manuscript Exposition
 

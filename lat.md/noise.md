@@ -140,6 +140,16 @@ The maintained production integration covers the three affine adapters, multipli
 
 Missing-event semantics are already fixed by [[noise#Observation-Time Potential Invariant]]. Extending coverage means implementing each operator's ordinary physical state trajectory up to $T_{\mathrm{obs}}$ and reading the resulting clamped potential; it does not require another validity policy discussion.
 
+### Explicit ViT Encoder Block Scope
+
+The optional explicit scope restricts sampling and statistics to selected ViT encoder blocks without creating another noise model.
+
+[[utils/transforms/noise.py#gaussian_time_noise_scope]] marks one block active or inactive. [[utils/transforms/noise.py#gaussian_time_noise_is_active]] preserves model-wide behavior by default, while explicit inactive regions consume no RNG state and create no Gaussian counters.
+
+[[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTEncoder#forward]] applies the scope around each selected block. Embeddings, the final normalization, the classifier, and blocks outside the selected input-side prefix remain deterministic.
+
+The runtime configuration stores $k$ before model construction so pretrained configuration loading cannot discard the selected prefix. Timing noise parameters and sampler state remain in the shared noise configuration.
+
 ## Interpretation Limits
 
 The implementation is a controlled computational robustness model rather than calibrated circuit validation.
@@ -158,7 +168,7 @@ The previous ViT-B/16 campaign used the removed global-range contract and is sup
 
 The maintained order is one schema-2 training calibration, deterministic dense and spiking references, a timing-noise fraction sweep at deadline-margin ratio 4, and a deadline-margin ratio sweep at one fixed fraction. Static range mismatch, parameter perturbation, 50k validation, W&B, and TensorBoard are excluded.
 
-Until timing error draws for inactive members of signed pairs are removed, site counts are simulator diagnostics and are not interpreted as physical event totals or energy estimates.
+Until timing error draws for inactive members of signed pairs are removed, site counts are simulator diagnostics and are not interpreted as physical event totals.
 
 Every stage keeps the noise-free tensor path as a parity reference. No stage may introduce `gaussian_multiplication_operator`, an operator-specific sampler, or invalid-result propagation.
 

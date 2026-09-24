@@ -58,8 +58,8 @@ Promote them only if the manuscript makes a general accuracy, scale, comparison 
 These tasks require a concrete substrate and measurement contract that the current computational model does not provide.
 
 - Correlated device noise models and calibrated parameter distributions.
-- Sensitivity to static, leakage, bias, routing, synchronization, and memory energy.
-- SPICE, FPGA, device, or silicon measurements.
+- Sensitivity to static mismatch, leakage, bias, routing, synchronization, and memory behavior.
+- Circuit, FPGA, device, or silicon measurements of the operator behavior.
 
 Promote them only after the manuscript commits to a quantitative hardware claim and the required external evidence is available.
 

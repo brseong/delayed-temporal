@@ -92,11 +92,11 @@ The v3 ImageNet rows used a bilinear direct resize produced by the converted Hug
 
 The replacement campaign must enforce fresh calibration, ANN evaluation, and SNN evaluation for each ImageNet model and accept only complete pipelines with the timm configuration hash before generating a summary.
 
-## Cost and Paper Integration
+## SOP and Paper Integration
 
-Operation and energy values are generated from the actual S/B/L architecture and remain estimates under the declared TTFS implementation boundary.
+Data SOP and Global SOP are generated from the actual S/B/L architecture under the declared TTFS implementation boundary.
 
-The calculation includes patch and class tokens, attention output projection, final LayerNorm, attention heads, and classifier dimensions. Energy is total SOP multiplied by 0.9 pJ/SOP; it is not measured GPU or chip energy. The maintained evaluator and cost table use the same TTFS classification head. Detailed formulas and exclusions are in [[comparison-costs]].
+The calculation includes patch and class tokens, attention output projection, final LayerNorm, attention heads, and classifier dimensions. The maintained evaluator and cost table use the same TTFS classification head. Detailed formulas and exclusions are in [[comparison-costs]]. The removed absolute energy calculation is preserved in [[deprecated#폐기한 전원 및 절대 에너지 검토]].
 
 Raw logs, calibration tables, summaries, provenance, generated LaTeX, and manuscript build evidence remain under versioned artifact paths. ICLR rows may be filled only from the verified current summaries and must state CIFAR test 10k versus ImageNet fixed validation 5k.
 
@@ -110,4 +110,4 @@ Policy 3 retains the Q/K/V and centered LayerNorm ranges, consumes them through 
 
 Verification separates numerical operator checks, calibration coverage, data identity, evaluation completeness, and generated-table arithmetic.
 
-The evaluator rejects nonfinite logits before metric accumulation. Model checks cover GELU constants, LayerNorm boundaries, 109/217 site execution, frozen table identity, CIFAR order and labels, timm preprocessing, source mixing, and complete correct/total counts. Cost checks recompute SOP partial sums, energy units, and CSV-to-LaTeX equality. `lat check`, terminology checks, and the manuscript build remain required after manuscript-facing changes.
+The evaluator rejects nonfinite logits before metric accumulation. Model checks cover GELU constants, LayerNorm boundaries, 109/217 site execution, frozen table identity, CIFAR order and labels, timm preprocessing, source mixing, and complete correct/total counts. Cost checks recompute SOP partial sums and CSV-to-LaTeX equality. `lat check`, terminology checks, and the manuscript build remain required after manuscript-facing changes.
