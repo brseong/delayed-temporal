@@ -142,6 +142,55 @@ def _admit_prepare_gpu(gpu: int) -> dict[str, Any]:
     return {"policy": policy, "samples": samples}
 
 
+def _gpu_available_on_host(
+    args: argparse.Namespace,
+    host_label: str,
+    gpu: int,
+) -> bool:
+    policy = dict(local_gpu.DEFAULT_ADMISSION_POLICY)
+    if gpu == 0:
+        policy["max_memory_used_mib"] = 4096.0
+    if host_label == "local":
+        return local_gpu.gpu_available(
+            local_gpu.gpu_activity(gpu_ids=(gpu,))[gpu], policy
+        )
+    code = (
+        "from scripts.runtime import local_gpu; "
+        f"gpu={gpu}; policy=dict(local_gpu.DEFAULT_ADMISSION_POLICY); "
+        + ("policy['max_memory_used_mib']=4096.0; " if gpu == 0 else "")
+        + "sample=local_gpu.gpu_activity(gpu_ids=(gpu,))[gpu]; "
+        "raise SystemExit(0 if local_gpu.gpu_available(sample, policy) else 1)"
+    )
+    completed = subprocess.run(
+        [
+            "ssh",
+            "poseidon1",
+            (
+                f"cd {shlex.quote(str(args.source_root))} && "
+                f"{shlex.quote(args.python_bin)} -c {shlex.quote(code)}"
+            ),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return completed.returncode == 0
+
+
+def _wait_for_gpu(
+    args: argparse.Namespace,
+    host_label: str,
+    gpu: int,
+) -> None:
+    announced = False
+    while not _gpu_available_on_host(args, host_label, gpu):
+        if not announced:
+            print(f"Waiting for {host_label} GPU {gpu}", flush=True)
+            announced = True
+        time.sleep(30)
+    if announced:
+        print(f"Acquired {host_label} GPU {gpu}", flush=True)
+
+
 def _prepare_cct(args: argparse.Namespace, gpu: int) -> None:
     output = args.output_root / "prepare/cct7"
     result_path = output / "prepare_result.json"
@@ -173,6 +222,7 @@ def _prepare_cct(args: argparse.Namespace, gpu: int) -> None:
             raise ValueError("completed CCT preparation artifact checksum differs")
         return
     runtime_files.immutable_json(manifest_path, manifest)
+    _wait_for_gpu(args, "local", gpu)
     lock_path = args.output_root / f"runtime/gpu-locks/local-gpu-{gpu}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a", encoding="utf-8") as lock:
@@ -297,6 +347,7 @@ def _prepare_vit(args: argparse.Namespace, model: str, gpu: int) -> None:
     environment = _base_environment(args.source_root, gpu, runtime)
     environment["DELAYED_TEMPORAL_ARTIFACTS_ROOT"] = str(args.output_root)
     environment["DELAYED_TEMPORAL_RUNTIME_ROOT"] = str(args.runtime_root)
+    _wait_for_gpu(args, "local", gpu)
     _run_logged(
         command,
         log_path=args.output_root / f"controller/prepare_{model}.log",
@@ -572,6 +623,7 @@ def _run_cell_group(
             ]
         last_error: Exception | None = None
         for attempt in range(2):
+            _wait_for_gpu(args, host_label, gpu)
             try:
                 subprocess.run(command, cwd=args.source_root, check=True)
                 last_error = None
