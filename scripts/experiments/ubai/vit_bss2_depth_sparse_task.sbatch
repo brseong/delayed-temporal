@@ -66,8 +66,10 @@ runner_root=/data/depth-runner
 evaluator_root=/data/depth-evaluator
 assets_root=/data/depth-assets
 experiment_root=/data/depth-experiment
+model_root=/data/nas/vit_base_patch16_224.augreg2_in21k_ft_in1k
 mounts="$DEPTH_RUNNER_SOURCE:$runner_root:ro,$DEPTH_EVALUATOR_SOURCE:$evaluator_root:ro"
 mounts+=",$DEPTH_ASSETS:$assets_root:ro,$DEPTH_EXPERIMENT:$experiment_root"
+mounts+=",$DEPTH_ASSETS/checkpoints/vit_base_patch16_224.augreg2_in21k_ft_in1k:$model_root:ro"
 mounts+=",$DEPTH_ASSETS/source-checkouts/transformers:$runner_root/src/transformers:ro"
 mounts+=",$DEPTH_ASSETS/source-checkouts/spikingjelly:$runner_root/src/spikingjelly:ro"
 mounts+=",$DEPTH_ASSETS/source-checkouts/transformers:$evaluator_root/src/transformers:ro"
@@ -99,7 +101,7 @@ srun --ntasks=1 --gres=gpu:1 \
     --execution-mode slurm --runtime-root /work-tmp \
     --source-root "$evaluator_root" \
     --expected-commit 52fd758dfee41c9eeb8f8124b6c1dde9ff16bc0f \
-    --model-id "$assets_root/checkpoints/vit_base_patch16_224.augreg2_in21k_ft_in1k" \
+    --model-id "$model_root" \
     --calibration-source "$experiment_root/input/calibration_source" \
     --calibration-dataset-path "$assets_root/datasets/imagenet_theta_selection_v1/train_seed0_5000" \
     --calibration-dataset-fingerprint cabf903d14d1b1ac \
