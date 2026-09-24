@@ -248,6 +248,8 @@ The campaign preserves completed cells and permits later multipliers without cha
 
 The current rerun preserves raw Gaussian spike timestamps until deadline accounting and injects noise into the internal exponential-difference encoding. The source commit and both behavior contracts are part of the protocol identity, so earlier results cannot merge with this campaign.
 
+Because artifact trees are local to each host, the controller copies immutable protocol inputs to Poseidon and retrieves every completed remote cell before aggregation.
+
 Generated evidence remains under the fixed result root, while multiprocessing uses a separately configured short runtime root on disk so Unix socket paths remain within the system limit.
 
 ### Summary Artifacts

@@ -191,6 +191,49 @@ def _wait_for_gpu(
         print(f"Acquired {host_label} GPU {gpu}", flush=True)
 
 
+def _sync_path_to_poseidon(path: Path) -> None:
+    resolved = path.resolve(strict=True)
+    subprocess.run(
+        [
+            "ssh",
+            "poseidon1",
+            f"mkdir -p {shlex.quote(str(resolved.parent))}",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["scp", "-p", "-r", str(resolved), f"poseidon1:{resolved.parent}/"],
+        check=True,
+    )
+
+
+def _sync_supporting_artifacts_to_poseidon(args: argparse.Namespace) -> None:
+    """Copy immutable protocol inputs to Poseidon's host-local artifact tree."""
+
+    for path in (
+        args.hardware_summary,
+        args.output_root / "protocol.json",
+        args.output_root / "prepare",
+        args.output_root / "logs/conversion_comparison",
+    ):
+        _sync_path_to_poseidon(path)
+
+
+def _fetch_poseidon_cell(args: argparse.Namespace, cell: Cell) -> None:
+    destination = args.output_root / cell.relative_path
+    destination.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "scp",
+            "-p",
+            "-r",
+            f"poseidon1:{destination}/",
+            str(destination.parent),
+        ],
+        check=True,
+    )
+
+
 def _prepare_cct(args: argparse.Namespace, gpu: int) -> None:
     output = args.output_root / "prepare/cct7"
     result_path = output / "prepare_result.json"
@@ -626,10 +669,17 @@ def _run_cell_group(
             _wait_for_gpu(args, host_label, gpu)
             try:
                 subprocess.run(command, cwd=args.source_root, check=True)
+                if host_label == "poseidon":
+                    _fetch_poseidon_cell(args, cell)
                 last_error = None
                 break
             except subprocess.CalledProcessError as error:
                 last_error = error
+                if host_label == "poseidon":
+                    try:
+                        _fetch_poseidon_cell(args, cell)
+                    except subprocess.CalledProcessError:
+                        pass
                 if attempt == 0:
                     time.sleep(5)
         if last_error is not None:
@@ -647,6 +697,8 @@ def run_cells(
     slots = _execution_slots(args)
     assignments = _assign_cells(cells, slots)
     _request(args, phase, assignments)
+    if args.poseidon_gpus:
+        _sync_supporting_artifacts_to_poseidon(args)
     groups: dict[tuple[str, int], list[tuple[Cell, str, int]]] = {
         slot: [] for slot in slots
     }
