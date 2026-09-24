@@ -36,6 +36,12 @@ ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", "/data/delaye
 RUNTIME_ARTIFACTS = Path(
     os.environ.get("DELAYED_TEMPORAL_RUNTIME_ROOT", str(ARTIFACTS / "runtime"))
 )
+DEFAULT_ANN_BASELINE_CACHE_ROOT = Path(
+    os.environ.get(
+        "DELAYED_TEMPORAL_ANN_BASELINE_ROOT",
+        "/data/delayed-temporal/artifacts/logs/ann_baselines/v1",
+    )
+)
 TAG = "conversion_comparison_end_to_end_local_ranges_float64_v1"
 MODEL_CONFIG = {
     "cifar10_vit_small": {"dataset_id": "cifar10", "split": "test", "samples": 10_000},
@@ -249,6 +255,11 @@ def main() -> None:
     parser.add_argument("--python-bin", default="/opt/conda/envs/dt/bin/python")
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--runtime-root", type=Path, required=True)
+    parser.add_argument(
+        "--ann-baseline-cache-root",
+        type=Path,
+        default=DEFAULT_ANN_BASELINE_CACHE_ROOT,
+    )
     args = parser.parse_args()
 
     expected_host = "baekryun-cuda129" if args.host_label == "local" else "poseidon1"
@@ -275,7 +286,7 @@ def main() -> None:
         checkpoint_sha256=args.checkpoint_sha256,
         evaluation_dataset=evaluation_dataset,
     )
-    dense_cache_root = ARTIFACTS / "logs/ann_baselines/v1"
+    dense_cache_root = args.ann_baseline_cache_root.expanduser().resolve()
     output = args.output_root.resolve()
     required_output = (ARTIFACTS / "logs/conversion_comparison" / TAG / "vit" / args.model_key).resolve()
     if output != required_output:
@@ -304,6 +315,7 @@ def main() -> None:
         "runtime_dir": str(runtime), "commands": commands,
         "ann_baseline_identity": dense_identity,
         "ann_baseline_identity_sha256": ann_baseline.identity_sha256(dense_identity),
+        "ann_baseline_cache_root": str(dense_cache_root),
     }
     manifest_path = output / "manifest.json"
     if manifest_path.exists():
