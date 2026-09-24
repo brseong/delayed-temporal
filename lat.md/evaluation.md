@@ -244,6 +244,8 @@ The reducer joins only results with the same protocol identity and rejects confl
 
 [[scripts/analysis/summarize_screening_median_model_sweep.py#main]] writes baseline, raw-replica, three-seed summary, and model-wide accuracy tables. Its figure reports top-1 accuracy change from the deterministic baseline against the noise scale multiplier and marks $\alpha=1$ as the measured screening median.
 
+The figure title is `Robustness across converted Transformer models`.
+
 ### Verification
 
 Pure-Python verification covers measurement selection, multiplier scaling, extensible cell identities, multi-root merging, and summary rendering.
