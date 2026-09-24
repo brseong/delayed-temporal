@@ -423,6 +423,7 @@ def write_primitive_noise_artifacts(
         "transformer_forward_included": False,
         "multiple_spike_handling": "first-spike-time",
         "config": config.to_manifest_dict(),
+        "primitive_timing": config.primitive_timing_dict(),
         "environment": environment or {},
         "raw_index": raw_index,
         "observations": [

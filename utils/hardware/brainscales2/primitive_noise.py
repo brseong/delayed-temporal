@@ -329,6 +329,23 @@ class PrimitiveNoiseConfig:
     def validation_repeats(self) -> int:
         return self.repeats - self.calibration_repeats
 
+    def primitive_timing_dict(self) -> dict[str, Any]:
+        """Return the declared time budget for one primitive invocation."""
+        return {
+            "definition": (
+                "worst_case_primitive_latency_s is the observation deadline "
+                "measured from the primitive start"
+            ),
+            "encoding_window_start_s": self.input_early_s,
+            "encoding_window_end_s": self.input_late_s,
+            "encoding_window_duration_s": (
+                self.input_late_s - self.input_early_s
+            ),
+            "observation_time_s": self.observation_time_s,
+            "deadline_s": self.deadline_s,
+            "worst_case_primitive_latency_s": self.deadline_s,
+        }
+
     def to_manifest_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["hagen_output_coordinates"] = None

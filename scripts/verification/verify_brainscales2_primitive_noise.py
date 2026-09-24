@@ -64,6 +64,7 @@ from scripts.evaluation.brainscales2_primitive_noise import (
     collect_observations,
     make_config,
     parse_reset_code_table,
+    primitive_timing_record,
     run,
 )
 
@@ -1874,6 +1875,19 @@ def verify_encoder_operating_point_score() -> None:
     assert reference["selection_objective_rt"] > 0
     assert reference["validation_objective_rt"] > 0
     selected = reference["calibration_selected_device"]
+    timing = primitive_timing_record(
+        config, reference, primitive="phi-np"
+    )
+    assert timing["encoding_window_start_s"] == config.input_early_s
+    assert timing["encoding_window_end_s"] == config.input_late_s
+    assert timing["encoding_window_duration_s"] == (
+        config.input_late_s - config.input_early_s
+    )
+    assert timing["worst_case_primitive_latency_s"] == config.deadline_s
+    assert timing["physical_coordinate"] == selected["physical_coordinate"]
+    assert timing["calibration"]["conditional_sigma_s"] > 0
+    assert timing["calibration"]["normalization_signal_span_s"] > 0
+    assert timing["calibration"]["r_t"] == selected["calibration_rt"]
     calibration_devices = reference["primitive_scores"]["phi-np"][
         "calibration"
     ]["devices"]

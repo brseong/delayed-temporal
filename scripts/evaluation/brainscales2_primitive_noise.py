@@ -204,6 +204,48 @@ def make_config(args: argparse.Namespace) -> PrimitiveNoiseConfig:
     )
 
 
+def primitive_timing_record(
+    config: PrimitiveNoiseConfig,
+    score: dict[str, Any] | None = None,
+    *,
+    primitive: PrimitiveKind | None = None,
+) -> dict[str, Any]:
+    """Combine the declared time budget with selected-circuit measurements."""
+    timing = config.primitive_timing_dict()
+    if score is None or primitive is None:
+        return timing
+    primitive_score = (
+        score.get("primitive_scores", {}).get(primitive, {})
+    )
+    selected = primitive_score.get("calibration_selected_device")
+    if not isinstance(selected, dict):
+        return timing
+    coordinate = selected.get("physical_coordinate")
+
+    def selected_measurement(split: str) -> dict[str, Any]:
+        rows = primitive_score.get(split, {}).get("devices", [])
+        row = next(
+            (
+                item for item in rows
+                if item.get("physical_coordinate") == coordinate
+            ),
+            {},
+        )
+        return {
+            "conditional_sigma_s": row.get("conditional_sigma_s"),
+            "normalization_signal_span_s": row.get("signal_span_s"),
+            "normalization_span_source": (
+                "frozen phi-np calibration transfer span"
+            ),
+            "r_t": row.get("r_t"),
+        }
+
+    timing["physical_coordinate"] = coordinate
+    timing["calibration"] = selected_measurement("calibration")
+    timing["held_out"] = selected_measurement("held_out")
+    return timing
+
+
 def parse_reset_code_table(
     values: list[int] | None, *, device_count: int
 ) -> tuple[int, ...] | tuple[tuple[int, ...], ...] | None:
@@ -547,6 +589,7 @@ def optimize_encoder_operating_point(
         "schema_version": 1,
         "primitive": args.primitive,
         "base_config": base_config.to_manifest_dict(),
+        "primitive_timing": base_config.primitive_timing_dict(),
         "candidates": [candidate.to_dict() for candidate in candidates],
         "selection_contract": {
             "split": "calibration repetitions only",
@@ -583,6 +626,7 @@ def optimize_encoder_operating_point(
     results: list[dict[str, Any]] = []
     consecutive_timeout_failures: list[dict[str, Any]] = []
     for index, candidate in enumerate(candidates, start=1):
+        candidate_config = candidate.apply(base_config)
         candidate_dir = output_dir / "candidates" / candidate.candidate_id
         result_path = candidate_dir / "candidate_result.json"
         if result_path.is_file():
@@ -592,6 +636,18 @@ def optimize_encoder_operating_point(
                     f"candidate identity mismatch in {result_path}"
                 )
             if result.get("status") == "complete":
+                if "primitive_timing" not in result:
+                    result["primitive_timing"] = {
+                        primitive: primitive_timing_record(
+                            candidate_config,
+                            result.get("score"),
+                            primitive=primitive,
+                        )
+                        for primitive in result.get("score", {}).get(
+                            "primitive_scores", {}
+                        )
+                    }
+                    _write_json(result_path, result)
                 print(
                     f"Reusing candidate {index}/{len(candidates)} "
                     f"{candidate.candidate_id}",
@@ -611,12 +667,12 @@ def optimize_encoder_operating_point(
             f"{candidate.candidate_id}",
             flush=True,
         )
-        candidate_config = candidate.apply(base_config)
         result: dict[str, Any] = {
             "schema_version": 1,
             "candidate": candidate.to_dict(),
             "config": candidate_config.to_manifest_dict(),
             "status": "failed",
+            "primitive_timing": candidate_config.primitive_timing_dict(),
         }
         try:
             observations, validations, failure = (
@@ -638,6 +694,16 @@ def optimize_encoder_operating_point(
                 primitive=args.primitive,
                 screening=args.search_quick_codes,
             )
+            result["primitive_timing"] = {
+                primitive: primitive_timing_record(
+                    candidate_config,
+                    result["score"],
+                    primitive=primitive,
+                )
+                for primitive in result["score"].get(
+                    "primitive_scores", {}
+                )
+            }
             result["status"] = "complete"
         except Exception as error:
             result["error_type"] = type(error).__name__
@@ -760,6 +826,7 @@ def optimize_encoder_operating_point(
             "calibration_rt": calibration_rt,
             "held_out_rt": held_out_rt,
             "held_out_validated": held_out_validated,
+            "primitive_timing": result["primitive_timing"][primitive],
             "targets": {
                 "hardware_feasibility_1e-3": (
                     not args.search_quick_codes

@@ -500,7 +500,9 @@ For static encoder acquisition, the reset associated with each code remains inst
 
 All PyNN encoder acquisitions use the official Calix refractory period calculator with a target equal to the full repeated trial window. The observation deadline is followed by a quiet interval of the same duration. Calix resolves the backend clock scales and the selected circuit counters, so a circuit cannot emit a second spike within one trial; the next trial begins only when the configured refractory period has elapsed.
 
-The search compatible with the operator assumptions keeps the synchronized ramp stop at 25 microseconds and the observation deadline at 60 microseconds. Longer ramps are not eligible merely because increasing the signal span can lower the normalized ratio.
+The fixed-latency comparison keeps the synchronized ramp stop at 25 microseconds and the observation deadline at 60 microseconds. This is a comparison contract rather than an operator-feasibility limit. Longer operating points remain eligible in a separate latency-versus-robustness analysis and must not be ranked together with the fixed-latency rows using $r_t$ alone.
+
+Every primitive artifact records the encoding-window start, end, and duration, the observation time, and the deadline. The deadline is the worst-case primitive latency measured from the primitive start. Selected encoder records additionally store the conditional timing deviation, the frozen normalization signal span, and $r_t$ for calibration and held-out repetitions, so a normalized improvement can be separated from an absolute-jitter change.
 
 After the coarse screen, separate refinements vary threshold and precharge input count around each encoder's selected current and ramp duration. The $\phi_{\mathrm{NL}}$ refinement additionally varies the input count and weight of its exponential synaptic current. The result records the best held out timing noise ratio for each encoder.
 
