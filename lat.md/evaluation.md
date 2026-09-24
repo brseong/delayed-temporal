@@ -39,7 +39,7 @@ The ViT, BERT, RoBERTa, and GPT-2 calibration workflow selects activation ranges
 
 The maintained defaults select observed min/max (`0/1`) without tail truncation, then add 5% of the selected width per calibrated side. Interior quantiles remain explicit diagnostic overrides. Collection does not optimize endpoints against task accuracy; validation reports the effect of the frozen ranges.
 
-`--calibration-mode none` loads no layer-wise table. It retains fixed configuration limits, intervals derived from weights, and analytic residual sums. This preserves static bounds but omits the measured layer limits intended to control range growth. The current ViT-B noise campaign uses this mode; see [[noise#Local-Window Timing Noise Sweep]].
+`--calibration-mode none` loads no layer-wise table. It retains fixed configuration limits, intervals derived from weights, and analytic residual sums. This mode is retained for calibration-free diagnostics only. The current ViT-B timing-noise campaign instead validates and freezes a schema-2 table collected from the training population; see [[noise#Local-Window Timing Noise Sweep]].
 
 The artifact path is explicit through `--calibration-path`. ViT records image processing and geometry; GPT-2 records filtering of empty texts, tokenizer controls, padded sequence length, and dataset configuration. Both record the seeded training subset, checkpoint, TTFS constants, attention path, and supported ablation settings. The separate ViT cubic implementation and floor are not part of the current artifact identity; see [[calibration#Two-pass Collection#Deterministic Training Subset]].
 
