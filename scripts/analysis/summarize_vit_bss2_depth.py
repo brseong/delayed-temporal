@@ -42,6 +42,41 @@ COLORS = {
 }
 
 
+def parse_max_first_block_counts(values: list[str]) -> dict[str, int] | None:
+    """Parse one explicit stopping depth for each measured condition."""
+    if not values:
+        return None
+    parsed: dict[str, int] = {}
+    for value in values:
+        condition, separator, raw_count = value.partition("=")
+        if not separator or condition not in DISPLAY_NAMES or condition in parsed:
+            raise ValueError("maximum block counts must uniquely name both conditions")
+        try:
+            count = int(raw_count)
+        except ValueError as error:
+            raise ValueError("maximum block count must be an integer") from error
+        if not 1 <= count <= 12:
+            raise ValueError("maximum block count must be between 1 and 12")
+        parsed[condition] = count
+    if set(parsed) != set(DISPLAY_NAMES):
+        raise ValueError("maximum block counts must uniquely name both conditions")
+    return parsed
+
+
+def selected_cells(
+    max_first_block_counts: dict[str, int] | None,
+) -> tuple[tuple[str, int, int], ...]:
+    """Return the complete grid or the explicitly stopped contiguous prefixes."""
+    cells = expected_cells()
+    if max_first_block_counts is None:
+        return cells
+    return tuple(
+        cell
+        for cell in cells
+        if cell[0] == "clean" or cell[1] <= max_first_block_counts[cell[0]]
+    )
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]], fields: tuple[str, ...]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -50,12 +85,17 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: tuple[str, ...]) -
         writer.writerows(rows)
 
 
-def load_runs(root: Path, phase: str) -> tuple[list[dict[str, Any]], dict[str, str]]:
+def load_runs(
+    root: Path,
+    phase: str,
+    max_first_block_counts: dict[str, int] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
     expected_samples = PHASE_SAMPLES[phase]
     rows: list[dict[str, Any]] = []
     source_hashes: dict[str, str] = {}
     shared_identity: tuple[Any, ...] | None = None
-    for condition, first_block_count, seed in expected_cells():
+    cells = selected_cells(max_first_block_counts)
+    for condition, first_block_count, seed in cells:
         name = run_id(condition, first_block_count, seed)
         run_root = root / "runs" / name
         manifest_path = run_root / "manifest.json"
@@ -110,9 +150,48 @@ def load_runs(root: Path, phase: str) -> tuple[list[dict[str, Any]], dict[str, s
         )
         source_hashes[f"runs/{name}/manifest.json"] = identity.sha256_file(manifest_path)
         source_hashes[f"runs/{name}/result.json"] = identity.sha256_file(result_path)
-    if len(rows) != 73:
-        raise ValueError("depth summary requires exactly 73 runs")
+    if len(rows) != len(cells):
+        raise ValueError("depth summary run population differs")
     return rows, source_hashes
+
+
+def validate_stopping_decision(
+    root: Path,
+    *,
+    max_first_block_counts: dict[str, int],
+    accuracy_threshold: float,
+) -> dict[str, Any]:
+    """Validate that each retained prefix ends at its first near-zero mean."""
+    if not math.isfinite(accuracy_threshold) or not 0.0 <= accuracy_threshold <= 1.0:
+        raise ValueError("accuracy threshold must be finite and between zero and one")
+    rows, hashes = load_runs(root, "pilot", max_first_block_counts)
+    decisions: dict[str, Any] = {}
+    for condition, maximum in max_first_block_counts.items():
+        means: dict[str, float] = {}
+        for first_block_count in range(1, maximum + 1):
+            values = [
+                float(row["accuracy"])
+                for row in rows
+                if row["condition"] == condition
+                and row["first_block_count"] == first_block_count
+            ]
+            if len(values) != 3:
+                raise ValueError("stopping decision requires three seeds at every retained depth")
+            means[str(first_block_count)] = statistics.fmean(values)
+        if means[str(maximum)] > accuracy_threshold:
+            raise ValueError("selected stopping depth does not meet the accuracy threshold")
+        if any(means[str(index)] <= accuracy_threshold for index in range(1, maximum)):
+            raise ValueError("selected stopping depth is not the first threshold crossing")
+        decisions[condition] = {
+            "max_first_block_count": maximum,
+            "accuracy_means": means,
+        }
+    return {
+        "rule": "stop after the mean accuracy is at most the stated threshold",
+        "accuracy_threshold": accuracy_threshold,
+        "conditions": decisions,
+        "source_hashes": hashes,
+    }
 
 
 def summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -122,7 +201,16 @@ def summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     clean = float(clean_rows[0]["accuracy"])
     summary: list[dict[str, Any]] = []
     for condition in DISPLAY_NAMES:
-        for first_block_count in range(13):
+        observed = sorted(
+            {
+                int(row["first_block_count"])
+                for row in rows
+                if row["condition"] == condition
+            }
+        )
+        if not observed or observed != list(range(1, max(observed) + 1)):
+            raise ValueError("depth summary requires a contiguous condition prefix")
+        for first_block_count in range(max(observed) + 1):
             if first_block_count == 0:
                 selected = clean_rows
             else:
@@ -190,8 +278,9 @@ def render(summary: list[dict[str, Any]], output: Path) -> None:
         axes[0].fill_between(x, low, high, color=color, alpha=0.16)
         axes[1].plot(x, change, marker="o", color=color, label=label)
         axes[1].fill_between(x, change_low, change_high, color=color, alpha=0.16)
+    maximum = max(int(row["first_block_count"]) for row in summary)
     for axis in axes:
-        axis.set_xticks(range(13))
+        axis.set_xticks(range(maximum + 1))
         axis.set_xlabel("Number of noisy encoder blocks from the input")
         axis.grid(alpha=0.25)
     axes[0].set_ylabel("Top-1 accuracy (%)")
@@ -208,9 +297,35 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--phase", choices=tuple(PHASE_SAMPLES), required=True)
     parser.add_argument("--input-root", type=Path, required=True)
+    parser.add_argument(
+        "--max-first-block-count",
+        action="append",
+        default=[],
+        metavar="CONDITION=K",
+    )
+    parser.add_argument("--stopping-decision-root", type=Path)
+    parser.add_argument("--stopping-accuracy-threshold", type=float)
     args = parser.parse_args()
     root = args.input_root.resolve(strict=True)
-    raw, source_hashes = load_runs(root, args.phase)
+    max_first_block_counts = parse_max_first_block_counts(args.max_first_block_count)
+    stopping_options = (
+        args.stopping_decision_root is not None,
+        args.stopping_accuracy_threshold is not None,
+    )
+    if max_first_block_counts is None and any(stopping_options):
+        raise ValueError("stopping evidence requires explicit maximum block counts")
+    if max_first_block_counts is not None and not all(stopping_options):
+        raise ValueError("explicit maximum block counts require stopping evidence")
+    stopping_decision = None
+    if max_first_block_counts is not None:
+        decision_root = args.stopping_decision_root.resolve(strict=True)
+        stopping_decision = validate_stopping_decision(
+            decision_root,
+            max_first_block_counts=max_first_block_counts,
+            accuracy_threshold=args.stopping_accuracy_threshold,
+        )
+        stopping_decision["root"] = str(decision_root)
+    raw, source_hashes = load_runs(root, args.phase, max_first_block_counts)
     summary = summarize(raw)
     raw_path = root / "depth_noise_raw.csv"
     summary_path = root / "depth_noise_summary.csv"
@@ -226,6 +341,8 @@ def main() -> None:
         "summary_csv_sha256": identity.sha256_file(summary_path),
         "figure_pdf_sha256": identity.sha256_file(figure.with_suffix(".pdf")),
         "figure_png_sha256": identity.sha256_file(figure.with_suffix(".png")),
+        "max_first_block_count_by_condition": max_first_block_counts,
+        "stopping_decision": stopping_decision,
         "interpretation": (
             "cumulative sensitivity to measured marginal encoder timing-noise scales; "
             "not causal attribution to an individual block"

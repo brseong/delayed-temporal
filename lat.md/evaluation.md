@@ -188,6 +188,46 @@ After the ViT-B result authenticates its frozen calibration, the supervisor rele
 
 [[scripts/analysis/summarize_local_range_paper_campaign.py#main]] accepts only seven complete table pipelines and all 63 identity-consistent noise replicas. It authenticates phase logs and frozen calibration, rejects removed range keys, and requires the noise runs to share the completed ViT-B source, checkpoint, dataset, and calibration identities. It writes table, raw-replica, and cell-summary CSV files and renders the two-panel PDF and PNG with dense and clean-spiking references, three-replica 95% Student-$t$ intervals, and pooled deadline-miss counts on a logarithmic auxiliary axis. The Figure 4 legend uses the empty area on the right side of the right panel and does not cover plotted values.
 
+## ViT-B Cumulative Encoder Block Timing Noise
+
+This diagnostic measures converted ViT-B accuracy as timing noise is enabled in a contiguous prefix of encoder blocks from the input.
+
+Both $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ are active inside each selected block, but each uses its own measured validation $r_t$ and local signal span. The two fractions are not averaged or replaced by one shared value.
+
+The authenticated hardware summary has SHA-256 `639a908ac4b86440ef706afcd98467117cbf0f1e5424ca3e8de5f4ef8802f6c0`. The best measured coordinate and screening median remain distinct measured conditions; the latter is not described as a chip-wide median.
+
+### Condition Execution
+
+Each run authenticates source, checkpoint, calibration, evaluation data, preprocessing, and the measured hardware summary before evaluating one condition.
+
+[[scripts/experiments/run_vit_bss2_depth_condition.py#main]] evaluates exactly 500 or 5,000 examples, fixes float64 and deadline-margin ratio 4, and records block-prefixed Gaussian counters. The clean reference uses $k=0$; noisy conditions use seeds 0--2.
+
+### Campaign Protocol
+
+The default campaign enumerates the complete $k=1,\ldots,12$ grid, while an explicitly stopped result must retain three seeds through the first stated accuracy threshold crossing.
+
+[[scripts/experiments/run_vit_bss2_depth_campaign.py#main]] schedules GPUs 4--7, resumes exact matching conditions, and rejects missing or mixed identities. A stopped campaign preserves completed larger-$k$ runs but excludes them from the selected result rather than deleting evidence.
+
+For the stopped run, each measured condition ends at the first $k$ whose three-seed mean accuracy is at most 1%. The 500-image pilot provides this decision; the 5,000-image phase evaluates only the clean reference and the retained condition prefixes.
+
+### Summary Artifacts
+
+The reducer reports cumulative sensitivity without assigning a causal failure to one individual block.
+
+[[scripts/analysis/summarize_vit_bss2_depth.py#main]] writes raw and summary CSV files, a summary manifest, and PDF/PNG figures. Full-grid behavior remains the default. Explicit maximum block counts require an authenticated pilot root and a validated accuracy threshold; omitted completed runs remain untouched.
+
+### Verification
+
+Pure-Python verification covers scope, complete and stopped condition populations, exact evaluation prefixes, stopping evidence, and artifact rejection rules.
+
+#### Block scope
+
+Inactive blocks must consume no Gaussian RNG state, create no counters, and retain deterministic event behavior.
+
+#### Campaign artifacts
+
+The campaign must reject missing seeds, invalid block prefixes, mixed dataset identities, modified hardware summary values, and a stopping depth that is not the first threshold crossing.
+
 ## Historical ViT-B/16 Global Range Selection
 
 This section preserves the removed global-range workflow for provenance only; maintained execution has no corresponding setting or selection gate.

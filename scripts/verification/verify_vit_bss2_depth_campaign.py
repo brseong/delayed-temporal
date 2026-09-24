@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -13,7 +14,17 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.analysis.summarize_vit_bss2_depth import load_runs, render, summarize, write_csv
+ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", ROOT / "artifacts"))
+
+from scripts.analysis.summarize_vit_bss2_depth import (
+    load_runs,
+    parse_max_first_block_counts,
+    render,
+    selected_cells,
+    summarize,
+    validate_stopping_decision,
+    write_csv,
+)
 from scripts.experiments.run_vit_bss2_depth_campaign import (
     expected_cells,
     run_id,
@@ -39,7 +50,7 @@ def verify_fixed_conditions() -> None:
     assert cells[0] == ("clean", 0, 0)
     assert sum(condition != "clean" for condition, _, _ in cells) == 72
     conditions = hardware_conditions(
-        ROOT / "artifacts/brainscales2-primitives/20260924T_best_median_screen_summary.json"
+        ARTIFACTS / "brainscales2-primitives/20260924T_best_median_screen_summary.json"
     )
     assert conditions["best-measured-coordinate"]["linear_time_std_fraction"] == 0.008752792479355493
     assert conditions["best-measured-coordinate"]["log_time_std_fraction"] == 0.015681047682163635
@@ -172,6 +183,40 @@ def verify_summary_gate() -> None:
         render(summary, root / "depth_noise_accuracy")
         assert (root / "depth_noise_accuracy.pdf").is_file()
         assert (root / "depth_noise_accuracy.png").is_file()
+
+        limits = parse_max_first_block_counts(
+            ["best-measured-coordinate=1", "screening-median=1"]
+        )
+        assert limits == {
+            "best-measured-coordinate": 1,
+            "screening-median": 1,
+        }
+        assert len(selected_cells(limits)) == 7
+        truncated, truncated_hashes = load_runs(root, "pilot", limits)
+        truncated_summary = summarize(truncated)
+        assert len(truncated) == 7
+        assert len(truncated_hashes) == 14
+        assert len(truncated_summary) == 4
+        decision = validate_stopping_decision(
+            root,
+            max_first_block_counts=limits,
+            accuracy_threshold=0.9,
+        )
+        assert decision["conditions"]["best-measured-coordinate"][
+            "max_first_block_count"
+        ] == 1
+        render(truncated_summary, root / "depth_noise_accuracy_truncated")
+        assert (root / "depth_noise_accuracy_truncated.pdf").is_file()
+        must_reject(
+            lambda: parse_max_first_block_counts(["best-measured-coordinate=1"])
+        )
+        must_reject(
+            lambda: validate_stopping_decision(
+                root,
+                max_first_block_counts=limits,
+                accuracy_threshold=0.1,
+            )
+        )
 
         wrong = root / "runs" / run_id("screening-median", 3, 1) / "manifest.json"
         payload = json.loads(wrong.read_text())
