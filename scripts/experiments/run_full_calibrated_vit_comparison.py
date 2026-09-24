@@ -33,6 +33,9 @@ from utils.transformers.calibration import (
 
 
 ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", "/data/delayed-temporal/artifacts"))
+RUNTIME_ARTIFACTS = Path(
+    os.environ.get("DELAYED_TEMPORAL_RUNTIME_ROOT", str(ARTIFACTS / "runtime"))
+)
 TAG = "conversion_comparison_end_to_end_local_ranges_float64_v1"
 MODEL_CONFIG = {
     "cifar10_vit_small": {"dataset_id": "cifar10", "split": "test", "samples": 10_000},
@@ -278,7 +281,7 @@ def main() -> None:
     if output != required_output:
         raise ValueError("output path differs from the fixed comparison layout")
     runtime = args.runtime_root.resolve()
-    required_runtime = (ARTIFACTS / "runtime" / TAG / "vit" / args.model_key).resolve()
+    required_runtime = (RUNTIME_ARTIFACTS / TAG / "vit" / args.model_key).resolve()
     if runtime != required_runtime:
         raise ValueError("runtime path differs from the fixed comparison layout")
     output.mkdir(parents=True, exist_ok=True)

@@ -205,7 +205,7 @@ def _prepare_cct(args: argparse.Namespace) -> None:
             environment=_base_environment(
                 args.source_root,
                 0,
-                args.output_root / "runtime/prepare/cct7",
+                args.runtime_root / "prepare/cct7",
             ),
         )
         summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
@@ -232,14 +232,18 @@ def _prepare_cct(args: argparse.Namespace) -> None:
         )
 
 
-def _vit_prepare_paths(output_root: Path, model: str) -> tuple[Path, Path]:
+def _vit_prepare_paths(
+    output_root: Path,
+    runtime_root: Path,
+    model: str,
+) -> tuple[Path, Path]:
     output = output_root / "logs/conversion_comparison" / VIT_PREPARE_TAG / "vit" / model
-    runtime = output_root / "runtime" / VIT_PREPARE_TAG / "vit" / model
+    runtime = runtime_root / VIT_PREPARE_TAG / "vit" / model
     return output, runtime
 
 
 def _prepare_vit(args: argparse.Namespace, model: str, gpu: int) -> None:
-    output, runtime = _vit_prepare_paths(args.output_root, model)
+    output, runtime = _vit_prepare_paths(args.output_root, args.runtime_root, model)
     if _complete(output / "result.json"):
         return
     model_path = args.vit_small_model if model == "imagenet_vit_small" else args.vit_base_model
@@ -280,6 +284,7 @@ def _prepare_vit(args: argparse.Namespace, model: str, gpu: int) -> None:
     ]
     environment = _base_environment(args.source_root, gpu, runtime)
     environment["DELAYED_TEMPORAL_ARTIFACTS_ROOT"] = str(args.output_root)
+    environment["DELAYED_TEMPORAL_RUNTIME_ROOT"] = str(args.runtime_root)
     _run_logged(
         command,
         log_path=args.output_root / f"controller/prepare_{model}.log",
@@ -335,7 +340,7 @@ def _build_protocol(args: argparse.Namespace) -> dict[str, Any]:
         }
     }
     for model in ("imagenet_vit_small", "imagenet_vit_base"):
-        root, _ = _vit_prepare_paths(args.output_root, model)
+        root, _ = _vit_prepare_paths(args.output_root, args.runtime_root, model)
         manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
         result = json.loads((root / "result.json").read_text(encoding="utf-8"))
         calibration_path = root / "calibration.json"
@@ -481,6 +486,8 @@ def _cell_command(
         str(gpu),
         "--output-dir",
         str(args.output_root / cell.relative_path),
+        "--runtime-dir",
+        str(args.runtime_root / cell.relative_path),
         "--python-bin",
         args.python_bin,
     ]
@@ -633,6 +640,11 @@ def main() -> None:
     parser.add_argument("--alphas", nargs="+", default=INITIAL_ALPHAS)
     parser.add_argument("--gpus", type=int, nargs="+", default=(0, 1, 2, 3))
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=Path("/data/dtr/screening-median-v1"),
+    )
     parser.add_argument("--python-bin", default="/opt/conda/envs/dt/bin/python")
     parser.add_argument("--cct-checkpoint", type=Path, default=DEFAULT_MODEL_PATHS["cct7"])
     parser.add_argument(
@@ -665,6 +677,9 @@ def main() -> None:
     args.hardware_summary = args.hardware_summary.resolve(strict=True)
     args.output_root = args.output_root.resolve()
     args.output_root.mkdir(parents=True, exist_ok=True)
+    args.runtime_root = args.runtime_root.resolve()
+    if args.phase not in {"status", "aggregate"}:
+        args.runtime_root.mkdir(parents=True, exist_ok=True)
     if args.phase in {"prepare", "all"}:
         args.cct_checkpoint = args.cct_checkpoint.resolve(strict=True)
         args.cct_dataset_root = args.cct_dataset_root.resolve(strict=True)

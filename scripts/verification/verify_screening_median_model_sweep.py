@@ -245,7 +245,7 @@ def verify_protocol_excludes_execution_axes() -> None:
     base = {"source_commit": "a" * 40, "hardware": {}, "models": {}}
     first = protocol_id(base)
     assert first == protocol_id(dict(base))
-    for key in ("alphas", "gpus", "created_at", "requests"):
+    for key in ("alphas", "gpus", "runtime_root", "created_at", "requests"):
         must_reject(lambda key=key: protocol_id({**base, key: []}))
 
 

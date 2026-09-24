@@ -214,7 +214,7 @@ def expected_cells(
 def protocol_id(identity_payload: dict[str, Any]) -> str:
     """Hash the scientific protocol independently of requested alpha values."""
 
-    forbidden = {"alphas", "gpus", "created_at", "requests"}
+    forbidden = {"alphas", "gpus", "runtime_root", "created_at", "requests"}
     if forbidden.intersection(identity_payload):
         raise ValueError("execution-only fields cannot enter the protocol identity")
     return identity.json_sha256(identity_payload)

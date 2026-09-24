@@ -358,6 +358,7 @@ def main() -> None:
     parser.add_argument("--evaluation-samples", type=int, required=True)
     parser.add_argument("--gpu", type=int, choices=range(4), required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--runtime-dir", type=Path, required=True)
     parser.add_argument("--python-bin", default="/opt/conda/envs/dt/bin/python")
     args = parser.parse_args()
     protocol_path, protocol = _load_protocol(args.protocol)
@@ -370,7 +371,7 @@ def main() -> None:
         raise ValueError("evaluation sample count is outside the fixed protocol")
     args.output_dir = args.output_dir.resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    runtime = args.output_dir / "runtime"
+    runtime = args.runtime_dir.resolve()
     runtime.mkdir(parents=True, exist_ok=True)
     if subprocess.check_output(
         ["findmnt", "-n", "-o", "FSTYPE", "-T", str(runtime)], text=True

@@ -212,6 +212,8 @@ The campaign preserves completed cells and permits later multipliers without cha
 
 [[scripts/experiments/run_poseidon_screening_median_model_sweep.py#main]] prepares one frozen calibration and deterministic baseline per model, gates the formal phase on nine 500-image smoke runs, and schedules CCT, ViT-S, and ViT-B over Poseidon GPUs 0--3. Immutable request shards record each added multiplier set.
 
+Generated evidence remains under the fixed result root, while multiprocessing uses a separately configured short runtime root on disk so Unix socket paths remain within the system limit.
+
 ### Summary Artifacts
 
 The reducer joins only results with the same protocol identity and rejects conflicting duplicate cells.
