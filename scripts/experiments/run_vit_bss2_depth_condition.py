@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import fcntl
 import json
 import math
@@ -202,6 +203,27 @@ def validate_condition_arguments(args: argparse.Namespace) -> None:
         raise ValueError("evaluation_samples must be 500 or 5000")
 
 
+def validate_execution_arguments(
+    args: argparse.Namespace,
+    *,
+    hostname: str,
+    environment: dict[str, str],
+) -> None:
+    """Validate direct-host or scheduler-owned device selection."""
+    if args.execution_mode == "local":
+        if hostname != "baekryun-cuda129" or args.gpu is None:
+            raise ValueError("local depth conditions require one baekryun GPU")
+        return
+    visible = environment.get("CUDA_VISIBLE_DEVICES", "")
+    if (
+        args.gpu is not None
+        or not environment.get("SLURM_JOB_ID")
+        or not visible
+        or "," in visible
+    ):
+        raise ValueError("Slurm depth conditions require one allocated GPU")
+
+
 # @lat: [[evaluation#Evaluation and Verification#ViT-B Cumulative Encoder Block Timing Noise#Condition Execution]]
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
@@ -220,12 +242,15 @@ def main() -> None:
     parser.add_argument("--first-block-count", type=int, required=True)
     parser.add_argument("--seed", type=int, choices=(0, 1, 2), required=True)
     parser.add_argument("--evaluation-samples", type=int, required=True)
-    parser.add_argument("--gpu", type=int, choices=range(8), required=True)
+    parser.add_argument("--execution-mode", choices=("local", "slurm"), default="local")
+    parser.add_argument("--gpu", type=int, choices=range(8))
+    parser.add_argument("--runtime-root", type=Path)
     parser.add_argument("--python-bin", default="/opt/conda/envs/dt/bin/python")
     args = parser.parse_args()
     validate_condition_arguments(args)
-    if socket.gethostname() != "baekryun-cuda129":
-        raise ValueError("ViT-B depth conditions must run on baekryun")
+    validate_execution_arguments(
+        args, hostname=socket.gethostname(), environment=dict(os.environ)
+    )
 
     for name in (
         "source_root",
@@ -292,7 +317,8 @@ def main() -> None:
         )
     )
     output = ARTIFACTS / "logs/bss2_vit_depth" / TAG / phase / "runs" / run_id
-    runtime = ARTIFACTS / "runtime" / TAG / phase / run_id
+    runtime_base = args.runtime_root or ARTIFACTS / "runtime"
+    runtime = runtime_base / TAG / phase / run_id
     output.mkdir(parents=True, exist_ok=True)
     runtime.mkdir(parents=True, exist_ok=True)
     filesystem = subprocess.check_output(
@@ -426,10 +452,21 @@ def main() -> None:
         "time_noise_scope": "vit_first_blocks",
         "dtype": "float64",
         "batch_size": 32,
-        "physical_gpu": args.gpu,
+        "physical_gpu": (
+            args.gpu
+            if args.execution_mode == "local"
+            else os.environ.get("SLURM_JOB_GPUS", os.environ["CUDA_VISIBLE_DEVICES"])
+        ),
         "runtime_dir": str(runtime),
         "command": command,
     }
+    if args.execution_mode == "slurm":
+        manifest.update(
+            execution_mode="slurm",
+            execution_host=socket.gethostname(),
+            slurm_job_id=os.environ["SLURM_JOB_ID"],
+            slurm_array_task_id=os.environ.get("SLURM_ARRAY_TASK_ID"),
+        )
     if runner_commit != args.expected_commit:
         manifest["runner_source_commit"] = runner_commit
     if args.measured_noise_scale != 1.0:
@@ -445,22 +482,25 @@ def main() -> None:
         print(result_path.read_text(), flush=True)
         return
 
-    lock_path = ARTIFACTS / "runtime/gpu-locks" / f"local-gpu-{args.gpu}.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        for check in range(2):
-            activity = local_gpu.gpu_activity(gpu_ids=(args.gpu,))[args.gpu]
-            if not local_gpu.gpu_available(activity):
-                raise RuntimeError(f"GPU {args.gpu} is occupied")
-            if check == 0:
-                time.sleep(10)
+    with ExitStack() as stack:
+        if args.execution_mode == "local":
+            lock_path = (
+                ARTIFACTS / "runtime/gpu-locks" / f"local-gpu-{args.gpu}.lock"
+            )
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock = stack.enter_context(lock_path.open("a"))
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for check in range(2):
+                activity = local_gpu.gpu_activity(gpu_ids=(args.gpu,))[args.gpu]
+                if not local_gpu.gpu_available(activity):
+                    raise RuntimeError(f"GPU {args.gpu} is occupied")
+                if check == 0:
+                    time.sleep(10)
         attempt = len(list(output.joinpath("logs").glob("evaluation.attempt-*.log"))) + 1
         log_path = output / "logs" / f"evaluation.attempt-{attempt:02d}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         environment = dict(
             os.environ,
-            CUDA_VISIBLE_DEVICES=str(args.gpu),
             WANDB_MODE="disabled",
             HF_HUB_OFFLINE="1",
             HF_DATASETS_OFFLINE="1",
@@ -485,6 +525,8 @@ def main() -> None:
                 )
             ),
         )
+        if args.execution_mode == "local":
+            environment["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
         started = time.monotonic()
         runtime_files.atomic_json(result_path, {"state": "running", "run_id": run_id})
         with log_path.open("x") as log:

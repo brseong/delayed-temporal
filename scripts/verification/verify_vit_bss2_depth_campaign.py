@@ -33,6 +33,7 @@ from scripts.experiments.run_vit_bss2_depth_condition import (
     hardware_conditions,
     parse_scoped_counts,
     validate_condition_arguments,
+    validate_execution_arguments,
 )
 
 
@@ -154,6 +155,33 @@ def verify_scoped_count_gate() -> None:
     )
 
 
+def verify_execution_gate() -> None:
+    validate_execution_arguments(
+        SimpleNamespace(execution_mode="local", gpu=1),
+        hostname="baekryun-cuda129",
+        environment={},
+    )
+    validate_execution_arguments(
+        SimpleNamespace(execution_mode="slurm", gpu=None),
+        hostname="gpu-node",
+        environment={"SLURM_JOB_ID": "1", "CUDA_VISIBLE_DEVICES": "0"},
+    )
+    must_reject(
+        lambda: validate_execution_arguments(
+            SimpleNamespace(execution_mode="local", gpu=None),
+            hostname="baekryun-cuda129",
+            environment={},
+        )
+    )
+    must_reject(
+        lambda: validate_execution_arguments(
+            SimpleNamespace(execution_mode="slurm", gpu=None),
+            hostname="gpu-node",
+            environment={"SLURM_JOB_ID": "1", "CUDA_VISIBLE_DEVICES": "0,1"},
+        )
+    )
+
+
 def write_fixture(root: Path) -> None:
     for condition, first_block_count, seed in expected_cells():
         name = run_id(condition, first_block_count, seed)
@@ -257,6 +285,7 @@ def verify_summary_gate() -> None:
 def main() -> None:
     verify_fixed_conditions()
     verify_scoped_count_gate()
+    verify_execution_gate()
     verify_summary_gate()
     print("ViT-B BrainScaleS-2 depth campaign verification passed.")
 

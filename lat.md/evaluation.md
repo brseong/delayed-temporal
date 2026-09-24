@@ -204,6 +204,8 @@ Each run authenticates source, checkpoint, calibration, evaluation data, preproc
 
 An optional factor in $(0,1]$ may attenuate both measured fractions without merging them: each encoder retains its own measured $r_t$ and local signal span. Scaled runs use distinct identities, and their manifests retain the original condition, factor, runner revision, and frozen evaluator revision.
 
+The same condition owner may run on the direct GPU host or in a Slurm allocation with one device. Slurm execution records its compute node and allocation identity while retaining the same evaluator, calibration, dataset, scope, and result checks.
+
 ### Campaign Protocol
 
 The default campaign enumerates the complete $k=1,\ldots,12$ grid, while an explicitly stopped result must retain three seeds through the first stated accuracy threshold crossing.
