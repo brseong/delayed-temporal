@@ -11,6 +11,7 @@ The multi-file Python campaigns use a contract module, one or more workers or co
 | Calibrated ViT comparison | `run_full_calibrated_vit_comparison.py` | `scripts/analysis/summarize_local_range_paper_campaign.py` |
 | Calibrated text comparison | `run_full_calibrated_text_comparison.py` | `scripts/analysis/summarize_full_calibrated_text_comparison.py` |
 | Local-window timing-noise and deadline-margin sweeps | `run_vit_local_range_noise_condition.py`, `run_poseidon_local_range_paper_campaign.py` | `scripts/analysis/summarize_local_range_paper_campaign.py` |
+| Appendix raw-timestamp ViT-B rerun | `run_appendix_vit_noise_campaign.py`, `run_vit_local_range_noise_condition.py` | `scripts/analysis/summarize_local_range_paper_campaign.py --noise-only` |
 | Discrete-time compatibility | `run_clock_driven_vit.py` | `scripts/analysis/plot_clock_discretization.py`, `scripts/analysis/plot_clock_time_step_sweep.py` |
 
 Historical UBAI deployment scripts were removed with their global-range campaigns. Any future cluster wrapper must follow the cluster instructions and must not become a second implementation of evaluator semantics.

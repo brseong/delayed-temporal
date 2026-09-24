@@ -194,6 +194,16 @@ After the ViT-B result authenticates its frozen calibration, the supervisor rele
 
 [[scripts/analysis/summarize_local_range_paper_campaign.py#main]] accepts only seven complete table pipelines and all 63 identity-consistent noise replicas. It authenticates phase logs and frozen calibration, rejects removed range keys, and requires the noise runs to share the completed ViT-B source, checkpoint, dataset, and calibration identities. It writes table, raw-replica, and cell-summary CSV files and renders the two-panel PDF and PNG with dense and clean-spiking references, three-replica 95% Student-$t$ intervals, and pooled deadline-miss counts on a logarithmic auxiliary axis. The Figure 4 legend uses the empty area on the right side of the right panel and does not cover plotted values.
 
+## Appendix Raw-Timestamp ViT-B Noise Rerun
+
+This campaign replaces the Appendix timing-noise evidence after the event-delivery semantics changed.
+
+[[scripts/experiments/run_appendix_vit_noise_campaign.py#main]] prepares one source-frozen ViT-B calibration and deterministic reference, writes a central 63-run assignment, and schedules disjoint local and poseidon1 partitions. The local GPU 0--7 permission is confined to this campaign manifest; other local campaigns keep their default GPU policy.
+
+[[scripts/experiments/run_vit_local_range_noise_condition.py#main]] remains the only condition evaluator. Each new manifest fixes raw timestamp delivery and enabled exponential-difference internal noise, rejects tmpfs and ramfs runtime paths, and authenticates the evaluator, data, preprocessing, checkpoint, calibration, and source.
+
+The reducer's noise-only mode accepts the new tag only after all 21 cells contain seeds 0, 1, and 2. It computes three-replica 95% Student-$t$ intervals and pooled event counts before the generated PDF or PNG can replace the manuscript figure.
+
 ## Compact Transformer Diagnostic
 
 This diagnostic tests whether reduced Transformer depth and width change sensitivity to measured timing noise without introducing another temporal-operator implementation.

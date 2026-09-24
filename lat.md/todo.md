@@ -50,12 +50,12 @@ Source details and reviewer labels are consolidated in [[deprecated#과거 리�
 This checklist covers reporting from the active local-range 5k campaign; removed global-range campaigns remain historical evidence only.
 
 - [x] Remove the global range selection phase and define timing-noise scale relative to each encoder's declared local time window.
-- [ ] Complete the fresh ViT-B calibration and deterministic ANN/SNN evaluation on the fixed validation 5k subset.
-- [ ] Complete the nine-point timing-noise fraction and thirteen-point deadline-margin ratio sweeps with seeds 0, 1, and 2.
+- [ ] Complete the fresh raw-timestamp ViT-B calibration and deterministic ANN/SNN evaluation on the fixed validation 5k subset.
+- [ ] Complete the raw-timestamp nine-point timing-noise fraction and thirteen-point deadline-margin ratio sweeps with seeds 0, 1, and 2 while keeping exponential-difference internal noise enabled.
 - [ ] State that the frozen calibration covers the complete active site set and remains unchanged during validation and noise evaluation.
 - [ ] Explain how each dimensionless local code interval maps to a declared physical duration and state that all associated time constants must be rescaled consistently.
 - [ ] Report the injection scope, seeds, confidence interval and empirical miss statistics from the accepted local-range logs.
-- [ ] Mark every earlier shared-range and threshold-selection result as superseded for manuscript support.
+- [x] Mark the earlier shared-range, threshold-selection, and pre-raw-timestamp local-window results as superseded for manuscript support.
 
 ### P0 Claims, Novelty, and Structure
 

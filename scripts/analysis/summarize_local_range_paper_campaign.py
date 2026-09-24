@@ -8,6 +8,7 @@ import csv
 import json
 import math
 from pathlib import Path
+import re
 import statistics
 import sys
 from typing import Any
@@ -283,8 +284,11 @@ def noise_reference(
 def noise_rows(
     artifacts: Path,
     calibration_source: Path | None = None,
+    *,
+    noise_tag: str = NOISE_TAG,
+    require_raw_timestamp_contract: bool = False,
 ) -> list[dict[str, Any]]:
-    runs = artifacts / "logs/noise_scan" / NOISE_TAG / "runs"
+    runs = artifacts / "logs/noise_scan" / noise_tag / "runs"
     vit_root, vit_result, vit_manifest = noise_reference(artifacts, calibration_source)
     vit_result_path = vit_root / "result.json"
     expected_cells = expected_noise_cells()
@@ -310,6 +314,12 @@ def noise_rows(
             or contains_legacy_range_key(result)
         ):
             raise ValueError(f"noise run population or identity differs: {root.name}")
+        if require_raw_timestamp_contract and (
+            manifest.get("raw_timestamp_contract") != "delivered_raw_timestamp_v1"
+            or manifest.get("exponential_difference_internal_noise") != "fixed_on_v1"
+            or manifest.get("schema_version") != 2
+        ):
+            raise ValueError(f"raw-timestamp or ED-noise contract differs: {root.name}")
         if root.name in run_ids:
             raise ValueError(f"duplicate noise run identifier: {root.name}")
         run_ids.add(root.name)
@@ -461,34 +471,51 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifacts-root", type=Path, default=Path("/data/delayed-temporal/artifacts"))
     parser.add_argument("--noise-calibration-source", type=Path)
+    parser.add_argument("--noise-tag", default=NOISE_TAG)
+    parser.add_argument("--output-tag", default="paper_end_to_end_local_range_poseidon_v1")
+    parser.add_argument("--noise-only", action="store_true")
+    parser.add_argument("--require-raw-timestamp-contract", action="store_true")
     args = parser.parse_args()
+    if not re.fullmatch(r"[a-z0-9_.-]+", args.noise_tag) or not re.fullmatch(
+        r"[a-z0-9_.-]+", args.output_tag
+    ):
+        raise ValueError("noise or output tag contains unsupported characters")
     artifacts = args.artifacts_root.resolve(strict=True)
-    output = artifacts / "results/paper_end_to_end_local_range_poseidon_v1"
-    tables = table_rows(artifacts)
+    output = artifacts / "results" / args.output_tag
+    tables = [] if args.noise_only else table_rows(artifacts)
     reference_root, reference_result, reference_manifest = noise_reference(
         artifacts, args.noise_calibration_source,
     )
-    table_vit_base = next(row for row in tables if row["model"] == "imagenet_vit_base")
-    table_vit_manifest = json.loads((
-        artifacts / "logs/conversion_comparison" / VIT_TAG
-        / "vit/imagenet_vit_base/manifest.json"
-    ).read_text())
-    if (
-        reference_manifest.get("checkpoint_sha256")
-        != table_vit_manifest.get("checkpoint_sha256")
-        or reference_manifest.get("evaluation_dataset")
-        != table_vit_manifest.get("evaluation_dataset")
-    ):
-        raise ValueError("noise reference does not match the Table 3 ViT-B checkpoint or dataset")
-    raw = noise_rows(artifacts, reference_root)
+    if tables:
+        table_vit_base = next(row for row in tables if row["model"] == "imagenet_vit_base")
+        table_vit_manifest = json.loads((
+            artifacts / "logs/conversion_comparison" / VIT_TAG
+            / "vit/imagenet_vit_base/manifest.json"
+        ).read_text())
+        if (
+            reference_manifest.get("checkpoint_sha256")
+            != table_vit_manifest.get("checkpoint_sha256")
+            or reference_manifest.get("evaluation_dataset")
+            != table_vit_manifest.get("evaluation_dataset")
+        ):
+            raise ValueError("noise reference does not match the Table 3 ViT-B checkpoint or dataset")
+    else:
+        table_vit_base = None
+    raw = noise_rows(
+        artifacts,
+        reference_root,
+        noise_tag=args.noise_tag,
+        require_raw_timestamp_contract=args.require_raw_timestamp_contract,
+    )
     summary = noise_summary(raw)
-    write_csv(output / "table_results.csv", tables, list(tables[0]))
+    if tables:
+        write_csv(output / "table_results.csv", tables, list(tables[0]))
     write_csv(output / "noise_raw_runs.csv", raw, list(raw[0]))
     write_csv(output / "noise_summary.csv", summary, list(summary[0]))
     reference_ann = reference_result["phases"]["ann"]["metrics"]["accuracy"]
     reference_snn = reference_result["phases"]["snn"]["metrics"]["accuracy"]
     render_figure(
-        artifacts / "figures/ViT-noise-eval-end-to-end",
+        artifacts / "figures" / args.output_tag / "ViT-noise-eval",
         summary,
         dense_accuracy=reference_ann,
         clean_spiking_accuracy=reference_snn,
@@ -499,7 +526,11 @@ def main() -> None:
         "noise_source_commit": reference_manifest["source_commit"],
         "noise_calibration_sha256": reference_result["calibration_sha256"],
         "noise_calibration_source": str(reference_root),
-        "table_vit_base_calibration_sha256": table_vit_base["calibration_sha256"],
+        "table_vit_base_calibration_sha256": (
+            table_vit_base["calibration_sha256"] if table_vit_base is not None else None
+        ),
+        "noise_tag": args.noise_tag,
+        "raw_timestamp_contract_required": args.require_raw_timestamp_contract,
     })
 
 

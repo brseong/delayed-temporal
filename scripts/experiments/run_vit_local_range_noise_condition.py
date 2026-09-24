@@ -25,6 +25,7 @@ from scripts.runtime import identity
 from scripts.runtime import local_gpu
 from scripts.experiments.run_full_calibrated_vit_comparison import (
     calibration_sites,
+    dataset_identity,
     parse_metric,
     source_identity,
     validate_snn_sites,
@@ -33,6 +34,9 @@ from scripts.experiments.run_full_calibrated_vit_comparison import (
 
 ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", "/data/delayed-temporal/artifacts"))
 TAG = "vit_base_end_to_end_local_range_timing_noise_float64_v1"
+APPENDIX_RAW_TIMESTAMP_TAG = "vit_base_appendix_local_range_raw_timestamp_float64_v2"
+RAW_TIMESTAMP_CONTRACT = "delivered_raw_timestamp_v1"
+ED_INTERNAL_NOISE_CONTRACT = "fixed_on_v1"
 
 
 def canonical(value: Any) -> str:
@@ -102,14 +106,34 @@ def main() -> None:
     parser.add_argument("--image-preprocessing-config", type=Path, required=True)
     parser.add_argument("--time-noise-std-frac", type=float, required=True)
     parser.add_argument("--deadline-margin-ratio", type=float, required=True)
+    parser.add_argument("--evaluation-dataset-fingerprint", required=True)
     parser.add_argument("--seed", type=int, choices=(0, 1, 2), required=True)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--gpu", type=int, choices=range(4), required=True)
+    parser.add_argument("--gpu", type=int, choices=range(8), required=True)
+    parser.add_argument("--host-label", choices=("local", "poseidon"), required=True)
+    parser.add_argument("--campaign-tag", default=TAG)
+    parser.add_argument("--allow-all-local-gpus", action="store_true")
     parser.add_argument("--python-bin", default="/opt/conda/envs/dt/bin/python")
     args = parser.parse_args()
 
-    if socket.gethostname() != "poseidon1":
-        raise ValueError("noise conditions are assigned to poseidon1")
+    expected_host = "baekryun-cuda129" if args.host_label == "local" else "poseidon1"
+    if socket.gethostname() != expected_host:
+        raise ValueError(f"noise condition requires host {expected_host}")
+    if not re.fullmatch(r"[a-z0-9_.-]+", args.campaign_tag):
+        raise ValueError("campaign tag contains unsupported characters")
+    if args.host_label == "poseidon" and args.gpu not in range(4):
+        raise ValueError("poseidon GPU must be in 0 through 3")
+    if args.host_label == "local" and args.gpu not in range(4, 8):
+        if not (
+            args.allow_all_local_gpus
+            and args.campaign_tag == APPENDIX_RAW_TIMESTAMP_TAG
+            and args.gpu in range(4)
+        ):
+            raise ValueError("local GPU 0 through 3 requires the Appendix campaign override")
+    if args.allow_all_local_gpus and (
+        args.host_label != "local" or args.campaign_tag != APPENDIX_RAW_TIMESTAMP_TAG
+    ):
+        raise ValueError("the all-local-GPU override is specific to the Appendix campaign")
     if not math.isfinite(args.time_noise_std_frac) or args.time_noise_std_frac <= 0:
         raise ValueError("timing-noise fraction must be finite and positive")
     if not math.isfinite(args.deadline_margin_ratio) or args.deadline_margin_ratio < 0:
@@ -128,8 +152,13 @@ def main() -> None:
     calibration_path, calibration_sha256, sites = completed_calibration(
         args.calibration_source, args.expected_commit,
     )
-    output = (ARTIFACTS / "logs/noise_scan" / TAG / "runs" / args.run_id).resolve()
-    runtime = (ARTIFACTS / "runtime" / TAG / args.run_id).resolve()
+    evaluation_dataset = dataset_identity(
+        args.evaluation_dataset_path, args.evaluation_dataset_fingerprint, 50_000,
+    )
+    output = (
+        ARTIFACTS / "logs/noise_scan" / args.campaign_tag / "runs" / args.run_id
+    ).resolve()
+    runtime = (ARTIFACTS / "runtime" / args.campaign_tag / args.run_id).resolve()
     output.mkdir(parents=True, exist_ok=True)
     runtime.mkdir(parents=True, exist_ok=True)
     filesystem = subprocess.check_output(["findmnt", "-n", "-o", "FSTYPE", "-T", str(runtime)], text=True).strip()
@@ -167,20 +196,31 @@ def main() -> None:
         "--weight-noise-std", "0", "--bias-noise-std", "0",
     ]
     manifest = {
-        "schema_version": 1, "tag": TAG, "run_id": args.run_id,
+        "schema_version": 2, "tag": args.campaign_tag, "run_id": args.run_id,
         "source_commit": args.expected_commit, "source_hashes": source_hashes,
+        "condition_runner_sha256": identity.sha256_file(Path(__file__).resolve()),
+        "evaluator_sha256": identity.sha256_file(
+            args.source_root / "scripts/evaluation/error_analysis_vit.py"
+        ),
         "checkpoint_path": str(args.model_id), "checkpoint_sha256": args.checkpoint_sha256,
         "calibration_source": str(args.calibration_source),
         "calibration_sha256": calibration_sha256,
         "calibration_source_result_sha256": identity.sha256_file(args.calibration_source / "result.json"),
         "evaluation_dataset_path": str(args.evaluation_dataset_path),
+        "evaluation_dataset": evaluation_dataset,
+        "evaluation_dataset_fingerprint": args.evaluation_dataset_fingerprint,
+        "image_preprocessing_sha256": identity.sha256_file(args.image_preprocessing_config),
         "calibration_dataset_fingerprint": args.calibration_dataset_fingerprint,
         "time_noise_std_fraction": args.time_noise_std_frac,
         "deadline_margin_sigma_ratio": args.deadline_margin_ratio,
         "seed": args.seed, "dtype": "float64",
         "range_contract": "operator_local_end_to_end_v1",
         "timing_noise_contract": "local_encoder_window_fraction_v1",
-        "physical_gpu": args.gpu, "runtime_dir": str(runtime), "command": command,
+        "raw_timestamp_contract": RAW_TIMESTAMP_CONTRACT,
+        "exponential_difference_internal_noise": ED_INTERNAL_NOISE_CONTRACT,
+        "host_label": args.host_label, "physical_gpu": args.gpu,
+        "campaign_local_gpu_override": bool(args.allow_all_local_gpus),
+        "runtime_dir": str(runtime), "command": command,
     }
     manifest_path = output / "manifest.json"
     if manifest_path.exists():
@@ -193,7 +233,7 @@ def main() -> None:
         print(result_path.read_text(), flush=True)
         return
 
-    lock_path = ARTIFACTS / "runtime/gpu-locks" / f"poseidon-gpu-{args.gpu}.lock"
+    lock_path = ARTIFACTS / "runtime/gpu-locks" / f"{args.host_label}-gpu-{args.gpu}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
