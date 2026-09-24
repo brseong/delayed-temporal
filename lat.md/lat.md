@@ -8,6 +8,7 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[output-heads]] — Output projection range flow, artifact identity, and verification.
 - [[decisions]] — Rationale and trade-offs behind the project’s major architectural choices.
 - [[noise]] — Gaussian event timing, fixed-deadline potential readout, calibrated ViT-B/16 evidence, and verification.
+- [[noise-timestamp-audit]] — Gaussian timestamp 호출 경로, 경계 테스트와 원고 대조.
 - [[clock-driven]] — Explicit time-step TTFS simulation and fixed ImageNet-1k validation contract.
 - [[calibration]] — Deterministic layer-wise collection, immutable ranges, clipping accounting, and strict persistence.
 - [[vit-calibration-policy2]] — Maintained ViT policy-3 Q/K/V, LayerNorm, output-head identity, and persistence contract.

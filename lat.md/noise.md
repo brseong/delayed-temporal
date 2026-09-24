@@ -35,17 +35,19 @@ The same Gaussian draw determines both the stored event time and whether the eve
 
 ## Fixed Observation Deadline
 
-Each event-aware encoder call uses the nominal end of the code interval as its physical observation deadline.
+Each encoder keeps one nominal code interval and one fixed receiver cutoff for its invocation.
 
-The maintained model fixes
+Without a margin the cutoff is the nominal endpoint:
 
 $$
 T_{\mathrm{obs}}=T_{\mathrm{code}}.
 $$
 
-Any sampled event later than this shared endpoint is a deadline miss. The model does not extend the observation window beyond the nominal latest codeword.
+Any sampled event later than this receiver cutoff is a deadline miss. A configured margin adds a nonnegative waiting duration; it does not change the nominal encoding map.
 
 The diagnostic deadline margin sweep may allow events to arrive up to $m=k\sigma_t$ after $T_{\mathrm{code}}$, with $m\ge 0$. It keeps the nominal encoding interval fixed but records the receiver cutoff separately as $T_{\mathrm{obs}}=T_{\mathrm{code}}+m$. An event arriving during this additional interval is delivered at its sampled timestamp. This is a late arrival tolerance diagnostic, not a calibrated hardware window.
+
+The tensor paths, boundary cases, and manuscript comparison are recorded in [[noise-timestamp-audit]].
 
 ## Comparison with Stanojevic et al.
 

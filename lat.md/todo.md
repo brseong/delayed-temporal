@@ -257,3 +257,10 @@ Calibration measurement uses two deterministic collection passes before frozen v
 Selected calibration sites use signed-symmetric, lower-bounded, or upper-bounded endpoint policies. These are distinct from the three reasons for selecting a range in [[domain#Domain Propagation]]. Practical structural bounds remain analytic, but a finite interval that grows excessively can still require calibration.
 
 For nonnegative sites selected for one-sided calibration, the lower endpoint stays at zero and only the upper endpoint is calibrated. Logarithmic domains keep a separately configured positive lower endpoint; current ViT/GPT-2 bindings do not select that endpoint from data.
+
+## Timestamp 변경 뒤 원고 확인
+
+감사 결과에서 확인된 원고 및 결과의 일치 조건만 후속 작업으로 기록한다. 상세 근거는 [[noise-timestamp-audit]]에 있다.
+
+- [ ] 원고에 실제 exponential difference 분해와 내부 encoding의 noise 주입을 명시한다.
+- [ ] 새 timestamp 구현으로 평가한 결과가 검증되기 전에는 기존 noise figure를 새 구현의 결과로 표시하지 않는다.

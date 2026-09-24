@@ -8,6 +8,12 @@ Deprecated. 이 문서는 2026-09-14 최초 지식 통합본의 역사적 설명
 
 현재 유효한 원칙은 [[neurips]], 동작은 [[domain]], [[operators]], [[noise]], [[calibration]], [[evaluation]]에서 확인한다. 과거의 추가 실험·삭제·수정 제안은 실행 지시가 아니며 [[todo]]나 [[deferred-experiments]]를 대체하지 않는다. 사용자 요청에 따라 한국어 리뷰와 용어 감사 문서만 남기고, 통합 완료한 나머지 원본 Markdown 11개는 삭제했다. 상세 원문은 아래 압축본에서 복구할 수 있다.
 
+## 과거 timestamp clamp
+
+Deprecated. Commit `8e946cc`까지 전달된 Gaussian timestamp는 nominal interval 양 끝으로 제한됐다. 새 구현 `ed42bfc`는 delivered raw time을 유지한다.
+
+과거 sampler는 raw sample로 deadline miss를 판정한 뒤 전달되는 time을 nominal 시작과 끝 사이로 clamp했다. Margin 안의 late event도 nominal 상한으로 되돌렸고, miss는 nominal 상한을 저장값으로 사용했다. 새 구현은 receiver cutoff를 별도 보관하며 전달된 early/late time을 그대로 소비한다. 상세 경로와 구별되는 potential clamp는 [[noise-timestamp-audit]]에 기록한다. 과거 실험 결과는 그때의 구현을 설명하는 근거로만 보존한다.
+
 ## 원본 복구
 
 Deprecated. 삭제한 통합 원본 11개의 전체 내용은 압축본으로 보존한다. 지식그래프 요약에 없는 긴 유도나 원문 문안이 필요할 때만 복구하며, 현재 계약으로 다시 등록하지 않는다.
