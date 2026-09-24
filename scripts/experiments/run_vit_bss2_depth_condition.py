@@ -202,6 +202,17 @@ def validate_condition_arguments(args: argparse.Namespace) -> None:
         raise ValueError("evaluation_samples must be 500 or 5000")
 
 
+def exponential_difference_internal_noise_argument(enabled: bool) -> str:
+    """Return the evaluator flag for the recorded internal timing-noise condition."""
+    if not isinstance(enabled, bool):
+        raise TypeError("exponential difference internal timing-noise condition must be boolean")
+    return (
+        "--time-noise-exponential-difference-internal"
+        if enabled
+        else "--no-time-noise-exponential-difference-internal"
+    )
+
+
 # @lat: [[evaluation#Evaluation and Verification#ViT-B Cumulative Encoder Block Timing Noise#Condition Execution]]
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
@@ -220,6 +231,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, choices=(0, 1, 2), required=True)
     parser.add_argument("--evaluation-samples", type=int, required=True)
     parser.add_argument("--gpu", type=int, choices=range(4, 8), required=True)
+    parser.add_argument(
+        "--time-noise-exponential-difference-internal",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--python-bin", default="/opt/conda/envs/dt/bin/python")
     args = parser.parse_args()
     validate_condition_arguments(args)
@@ -361,6 +377,9 @@ def main() -> None:
         str(args.seed),
         "--time-noise-vit-first-block-count",
         str(args.first_block_count),
+        exponential_difference_internal_noise_argument(
+            args.time_noise_exponential_difference_internal
+        ),
         "--no-mismatch-enabled",
         "--mismatch-range-std-frac",
         "0",
@@ -397,6 +416,9 @@ def main() -> None:
         "log_time_std_fraction": log_fraction,
         "deadline_margin_sigma_ratio": 4.0,
         "time_noise_scope": "vit_first_blocks",
+        "time_noise_exponential_difference_internal": (
+            args.time_noise_exponential_difference_internal
+        ),
         "dtype": "float64",
         "batch_size": 32,
         "physical_gpu": args.gpu,

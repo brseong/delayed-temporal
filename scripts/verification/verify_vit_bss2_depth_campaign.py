@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -13,12 +14,15 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", ROOT / "artifacts"))
+
 from scripts.analysis.summarize_vit_bss2_depth import load_runs, render, summarize, write_csv
 from scripts.experiments.run_vit_bss2_depth_campaign import (
     expected_cells,
     run_id,
 )
 from scripts.experiments.run_vit_bss2_depth_condition import (
+    exponential_difference_internal_noise_argument,
     hardware_conditions,
     parse_scoped_counts,
     validate_condition_arguments,
@@ -39,7 +43,7 @@ def verify_fixed_conditions() -> None:
     assert cells[0] == ("clean", 0, 0)
     assert sum(condition != "clean" for condition, _, _ in cells) == 72
     conditions = hardware_conditions(
-        ROOT / "artifacts/brainscales2-primitives/20260924T_best_median_screen_summary.json"
+        ARTIFACTS / "brainscales2-primitives/20260924T_best_median_screen_summary.json"
     )
     assert conditions["screening-selected-coordinate"]["linear_time_std_fraction"] == 0.008752792479355493
     assert conditions["screening-selected-coordinate"]["log_time_std_fraction"] == 0.015681047682163635
@@ -58,6 +62,13 @@ def verify_fixed_conditions() -> None:
         25.0e-6,
     )
     assert conditions["screening-median"]["phi_nl_observation_deadline_s"] == 60.0e-6
+    assert exponential_difference_internal_noise_argument(True) == (
+        "--time-noise-exponential-difference-internal"
+    )
+    assert exponential_difference_internal_noise_argument(False) == (
+        "--no-time-noise-exponential-difference-internal"
+    )
+    must_reject(lambda: exponential_difference_internal_noise_argument(0))
     validate_condition_arguments(
         SimpleNamespace(
             condition="clean", first_block_count=0, seed=0, evaluation_samples=500

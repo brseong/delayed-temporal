@@ -156,6 +156,8 @@ The maintained production integration covers the three affine adapters, multipli
 
 The exponential difference ablation may keep only its internal identity encoding deterministic. Both input events retain their previously sampled timestamps and delivery masks, while the internal encoding consumes no random draw and creates no `exponential_difference.internal` counter. Its public Gaussian output range is unchanged.
 
+ViT depth experiment manifests record whether this internal encoding receives timing noise, and the condition runner passes the same explicit Boolean choice to the evaluator. This keeps the ablation distinct from disabling either noisy input event.
+
 Missing-event semantics are already fixed by [[noise#Observation-Time Potential Invariant]]. Extending coverage means implementing each operator's ordinary physical state trajectory up to $T_{\mathrm{obs}}$ and reading the resulting clamped potential; it does not require another validity policy discussion.
 
 ### Explicit ViT Encoder Block Scope
