@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,11 +51,8 @@ def must_reject(callable_) -> None:
     raise AssertionError("invalid screening median input was accepted")
 
 
-def verify_measurement_and_grid() -> None:
-    pair = load_screening_median(
-        ROOT
-        / "artifacts/brainscales2-primitives/20260924T_best_median_screen_summary.json"
-    )
+def verify_measurement_and_grid(hardware_summary: Path) -> None:
+    pair = load_screening_median(hardware_summary)
     assert pair.phi_np.physical_coordinate == 184
     assert pair.phi_nl.physical_coordinate == 1
     assert pair.phi_np.validation_rt == 0.010838111004060678
@@ -253,7 +251,18 @@ def verify_protocol_excludes_execution_axes() -> None:
 
 # @lat: [[evaluation#Evaluation and Verification#Screening Median Model Timing Noise Sweep#Verification]]
 def main() -> None:
-    verify_measurement_and_grid()
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument(
+        "--hardware-summary",
+        type=Path,
+        default=(
+            ROOT
+            / "artifacts/brainscales2-primitives/"
+            "20260924T_best_median_screen_summary.json"
+        ),
+    )
+    args = parser.parse_args()
+    verify_measurement_and_grid(args.hardware_summary)
     verify_smoke_gate()
     verify_protocol_excludes_execution_axes()
     verify_extension_and_merge()
