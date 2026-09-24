@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Prepare, run, resume, and summarize the screening median model sweep."""
+"""Prepare, distribute, resume, and summarize the screening median model sweep."""
 
 from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import fcntl
-import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import shlex
 import socket
 import subprocess
 import sys
@@ -25,6 +25,10 @@ if str(ROOT) not in sys.path:
 from scripts.experiments.run_full_calibrated_vit_comparison import (
     TAG as VIT_PREPARE_TAG,
     source_identity,
+)
+from scripts.experiments.run_vit_local_range_noise_condition import (
+    ED_INTERNAL_NOISE_CONTRACT,
+    RAW_TIMESTAMP_CONTRACT,
 )
 from scripts.experiments.screening_median_model_sweep import (
     DEADLINE_MARGIN_SIGMA_RATIO,
@@ -121,21 +125,24 @@ def _base_environment(source_root: Path, gpu: int, runtime: Path) -> dict[str, s
     )
 
 
-def _admit_gpu_zero() -> dict[str, Any]:
+def _admit_prepare_gpu(gpu: int) -> dict[str, Any]:
     policy = dict(local_gpu.DEFAULT_ADMISSION_POLICY)
-    policy["max_memory_used_mib"] = 4096.0
+    if gpu == 0:
+        policy["max_memory_used_mib"] = 4096.0
     samples = []
     for check in range(2):
-        sample = local_gpu.gpu_activity(gpu_ids=(0,))[0]
+        sample = local_gpu.gpu_activity(gpu_ids=(gpu,))[gpu]
         samples.append(sample)
         if not local_gpu.gpu_available(sample, policy):
-            raise RuntimeError("GPU 0 does not satisfy the campaign admission policy")
+            raise RuntimeError(
+                f"GPU {gpu} does not satisfy the campaign admission policy"
+            )
         if check == 0:
             time.sleep(10)
     return {"policy": policy, "samples": samples}
 
 
-def _prepare_cct(args: argparse.Namespace) -> None:
+def _prepare_cct(args: argparse.Namespace, gpu: int) -> None:
     output = args.output_root / "prepare/cct7"
     result_path = output / "prepare_result.json"
     manifest_path = output / "prepare_manifest.json"
@@ -166,11 +173,11 @@ def _prepare_cct(args: argparse.Namespace) -> None:
             raise ValueError("completed CCT preparation artifact checksum differs")
         return
     runtime_files.immutable_json(manifest_path, manifest)
-    lock_path = args.output_root / "runtime/gpu-locks/poseidon-gpu-0.lock"
+    lock_path = args.output_root / f"runtime/gpu-locks/local-gpu-{gpu}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        admission = _admit_gpu_zero()
+        admission = _admit_prepare_gpu(gpu)
         command = [
             args.python_bin,
             "-u",
@@ -204,7 +211,7 @@ def _prepare_cct(args: argparse.Namespace) -> None:
             cwd=args.source_root,
             environment=_base_environment(
                 args.source_root,
-                0,
+                gpu,
                 args.runtime_root / "prepare/cct7",
             ),
         )
@@ -279,7 +286,7 @@ def _prepare_vit(args: argparse.Namespace, model: str, gpu: int) -> None:
         "--gpu",
         str(gpu),
         "--host-label",
-        "poseidon",
+        "local",
         "--python-bin",
         args.python_bin,
         "--output-root",
@@ -299,11 +306,17 @@ def _prepare_vit(args: argparse.Namespace, model: str, gpu: int) -> None:
 
 
 def _prepare_models(args: argparse.Namespace) -> None:
+    if len(args.local_gpus) < 3:
+        raise ValueError("model preparation requires at least three local GPUs")
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = (
-            executor.submit(_prepare_cct, args),
-            executor.submit(_prepare_vit, args, "imagenet_vit_small", 1),
-            executor.submit(_prepare_vit, args, "imagenet_vit_base", 2),
+            executor.submit(_prepare_cct, args, args.local_gpus[0]),
+            executor.submit(
+                _prepare_vit, args, "imagenet_vit_small", args.local_gpus[1]
+            ),
+            executor.submit(
+                _prepare_vit, args, "imagenet_vit_base", args.local_gpus[2]
+            ),
         )
         for future in futures:
             future.result()
@@ -395,6 +408,8 @@ def _build_protocol(args: argparse.Namespace) -> dict[str, Any]:
         "weight_noise_std": 0.0,
         "bias_noise_std": 0.0,
         "static_mismatch": False,
+        "raw_timestamp_contract": RAW_TIMESTAMP_CONTRACT,
+        "exponential_difference_internal_noise": ED_INTERNAL_NOISE_CONTRACT,
     }
     return {
         "schema_version": 1,
@@ -429,18 +444,25 @@ def _load_protocol(args: argparse.Namespace) -> dict[str, Any]:
     return protocol
 
 
-def _cell_gpu(cell: Cell) -> int:
-    if cell.model == "cct7":
-        return 0
-    if cell.model == "imagenet_vit_small":
-        return 1
-    try:
-        alpha_index = INITIAL_ALPHAS.index(cell.alpha)
-        parity = (alpha_index * len((0, 1, 2)) + cell.seed) % 2
-    except ValueError:
-        digest = hashlib.sha256(f"{cell.alpha}:{cell.seed}".encode()).digest()
-        parity = digest[0] % 2
-    return 2 + parity
+def _execution_slots(args: argparse.Namespace) -> tuple[tuple[str, int], ...]:
+    slots = (
+        *(("local", gpu) for gpu in args.local_gpus),
+        *(("poseidon", gpu) for gpu in args.poseidon_gpus),
+    )
+    if not slots:
+        raise ValueError("at least one execution GPU is required")
+    return slots
+
+
+def _assign_cells(
+    cells: tuple[Cell, ...],
+    slots: tuple[tuple[str, int], ...],
+) -> tuple[tuple[Cell, str, int], ...]:
+    """Assign immutable cells evenly across all requested host/GPU slots."""
+
+    return tuple(
+        (cell, *slots[index % len(slots)]) for index, cell in enumerate(cells)
+    )
 
 
 def _verify_smoke_gate(args: argparse.Namespace) -> None:
@@ -474,6 +496,7 @@ def _cell_command(
     args: argparse.Namespace,
     cell: Cell,
     *,
+    host_label: str,
     gpu: int,
 ) -> list[str]:
     return [
@@ -490,6 +513,8 @@ def _cell_command(
         str(cell.seed),
         "--evaluation-samples",
         str(cell.evaluation_samples),
+        "--host-label",
+        host_label,
         "--gpu",
         str(gpu),
         "--output-dir",
@@ -501,7 +526,12 @@ def _cell_command(
     ]
 
 
-def _request(args: argparse.Namespace, phase: str, cells: tuple[Cell, ...]) -> Path:
+def _request(
+    args: argparse.Namespace,
+    phase: str,
+    assignments: tuple[tuple[Cell, str, int], ...],
+) -> Path:
+    cells = tuple(cell for cell, _, _ in assignments)
     request = {
         "schema_version": 1,
         "protocol_id": _load_protocol(args)["protocol_id"],
@@ -514,8 +544,10 @@ def _request(args: argparse.Namespace, phase: str, cells: tuple[Cell, ...]) -> P
                 "alpha": cell.alpha,
                 "seed": cell.seed,
                 "evaluation_samples": cell.evaluation_samples,
+                "host_label": host_label,
+                "physical_gpu": gpu,
             }
-            for cell in cells
+            for cell, host_label, gpu in assignments
         ],
     }
     path = args.output_root / "requests" / f"{request['created_at_unix_ns']}_{phase}.json"
@@ -525,13 +557,19 @@ def _request(args: argparse.Namespace, phase: str, cells: tuple[Cell, ...]) -> P
 
 def _run_cell_group(
     args: argparse.Namespace,
-    rows: list[tuple[Cell, int]],
+    rows: list[tuple[Cell, str, int]],
 ) -> None:
-    for cell, gpu in rows:
+    for cell, host_label, gpu in rows:
         result = args.output_root / cell.relative_path / "result.json"
         if _complete(result):
             continue
-        command = _cell_command(args, cell, gpu=gpu)
+        command = _cell_command(args, cell, host_label=host_label, gpu=gpu)
+        if host_label == "poseidon":
+            command = [
+                "ssh",
+                "poseidon1",
+                f"cd {shlex.quote(str(args.source_root))} && {shlex.join(command)}",
+            ]
         last_error: Exception | None = None
         for attempt in range(2):
             try:
@@ -554,13 +592,14 @@ def run_cells(
 ) -> None:
     _load_protocol(args)
     cells = expected_cells(phase=phase, alphas=alphas)
-    _request(args, phase, cells)
-    groups: dict[int, list[tuple[Cell, int]]] = {gpu: [] for gpu in args.gpus}
-    for cell in cells:
-        gpu = _cell_gpu(cell)
-        if gpu not in groups:
-            raise ValueError(f"required GPU {gpu} was not selected")
-        groups[gpu].append((cell, gpu))
+    slots = _execution_slots(args)
+    assignments = _assign_cells(cells, slots)
+    _request(args, phase, assignments)
+    groups: dict[tuple[str, int], list[tuple[Cell, str, int]]] = {
+        slot: [] for slot in slots
+    }
+    for cell, host_label, gpu in assignments:
+        groups[(host_label, gpu)].append((cell, host_label, gpu))
     with ThreadPoolExecutor(max_workers=len(groups)) as executor:
         futures = [
             executor.submit(_run_cell_group, args, rows)
@@ -612,9 +651,11 @@ def status(args: argparse.Namespace) -> None:
             state, log_file = "pending", None
         gpu = None
         if manifest_path.is_file():
-            gpu = json.loads(manifest_path.read_text(encoding="utf-8")).get(
-                "physical_gpu"
-            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            gpu = manifest.get("physical_gpu")
+            host_label = manifest.get("host_label")
+        else:
+            host_label = None
         rows.append(
             {
                 "phase": cell.phase,
@@ -623,6 +664,7 @@ def status(args: argparse.Namespace) -> None:
                 "seed": cell.seed,
                 "state": state,
                 "gpu": gpu,
+                "host_label": host_label,
                 "run_root": str(run_root),
                 "log_file": log_file,
             }
@@ -646,12 +688,13 @@ def main() -> None:
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--hardware-summary", type=Path, required=True)
     parser.add_argument("--alphas", nargs="+", default=INITIAL_ALPHAS)
-    parser.add_argument("--gpus", type=int, nargs="+", default=(0, 1, 2, 3))
+    parser.add_argument("--local-gpus", type=int, nargs="+", default=tuple(range(8)))
+    parser.add_argument("--poseidon-gpus", type=int, nargs="+", default=(0, 1, 2, 3))
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument(
         "--runtime-root",
         type=Path,
-        default=Path("/data/dtr/screening-median-v1"),
+        default=Path("/data/dtr/screening-median-raw-timestamp-v2"),
     )
     parser.add_argument("--python-bin", default="/opt/conda/envs/dt/bin/python")
     parser.add_argument("--cct-checkpoint", type=Path, default=DEFAULT_MODEL_PATHS["cct7"])
@@ -696,10 +739,16 @@ def main() -> None:
         args.calibration_dataset_path = args.calibration_dataset_path.resolve(strict=True)
         args.evaluation_dataset_path = args.evaluation_dataset_path.resolve(strict=True)
     args.alphas = canonical_alphas(args.alphas)
-    if tuple(sorted(set(args.gpus))) != (0, 1, 2, 3):
-        raise ValueError("the Poseidon campaign requires GPUs 0, 1, 2, and 3")
-    if args.phase not in {"status", "aggregate"} and socket.gethostname() != "poseidon1":
-        raise ValueError("model sweep execution requires poseidon1")
+    if len(set(args.local_gpus)) != len(args.local_gpus):
+        raise ValueError("local GPU list contains duplicates")
+    if len(set(args.poseidon_gpus)) != len(args.poseidon_gpus):
+        raise ValueError("Poseidon GPU list contains duplicates")
+    if any(gpu not in range(8) for gpu in args.local_gpus):
+        raise ValueError("local GPU list must use indices 0--7")
+    if any(gpu not in range(4) for gpu in args.poseidon_gpus):
+        raise ValueError("Poseidon GPU list must use indices 0--3")
+    if args.phase not in {"status", "aggregate"} and socket.gethostname() != "baekryun-cuda129":
+        raise ValueError("distributed model sweep execution requires baekryun")
 
     if args.phase in {"prepare", "all"}:
         prepare(args)

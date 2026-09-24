@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import time
@@ -362,11 +363,17 @@ def main() -> None:
     parser.add_argument("--alpha", required=True)
     parser.add_argument("--seed", type=int, choices=(0, 1, 2), required=True)
     parser.add_argument("--evaluation-samples", type=int, required=True)
-    parser.add_argument("--gpu", type=int, choices=range(4), required=True)
+    parser.add_argument("--host-label", choices=("local", "poseidon"), required=True)
+    parser.add_argument("--gpu", type=int, choices=range(8), required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--runtime-dir", type=Path, required=True)
     parser.add_argument("--python-bin", default="/opt/conda/envs/dt/bin/python")
     args = parser.parse_args()
+    expected_host = "baekryun-cuda129" if args.host_label == "local" else "poseidon1"
+    if socket.gethostname() != expected_host:
+        raise ValueError(f"condition requires host {expected_host}")
+    if args.host_label == "poseidon" and args.gpu > 3:
+        raise ValueError("Poseidon exposes GPUs 0--3")
     protocol_path, protocol = _load_protocol(args.protocol)
     expected_samples = {
         "cct7": (500, 10_000),
@@ -447,6 +454,7 @@ def main() -> None:
         "checkpoint_sha256": resource["checkpoint_sha256"],
         "calibration_sha256": resource["calibration_sha256"],
         "evaluation_population": resource["evaluation_population"],
+        "host_label": args.host_label,
         "physical_gpu": args.gpu,
         "command": command,
     }
@@ -459,7 +467,11 @@ def main() -> None:
             print(canonical(existing), flush=True)
             return
 
-    lock_path = args.protocol.parent / "runtime/gpu-locks" / f"poseidon-gpu-{args.gpu}.lock"
+    lock_path = (
+        args.protocol.parent
+        / "runtime/gpu-locks"
+        / f"{args.host_label}-gpu-{args.gpu}.lock"
+    )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

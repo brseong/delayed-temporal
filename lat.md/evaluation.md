@@ -244,7 +244,9 @@ Each cell authenticates the measured pair, source, checkpoint, preprocessing, ca
 
 The campaign preserves completed cells and permits later multipliers without changing the scientific protocol identity.
 
-[[scripts/experiments/run_poseidon_screening_median_model_sweep.py#main]] prepares one frozen calibration and deterministic baseline per model, gates the formal phase on nine 500-image smoke runs, and schedules CCT, ViT-S, and ViT-B over Poseidon GPUs 0--3. Immutable request shards record each added multiplier set.
+[[scripts/experiments/run_poseidon_screening_median_model_sweep.py#main]] prepares one frozen calibration and deterministic baseline per model, gates the formal phase on nine 500-image smoke runs, and distributes CCT, ViT-S, and ViT-B across baekryun GPUs 0--7 and Poseidon GPUs 0--3. Immutable request shards record every host/GPU assignment for each added multiplier set.
+
+The current rerun preserves raw Gaussian spike timestamps until deadline accounting and injects noise into the internal exponential-difference encoding. The source commit and both behavior contracts are part of the protocol identity, so earlier results cannot merge with this campaign.
 
 Generated evidence remains under the fixed result root, while multiprocessing uses a separately configured short runtime root on disk so Unix socket paths remain within the system limit.
 
