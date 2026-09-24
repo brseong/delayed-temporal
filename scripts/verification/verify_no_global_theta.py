@@ -45,6 +45,26 @@ FORBIDDEN_RETIRED_RANGE_GUIDANCE = (
     "ranges above and below the global threshold",
     "model threshold and time constant",
 )
+RETIRED_EXECUTABLES = (
+    "scripts/analysis/select_ubai_gpu_family.py",
+    "scripts/analysis/summarize_deadline_margin_sweep.py",
+    "scripts/experiments/ablation_gelu_layers_vit.sh",
+    "scripts/experiments/ablation_gelu_operators_vit.sh",
+    "scripts/experiments/ablation_gelu_vit.sh",
+    "scripts/experiments/bias_analysis_vit.sh",
+    "scripts/experiments/collect_all_quantiles.sh",
+    "scripts/experiments/error_analysis_bert.sh",
+    "scripts/experiments/error_analysis_gpt2.sh",
+    "scripts/experiments/error_analysis_relu_vit.sh",
+    "scripts/experiments/error_analysis_roberta.sh",
+    "scripts/experiments/error_analysis_vit.sh",
+    "scripts/experiments/gelu_confirm.sh",
+)
+FORBIDDEN_CAMPAIGN_OPTIONS = (
+    "--campaign-tag",
+    "--reuse-calibration-from",
+    "--tag",
+)
 
 
 def _terminal_name(node: ast.AST) -> str | None:
@@ -276,6 +296,31 @@ def verify_no_tracked_calibration_fallback() -> None:
     assert not tracked, "tracked calibration fallback was introduced:\n" + "\n".join(tracked)
 
 
+def verify_retired_execution_paths_absent() -> None:
+    """Removed drivers and cross-campaign fallback options cannot become executable again."""
+    present = [relative for relative in RETIRED_EXECUTABLES if (ROOT / relative).exists()]
+    assert not present, "retired executables returned:\n" + "\n".join(present)
+
+    maintained_campaigns = (
+        ROOT / "scripts/experiments/run_clock_driven_vit.py",
+        ROOT / "scripts/experiments/run_full_calibrated_text_comparison.py",
+        ROOT / "scripts/experiments/run_poseidon_local_range_paper_campaign.py",
+    )
+    violations: list[str] = []
+    for path in maintained_campaigns:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or _terminal_name(node.func) != "add_argument":
+                continue
+            for argument in node.args:
+                if (
+                    isinstance(argument, ast.Constant)
+                    and argument.value in FORBIDDEN_CAMPAIGN_OPTIONS
+                ):
+                    violations.append(f"{path.relative_to(ROOT)}:{argument.lineno}:{argument.value}")
+    assert not violations, "retired campaign selectors returned:\n" + "\n".join(violations)
+
+
 def main() -> None:
     verify_production_surface()
     verify_legacy_config_rejection()
@@ -285,6 +330,7 @@ def main() -> None:
     verify_no_global_noise_resolution_reporting()
     verify_maintained_guidance()
     verify_no_tracked_calibration_fallback()
+    verify_retired_execution_paths_absent()
     print("Global theta removal verification passed")
 
 

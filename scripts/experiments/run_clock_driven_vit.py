@@ -887,7 +887,6 @@ def run_command(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--source-root", type=Path, default=SOURCE)
-    parser.add_argument("--tag")
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--calibration-path", type=Path)
     parser.add_argument("--calibration-source-commit")
@@ -965,7 +964,7 @@ def main() -> None:
         or any(value <= 0 for value in window_steps)
     ):
         raise ValueError("time steps per window must be unique and strictly positive")
-    tag = args.tag or (default_window_steps_tag if window_steps else default_tag)
+    tag = default_window_steps_tag if window_steps else default_tag
     root = (
         args.output_root
         or Path("/data/delayed-temporal/artifacts/logs/clock_driven") / tag

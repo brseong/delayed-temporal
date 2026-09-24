@@ -29,13 +29,7 @@ Pretrained checkpoints and datasets are external assets. Existing experiment man
 
 ## Basic evaluation
 
-The shell wrappers remain available for the original workflows:
-
-```bash
-bash scripts/setup/convert_vits.sh
-bash scripts/experiments/error_analysis_vit.sh
-bash scripts/experiments/error_analysis_bert.sh sst2
-```
+Use the maintained Python campaign controllers listed in `scripts/experiments/README.md`. They fix their artifact layout and validate source and calibration identity before execution.
 
 For a direct smoke evaluation, invoke an evaluator rather than copying a campaign controller:
 

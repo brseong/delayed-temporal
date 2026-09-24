@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 import time
@@ -192,7 +191,6 @@ def main() -> None:
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--gpus", type=int, nargs="+", default=(1, 2, 3))
     parser.add_argument("--python-bin", default="/opt/conda/envs/dt/bin/python")
-    parser.add_argument("--campaign-tag", default=CAMPAIGN_TAG)
     parser.add_argument("--noise-only", action="store_true")
     parser.add_argument("--noise-calibration-source", type=Path)
     args = parser.parse_args()
@@ -200,8 +198,6 @@ def main() -> None:
         raise ValueError("campaign supervisor must run on poseidon1")
     if len(set(args.gpus)) != len(args.gpus) or not args.gpus or any(gpu not in range(4) for gpu in args.gpus):
         raise ValueError("poseidon GPU list must contain unique indices from 0 through 3")
-    if not re.fullmatch(r"[a-z0-9_.-]+", args.campaign_tag):
-        raise ValueError("campaign tag contains unsupported characters")
     if args.noise_only and args.noise_calibration_source is None:
         raise ValueError("noise-only execution requires an explicit calibration source")
     args.source_root = args.source_root.resolve(strict=True)
@@ -212,14 +208,14 @@ def main() -> None:
     ).strip()
     if actual_commit != args.expected_commit:
         raise ValueError("campaign source commit differs")
-    output = ARTIFACTS / "logs" / args.campaign_tag
-    runtime = ARTIFACTS / "runtime" / args.campaign_tag
+    output = ARTIFACTS / "logs" / CAMPAIGN_TAG
+    runtime = ARTIFACTS / "runtime" / CAMPAIGN_TAG
     output.mkdir(parents=True, exist_ok=True)
     runtime.mkdir(parents=True, exist_ok=True)
     if subprocess.check_output(["findmnt", "-n", "-o", "FSTYPE", "-T", str(runtime)], text=True).strip() in {"tmpfs", "ramfs"}:
         raise RuntimeError("campaign runtime must use a disk filesystem")
     manifest = {
-        "schema_version": 1, "tag": args.campaign_tag, "source_root": str(args.source_root),
+        "schema_version": 1, "tag": CAMPAIGN_TAG, "source_root": str(args.source_root),
         "source_commit": args.expected_commit, "gpus": list(args.gpus),
         "noise_only": args.noise_only,
         "noise_calibration_source": (

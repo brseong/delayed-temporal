@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.experiments.run_full_calibrated_text_comparison import (
-    FAMILY_CONFIG, MODEL_CONFIG, POWER_REUSE_TAG, TAG, canonical, parse_evaluation, parse_sites,
+    FAMILY_CONFIG, MODEL_CONFIG, TAG, canonical, parse_evaluation, parse_sites,
 )
 from scripts.runtime import files as runtime_files
 from scripts.runtime import identity
@@ -37,8 +37,7 @@ def validate_family(root: Path, family: str) -> tuple[list[dict[str, Any]], dict
     output = root / family
     manifest = json.loads((output / "manifest.json").read_text())
     result = json.loads((output / "result.json").read_text())
-    calibration_reuse = manifest.get("calibration_reuse")
-    expected_tag = POWER_REUSE_TAG if calibration_reuse is not None else config["tag"]
+    expected_tag = config["tag"]
     if (manifest.get("tag") != expected_tag or manifest.get("family") != family
             or result.get("state") != "complete"):
         raise ValueError(f"{family} is not a completed member of {expected_tag}")
@@ -47,33 +46,14 @@ def validate_family(root: Path, family: str) -> tuple[list[dict[str, Any]], dict
     if manifest.get("range_contract") != "operator_local_end_to_end_v1" or manifest.get("dtype") != "float64":
         raise ValueError(f"{family} numerical contract differs")
     phases = result.get("phases", {})
-    expected_phases = {"ann", "snn"} if calibration_reuse is not None else {"collect", "ann", "snn"}
+    expected_phases = {"collect", "ann", "snn"}
     if set(phases) != expected_phases:
         raise ValueError(f"{family} phase population differs")
     calibration_path = output / "calibration.json"
     metadata, sites = parse_sites(calibration_path, config["sites"])
     calibration_sha = identity.sha256_file(calibration_path)
     rows: list[dict[str, Any]] = []
-    if calibration_reuse is not None:
-        if (
-            result.get("calibration_reuse") != calibration_reuse
-            or calibration_reuse.get("calibration_sha256") != calibration_sha
-        ):
-            raise ValueError(f"{family} reused calibration evidence differs")
-        rows.append({
-            "family": family,
-            "phase": "calibration_reuse",
-            "source_commit": manifest["source_commit"],
-            "checkpoint_identity_sha256": identity.json_sha256(
-                manifest["checkpoint_files_sha256"]
-            ),
-            "dataset_fingerprint": manifest["calibration_dataset"]["fingerprint"],
-            "calibration_sha256": calibration_sha,
-            "calibration_site_count": len(sites),
-            "calibration_source_commit": calibration_reuse["source_commit"],
-            "calibration_source_manifest_sha256": calibration_reuse["source_manifest_sha256"],
-        })
-    for phase in (("ann", "snn") if calibration_reuse is not None else ("collect", "ann", "snn")):
+    for phase in ("collect", "ann", "snn"):
         evidence = phases[phase]
         log_path = output / evidence["log_file"]
         if identity.sha256_file(log_path) != evidence["log_sha256"]:
@@ -100,7 +80,6 @@ def validate_family(root: Path, family: str) -> tuple[list[dict[str, Any]], dict
         raise ValueError(f"{family} final calibration identity differs")
     return rows, {"family": family, "site_count": len(sites),
                   "calibration_sha256": calibration_sha,
-                  "reused": calibration_reuse is not None,
                   "metadata_sha256": identity.json_sha256(metadata)}
 
 

@@ -59,14 +59,7 @@ Vendored or reference implementations such as `TTFSFormer/`, `src/transformers`,
 
 ## Common commands
 
-Run experiment wrappers from the repository root:
-
-```bash
-bash scripts/setup/convert_vits.sh
-bash scripts/experiments/error_analysis_vit.sh
-bash scripts/experiments/ablation_gelu_vit.sh
-bash scripts/experiments/error_analysis_bert.sh sst2
-```
+Run maintained Python campaign controllers from the repository root. Each controller fixes its artifact layout and validates its source and calibration identity; inspect `scripts/experiments/README.md` for the active campaigns.
 
 A short ViT evaluation can be launched directly:
 

@@ -19,9 +19,9 @@ Historical UBAI deployment scripts were removed with their global-range campaign
 
 `quick_text_check.py` and `quick_calibrated_text_check.py` are bounded diagnostic runs. They do not produce publication results and must identify their frozen evaluator source.
 
-## Compatibility shell drivers
+## Retired execution paths
 
-The flat `.sh` files predate the manifest-based controllers and remain for reproduction of the original workflows. They are compatibility entry points, not templates for new campaign code. New multi-condition work should use a manifest, an immutable condition identity, resumable results, and a separate analysis program.
+The flat shell drivers and cross-campaign calibration-reuse path were removed. Publication experiments must use the maintained Python campaign controllers, which fix their artifact tags and reject calibration reuse from earlier campaigns. Historical results remain evidence, not executable inputs to a current campaign.
 
 ## Rules for new work
 

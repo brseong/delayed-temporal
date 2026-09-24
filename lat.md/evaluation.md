@@ -246,7 +246,7 @@ The ViT GELU layer scan isolates where temporal activation errors become task-cr
 
 [[scripts/evaluation/error_analysis_vit.py#configure_vit_exact_gelu_layers]] selects zero-based encoder blocks whose MLP GELU uses the maintained cubic-tanh formula in dense arithmetic. Both affine layers remain unchanged, and every unselected block retains the temporal composite.
 
-`scripts/experiments/ablation_gelu_layers_vit.sh` selects exactly one block per condition and compares its noisy accuracy with the corresponding noise-off accuracy. It schedules one process per GPU, resumes complete logs, and permits seed and layer subsets through environment variables.
+The retired layer-ablation shell driver selected one block per condition and compared noisy accuracy with the corresponding noise-off accuracy. Its historical artifacts remain available only in their recorded source commit; maintained campaigns do not expose this execution path.
 
 Recovery relative to the fully temporal noisy run estimates that block's timing-error contribution; it is not an architecture or activation-function comparison. The default seed-zero scan ranks all blocks before additional seeds are assigned to the most influential conditions.
 
@@ -299,7 +299,7 @@ The dense helpers apply the production analytic endpoint clamp after the cubic i
 
 Selected operators shadow-consume the same Gaussian draws in the same tensor/scalar order but do not apply or count those events. This common-random-number coupling keeps every later GELU and non-GELU event aligned across variants, reducing paired seed variance without representing shadow draws as physical activity.
 
-`scripts/experiments/ablation_gelu_operators_vit.sh` runs one condition per process and GPU, holds model, 5,000-image subset, absolute timing scale, and seed fixed, and resumes only complete logs. [[scripts/analysis/gelu_operator_ablation_vit.py#install_gelu_operator_ablation]] patches only the local ViT GELU symbol, leaving production implementations and other model families unchanged.
+The retired operator-ablation shell driver ran one condition per process and GPU while holding the model, 5,000-image subset, absolute timing scale, and seed fixed. [[scripts/analysis/gelu_operator_ablation_vit.py#install_gelu_operator_ablation]] remains an analysis helper, but it is no longer reachable from a maintained campaign.
 
 This scan deliberately leaves endpoint placement and calibration unchanged. At the existing float32 transition point it is an implementation-level attribution conditioned on [[noise#Numerical Precision and Endpoint Caveat]], not a calibrated continuous-noise robustness result. Repeating the matrix belongs to [[deferred-experiments#Mechanism and Operator Ablations]] and is needed only for a retained mechanism claim.
 

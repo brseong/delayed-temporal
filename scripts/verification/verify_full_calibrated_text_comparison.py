@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -228,46 +227,6 @@ def verify_summarizer(root: Path) -> None:
     assert provenance["complete"] and len(provenance["families"]) == 3
     assert set(provenance["files"]) == {"raw_runs.csv", "summary.csv", "calibration_sites.csv"}
 
-    reused = root / "reused"
-    for family in ("roberta", "gpt2"):
-        source = campaign / family
-        source_manifest = json.loads((source / "manifest.json").read_text())
-        if family == "roberta":
-            source_manifest.pop("evaluator_family")
-            (source / "manifest.json").write_text(json.dumps(source_manifest))
-        evidence, sites = runner.reused_calibration_evidence(
-            source,
-            family=family,
-            evaluator_family=runner.MODEL_CONFIG[family]["evaluator_family"],
-            checkpoint_files_sha256=source_manifest["checkpoint_files_sha256"],
-            calibration_dataset=source_manifest["calibration_dataset"],
-            expected_sites=runner.MODEL_CONFIG[family]["sites"],
-        )
-        assert len(sites) == runner.MODEL_CONFIG[family]["sites"]
-        output = reused / family
-        output.joinpath("logs").mkdir(parents=True)
-        shutil.copyfile(source / "calibration.json", output / "calibration.json")
-        source_result = json.loads((source / "result.json").read_text())
-        phases = {}
-        for phase in ("ann", "snn"):
-            shutil.copyfile(source / "logs" / f"{phase}.log", output / "logs" / f"{phase}.log")
-            phases[phase] = source_result["phases"][phase]
-        manifest = dict(source_manifest)
-        manifest.update(tag=runner.POWER_REUSE_TAG, calibration_reuse=evidence,
-                        gelu_cubic_implementation="phi_nl_psi_ed_v1")
-        output.joinpath("manifest.json").write_text(json.dumps(manifest))
-        output.joinpath("result.json").write_text(json.dumps({
-            "state": "complete", "family": family, "phases": phases,
-            "calibration_sha256": evidence["calibration_sha256"],
-            "calibration_reuse": evidence,
-        }))
-    reuse_provenance = summary.build(
-        reused,
-        reused / "outputs",
-        require_complete=True,
-        requested_models=("roberta", "gpt2"),
-    )
-    assert reuse_provenance["tag"] == runner.POWER_REUSE_TAG
     (campaign / "gpt2" / "result.json").unlink()
     reject(lambda: summary.build(campaign, campaign / "partial", require_complete=True), ValueError)
 
