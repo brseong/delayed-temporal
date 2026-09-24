@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import tempfile
 
 import torch
 from torch import nn
@@ -23,6 +24,7 @@ from utils.transforms.noise import (
 )
 from utils.transforms.potential_to_spike import neg_identity_transform
 from utils.transforms.types import Potential, PotentialBounds, SpikeSample
+from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
 from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTEncoder
 
 
@@ -170,12 +172,26 @@ def verify_vit_prefix_scope() -> None:
     assert set(get_gaussian_noise_stats()) == {"verification.global"}
 
 
+def verify_scope_survives_pretrained_config_loading() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        ViTConfig(num_hidden_layers=3).save_pretrained(temporary)
+        config = ViTConfig.from_pretrained(
+            temporary,
+            time_noise_vit_first_block_count=2,
+        )
+    assert config.time_noise_vit_first_block_count == 2
+
+    encoder = ViTEncoder(config)
+    assert encoder.time_noise_vit_first_block_count == 2
+
+
 # @lat: [[evaluation#Evaluation and Verification#ViT-B Cumulative Encoder Block Timing Noise#Verification#Block scope]]
 def main() -> None:
     try:
         verify_prefix_selection()
         verify_scope_rng_and_statistics()
         verify_vit_prefix_scope()
+        verify_scope_survives_pretrained_config_loading()
     finally:
         set_gaussian_time_noise(enabled=False)
     print("ViT block-scoped timing-noise verification passed.")
