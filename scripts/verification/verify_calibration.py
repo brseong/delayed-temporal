@@ -1186,19 +1186,15 @@ def verify_vit_evaluator_artifact_lifecycle() -> None:
     assert default_args.calibration_lower_quantile == 0.0
     assert default_args.calibration_upper_quantile == 1.0
     assert default_args.calibration_margin_fraction == 0.05
-    assert default_args.time_noise_exponential_difference_internal
 
-    # The ViT CLI exposes the narrow exponential difference ablation without
-    # changing the default production path.
+    # Internal exponential-difference timing noise is part of the fixed production
+    # model. A retired disabling flag must fail at argument parsing rather than
+    # silently creating a second experiment contract.
     with patch(
         "sys.argv",
-        [
-            "error_analysis_vit.py",
-            "--no-time-noise-exponential-difference-internal",
-        ],
+        ["error_analysis_vit.py", "--no-time-noise-exponential-difference-internal"],
     ):
-        internal_noise_disabled_args = parse_arguments()
-    assert not internal_noise_disabled_args.time_noise_exponential_difference_internal
+        _expect_raises(SystemExit, parse_arguments, "2")
 
     # Parsing exposes every artifact and statistical control without aliases to the
     # legacy quantile diagnostic. The active string converts to the shared enum only

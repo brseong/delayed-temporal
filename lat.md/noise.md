@@ -154,7 +154,7 @@ Event-aware noise applies only where a consumer can interpret a delivered-event 
 
 The maintained production integration covers the three affine adapters, multiplication, exponential, division, exponential difference, spiking LayerNorm, softmin and activation compositions, and attention value integration. Every noisy production event originates at the decorated encoder boundary; tensor-only branches remain only as noise-off parity references.
 
-The exponential difference ablation may keep only its internal identity encoding deterministic. Both input events retain their previously sampled timestamps and delivery masks, while the internal encoding consumes no random draw and creates no `exponential_difference.internal` counter. Its public Gaussian output range is unchanged.
+Exponential difference always applies Gaussian timing noise to its internal identity encoding when timing noise is enabled. Disabling that internal noise is unsupported, so the configuration and evaluator expose no bypass for this physical event boundary.
 
 Missing-event semantics are already fixed by [[noise#Observation-Time Potential Invariant]]. Extending coverage means implementing each operator's ordinary physical state trajectory up to $T_{\mathrm{obs}}$ and reading the resulting clamped potential; it does not require another validity policy discussion.
 

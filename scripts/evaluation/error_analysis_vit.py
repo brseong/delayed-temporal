@@ -132,7 +132,6 @@ class Arguments:
     time_noise_deadline_margin_std: float
     time_noise_seed: int
     time_noise_vit_first_block_count: int | None
-    time_noise_exponential_difference_internal: bool
 
     # Static device and parameter non-idealities remain separate from event timing
     # so their effects can be swept and attributed independently.
@@ -409,17 +408,6 @@ def parse_arguments() -> Arguments:
             "omission preserves the existing model-wide injection scope."
         ),
     )
-    parser.add_argument(
-        "--time-noise-exponential-difference-internal",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Apply Gaussian timing noise to the internal exponential difference "
-            "encoding. Use --no-time-noise-exponential-difference-internal to "
-            "keep only that encoding deterministic."
-        ),
-    )
-
     # Static range mismatch and learned-parameter perturbations deliberately
     # remain separate controls rather than being folded into event timing noise.
     parser.add_argument("--mismatch-enabled", action=argparse.BooleanOptionalAction, default=False,
@@ -513,9 +501,6 @@ def parse_arguments() -> Arguments:
         time_noise_deadline_margin_std=args.time_noise_deadline_margin_std,
         time_noise_seed=args.time_noise_seed,
         time_noise_vit_first_block_count=args.time_noise_vit_first_block_count,
-        time_noise_exponential_difference_internal=(
-            args.time_noise_exponential_difference_internal
-        ),
         mismatch_enabled=args.mismatch_enabled,
         mismatch_range_std_frac=args.mismatch_range_std_frac,
         mismatch_seed=args.mismatch_seed,
@@ -1164,9 +1149,6 @@ def evaluate_vit_model(args: Arguments) -> None:
         seed=args.time_noise_seed,
         device=device,
         explicit_scope_required=args.time_noise_vit_first_block_count is not None,
-        exponential_difference_internal_noise=(
-            args.time_noise_exponential_difference_internal
-        ),
     )
     set_clock_driven(
         enabled=clock_driven_enabled,
@@ -1218,8 +1200,7 @@ def evaluate_vit_model(args: Arguments) -> None:
         f"mean_abs: {args.time_noise_mean}, "
         f"seed: {args.time_noise_seed}, "
         f"deadline_margin_std: {args.time_noise_deadline_margin_std}, "
-        "exponential_difference_internal: "
-        f"{args.time_noise_exponential_difference_internal}"
+        "exponential_difference_internal: enabled"
     )
     print(
         "Gaussian time-noise scope — "
