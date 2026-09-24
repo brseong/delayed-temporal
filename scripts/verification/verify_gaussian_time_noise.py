@@ -1828,6 +1828,52 @@ def verify_gaussian_exponential_difference_operator() -> None:
             "output_underflows": 0,
             "output_overflows": 0,
         }
+
+        # This ablation leaves both noisy input events intact while making only the
+        # internal identity encoding deterministic. Input sampling advances the
+        # shared generator; the exponential-difference call itself does not advance
+        # it or create an internal-site counter.
+        set_gaussian_time_noise(
+            enabled=True,
+            time_std_fraction=0.1,
+            deadline_margin_std_ratio=4.0,
+            seed=605,
+            exponential_difference_internal_noise=False,
+        )
+        noisy_open = neg_identity_transform(
+            torch.tensor([1.0], dtype=torch.float64),
+            PotentialBounds(0.0, 4.0),
+            return_spike_sample=True,
+            noise_site="verification.ed_input_open",
+        )
+        noisy_close = neg_identity_transform(
+            torch.tensor([2.0], dtype=torch.float64),
+            PotentialBounds(0.0, 4.0),
+            return_spike_sample=True,
+            noise_site="verification.ed_input_close",
+        )
+        assert isinstance(noisy_open, SpikeSample)
+        assert isinstance(noisy_close, SpikeSample)
+        generator = get_gaussian_time_noise().generator
+        assert generator is not None
+        state_after_inputs = generator.get_state().clone()
+        internal_disabled, internal_disabled_domain = (
+            exponential_difference_operator(
+                noisy_open,
+                time_domain,
+                noisy_close,
+                time_domain,
+                tau_s=1.0,
+            )
+        )
+        assert torch.equal(state_after_inputs, generator.get_state())
+        assert torch.isfinite(internal_disabled).all()
+        assert internal_disabled_domain == zero_noise_domain
+        disabled_stats = get_gaussian_noise_stats()
+        assert disabled_stats["verification.ed_input_open"]["events"] == 1
+        assert disabled_stats["verification.ed_input_close"]["events"] == 1
+        assert "exponential_difference.internal" not in disabled_stats
+        assert disabled_stats["exponential_difference.output"]["outputs"] == 1
     finally:
         # Restore global state before the next composed operator verification.
         set_gaussian_time_noise(enabled=False)

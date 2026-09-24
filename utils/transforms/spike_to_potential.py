@@ -4,7 +4,11 @@ from math import exp, isclose, isfinite
 from numbers import Real
 
 from .clock import clocked_difference, clocked_exponential, get_clock_driven
-from .noise import clamp_gaussian_output, gaussian_time_noise_is_active
+from .noise import (
+    clamp_gaussian_output,
+    gaussian_time_noise_is_active,
+    get_gaussian_time_noise,
+)
 from .potential_to_spike import neg_identity_transform
 from .types import ClosedBounds, PotentialBounds, SpikeSample, TimeBounds, check_domain
 from .primitive import signed_pulse_width_modulation_operator
@@ -264,17 +268,30 @@ def _gaussian_exponential_difference_operator(
         name="exponential_difference_p",
     )
 
-    # Re-encoding is itself a physical spike operation and consumes the next sample
-    # from the shared generator. Its miss mask controls the exponential reset state.
-    internal_event = neg_identity_transform(
-        intermediate,
-        intermediate_domain,
-        return_spike_sample=True,
-        noise_site="exponential_difference.internal",
-    )
-    if not isinstance(internal_event, SpikeSample):
-        raise RuntimeError(
-            "Gaussian exponential-difference encoding must return SpikeSample"
+    # The default model perturbs this physical internal encoding. The dedicated
+    # ablation keeps both already noisy input events but makes only this encoding
+    # deterministic, consuming neither the shared RNG nor internal-site counters.
+    if get_gaussian_time_noise().exponential_difference_internal_noise:
+        internal_event = neg_identity_transform(
+            intermediate,
+            intermediate_domain,
+            return_spike_sample=True,
+            noise_site="exponential_difference.internal",
+        )
+        if not isinstance(internal_event, SpikeSample):
+            raise RuntimeError(
+                "Gaussian exponential-difference encoding must return SpikeSample"
+            )
+    else:
+        internal_time, internal_domain = neg_identity_transform(
+            intermediate,
+            intermediate_domain,
+        )
+        internal_event = SpikeSample(
+            time=internal_time,
+            domain=internal_domain,
+            fired=torch.ones_like(internal_time, dtype=torch.bool),
+            observation_deadline=float(internal_domain.max),
         )
 
     # Shift the finite encoded carrier by the intermediate upper rail, matching the

@@ -57,6 +57,7 @@ class GaussianTimeNoiseConfig:
     seed: int = 0  # Replica seed used once when constructing the dedicated generator.
     generator: torch.Generator | None = None  # Stateful RNG owned by this configuration.
     explicit_scope_required: bool = False
+    exponential_difference_internal_noise: bool = True
 
 
 @dataclass(frozen=True)
@@ -330,6 +331,7 @@ def set_gaussian_time_noise(
     seed: int = 0,
     device: torch.device | str = "cpu",
     explicit_scope_required: bool = False,
+    exponential_difference_internal_noise: bool = True,
 ) -> None:
     """Install process-wide direct Gaussian spike-time noise configuration.
 
@@ -351,6 +353,9 @@ def set_gaussian_time_noise(
         device: Device on which the encoder's spike-time samples will be drawn.
         explicit_scope_required: Require an active :func:`gaussian_time_noise_scope`
             before sampling or recording statistics.
+        exponential_difference_internal_noise: Whether the internal identity
+            encoding in exponential difference samples Gaussian timing noise. This
+            does not change noise already carried by either input event.
 
     Raises:
         TypeError: If ``enabled`` is not boolean or ``seed`` is not an integer.
@@ -365,6 +370,8 @@ def set_gaussian_time_noise(
         raise TypeError("enabled must be a bool")
     if not isinstance(explicit_scope_required, bool):
         raise TypeError("explicit_scope_required must be a bool")
+    if not isinstance(exponential_difference_internal_noise, bool):
+        raise TypeError("exponential_difference_internal_noise must be a bool")
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise TypeError("seed must be an integer")
 
@@ -434,6 +441,7 @@ def set_gaussian_time_noise(
         seed=seed,
         generator=generator,
         explicit_scope_required=explicit_scope_required,
+        exponential_difference_internal_noise=exponential_difference_internal_noise,
     )
 
     # Installing a new configuration defines a new measurement interval. Replace
