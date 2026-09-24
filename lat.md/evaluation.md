@@ -188,6 +188,42 @@ After the ViT-B result authenticates its frozen calibration, the supervisor rele
 
 [[scripts/analysis/summarize_local_range_paper_campaign.py#main]] accepts only seven complete table pipelines and all 63 identity-consistent noise replicas. It authenticates phase logs and frozen calibration, rejects removed range keys, and requires the noise runs to share the completed ViT-B source, checkpoint, dataset, and calibration identities. It writes table, raw-replica, and cell-summary CSV files and renders the two-panel PDF and PNG with dense and clean-spiking references, three-replica 95% Student-$t$ intervals, and pooled deadline-miss counts on a logarithmic auxiliary axis. The Figure 4 legend uses the empty area on the right side of the right panel and does not cover plotted values.
 
+## Screening Median Model Timing Noise Sweep
+
+This campaign measures the top-1 accuracy change caused by direct Gaussian spike-time noise in three completely converted Transformer models.
+
+The validation screening median is $(r_{t,\mathrm{NP}},r_{t,\mathrm{NL}})=(0.010838111004060678,0.024617376541590685)$ at physical coordinates 184 and 1. The NP value is the median among four usable screened coordinates rather than a chip-wide median.
+
+For multiplier $\alpha$, every model-wide $\phi_{\mathrm{NP}}$ event uses $\alpha r_{t,\mathrm{NP}}$ and every model-wide $\phi_{\mathrm{NL}}$ event uses $\alpha r_{t,\mathrm{NL}}$. Each encoder converts its dimensionless fraction through its own declared local time window. Other non-ideality axes remain disabled.
+
+The initial formal grid is $\alpha\in\{0.003,0.01,0.03,0.1,0.3,1\}$ with seeds 0--2. CCT-7 uses the complete 10,000-image CIFAR-10 test split; ViT-S/16 and ViT-B/16 use the same fixed 5,000-image ImageNet-1k validation prefix. Each model freezes one label-free calibration before clean and noisy evaluation.
+
+[[utils/transformers/models/spiking_cct.py#CCT7ForImageClassification]] maps the official seven-block CCT-7/3x1 checkpoint to the maintained temporal modules. [[scripts/evaluation/error_analysis_cct.py#main]] rejects any dense learned convolution, affine map, or normalization module before calibration or evaluation.
+
+### Condition Execution
+
+Each cell authenticates the measured pair, source, checkpoint, calibration, and data population before model-wide noise injection.
+
+[[scripts/experiments/run_screening_median_model_condition.py#main]] runs one model, multiplier, and seed. It records the separate linear and logarithmic fractions, prediction digest, accuracy, event counts, misses, nominal-deadline occupancy, and pre-clamp output counts.
+
+### Campaign Execution
+
+The campaign preserves completed cells and permits later multipliers without changing the scientific protocol identity.
+
+[[scripts/experiments/run_poseidon_screening_median_model_sweep.py#main]] prepares one frozen calibration and deterministic baseline per model, gates the formal phase on nine 500-image smoke runs, and schedules CCT, ViT-S, and ViT-B over Poseidon GPUs 0--3. Immutable request shards record each added multiplier set.
+
+### Summary Artifacts
+
+The reducer joins only results with the same protocol identity and rejects conflicting duplicate cells.
+
+[[scripts/analysis/summarize_screening_median_model_sweep.py#main]] writes baseline, raw-replica, three-seed summary, and model-wide accuracy tables. Its figure reports top-1 accuracy change from the deterministic baseline against the noise scale multiplier and marks $\alpha=1$ as the measured screening median.
+
+### Verification
+
+Pure-Python verification covers measurement selection, multiplier scaling, smoke gating, stable GPU placement, extensible cell identities, multi-root merging, and summary rendering.
+
+[[scripts/verification/verify_screening_median_model_sweep.py#main]] requires 9 smoke cells and 54 initial formal cells, rejects execution axes in the protocol identity, and rejects incompatible or conflicting artifact unions.
+
 ## Historical ViT-B/16 Global Range Selection
 
 This section preserves the removed global-range workflow for provenance only; maintained execution has no corresponding setting or selection gate.
