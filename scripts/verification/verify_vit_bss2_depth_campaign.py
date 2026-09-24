@@ -17,11 +17,16 @@ if str(ROOT) not in sys.path:
 ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", ROOT / "artifacts"))
 
 from scripts.analysis.summarize_vit_bss2_depth import (
+    load_clean_reference,
     load_runs,
+    load_scaled_sparse_runs,
     parse_max_first_block_counts,
     render,
+    render_scaled_sparse,
+    scaled_run_id,
     selected_cells,
     summarize,
+    summarize_scaled_sparse,
     validate_stopping_decision,
     write_csv,
 )
@@ -225,6 +230,78 @@ def write_fixture(root: Path) -> None:
         (run_root / "result.json").write_text(json.dumps(result))
 
 
+def write_scaled_sparse_fixture(root: Path) -> Path:
+    scales = (0.03, 0.1)
+    depths = (1, 2)
+    for scale in scales:
+        for first_block_count in depths:
+            for seed in range(3):
+                name = scaled_run_id(
+                    "screening-median", scale, first_block_count, seed
+                )
+                run_root = root / "runs" / name
+                run_root.mkdir(parents=True)
+                manifest = {
+                    "condition": "screening-median",
+                    "measured_noise_scale": scale,
+                    "first_block_count": first_block_count,
+                    "seed": seed,
+                    "evaluation_samples": 5000,
+                    "source_commit": "a" * 40,
+                    "checkpoint_sha256": "b" * 64,
+                    "calibration_sha256": "c" * 64,
+                    "evaluation_dataset": {
+                        "fingerprint": "evaluation",
+                        "selected_fingerprint": "evaluation-prefix-5000",
+                    },
+                    "hardware_summary_sha256": "d" * 64,
+                    "measured_condition": {
+                        "linear_time_std_fraction": 0.01,
+                        "log_time_std_fraction": 0.02,
+                    },
+                    "linear_time_std_fraction": 0.01 * scale,
+                    "log_time_std_fraction": 0.02 * scale,
+                }
+                accuracy = 0.86 - scale * first_block_count - 0.001 * seed
+                result = {
+                    "state": "complete",
+                    "metrics": {
+                        "total": 5000,
+                        "correct": round(accuracy * 5000),
+                        "accuracy": accuracy,
+                        "prediction_sha256": f"{first_block_count + seed:064x}"[-64:],
+                        "gaussian_counts": {
+                            "active_blocks": list(range(first_block_count)),
+                            "events": 100 * first_block_count,
+                            "misses": first_block_count,
+                            "miss_rate": 0.01,
+                            "site_count": 26 * first_block_count,
+                        },
+                    },
+                }
+                (run_root / "manifest.json").write_text(json.dumps(manifest))
+                (run_root / "result.json").write_text(json.dumps(result))
+    clean = root / "clean_reference.json"
+    clean.write_text(
+        json.dumps(
+            {
+                "state": "complete",
+                "phases": {
+                    "snn": {
+                        "metrics": {
+                            "total": 5000,
+                            "correct": 4300,
+                            "accuracy": 0.86,
+                            "prediction_sha256": "e" * 64,
+                        }
+                    }
+                },
+            }
+        )
+    )
+    return clean
+
+
 def verify_summary_gate() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -239,6 +316,39 @@ def verify_summary_gate() -> None:
         render(summary, root / "depth_noise_accuracy")
         assert (root / "depth_noise_accuracy.pdf").is_file()
         assert (root / "depth_noise_accuracy.png").is_file()
+
+        scaled_root = root / "scaled"
+        clean_path = write_scaled_sparse_fixture(scaled_root)
+        scaled_raw, scaled_hashes = load_scaled_sparse_runs(
+            scaled_root,
+            phase="formal",
+            condition="screening-median",
+            measured_noise_scales=(0.03, 0.1),
+            first_block_counts=(1, 2),
+        )
+        clean_metrics = load_clean_reference(clean_path, expected_samples=5000)
+        scaled_summary = summarize_scaled_sparse(
+            scaled_raw, clean_metrics=clean_metrics
+        )
+        assert len(scaled_raw) == 12 and len(scaled_hashes) == 24
+        assert len(scaled_summary) == 6
+        assert all(
+            row["accuracy_mean"] == 0.86
+            for row in scaled_summary
+            if row["first_block_count"] == 0
+        )
+        render_scaled_sparse(scaled_summary, scaled_root / "scaled_accuracy")
+        assert (scaled_root / "scaled_accuracy.pdf").is_file()
+        assert (scaled_root / "scaled_accuracy.png").is_file()
+        must_reject(
+            lambda: load_scaled_sparse_runs(
+                scaled_root,
+                phase="formal",
+                condition="screening-median",
+                measured_noise_scales=(0.03, 0.2),
+                first_block_counts=(1, 2),
+            )
+        )
 
         limits = parse_max_first_block_counts(
             ["best-measured-coordinate=1", "screening-median=1"]

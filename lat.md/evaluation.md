@@ -222,9 +222,11 @@ The reducer reports cumulative sensitivity without assigning a causal failure to
 
 [[scripts/analysis/summarize_vit_bss2_depth.py#main]] writes raw and summary CSV files, a summary manifest, and PDF/PNG figures. Full-grid behavior remains the default. Explicit maximum block counts require an authenticated pilot root and a validated accuracy threshold; omitted completed runs remain untouched.
 
+The scaled sparse mode accepts one fixed screening-median condition, explicit noise factors and prefix depths, and one authenticated clean converted-model result. It requires three seeds per noisy cell and plots the factors as separate curves sharing the same clean point.
+
 ### Verification
 
-Pure-Python verification covers scope, complete and stopped condition populations, exact evaluation prefixes, stopping evidence, and artifact rejection rules.
+Pure-Python verification covers scope, complete, stopped, and scaled sparse condition populations, exact evaluation prefixes, stopping evidence, and artifact rejection rules.
 
 #### Block scope
 
