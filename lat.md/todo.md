@@ -262,5 +262,8 @@ For nonnegative sites selected for one-sided calibration, the lower endpoint sta
 
 감사 결과에서 확인된 원고 및 결과의 일치 조건만 후속 작업으로 기록한다. 상세 근거는 [[noise-timestamp-audit]]에 있다.
 
-- [ ] 원고에 실제 exponential difference 분해와 내부 encoding의 noise 주입을 명시한다.
+- [x] 원고에 실제 exponential difference 분해와 내부 encoding의 noise 주입을 명시했다.
 - [ ] 새 timestamp 구현으로 평가한 결과가 검증되기 전에는 기존 noise figure를 새 구현의 결과로 표시하지 않는다.
+- [x] 비활성 부호 경로와 내부 ED의 event 및 output 통계를 제외하고, 공유 참조는 사용하는 경우에만 센다. 출력·난수 상태 동일성은 [[noise#Active Signed-Branch Statistics]]에서 검증한다.
+- [ ] 2026-09-24 ICLR 연산자 표 대조 스크립트를 `scripts/verification/`으로 이식하고, ICLR appendix의 SOP 총계를 검사하는 항목을 [[scripts/verification/verify_sop.py#main]]에 추가한다. 근거는 [[noise-timestamp-audit#ICLR 원고 연산자 표와 잡음 모델 대조]]다.
+- [x] Scalar reference event가 operator 호출당 한 번 추출되는 규칙을 Appendix counting convention에 명시했다. Softmin의 reset 0 이후 log 입력 제한은 기존 범위 clamp와 별도 양의 log 하한 규약에서 직접 따르므로 중복 서술하지 않는다.

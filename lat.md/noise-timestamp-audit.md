@@ -159,3 +159,65 @@ Timestamp 수정과 원고 전체 및 기존 결과의 일치를 별도로 판�
 기존 `verify_layernorm_calibrated_bounds.py` fixture는 폐기된 policy 2 때문에 검증 전에 실패했다. 실행기의 policy 제한은 유지하고 fixture가 현재 `VIT_CALIBRATION_POLICY_VERSION` 및 output head metadata를 사용하도록 수정해 두 LayerNorm 검증기를 실제 실행했다. Clean 및 Gaussian std=0 parity, 두 pass, frozen bounds, 8개 조합은 이 기존 검증기로 함께 확인한다.
 
 전체 실행 로그는 `artifacts/verification/raw_timestamp_ed42bfc_20260924/`에 보존한다. `verify_raw_timestamp_paths.py`, `verify_gaussian_time_noise.py`, `verify_layernorm_shared_deadline.py`, `verify_layernorm_calibrated_bounds.py`, `verify_attention_output_bounds.py`, `verify_vit_block_scoped_noise.py`를 `/opt/conda/envs/dt/bin/python scripts/verification/<파일명>`으로 실행한다. 검증 중 출력되는 Transformers docstring 진단은 assertion 실패가 아니며 원시 로그에 그대로 보존했다.
+
+## 독립 검토 결과
+
+2026-09-24에 이전 대화와 기존 감사 결론을 전달하지 않은 별도 검토자가 원고를 먼저 읽고 구현을 대조했다. 아래 두 항목은 CPU 반례가 있으며, 정확도 표 전체가 잘못됐다는 판정은 아니다.
+
+### 비활성 부호 경로의 통계
+
+수정 전 검토 결과이며 비활성 경로 통계는 이제 [[noise#Active Signed-Branch Statistics]] 규약으로 수정했다. 출력과 난수 순서는 유지하고 과거 로그는 수정하지 않는다.
+
+GELU와 LayerNorm은 사용하지 않는 부호 경로도 양의 log 하한으로 인코딩한 뒤 최종 기여만 제거한다. 수정 전에는 해당 경로의 event와 deadline miss가 합산 통계에 포함됐다.
+
+원고 methodology의 signed power 설명은 반대 부호 경로를 발화하지 않는 경로로 설명한다. 실제 `gelu_cubic_power_operator`는 active 여부를 판정한 후 양쪽 carrier를 모두 인코딩하고, 두 exponential difference 계산 뒤 출력을 제거한다. 공통 noise 통계에는 이 active mask가 전달되지 않는다. `parse_physical_counts`도 모든 site의 events와 misses를 합산한다.
+
+재현 조건은 float64, 입력 10,000개 모두 +1, bounds [-2,2], 시간상수 1, noise fraction 1e-5, margin 0, seed 0이다. 사용되지 않는 `gelu.cubic.log_negative`에 events 10,000, misses 4,930, deadline_events 10,000이 기록됐다. 이 경로 출력은 나중에 모두 제거된다.
+
+이는 출력에 기여하는 spike의 miss rate와 동일한 통계가 아니다. 이 사실만으로 정확도가 틀렸다고 판단하지 않는다. 기존 noise source `b1a6bf8`에도 같은 구조가 있어 새 timestamp 변경만의 영향도 아니다. 기존 로그에는 inactive event를 분리할 정보가 없으므로 기존 합계에서 임의로 빼서 보정하지 않는다.
+
+근거는 [[utils/transforms/functions.py#gelu_cubic_power_operator]], [[utils/transforms/noise.py#inject_spike_time_noise]], [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm#_gaussian_forward]], [[scripts/experiments/run_vit_local_range_noise_condition.py#parse_physical_counts]]다.
+
+### 내부 인코딩의 잡음
+
+독립 검토도 exponential difference 내부의 추가 인코딩을 확인했다. 논문이 가능한 구성으로 설명하는 분해 경로가 실제 평가에서는 항상 사용된다.
+
+Division 입력을 0.5와 1, 공통 bounds를 [0.1,1]로 두고 10,000개를 평가했다. Log encoder noise fraction 0, identity encoder noise fraction 0.01, margin ratio 4, seed 0, float64에서 평균은 0.5000785592, 표준편차는 0.0231999830이었다. 외부 log 입력 시각의 잡음이 없어도 내부 identity encoding의 잡음이 출력에 반영된다.
+
+이는 위 Paper Comparison의 설명 보완 항목을 독립적으로 재현한 결과다. SOP 계산에는 내부 encoder가 이미 포함돼 있으므로 이를 비용 누락으로 분류하지 않는다. 이제 Appendix의 exponential difference 정의 바로 뒤에 실제 평가에서 이 합성과 내부 encoding의 잡음을 사용했다고 명시했다.
+
+### 확인 범위
+
+검토는 주요 연산·범위·잡음·평가 설명과 해당 구현의 대조다. 전체 모델이나 하드웨어 실험을 재실행하지 않았다.
+
+변환 표의 자체 정확도와 perplexity는 `artifacts/results/paper_end_to_end_local_range_poseidon_v1/table_results.csv`와 일치했다. 잡음 없는 기본 항등식이 잘못됐다는 근거는 찾지 못했다.
+
+Clock mode의 합성 exponential에 `torch.exp` 직접 계산이 남는 사실도 확인했으나, 격자 시각에서 반복 exponential 계산과 수학적으로 같을 수 있으므로 정확도 그림 오류로 확정하지 않았다. GPT-2의 입력 길이 제한 역시 metric 오류로 확정하지 않았다. BSS2 원시 측정 재계산과 전체 모델 forward 검증은 범위 밖이다.
+
+검토 대상 source는 `eea2d9d`, paper 저장소 HEAD는 `03b18d9`이며 당시 실제 작업 트리를 읽었다. 검토자는 구현·원고·실험 기록을 수정하지 않았다.
+
+## ICLR 원고 연산자 표와 잡음 모델 대조
+
+2026-09-24에 `paper/iclr_2027/` 원고의 Table 1, Table 2, Appendix B 항등식, Methodology의 primitive-level error model을 현재 구현과 수치로 대조했다. 원고 소스는 `eea2d9d` 위의 작업 트리다.
+
+### 검사 방법
+
+임시 스크립트로 float64 CPU에서 25개 항목을 검사했고 모두 통과했다. 스크립트는 저장소에 넣지 않았으며 [[todo#Timestamp 변경 뒤 원고 확인]]에 이식 항목을 남겼다.
+
+- Table 1: $\phi_{\mathrm{NP}}(v)=V_{\max}-v$, $\phi_{\mathrm{NL}}(v)=\tau_s\log(V_{\max}/v)$와 창 길이 $\tau_s\log(V_{\max}/V_{\min})$, $\psi_{\mathrm{NE}}$, $\psi_{\mathrm{Int}}(t_1,t_2;w)=w(t_2-t_1)$, $\psi_{\mathrm{ED}}=\exp((t_2-t_1)/\tau)$를 [[utils/transforms/potential_to_spike.py#neg_identity_transform]], [[utils/transforms/potential_to_spike.py#neg_log_transform]], [[utils/transforms/spike_to_potential.py#exp_operator]], [[utils/transforms/primitive.py#signed_pulse_width_modulation_operator]], [[utils/transforms/spike_to_potential.py#exponential_difference_operator]]로 확인했다.
+- Table 2: 부호 있는 피연산자의 $f_{\mathrm{Mul}}$, $[0,1]$ 범위의 $f_{\mathrm{Div}}$, $f_{\mathrm{Exp}}(v)=\exp(-v)$, $3\tau_s$ 인코딩과 $\tau_s$ 디코딩 및 하한 $10^{-5}$를 쓰는 부호 있는 세제곱, tanh 형식 GELU와의 일치(최대 오차 $3\times10^{-14}$), $\tau_s$ 불변성, softmin과 softmax의 일치, $f_{\mathrm{SDP}}$의 부호와 $d_k^{-1/2}$ 배율을 확인했다.
+- 층 수준: 세 단계를 모두 spiking으로 둔 [[utils/transformers/models/spiking_ops.py#SpikingLayerNorm]]과 `torch` LayerNorm의 최대 오차 $9\times10^{-15}$, [[utils/transformers/models/spiking_ops.py#SpikingLinear]]과 `nn.Linear`의 일치, [[utils/transformers/integrations/spiking_sdpa_attention.py#spiking_scaled_dot_product_attention]]과 `torch` scaled dot-product attention의 최대 오차 $2\times10^{-14}$를 확인했다.
+- 잡음: 원고 Eq. measured-timing-scale의 $\sigma_{t,e,\ell}=\alpha r_{t,e}W_{e,\ell}$가 인코더 종류별 fraction과 각 호출의 창 길이로 구현되는 것을 screening median 값 $r_{t,\mathrm{NP}}=0.010838111$, $r_{t,\mathrm{NL}}=0.024617377$로 확인했다. 경험 표준편차와 기대값의 비는 0.998과 0.999였다. 창 끝 codeword의 miss rate는 margin 0에서 0.4998, margin $4\sigma_t$에서 $3\times10^{-5}$로 해석적 꼬리와 일치했다.
+- 원고 예시: $\psi_{\mathrm{Int}}$에 $t_1=0.5$가 전달되고 $t_2$가 miss이면 출력은 0.5로 유지되고, 창 끝에 놓인 $\psi_{\mathrm{NE}}$ 입력이 늦으면 출력은 0이며 정확히 창 끝이면 1이다.
+- 참조 event: $f_{\mathrm{Mul}}$ 한 호출은 data event 100개에 대해 scalar zero-reference event 1개만 추출한다. Appendix A의 "scalar reference synchronized once per operator call" 비용 규약과 같다.
+- 실험 설정: [[scripts/experiments/run_screening_median_model_condition.py]]와 [[scripts/experiments/run_vit_bss2_depth_condition.py]]는 float64, mean 0, margin ratio 4, 5% calibration margin, quantile 0과 1, 2048 bins, 세 LayerNorm 단계와 attention, MLP를 모두 spiking으로 둔다. 전체 모델 조건은 embedding, final LayerNorm, classifier까지 잡음을 넣고, 블록 조건은 [[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTEncoder#forward]]의 scope로 앞 $K$개 블록에만 넣는다. 두 동작 모두 Experiment 절의 서술과 같다.
+- Appendix A의 SOP 총계 4,750,469,300, 4,750,850,450, 17,867,607,866, 62,360,701,602는 appendix 식을 그대로 계산해 재현했다. 단 [[scripts/verification/verify_sop.py#main]]은 NeurIPS 판 값을 검사하므로 ICLR appendix를 덮는 유지 검사기는 없다.
+
+### 원고 보완이 필요한 항목
+
+기존 [[noise-timestamp-audit#Paper Comparison]]과 [[noise-timestamp-audit#독립 검토 결과]]의 두 항목은 이번 대조에서도 재확인됐고, 아래 두 항목을 추가한다.
+
+- Softmin의 Gaussian 경로에서 miss된 $\psi_{\mathrm{NE}}$ 출력은 관측 시각의 reset 막전위 0으로 유지된다. 그 다음 $\phi_{\mathrm{NL}}$ 입력은 양의 floor를 가진 선언 범위에 따라 제한된다. [[utils/transforms/functions.py#_gaussian_softmin_function]]과 [[utils/transforms/functions.py#division_function]]이 근거다. 이 동작은 원고의 Calibration and Finite Potential Ranges 절에서 이미 정한 범위 밖 입력 clamp와 별도 log 하한 규약으로부터 직접 따르므로 중복 설명을 추가하지 않는다.
+- Division과 signed cubic의 event 구조는 Appendix A의 GELU 비용 표와 같다. 입력 5개에 대해 log positive 5, log negative 5, reference 1, exponential-difference internal 15, exponential input 5, division numerator와 denominator 각 5, multiplication data 5와 reference 1을 기록했다. 따라서 비용 모델은 내부 인코더를 이미 세고 있으며, Methodology의 "other $\Psi$ operations remain ideal"만 이 구조와 맞지 않는다.
+
+Multiplication의 scalar reference event가 operator 호출당 한 번만 추출되고 그 호출의 data element에 공유되는 규칙은 본문에서 빼고 Appendix의 기존 counting convention에 명시했다.

@@ -57,7 +57,14 @@ def _condition_key(
     return "continuous"
 
 
-def load_verified_results(root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def load_verified_results(
+    root: Path,
+    *,
+    time_step_tag: str = expected_tag,
+    window_step_tag: str = expected_window_steps_tag,
+    time_step_grid: tuple[float, ...] = expected_time_steps,
+    window_step_grid: tuple[int, ...] = expected_time_steps_per_window,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Load a complete campaign and reject mixed or incomplete evidence."""
 
     experiment_path = root / "experiment.json"
@@ -79,20 +86,20 @@ def load_verified_results(root: Path) -> tuple[dict[str, Any], list[dict[str, An
     if time_steps and window_steps:
         raise ValueError("sweep mixes two clock resolution modes")
     if window_steps:
-        if experiment.get("tag") != expected_window_steps_tag:
+        if experiment.get("tag") != window_step_tag:
             raise ValueError("steps-per-window sweep tag differs")
-        if window_steps != expected_time_steps_per_window:
+        if window_steps != window_step_grid:
             raise ValueError("time steps per window grid differs")
         expected_conditions = ((None, None),) + tuple(
-            (None, value) for value in expected_time_steps_per_window
+            (None, value) for value in window_step_grid
         )
     else:
-        if experiment.get("tag") != expected_tag:
+        if experiment.get("tag") != time_step_tag:
             raise ValueError("time-step sweep tag differs")
-        if time_steps != expected_time_steps:
+        if time_steps != time_step_grid:
             raise ValueError("clock time step grid differs")
         expected_conditions = ((None, None),) + tuple(
-            (value, None) for value in expected_time_steps
+            (value, None) for value in time_step_grid
         )
     if experiment.get("simulation") != "explicit_sequential_state_updates":
         raise ValueError("execution is not the explicit sequential simulation")

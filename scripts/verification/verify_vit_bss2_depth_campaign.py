@@ -41,10 +41,23 @@ def verify_fixed_conditions() -> None:
     conditions = hardware_conditions(
         ROOT / "artifacts/brainscales2-primitives/20260924T_best_median_screen_summary.json"
     )
-    assert conditions["best-measured-coordinate"]["linear_time_std_fraction"] == 0.008752792479355493
-    assert conditions["best-measured-coordinate"]["log_time_std_fraction"] == 0.015681047682163635
+    assert conditions["screening-selected-coordinate"]["linear_time_std_fraction"] == 0.008752792479355493
+    assert conditions["screening-selected-coordinate"]["log_time_std_fraction"] == 0.015681047682163635
+    assert conditions["screening-selected-coordinate"]["interpretation"] == (
+        "screening calibration-selected coordinate remeasurement"
+    )
     assert conditions["screening-median"]["linear_time_std_fraction"] == 0.010838111004060678
     assert conditions["screening-median"]["log_time_std_fraction"] == 0.024617376541590685
+    assert conditions["screening-median"]["phi_np_encoding_window_s"] == (
+        5.0e-6,
+        91.0e-6,
+    )
+    assert conditions["screening-median"]["phi_np_observation_deadline_s"] == 300.0e-6
+    assert conditions["screening-median"]["phi_nl_encoding_window_s"] == (
+        5.0e-6,
+        25.0e-6,
+    )
+    assert conditions["screening-median"]["phi_nl_observation_deadline_s"] == 60.0e-6
     validate_condition_arguments(
         SimpleNamespace(
             condition="clean", first_block_count=0, seed=0, evaluation_samples=500
@@ -61,7 +74,7 @@ def verify_fixed_conditions() -> None:
     for candidate in (
         SimpleNamespace(condition="clean", first_block_count=1, seed=0, evaluation_samples=500),
         SimpleNamespace(
-            condition="best-measured-coordinate",
+            condition="screening-selected-coordinate",
             first_block_count=0,
             seed=0,
             evaluation_samples=500,

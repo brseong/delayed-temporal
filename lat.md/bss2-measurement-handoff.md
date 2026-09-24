@@ -86,6 +86,8 @@ Timing-only evaluation은 continuous potential을 유지한다. Deployment proxy
 
 다음 선택은 결과를 본 뒤 바꾸지 않는 protocol 결정이다.
 
+현재 ICLR 원고에 사용되는 값은 이 formal 계약의 완료 결과가 아니라 representative-code screening 결과다. NP는 code당 calibration 8회와 validation 8회, NL은 각각 16회를 사용했으며, NP의 population median은 완화된 eligibility rule로 얻었다.
+
 - Operating point는 eligible circuit들의 calibration median $r_t$로 선택하며 best coordinate 값으로 선택하지 않는다.
 - Coordinate quantile은 calibration data로만 정하고 validation에서 다시 선택하지 않는다.
 - $\phi_{\mathrm{NP}}$와 $\phi_{\mathrm{NL}}$은 각각 자신의 frozen signal span을 사용한다.
@@ -165,7 +167,7 @@ Current-schema ViT-B evaluation을 GPU 0과 GPU 1에서 독립 프로세스로 �
 - GPU 1: $\phi_{\mathrm{NP}}+\phi_{\mathrm{NL}}$.
 - 먼저 동일 fixed 500-image subset에서 smoke/selection evaluation을 수행한다.
 - 최종 paper result는 고정된 5,000-image population과 기존 seed contract를 따른다.
-- Clean, best, median, 90th-percentile measured conditions를 같은 evaluator로 비교한다.
+- Clean, screening-selected coordinate, screening median, 그리고 formal 측정이 완료될 경우 90th-percentile condition을 같은 evaluator로 비교한다.
 - Sweep은 최소 $10^{-5}$부터 가장 큰 formal validation $r_t$ 이상까지 포함한다.
 - 각 결과는 encoder별 $r_t$, primitive latency, observed model miss rate와 accuracy를 함께 기록한다.
 
@@ -210,7 +212,7 @@ Model artifact에는 다음 항목이 필요하다.
 - NP/NL injection scale and source hardware artifact;
 - quantization and mapping-error flags;
 - seed, accuracy, confidence interval and miss statistics;
-- measured-condition label: best, median, 90th percentile, or clean.
+- measured-condition label: screening-selected coordinate, screening median, formal 90th percentile, or clean.
 
 ## 완료 판정
 

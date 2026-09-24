@@ -32,6 +32,10 @@ class EncoderMeasurement:
     calibration_sigma_s: float
     validation_sigma_s: float
     signal_span_s: float
+    encoding_window_start_s: float
+    encoding_window_end_s: float
+    encoding_window_duration_s: float
+    observation_deadline_s: float
 
 
 @dataclass(frozen=True)
@@ -79,6 +83,7 @@ class Cell:
 
 def _measurement(payload: dict[str, Any], encoder: str) -> EncoderMeasurement:
     median = payload["screening_median"]
+    window = payload["encoding_window_s"]
     measurement = EncoderMeasurement(
         encoder=encoder,
         physical_coordinate=int(median["physical_coordinate"]),
@@ -87,6 +92,10 @@ def _measurement(payload: dict[str, Any], encoder: str) -> EncoderMeasurement:
         calibration_sigma_s=float(median["calibration_sigma_s"]),
         validation_sigma_s=float(median["validation_sigma_s"]),
         signal_span_s=float(median["signal_span_s"]),
+        encoding_window_start_s=float(window[0]),
+        encoding_window_end_s=float(window[1]),
+        encoding_window_duration_s=float(payload["encoding_window_duration_s"]),
+        observation_deadline_s=float(payload["observation_deadline_s"]),
     )
     for field in (
         measurement.calibration_rt,
@@ -94,6 +103,8 @@ def _measurement(payload: dict[str, Any], encoder: str) -> EncoderMeasurement:
         measurement.calibration_sigma_s,
         measurement.validation_sigma_s,
         measurement.signal_span_s,
+        measurement.encoding_window_duration_s,
+        measurement.observation_deadline_s,
     ):
         if not math.isfinite(field) or field <= 0.0:
             raise ValueError(f"{encoder} screening median contains a non-positive value")
@@ -105,6 +116,15 @@ def _measurement(payload: dict[str, Any], encoder: str) -> EncoderMeasurement:
         abs_tol=0.0,
     ):
         raise ValueError(f"{encoder} validation r_t is not normalized by its own span")
+    if not math.isclose(
+        measurement.encoding_window_end_s - measurement.encoding_window_start_s,
+        measurement.encoding_window_duration_s,
+        rel_tol=1.0e-12,
+        abs_tol=1.0e-15,
+    ):
+        raise ValueError(f"{encoder} encoding window duration differs")
+    if measurement.observation_deadline_s < measurement.encoding_window_end_s:
+        raise ValueError(f"{encoder} deadline precedes its encoding window")
     return measurement
 
 

@@ -256,7 +256,7 @@ This diagnostic measures converted ViT-B accuracy as timing noise is enabled in 
 
 Both $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ are active inside each selected block, but each uses its own measured validation $r_t$ and local signal span. The two fractions are never averaged or replaced by one shared value.
 
-The authenticated hardware summary has SHA-256 `639a908ac4b86440ef706afcd98467117cbf0f1e5424ca3e8de5f4ef8802f6c0`. The best measured coordinate uses $(r_{t,\mathrm{NP}},r_{t,\mathrm{NL}})=(0.008752792479355493,0.015681047682163635)$; the screening median uses $(0.010838111004060678,0.024617376541590685)$. The latter is not labeled a chip-wide median because the NP screen retained only 4 usable coordinates among 63 measured coordinates.
+The authenticated hardware summary has SHA-256 `639a908ac4b86440ef706afcd98467117cbf0f1e5424ca3e8de5f4ef8802f6c0`. The coordinates selected using screening calibration repetitions use $(r_{t,\mathrm{NP}},r_{t,\mathrm{NL}})=(0.008752792479355493,0.015681047682163635)$ on held-out remeasurement; the screening median uses $(0.010838111004060678,0.024617376541590685)$. NP records its $5$--$91$ microsecond encoding interval and $300$ microsecond deadline, while NL records $5$--$25$ and $60$ microseconds. Neither condition is labeled chip-wide because the NP screen retained only 4 usable coordinates among 63 measured coordinates.
 
 ### Condition Execution
 
@@ -614,6 +614,8 @@ The paper’s SOP formulas have a dedicated symbolic regression checker independ
 [[scripts/verification/verify_sop.py#main]] recomputes atomic operators, module costs, full ViT formulas, and published rounded values. It encodes fixed-scalar multiplication as free weight calibration through [[scripts/verification/verify_sop.py#free_scale]] instead of counting raw Python calls.
 
 This verifies internal arithmetic consistency under the stated SOP model. It does not validate routing, memory, circuit feasibility, or a physical hardware implementation.
+
+The checker targets the NeurIPS appendix values, including the 4.31, 16.3, and 56.9 billion ViT totals. The ICLR 2027 appendix uses a different cost model whose totals are 4.75, 17.87, and 62.36 billion; on 2026-09-24 a manual recomputation of its block, stem, final LayerNorm, and head formulas reproduced all four published totals, but no maintained checker covers them. See [[noise-timestamp-audit#ICLR 원고 연산자 표와 잡음 모델 대조]].
 
 ## Manuscript Terminology and Notation Check
 

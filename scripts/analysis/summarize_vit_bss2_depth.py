@@ -33,11 +33,11 @@ from scripts.runtime import identity
 
 T_CRITICAL_DF2_975 = 4.302652729911275
 DISPLAY_NAMES = {
-    "best-measured-coordinate": "best measured coordinate",
+    "screening-selected-coordinate": "screening-selected coordinate",
     "screening-median": "screening median",
 }
 COLORS = {
-    "best-measured-coordinate": "#1f77b4",
+    "screening-selected-coordinate": "#1f77b4",
     "screening-median": "#d62728",
 }
 

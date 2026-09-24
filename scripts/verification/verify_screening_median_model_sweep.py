@@ -58,6 +58,10 @@ def verify_measurement_and_grid(hardware_summary: Path) -> None:
     assert pair.phi_nl.physical_coordinate == 1
     assert pair.phi_np.validation_rt == 0.010838111004060678
     assert pair.phi_nl.validation_rt == 0.024617376541590685
+    assert pair.phi_np.encoding_window_duration_s == 86.0e-6
+    assert pair.phi_np.observation_deadline_s == 300.0e-6
+    assert pair.phi_nl.encoding_window_duration_s == 20.0e-6
+    assert pair.phi_nl.observation_deadline_s == 60.0e-6
     linear, logarithmic = scaled_fractions(pair, "0.3")
     assert linear == pair.phi_np.validation_rt * 0.3
     assert logarithmic == pair.phi_nl.validation_rt * 0.3
