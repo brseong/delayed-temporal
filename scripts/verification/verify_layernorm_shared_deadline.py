@@ -187,7 +187,12 @@ def verify_primitive_deadline_stays_strict():
         time, normal, time, wider, drive, drive_domain,
         observation_deadline=deadline,
     ), "must not precede")
-    event = SpikeSample(time=time, fired=torch.ones_like(time, dtype=torch.bool), domain=normal)
+    event = SpikeSample(
+        time=time,
+        fired=torch.ones_like(time, dtype=torch.bool),
+        domain=normal,
+        observation_deadline=deadline,
+    )
     _expect_error(lambda: signed_pulse_width_modulation_operator(
         event, normal, time, normal, drive, drive_domain,
         observation_deadline=math.nextafter(deadline, math.inf),

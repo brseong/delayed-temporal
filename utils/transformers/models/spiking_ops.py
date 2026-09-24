@@ -499,8 +499,16 @@ class SpikingLayerNorm(nn.Module):
         else:
             if isinstance(t_sigma, SpikeSample):
                 # All three log encoders describe two differential readouts and must
-                # use the same observation deadline before their rail masks combine.
+                # share both their nominal code interval and receiver cutoff.
                 if not (t_sigma.domain == t_err_pos.domain == t_err_neg.domain):
+                    raise ValueError(
+                        "LayerNorm log events require a shared code interval"
+                    )
+                if not (
+                    t_sigma.observation_deadline
+                    == t_err_pos.observation_deadline
+                    == t_err_neg.observation_deadline
+                ):
                     raise ValueError(
                         "LayerNorm log events require a shared observation deadline"
                     )
@@ -509,7 +517,9 @@ class SpikingLayerNorm(nn.Module):
                 # time-to-deadline pulse widths. Each miss leaves only its own rail at
                 # reset, matching signed PWM without invoking the disabled exponential-
                 # difference operator or sampling its internal exponential event.
-                deadline = t_sigma.time.new_tensor(float(t_sigma.domain.max))
+                deadline = t_sigma.time.new_tensor(
+                    float(t_sigma.observation_deadline)
+                )
                 sigma_pulse_width = torch.where(
                     t_sigma.fired,
                     (deadline - t_sigma.time).clamp_min(0.0),
@@ -1004,7 +1014,7 @@ class SpikingLinear(nn.Linear):
         signed_pulse_width = signed_pulse_width_duration(
             data_event,
             reference_event,
-            observation_deadline=float(data_event.domain.max),
+            observation_deadline=float(data_event.observation_deadline),
             time_bounds=data_event.domain,
         )
 
@@ -1017,7 +1027,7 @@ class SpikingLinear(nn.Linear):
         #     data_event_i, data_event.domain,
         #     reference_event, reference_event.domain,
         #     self.weight[j, i], weight_domain,
-        #     observation_deadline=float(data_event.domain.max),
+        #     observation_deadline=float(data_event.observation_deadline),
         # )
         # y_j = sum_i(pwm_ji) + bias_j
         y = nn.functional.linear(signed_pulse_width, self.weight, self.bias)
@@ -1286,7 +1296,7 @@ class SpikingConv2d(nn.Conv2d):
         signed_pulse_width = signed_pulse_width_duration(
             data_event,
             reference_event,
-            observation_deadline=float(data_event.domain.max),
+            observation_deadline=float(data_event.observation_deadline),
             time_bounds=data_event.domain,
         )
 
@@ -1297,7 +1307,7 @@ class SpikingConv2d(nn.Conv2d):
         #     data_event_at_input, data_event.domain,
         #     reference_event, reference_event.domain,
         #     self.weight[out_channel, in_channel, kh, kw], weight_domain,
-        #     observation_deadline=float(data_event.domain.max),
+        #     observation_deadline=float(data_event.observation_deadline),
         # )
         # y = sum_receptive_field(pwm_synapse) + bias
         #

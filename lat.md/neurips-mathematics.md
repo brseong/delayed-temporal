@@ -65,7 +65,7 @@ $$
 
 Composition table의 $f_{\mathrm{Exp}}$ 행에만 $w$나 $\kappa^{-1}\cdot_{\mkern-2mu\scriptscriptstyle\Psi}$를 노출하면 다른 operator mapping과 추상화 수준이 달라진다. 모든 $\Psi$ operator가 fixed receiving synaptic gain을 가진다는 공통 규칙을 먼저 두고, 이 gain은 입력과 무관한 multiplicative prefactor만 상쇄할 수 있다고 한정한다. Primitive table에서는 $\psi_{\mathrm{NE}}$ 행에만 있는 $w$를 제거하며, $\alpha\cdot_{\mkern-2mu\scriptscriptstyle\Psi}z$는 composition에서 함수상 fixed coefficient를 드러낼 때만 쓴다. $f_{\mathrm{Exp}}$에 필요한 gain 값과 GELU 분모에서의 적용 순서는 appendix derivation에 명시하는 편이 일관된다.
 
-물리적 관측 시각을 $t_{\mathrm{obs}}$에서 $t_{\mathrm{obs}}+\Delta$로 옮긴다면 normalized decoding을 유지하기 위해 fixed readout gain을 $\exp(\Delta/\tau_m)$만큼 늘려야 한다. 반면 현행 observation margin은 [[utils/transforms/noise.py#_sample_gaussian_spike_time]]에서 event의 delivered/missed 판정 시각만 늦추고 nominal code deadline과 downstream bounds는 유지하며, 허용된 늦은 timestamp를 nominal deadline에 clamp한다. 따라서 현재 실험의 margin은 [[utils/transforms/functions.py#exponential_function]]의 prefactor를 바꾸지 않는다. 원고에서는 이 event 허용 구간과 exponential readout의 물리적 관측 시각 이동을 구별해야 한다.
+물리적 관측 시각을 $t_{\mathrm{obs}}$에서 $t_{\mathrm{obs}}+\Delta$로 옮긴다면 normalized decoding을 유지하기 위해 fixed readout gain을 $\exp(\Delta/\tau_m)$만큼 늘려야 한다. 현행 observation margin은 [[utils/transforms/noise.py#_sample_gaussian_spike_time]]에서 nominal code interval과 receiver cutoff를 분리하고, 허용된 늦은 timestamp를 그대로 보존한다. Physical pulse-width modulation은 늘어난 receiver cutoff를 사용하지만 [[utils/transforms/functions.py#exponential_function]]은 nominal code mapping의 prefactor를 유지한 채 raw timestamp를 디코딩한다. 원고에서는 event 허용 구간, pulse-width readout 시각, exponential decoding 기준을 구별해야 한다.
 
 ## Softmax 범위와 공통 배율
 

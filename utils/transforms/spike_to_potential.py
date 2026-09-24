@@ -219,6 +219,7 @@ def _gaussian_exponential_difference_operator(
             time=time_A,
             domain=domain_t_A,
             fired=torch.ones_like(time_A, dtype=torch.bool),
+            observation_deadline=float(domain_t_A.max),
         )
     if isinstance(t_B, SpikeSample):
         event_B = t_B
@@ -228,13 +229,14 @@ def _gaussian_exponential_difference_operator(
             time=time_B,
             domain=domain_t_B,
             fired=torch.ones_like(time_B, dtype=torch.bool),
+            observation_deadline=float(domain_t_B.max),
         )
 
     # Both causal rails participate in one differential readout and therefore must
     # use the same fixed observation deadline before their miss masks are applied.
     if not isclose(
-        float(event_A.domain.max),
-        float(event_B.domain.max),
+        float(event_A.observation_deadline),
+        float(event_B.observation_deadline),
         rel_tol=1.0e-9,
         abs_tol=1.0e-12,
     ):
@@ -252,7 +254,7 @@ def _gaussian_exponential_difference_operator(
         domain_t_B,
         event_A.time.new_tensor(-1.0),
         PotentialBounds(-1.0, -1.0),
-        observation_deadline=float(event_A.domain.max),
+        observation_deadline=float(event_A.observation_deadline),
     )
 
     # The ideal PWM rails remain determined by the declared input-time endpoints.
@@ -282,11 +284,12 @@ def _gaussian_exponential_difference_operator(
         internal_time_domain.min - intermediate_domain.max,
         internal_time_domain.max - intermediate_domain.max,
     )
-    exponential_input = torch.clamp(
-        internal_event.time - float(intermediate_domain.max),
-        min=float(exponential_input_domain.min),
-        max=float(exponential_input_domain.max),
+    decoded_internal_time = torch.where(
+        internal_event.fired,
+        internal_event.time,
+        internal_event.time.new_tensor(float(internal_event.domain.max)),
     )
+    exponential_input = decoded_internal_time - float(intermediate_domain.max)
 
     # Apply the physical membrane scale to both declared endpoints before decoding
     # the carrier. This makes log-encoded differences tau_s*log(X/Y) return X/Y

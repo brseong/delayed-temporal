@@ -49,19 +49,19 @@ class TimeBounds(ClosedBounds): pass
 
 
 class SpikeSample(NamedTuple):
-    """Finite spike-time storage paired with an explicit delivery mask.
+    """Raw delivered spike time with separate code and observation intervals.
 
-    ``time`` always remains inside ``domain`` so downstream tensor operations never
-    receive infinities or sentinel values outside the declared temporal interval.
-    When an event misses the fixed observation deadline, ``time`` stores
-    ``domain.max`` only as a finite carrier and ``fired`` is false. Consumers must
-    therefore consult ``fired`` before interpreting the stored timestamp as an
-    event that physically arrived.
+    ``domain`` is the nominal encoding interval and does not widen when a receiver
+    waits beyond the latest codeword. ``observation_deadline`` is the actual inclusive
+    delivery cutoff. A delivered ``time`` may therefore lie outside ``domain`` after
+    additive timing error. Misses store the finite observation deadline as a carrier;
+    consumers must inspect ``fired`` before interpreting that carrier as an event.
     """
 
-    time: Tensor  # Delivered time, or the finite deadline carrier for a missed event.
-    domain: TimeBounds  # Code interval whose maximum is the observation deadline.
+    time: Tensor  # Raw delivered time, or the finite carrier for a missed event.
+    domain: TimeBounds  # Nominal code interval used by the encoder and decoder.
     fired: Tensor  # Boolean tensor distinguishing delivered events from deadline misses.
+    observation_deadline: float  # Inclusive receiver cutoff for this sample.
 
 
 OutBoundsT = TypeVar("OutBoundsT", bound=ClosedBounds)

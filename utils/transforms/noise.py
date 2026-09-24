@@ -442,7 +442,7 @@ def _broadcast_gaussian_time_inputs(
         nominal_time: Deterministic encoder output inside ``domain``.
         time_mean: Scalar or broadcastable absolute Gaussian mean.
         time_std: Scalar or broadcastable non-negative absolute standard deviation.
-        domain: Fixed TTFS interval whose maximum is the observation deadline.
+        domain: Fixed nominal TTFS encoding interval.
 
     Returns:
         Broadcast nominal time, mean, and standard-deviation tensors sharing the
@@ -459,8 +459,8 @@ def _broadcast_gaussian_time_inputs(
     if not torch.is_floating_point(nominal_time):
         raise TypeError("nominal_time must be a floating-point tensor")
 
-    # TimeBounds.max is both the code endpoint and the physical observation
-    # deadline, so invalid endpoints would make every later miss decision ambiguous.
+    # TimeBounds declares the nominal code interval. The sampler may derive a later
+    # receiver cutoff from its upper endpoint and a validated observation margin.
     if not isinstance(domain, TimeBounds):
         raise TypeError("domain must be a TimeBounds instance")
     domain_min = float(domain.min)
@@ -516,14 +516,15 @@ def gaussian_deadline_miss_probability(
 ) -> Tensor:
     """Return the analytic probability that a Gaussian event misses its deadline.
 
-    This function evaluates ``P(t_nominal + N(time_mean, time_std) > domain.max)``
-    without drawing a random sample. Equality with ``domain.max`` is a delivered
-    event, matching the fixed-deadline rule used by the event sampler.
+    This function evaluates the probability that
+    ``t_nominal + N(time_mean, time_std)`` exceeds ``domain.max + deadline_margin``
+    without drawing a random sample. Equality with that receiver cutoff is delivered,
+    matching the inclusive rule used by the event sampler.
 
     Args:
         nominal_time: Deterministic encoder output inside ``domain``.
         time_std: Scalar or broadcastable absolute Gaussian standard deviation.
-        domain: Fixed TTFS interval whose maximum is the observation deadline.
+        domain: Fixed nominal TTFS encoding interval.
         time_mean: Scalar or broadcastable absolute Gaussian mean.
 
     Returns:
@@ -576,14 +577,15 @@ def _sample_gaussian_spike_time(
     """Sample one Gaussian timing error and classify event delivery.
 
     A single sampled timestamp determines both the delivered time and whether the
-    event misses ``domain.max``. Misses retain the deadline as finite tensor storage
-    while ``SpikeSample.fired`` preserves the physical distinction between a miss
-    and an event delivered exactly at the deadline.
+    event misses the receiver deadline. Delivered events retain that raw timestamp,
+    including values outside the nominal code interval. Misses retain the receiver
+    deadline as finite tensor storage while ``SpikeSample.fired`` preserves the
+    physical distinction between a miss and an event delivered exactly at cutoff.
 
     Args:
         nominal_time: Deterministic encoder output inside ``domain``.
         time_std: Scalar or broadcastable absolute Gaussian standard deviation.
-        domain: Fixed TTFS interval whose maximum is the observation deadline.
+        domain: Fixed nominal TTFS encoding interval.
         generator: Dedicated stateful RNG for the current evaluation replica.
         time_mean: Scalar or broadcastable absolute Gaussian mean.
 
@@ -628,24 +630,23 @@ def _sample_gaussian_spike_time(
     if not math.isfinite(normalized_margin) or normalized_margin < 0.0:
         raise ValueError("deadline_margin must be finite and non-negative")
 
-    # The upper endpoint is inclusive. A positive grace interval accepts a late
-    # arrival before the receiver deadline, but its stored carrier still saturates
-    # at the nominal code rail to preserve downstream bounds and clean arithmetic.
-    start = nominal.new_tensor(float(domain.min))
-    code_deadline = nominal.new_tensor(float(domain.max))
+    # The receiver cutoff is inclusive. Keep the code interval separate because a
+    # positive margin changes when the receiver stops waiting, not the encoder map.
+    receiver_deadline_value = float(domain.max) + normalized_margin
     receiver_deadline = nominal.new_tensor(
-        float(domain.max) + normalized_margin
+        receiver_deadline_value
     )
     fired = raw_time <= receiver_deadline
 
-    # Events earlier than the modeled interval are observable from its start. Do
-    # not upper-clamp here because late samples must first remain identifiable misses.
-    delivered_time = torch.clamp(raw_time, min=start, max=code_deadline)
-
-    # Replace every missed raw timestamp with a finite deadline carrier. Consumers
-    # must use fired—not the stored value—to distinguish misses from on-time arrivals.
-    stored_time = torch.where(fired, delivered_time, code_deadline)
-    return SpikeSample(time=stored_time, domain=domain, fired=fired)
+    # Preserve every delivered raw timestamp. Only misses receive a finite carrier,
+    # and their false delivery mask prevents consumers from treating it as an event.
+    stored_time = torch.where(fired, raw_time, receiver_deadline)
+    return SpikeSample(
+        time=stored_time,
+        domain=domain,
+        fired=fired,
+        observation_deadline=receiver_deadline_value,
+    )
 # ---------------------------------------------------------------------------
 # Gaussian encoder injection boundary
 # ---------------------------------------------------------------------------
@@ -742,6 +743,7 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
                     time=nominal_time,
                     domain=out_domain,
                     fired=torch.ones_like(nominal_time, dtype=torch.bool),
+                    observation_deadline=float(out_domain.max),
                 )
 
             # An omitted override preserves the historical shared-parameter path.

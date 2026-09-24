@@ -165,8 +165,8 @@ def _gaussian_attention_value_readout(
     # Both rails participate in one differential readout, so accepting different
     # deadlines would make their common-reference subtraction undefined.
     if not math.isclose(
-        float(value_event.domain.max),
-        float(reference_event.domain.max),
+        float(value_event.observation_deadline),
+        float(reference_event.observation_deadline),
         rel_tol=1.0e-9,
         abs_tol=1.0e-12,
     ):
@@ -180,7 +180,7 @@ def _gaussian_attention_value_readout(
     signed_pulse_width = signed_pulse_width_duration(
         value_event,
         reference_event,
-        observation_deadline=float(value_event.domain.max),
+        observation_deadline=float(value_event.observation_deadline),
         time_bounds=value_event.domain,
     )
 
@@ -191,7 +191,7 @@ def _gaussian_attention_value_readout(
     #     value_event_sd, value_event.domain,
     #     reference_event, reference_event.domain,
     #     attn_weight_qs, PotentialBounds(0.0, 1.0),
-    #     observation_deadline=float(value_event.domain.max),
+    #     observation_deadline=float(value_event.observation_deadline),
     # )
     # attn_output_qd = sum_s(pwm_qsd)
     #

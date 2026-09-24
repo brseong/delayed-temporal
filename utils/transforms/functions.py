@@ -77,7 +77,7 @@ def _gaussian_multiplication_operator(
         reference_event.domain,
         V,
         domain_V,
-        observation_deadline=float(data_event.domain.max),
+        observation_deadline=float(data_event.observation_deadline),
     )
 
     # Gaussian excursions do not expand the ideal product rails. The encoder still
@@ -297,13 +297,12 @@ def _gaussian_exponential_function(
             "Gaussian exponential encoding must return SpikeSample"
         )
 
-    # The sampler already stores early arrivals at the window start and misses at
-    # the finite deadline. Clamp defensively to the declared carrier interval before
-    # applying an exponentially sensitive readout.
-    delivered_time = torch.clamp(
+    # Decode the delivered raw timestamp directly. The sampled event may lie outside
+    # the nominal code interval; only the final potential contract applies saturation.
+    delivered_time = torch.where(
+        event.fired,
         event.time,
-        min=float(event.domain.min),
-        max=float(event.domain.max),
+        event.time.new_tensor(float(event.domain.max)),
     )
 
     # Build the final exponent directly after applying each composition's fixed
@@ -1326,20 +1325,19 @@ def _gaussian_swiglu_function(
     if not isinstance(exponential_event, SpikeSample):
         raise RuntimeError("Gaussian SwiGLU encoding must return SpikeSample")
 
-    # Clamp the stored carrier to the finite observation window before evaluating
-    # the deadline response. Early samples already live at the window start, while
-    # missed samples retain the deadline only as metadata for downstream accounting.
-    delivered_time = torch.clamp(
+    # Decode the delivered raw timestamp directly. A missed event is still masked to
+    # reset below, so its finite observation-deadline carrier is never interpreted.
+    delivered_time = torch.where(
+        exponential_event.fired,
         exponential_event.time,
-        min=float(exponential_event.domain.min),
-        max=float(exponential_event.domain.max),
+        exponential_event.time.new_tensor(float(exponential_event.domain.max)),
     )
 
     # The raw deadline response is biased by exp(z_min/tau_s), where z=beta*u.
     # This is the same fixed factor produced by exp_operator in the deterministic
     # path and is independent of the sampled input event within this operator call.
-    deadline = delivered_time.new_tensor(float(exponential_event.domain.max))
-    biased_exp = torch.exp(-(deadline - delivered_time) / tau_s)
+    code_deadline = delivered_time.new_tensor(float(exponential_event.domain.max))
+    biased_exp = torch.exp(-(code_deadline - delivered_time) / tau_s)
     bias_cancellation_gain = exp(-scaled_domain_u_clamped.min / tau_s)
 
     # Apply the fixed synaptic-current gain only to delivered events. A missed
