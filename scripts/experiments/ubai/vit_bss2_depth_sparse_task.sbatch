@@ -25,6 +25,12 @@ task_index="$SLURM_ARRAY_TASK_ID"
 evaluation_samples="${DEPTH_EVALUATION_SAMPLES:-5000}"
 [[ "$evaluation_samples" == 500 || "$evaluation_samples" == 5000 ]]
 
+authenticated_runner_commit="$(git -C "$DEPTH_RUNNER_SOURCE" rev-parse HEAD)"
+authenticated_evaluator_commit="$(git -C "$DEPTH_EVALUATOR_SOURCE" rev-parse HEAD)"
+[[ "$authenticated_evaluator_commit" == 52fd758dfee41c9eeb8f8124b6c1dde9ff16bc0f ]]
+[[ -z "$(git -C "$DEPTH_RUNNER_SOURCE" status --porcelain --untracked-files=no)" ]]
+[[ -z "$(git -C "$DEPTH_EVALUATOR_SOURCE" status --porcelain --untracked-files=no)" ]]
+
 scales=(0.03 0.1)
 prefixes=(1 2 4 8 12)
 scale_index="$((task_index / 15))"
@@ -81,6 +87,9 @@ srun --ntasks=1 --gres=gpu:1 \
     TORCH_HOME=/work-tmp/torch TRITON_CACHE_DIR=/work-tmp/triton \
     CUDA_CACHE_PATH=/work-tmp/cuda MPLCONFIGDIR=/work-tmp/matplotlib \
     PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    PATH="$runner_root/scripts/experiments/ubai/git-shim:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    DEPTH_AUTHENTICATED_RUNNER_COMMIT="$authenticated_runner_commit" \
+    DEPTH_AUTHENTICATED_EVALUATOR_COMMIT="$authenticated_evaluator_commit" \
     PYTHONPATH="$evaluator_root:$evaluator_root/src/transformers/src:$evaluator_root/src/spikingjelly" \
     WANDB_MODE=disabled WANDB_SILENT=true WANDB_CONSOLE=off \
     HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
