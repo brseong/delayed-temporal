@@ -284,6 +284,8 @@ The controller prepares one clean baseline and calibration per model before rele
 
 [[scripts/experiments/run_screening_median_text_sweep.py#main]] distributes resumable conditions across baekryun GPUs, preserves immutable request shards, and keeps multiplier and GPU choices outside the scientific protocol identity.
 
+The controller places preparation outputs below the campaign artifacts root while retaining the canonical fixed comparison layout and checks.
+
 ### Summary Artifacts
 
 The reducer keeps task metrics separate rather than combining accuracy and perplexity on one scale.

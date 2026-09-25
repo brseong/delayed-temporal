@@ -23,6 +23,11 @@ from scripts.analysis.summarize_screening_median_text_sweep import (
 )
 from scripts.evaluation import error_analysis_gpt2, error_analysis_roberta
 from scripts.experiments.run_screening_median_text_condition import evaluator_command
+from scripts.experiments.run_screening_median_text_sweep import (
+    preparation_artifacts_root,
+    preparation_root,
+    preparation_runtime_root,
+)
 from scripts.experiments.screening_median_text_sweep import (
     TEXT_INITIAL_ALPHAS,
     TEXT_MODELS,
@@ -97,6 +102,29 @@ def verify_grid_and_command() -> None:
     assert command[command.index("--time-noise-deadline-margin-std") + 1] == "4.0"
 
 
+def verify_preparation_layout() -> None:
+    """Require campaign isolation without weakening the canonical fixed layout."""
+
+    args = SimpleNamespace(output_root=Path("/artifacts/results/text-campaign"))
+    artifacts = preparation_artifacts_root(args)
+    assert artifacts == args.output_root / "preparation_artifacts"
+    assert preparation_root(args, "roberta_base") == (
+        artifacts
+        / "logs/conversion_comparison"
+        / "conversion_comparison_end_to_end_local_ranges_float64_v1"
+        / "text/roberta"
+    )
+    assert preparation_root(args, "gpt2") == (
+        artifacts
+        / "logs/conversion_comparison"
+        / "gpt2_end_to_end_local_ranges_float64_v1"
+        / "text/gpt2"
+    )
+    assert preparation_runtime_root(args, "gpt2") == (
+        artifacts / "runtime/gpt2_end_to_end_local_ranges_float64_v1/text"
+    )
+
+
 def fixture_protocol() -> dict:
     return {
         "resources": {
@@ -144,6 +172,7 @@ def fixture_rows() -> list[dict]:
 def main() -> None:
     verify_evaluator_arguments()
     verify_grid_and_command()
+    verify_preparation_layout()
     summary = summarize(fixture_protocol(), fixture_rows())
     assert len(summary) == 4
     assert {row["metric"] for row in summary} == {"accuracy", "token_weighted_perplexity"}

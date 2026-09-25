@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -38,6 +39,7 @@ MODEL_CONFIG = {
     "roberta_base": {
         "family": "roberta",
         "evaluator_family": "roberta",
+        "preparation_tag": "conversion_comparison_end_to_end_local_ranges_float64_v1",
         "task": "sst2",
         "activation": "gelu",
         "model_id": ASSETS / "checkpoints/roberta",
@@ -49,6 +51,7 @@ MODEL_CONFIG = {
     "gpt2": {
         "family": "gpt2",
         "evaluator_family": "gpt2",
+        "preparation_tag": "gpt2_end_to_end_local_ranges_float64_v1",
         "task": "wikitext2",
         "activation": "gelu_new",
         "model_id": ASSETS / "checkpoints/gpt2",
@@ -58,6 +61,37 @@ MODEL_CONFIG = {
         "evaluation_fingerprint": "38d46c7ecf7254ca",
     },
 }
+
+
+def preparation_artifacts_root(args: argparse.Namespace) -> Path:
+    """Return the campaign-local artifacts root used by the canonical preparer."""
+
+    return args.output_root / "preparation_artifacts"
+
+
+def preparation_root(args: argparse.Namespace, model: str) -> Path:
+    """Return one canonical fixed-layout preparation directory."""
+
+    config = MODEL_CONFIG[model]
+    return (
+        preparation_artifacts_root(args)
+        / "logs/conversion_comparison"
+        / config["preparation_tag"]
+        / "text"
+        / config["family"]
+    )
+
+
+def preparation_runtime_root(args: argparse.Namespace, model: str) -> Path:
+    """Return the fixed-layout runtime parent expected by the preparer."""
+
+    config = MODEL_CONFIG[model]
+    return (
+        preparation_artifacts_root(args)
+        / "runtime"
+        / config["preparation_tag"]
+        / "text"
+    )
 
 
 def complete(path: Path) -> bool:
@@ -85,7 +119,7 @@ def preparation_command(args: argparse.Namespace, model: str, gpu: int) -> list[
     """Build one complete clean text-model preparation command."""
 
     config = MODEL_CONFIG[model]
-    output = args.output_root / "prepare" / model
+    output = preparation_root(args, model)
     command = [
         args.python_bin,
         "-u",
@@ -115,7 +149,7 @@ def preparation_command(args: argparse.Namespace, model: str, gpu: int) -> list[
         "--output-root",
         str(output),
         "--runtime-root",
-        str(args.runtime_root / "prepare" / model),
+        str(preparation_runtime_root(args, model)),
     ]
     if gpu < 4:
         command.append("--campaign-extra-local-gpus")
@@ -125,16 +159,21 @@ def preparation_command(args: argparse.Namespace, model: str, gpu: int) -> list[
 def prepare_one(args: argparse.Namespace, model: str, gpu: int) -> None:
     """Prepare a clean baseline and calibration after the selected GPU is idle."""
 
-    output = args.output_root / "prepare" / model
+    output = preparation_root(args, model)
     if complete(output / "result.json"):
         return
     wait_for_gpu(gpu)
-    log_path = output / "controller.log"
+    log_path = args.output_root / "prepare" / model / "controller.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as log:
+        environment = dict(os.environ)
+        environment["DELAYED_TEMPORAL_ARTIFACTS_ROOT"] = str(
+            preparation_artifacts_root(args)
+        )
         subprocess.run(
             preparation_command(args, model, gpu),
             cwd=args.source_root,
+            env=environment,
             stdout=log,
             stderr=subprocess.STDOUT,
             check=True,
@@ -156,7 +195,7 @@ def prepared_resource(args: argparse.Namespace, model: str) -> dict[str, Any]:
     """Build one immutable protocol resource from a complete preparation."""
 
     config = MODEL_CONFIG[model]
-    root = args.output_root / "prepare" / model
+    root = preparation_root(args, model)
     result = json.loads((root / "result.json").read_text(encoding="utf-8"))
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     if result.get("state") != "complete" or manifest.get("source_commit") != args.expected_commit:
