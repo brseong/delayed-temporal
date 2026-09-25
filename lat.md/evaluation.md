@@ -296,6 +296,10 @@ The reducer keeps task metrics on distinct axes while aligning their determinist
 
 The combined model figure places classification accuracy change on the left axis and GPT-2 negative relative perplexity increase on the right axis. Both deterministic references are zero and degradation is negative. The axes share direction and zero but are not numerically comparable.
 
+Formal reduction requires all three replicas for every requested text-model condition. The explicit draft mode omits incomplete conditions and therefore supports interim figures without representing a partial replica set as a confidence interval.
+
+The combined renderer exposes physical size, typography, legend placement, and an explicit GPT-2 display cutoff while retaining the underlying aggregate table. This permits a compact manuscript panel and records which completed GPT-2 points an interim figure displays.
+
 ### Verification
 
 Pure-Python verification covers separate NP/NL controls, the complete cell grid, command construction, task-native reduction, and figure generation.

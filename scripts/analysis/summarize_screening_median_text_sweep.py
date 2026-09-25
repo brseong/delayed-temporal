@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import dataclass
 import json
 import math
 from pathlib import Path
@@ -23,6 +24,22 @@ from scripts.experiments.screening_median_text_sweep import TEXT_MODELS, TEXT_SE
 
 
 T_CRITICAL_DF2_975 = 4.302652729696142
+
+
+@dataclass(frozen=True)
+class ComparisonFigureStyle:
+    """Control the physical size and typography of the combined model panel."""
+
+    width_in: float = 8.8
+    height_in: float = 5.0
+    font_size: float = 10.0
+    legend_size: float = 9.0
+    legend_columns: int = 1
+    legend_above: bool = False
+    gpt2_max_alpha: float | None = None
+    show_title: bool = True
+    compact_labels: bool = False
+    annotate_measured: bool = True
 
 
 def load_rows(root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -80,7 +97,12 @@ def interval(values: list[float]) -> tuple[float, float, float]:
     return mean, mean - half_width, mean + half_width
 
 
-def summarize(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def summarize(
+    protocol: dict[str, Any],
+    rows: list[dict[str, Any]],
+    *,
+    allow_incomplete: bool = False,
+) -> list[dict[str, Any]]:
     """Reduce each model and multiplier to task-native uncertainty metrics."""
 
     grouped: dict[tuple[str, float], list[dict[str, Any]]] = {}
@@ -88,11 +110,13 @@ def summarize(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict
         grouped.setdefault((row["model"], row["alpha"]), []).append(row)
     alphas = {row["alpha"] for row in rows}
     expected = {(model, alpha) for model in TEXT_MODELS for alpha in alphas}
-    if set(grouped) != expected:
+    if not allow_incomplete and set(grouped) != expected:
         raise ValueError(f"text formal grid is incomplete: {sorted(expected - set(grouped))}")
     summary = []
     for (model, alpha), selected in sorted(grouped.items()):
         if {row["seed"] for row in selected} != set(TEXT_SEEDS):
+            if allow_incomplete:
+                continue
             raise ValueError(f"text condition seeds differ: {(model, alpha)}")
         resource = protocol["resources"]["models"][model]
         events = sum(row["events"] for row in selected)
@@ -257,9 +281,23 @@ def aligned_zero_limits(
 
 
 def render_model_comparison(
-    summary: list[dict[str, Any]], vision_root: Path, output: Path
+    summary: list[dict[str, Any]],
+    vision_root: Path,
+    output: Path,
+    *,
+    style: ComparisonFigureStyle | None = None,
 ) -> None:
     """Render classification accuracy and GPT-2 perplexity on aligned axes."""
+
+    style = style or ComparisonFigureStyle()
+    if (
+        style.width_in <= 0
+        or style.height_in <= 0
+        or style.font_size <= 0
+        or style.legend_size <= 0
+        or style.legend_columns < 1
+    ):
+        raise ValueError("comparison figure dimensions and typography must be positive")
 
     with (vision_root / "aggregate.csv").open(newline="", encoding="utf-8") as handle:
         vision = list(csv.DictReader(handle))
@@ -290,7 +328,9 @@ def render_model_comparison(
         for row in summary
         if row["model"] == "roberta_base"
     ]
-    figure, axis = plt.subplots(figsize=(8.8, 5.0), constrained_layout=True)
+    figure, axis = plt.subplots(
+        figsize=(style.width_in, style.height_in), constrained_layout=True
+    )
     accuracy_limits = []
     for model in labels:
         selected = sorted(
@@ -304,11 +344,26 @@ def render_model_comparison(
         low = [row["low"] for row in selected]
         high = [row["high"] for row in selected]
         accuracy_limits.extend([*low, *high])
-        axis.plot(x, mean, marker="o", linewidth=2.0, label=labels[model])
+        axis.plot(
+            x,
+            mean,
+            marker="o",
+            markersize=0.55 * style.font_size,
+            linewidth=0.18 * style.font_size,
+            label=labels[model],
+        )
         axis.fill_between(x, low, high, alpha=0.15)
 
     perplexity_rows = sorted(
-        (row for row in summary if row["model"] == "gpt2"),
+        (
+            row
+            for row in summary
+            if row["model"] == "gpt2"
+            and (
+                style.gpt2_max_alpha is None
+                or float(row["alpha"]) <= style.gpt2_max_alpha
+            )
+        ),
         key=lambda row: row["alpha"],
     )
     if not perplexity_rows:
@@ -325,7 +380,8 @@ def render_model_comparison(
         color="black",
         linestyle="--",
         marker="s",
-        linewidth=2.0,
+        markersize=0.55 * style.font_size,
+        linewidth=0.18 * style.font_size,
         label="GPT-2",
     )
     perplexity_axis.fill_between(
@@ -335,7 +391,17 @@ def render_model_comparison(
         color="black",
         alpha=0.10,
     )
-    perplexity_axis.set_ylabel("Negative relative perplexity increase (%)")
+    axis_label_size = 0.95 * style.font_size
+    tick_size = 0.80 * style.font_size
+    if style.compact_labels:
+        accuracy_label = "Accuracy change (pp)"
+        perplexity_label = "Negative PPL increase (%)"
+        x_label = r"Noise scale $\alpha$"
+    else:
+        accuracy_label = "Accuracy change from deterministic baseline (pp)"
+        perplexity_label = "Negative relative perplexity increase (%)"
+        x_label = "Noise scale multiplier"
+    perplexity_axis.set_ylabel(perplexity_label, fontsize=axis_label_size)
     axis.set_ylim(*aligned_zero_limits(accuracy_limits))
     perplexity_axis.set_ylim(
         *aligned_zero_limits([*perplexity_low, *perplexity_high])
@@ -343,24 +409,40 @@ def render_model_comparison(
     axis.set_xscale("log")
     axis.axvline(1.0, color="black", linestyle=":", linewidth=1.4)
     axis.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
-    axis.text(
-        1.0,
-        0.02,
-        "Measured screening median",
-        transform=axis.get_xaxis_transform(),
-        ha="right",
-        va="bottom",
-    )
-    axis.set_xlabel("Noise scale multiplier")
-    axis.set_ylabel("Accuracy change from deterministic baseline (pp)")
-    axis.set_title("Model sensitivity to measured encoder timing noise")
+    if style.annotate_measured:
+        axis.text(
+            1.0,
+            0.02,
+            "Measured screening median",
+            transform=axis.get_xaxis_transform(),
+            ha="right",
+            va="bottom",
+            fontsize=tick_size,
+        )
+    axis.set_xlabel(x_label, fontsize=axis_label_size)
+    axis.set_ylabel(accuracy_label, fontsize=axis_label_size)
+    if style.show_title:
+        axis.set_title(
+            "Model sensitivity to measured encoder timing noise",
+            fontsize=1.05 * style.font_size,
+        )
     axis.grid(alpha=0.25, which="both")
+    axis.tick_params(axis="both", labelsize=tick_size)
+    perplexity_axis.tick_params(axis="both", labelsize=tick_size)
     accuracy_handles, accuracy_labels = axis.get_legend_handles_labels()
     perplexity_handles, perplexity_labels = perplexity_axis.get_legend_handles_labels()
+    legend_options: dict[str, Any] = {}
+    if style.legend_above:
+        legend_options.update(loc="lower center", bbox_to_anchor=(0.5, 1.01))
     axis.legend(
         accuracy_handles + perplexity_handles,
         accuracy_labels + perplexity_labels,
         frameon=False,
+        fontsize=style.legend_size,
+        ncol=style.legend_columns,
+        columnspacing=0.8,
+        handlelength=1.8,
+        **legend_options,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output.with_suffix(".png"), dpi=220)
@@ -374,9 +456,26 @@ def main() -> None:
     parser.add_argument("--input-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--vision-root", type=Path, required=True)
+    parser.add_argument("--allow-incomplete", action="store_true")
+    parser.add_argument("--comparison-width-in", type=float, default=8.8)
+    parser.add_argument("--comparison-height-in", type=float, default=5.0)
+    parser.add_argument("--comparison-font-size", type=float, default=10.0)
+    parser.add_argument("--comparison-legend-size", type=float, default=9.0)
+    parser.add_argument("--comparison-legend-columns", type=int, default=1)
+    parser.add_argument("--comparison-legend-above", action="store_true")
+    parser.add_argument("--comparison-gpt2-max-alpha", type=float)
+    parser.add_argument(
+        "--comparison-title", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument("--comparison-compact-labels", action="store_true")
+    parser.add_argument(
+        "--comparison-measured-label",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     args = parser.parse_args()
     protocol, raw = load_rows(args.input_root.resolve(strict=True))
-    summary = summarize(protocol, raw)
+    summary = summarize(protocol, raw, allow_incomplete=args.allow_incomplete)
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     write_csv(output / "text_formal_raw.csv", raw)
@@ -387,6 +486,18 @@ def main() -> None:
         summary,
         args.vision_root.resolve(strict=True),
         output / "model_timing_noise_model_comparison",
+        style=ComparisonFigureStyle(
+            width_in=args.comparison_width_in,
+            height_in=args.comparison_height_in,
+            font_size=args.comparison_font_size,
+            legend_size=args.comparison_legend_size,
+            legend_columns=args.comparison_legend_columns,
+            legend_above=args.comparison_legend_above,
+            gpt2_max_alpha=args.comparison_gpt2_max_alpha,
+            show_title=args.comparison_title,
+            compact_labels=args.comparison_compact_labels,
+            annotate_measured=args.comparison_measured_label,
+        ),
     )
 
 

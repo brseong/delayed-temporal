@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.analysis.summarize_screening_median_text_sweep import (
+    ComparisonFigureStyle,
     aligned_zero_limits,
     negative_relative_perplexity,
     render,
@@ -202,6 +203,22 @@ def main() -> None:
     summary = summarize(fixture_protocol(), fixture_rows())
     assert len(summary) == 4
     assert {row["metric"] for row in summary} == {"accuracy", "token_weighted_perplexity"}
+    incomplete = [
+        row
+        for row in fixture_rows()
+        if not (row["model"] == "gpt2" and row["alpha"] == 1.0 and row["seed"] == 2)
+    ]
+    try:
+        summarize(fixture_protocol(), incomplete)
+    except ValueError as error:
+        assert "seeds differ" in str(error)
+    else:
+        raise AssertionError("formal reduction accepted an incomplete three-seed cell")
+    draft = summarize(fixture_protocol(), incomplete, allow_incomplete=True)
+    assert len(draft) == 3
+    assert not any(
+        row["model"] == "gpt2" and row["alpha"] == 1.0 for row in draft
+    )
     gpt2 = next(
         row for row in summary
         if row["model"] == "gpt2" and row["alpha"] == 1.0
@@ -232,10 +249,29 @@ def main() -> None:
                 )
         write_csv(root / "aggregate.csv", vision)
         render_model_comparison(summary, root, root / "combined")
+        render_model_comparison(
+            summary,
+            root,
+            root / "combined_compact",
+            style=ComparisonFigureStyle(
+                width_in=3.2,
+                height_in=2.1,
+                font_size=7.6,
+                legend_size=5.8,
+                legend_columns=2,
+                legend_above=True,
+                gpt2_max_alpha=0.01,
+                show_title=False,
+                compact_labels=True,
+                annotate_measured=False,
+            ),
+        )
         assert (root / "figure.png").is_file()
         assert (root / "figure.pdf").is_file()
         assert (root / "combined.png").is_file()
         assert (root / "combined.pdf").is_file()
+        assert (root / "combined_compact.png").is_file()
+        assert (root / "combined_compact.pdf").is_file()
     print("Screening median text timing-noise sweep verification passed.")
 
 
