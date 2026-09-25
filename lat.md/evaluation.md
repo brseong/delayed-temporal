@@ -288,7 +288,7 @@ For the stopped run, each measured condition ends at the first $k$ whose three-s
 
 A separate 500-example seed-0 pilot attenuates the screening-median pair by a factor of 0.1 and evaluates $k\in\{1,2,4,8,12\}$. Top-1 accuracies are 42.2, 38.6, 39.6, 24.2, and 11.4 percent, respectively, against the reused clean value of 86.4 percent. The 1.0 percentage point increase from $k=2$ to $k=4$ is within the declared 2-point tolerance, so this pilot passes its screening gate. No 5,000-example evaluation is launched by this pilot.
 
-The final 5,000-image scaled sparse sweep uses the screening median and $\alpha\in\{0.03,0.05,0.1\}$. The final evidence uses evaluator revision `24d168fee6f4b09899291a2936786edb0bdef3dc`. At $\alpha=0.03$, mean Top-1 accuracy remains between 84.37 and 84.66 percent through $k=8$ and reaches 80.29 percent at $k=12$. At $\alpha=0.05$, it changes from 81.45 percent at $k=1$ to 79.96 percent at $k=8$ and 70.81 percent at $k=12$. At $\alpha=0.1$, it decreases from 43.29 percent at $k=1$ to 14.55 percent at $k=12$.
+The final 5,000-image scaled sparse sweep uses the screening median and $\alpha\in\{0.03,0.05,0.075,0.1\}$. The final evidence uses evaluator revision `24d168fee6f4b09899291a2936786edb0bdef3dc`. At $\alpha=0.03$, mean Top-1 accuracy remains between 84.37 and 84.66 percent through $k=8$ and reaches 80.29 percent at $k=12$. At $\alpha=0.05$, it changes from 81.45 percent at $k=1$ to 79.96 percent at $k=8$ and 70.81 percent at $k=12$. The $\alpha=0.075$ condition fills the transition between 0.05 and 0.1: mean Top-1 accuracy decreases from 70.41 percent at $k=1$ to 67.51, 65.45, 61.84, and 46.53 percent at $k=2,4,8,12$, respectively. At $\alpha=0.1$, it decreases from 43.29 percent at $k=1$ to 14.55 percent at $k=12$.
 
 ### Summary Artifacts
 
@@ -302,7 +302,7 @@ The Slurm launcher accepts either the fixed grid or one explicit attenuation fac
 
 The Slurm launcher requires an explicit evaluator revision and rejects a checkout whose revision differs.
 
-The formal scaled sparse summary manifest records raw CSV SHA-256 `16cfc5098f4c07697e9d58918319785db856821b746c5091c29c573fee202083`, summary CSV SHA-256 `36c7d539fd30514540d5b02af72c7aa7c021e47624a1fd416568e4b5f58e120c`, and figure PDF SHA-256 `2d19f9a4060a9049d79d100a8bf80e53114f247b432971655cf5c88f45bc9fb2`.
+The formal scaled sparse summary manifest records raw table digest `d66a7f0a7a6fcbf6ac501ab374526532f929edcda53472e04b99b1288bb98724`, summary table digest `dbfb111a40bc9406c8506ce96b0ad4f9cfa7486c95cacdbdc524bf601a571f72`, and figure digest `e57e0c8f5414fcad91a45ffa69599f31ca0e984b6d21fffa5ac87fbe84084672`.
 
 ### Verification
 
