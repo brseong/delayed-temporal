@@ -127,8 +127,8 @@ class Arguments:
     evaluation_dataset_path: str
     evaluation_dataset_fingerprint: str
 
-    # These four fields match ViT, BERT, and RoBERTa exactly; distribution choice
-    # and a separate evaluation-mode switch are intentionally absent.
+    # Encoder-specific overrides preserve a measured NP/NL noise pair while the
+    # shared fraction remains available for one-scale experiments.
     gaussian_time_noise: bool
     time_noise_std_frac: float
     time_noise_mean: float
@@ -137,6 +137,9 @@ class Arguments:
     # Quantile collection is calibration instrumentation, not dynamic noise state.
     collect_quantiles: bool
     report_clamp_stats: bool
+    linear_time_noise_std_frac: float | None = None
+    log_time_noise_std_frac: float | None = None
+    time_noise_deadline_margin_std: float = 0.0
     tensorboard: bool = True
 
 def parse_arguments() -> Arguments:
@@ -269,6 +272,24 @@ def parse_arguments() -> Arguments:
         help="Gaussian time std as a fraction of each encoder's declared window.",
     )
     parser.add_argument(
+        "--linear-time-noise-std-frac",
+        type=float,
+        default=None,
+        help="Optional linear-encoder override for --time-noise-std-frac.",
+    )
+    parser.add_argument(
+        "--log-time-noise-std-frac",
+        type=float,
+        default=None,
+        help="Optional logarithmic-encoder override for --time-noise-std-frac.",
+    )
+    parser.add_argument(
+        "--time-noise-deadline-margin-std",
+        type=float,
+        default=0.0,
+        help="Deadline margin measured in local timing-noise standard deviations.",
+    )
+    parser.add_argument(
         "--time-noise-mean",
         type=float,
         default=0.0,
@@ -332,6 +353,9 @@ def parse_arguments() -> Arguments:
         evaluation_dataset_fingerprint=args.evaluation_dataset_fingerprint,
         gaussian_time_noise=args.gaussian_time_noise,
         time_noise_std_frac=args.time_noise_std_frac,
+        linear_time_noise_std_frac=args.linear_time_noise_std_frac,
+        log_time_noise_std_frac=args.log_time_noise_std_frac,
+        time_noise_deadline_margin_std=args.time_noise_deadline_margin_std,
         time_noise_mean=args.time_noise_mean,
         time_noise_seed=args.time_noise_seed,
         collect_quantiles=args.collect_quantiles,
@@ -544,6 +568,25 @@ def evaluate_gpt2_model(args: Arguments) -> None:
     torch_dtype = torch.float32 if args.dtype == "float32" else torch.float64
     calibration_mode = validate_gpt2_calibration_arguments(args)
 
+    linear_time_noise_std_frac = (
+        float(args.time_noise_std_frac)
+        if args.linear_time_noise_std_frac is None
+        else float(args.linear_time_noise_std_frac)
+    )
+    log_time_noise_std_frac = (
+        float(args.time_noise_std_frac)
+        if args.log_time_noise_std_frac is None
+        else float(args.log_time_noise_std_frac)
+    )
+    for name, value in (
+        ("time_noise_std_frac", float(args.time_noise_std_frac)),
+        ("linear_time_noise_std_frac", linear_time_noise_std_frac),
+        ("log_time_noise_std_frac", log_time_noise_std_frac),
+        ("time_noise_deadline_margin_std", float(args.time_noise_deadline_margin_std)),
+    ):
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"{name} must be finite and non-negative")
+
     # Every encoder derives an absolute standard deviation from its own time window.
     gaussian_enabled = bool(
         model_backend == "spiking" and args.gaussian_time_noise
@@ -554,7 +597,10 @@ def evaluate_gpt2_model(args: Arguments) -> None:
     set_gaussian_time_noise(
         enabled=gaussian_enabled,
         time_std_fraction=float(args.time_noise_std_frac),
+        linear_time_std_fraction=linear_time_noise_std_frac,
+        log_time_std_fraction=log_time_noise_std_frac,
         time_mean=args.time_noise_mean,
+        deadline_margin_std_ratio=float(args.time_noise_deadline_margin_std),
         seed=args.time_noise_seed,
         device=torch_device,
     )
@@ -564,6 +610,8 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         **vars(args),
         "gaussian_time_noise_effective": gaussian_enabled,
         "time_noise_window_normalization": "encoder_local",
+        "linear_time_noise_std_frac_effective": linear_time_noise_std_frac,
+        "log_time_noise_std_frac_effective": log_time_noise_std_frac,
     }
     effective_attn_impl = "eager"
     if model_backend == "spiking" and torch_device.type != "cpu" and args.spiking_attention:
@@ -577,9 +625,13 @@ def evaluate_gpt2_model(args: Arguments) -> None:
         "Gaussian time noise — "
         f"enabled: {gaussian_enabled}, "
         f"std_frac: {args.time_noise_std_frac}, "
+        f"linear_std_frac: {linear_time_noise_std_frac}, "
+        f"log_std_frac: {log_time_noise_std_frac}, "
         "window_normalization: encoder_local, "
         f"mean_abs: {args.time_noise_mean}, "
-        f"seed: {args.time_noise_seed}"
+        f"seed: {args.time_noise_seed}, "
+        f"deadline_margin_std: {args.time_noise_deadline_margin_std}, "
+        "exponential_difference_internal: enabled"
     )
     if model_backend == "spiking":
         print(

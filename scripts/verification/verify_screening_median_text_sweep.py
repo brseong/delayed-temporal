@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""Verify encoder-specific text timing controls and sweep reduction."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+import sys
+import tempfile
+
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.analysis.summarize_screening_median_text_sweep import (
+    render,
+    render_accuracy_models,
+    summarize,
+    write_csv,
+)
+from scripts.evaluation import error_analysis_gpt2, error_analysis_roberta
+from scripts.experiments.run_screening_median_text_condition import evaluator_command
+from scripts.experiments.screening_median_text_sweep import (
+    TEXT_INITIAL_ALPHAS,
+    TEXT_MODELS,
+    TEXT_SEEDS,
+    expected_text_cells,
+)
+
+
+def verify_evaluator_arguments() -> None:
+    """Require distinct NP/NL fractions and a shared deadline margin."""
+
+    options = [
+        "--gaussian-time-noise",
+        "--time-noise-std-frac",
+        "0",
+        "--linear-time-noise-std-frac",
+        "0.001",
+        "--log-time-noise-std-frac",
+        "0.002",
+        "--time-noise-deadline-margin-std",
+        "4",
+    ]
+    with patch("sys.argv", ["error_analysis_roberta.py", *options]):
+        roberta = error_analysis_roberta.parse_arguments()
+    with patch("sys.argv", ["error_analysis_gpt2.py", *options]):
+        gpt2 = error_analysis_gpt2.parse_arguments()
+    for parsed in (roberta, gpt2):
+        assert parsed.gaussian_time_noise
+        assert parsed.time_noise_std_frac == 0.0
+        assert parsed.linear_time_noise_std_frac == 0.001
+        assert parsed.log_time_noise_std_frac == 0.002
+        assert parsed.time_noise_deadline_margin_std == 4.0
+
+
+def verify_grid_and_command() -> None:
+    """Require the complete two-model, seven-alpha, three-seed population."""
+
+    formal = expected_text_cells(phase="formal", alphas=TEXT_INITIAL_ALPHAS)
+    smoke = expected_text_cells(phase="smoke", alphas=("1",))
+    assert len(formal) == len(TEXT_MODELS) * len(TEXT_INITIAL_ALPHAS) * len(TEXT_SEEDS) == 42
+    assert len(smoke) == len(TEXT_MODELS) * len(TEXT_SEEDS) == 6
+    assert len({cell.identity for cell in formal}) == len(formal)
+
+    args = SimpleNamespace(
+        python_bin="python",
+        phase="formal",
+        seed=2,
+    )
+    protocol = {"resources": {"source_root": str(ROOT)}}
+    resource = {
+        "evaluator_family": "roberta",
+        "model_id": "/checkpoint",
+        "task": "sst2",
+        "cache_dir": "/cache",
+        "activation": "gelu",
+        "calibration_dataset_path": "/calibration",
+        "calibration_dataset_fingerprint": "cal",
+        "evaluation_dataset_path": "/evaluation",
+        "evaluation_dataset_fingerprint": "eval",
+    }
+    command = evaluator_command(
+        args,
+        protocol,
+        resource,
+        Path("/frozen-calibration.json"),
+        linear_fraction=0.001,
+        log_fraction=0.002,
+        run_id="fixture",
+    )
+    assert command[command.index("--linear-time-noise-std-frac") + 1] == "0.001"
+    assert command[command.index("--log-time-noise-std-frac") + 1] == "0.002"
+    assert command[command.index("--time-noise-deadline-margin-std") + 1] == "4.0"
+
+
+def fixture_protocol() -> dict:
+    return {
+        "resources": {
+            "models": {
+                "roberta_base": {
+                    "converted_clean": {"accuracy": 0.94},
+                    "ann_reference": {"accuracy": 0.945},
+                },
+                "gpt2": {
+                    "converted_clean": {
+                        "token_weighted_loss": 3.1,
+                        "token_weighted_perplexity": 22.0,
+                    },
+                    "ann_reference": {"token_weighted_perplexity": 21.9},
+                },
+            }
+        }
+    }
+
+
+def fixture_rows() -> list[dict]:
+    rows = []
+    for model in TEXT_MODELS:
+        for alpha in (0.01, 1.0):
+            for seed in TEXT_SEEDS:
+                row = {
+                    "model": model,
+                    "alpha": alpha,
+                    "seed": seed,
+                    "linear_time_noise_std_fraction": 0.01 * alpha,
+                    "log_time_noise_std_fraction": 0.02 * alpha,
+                    "events": 100,
+                    "misses": seed,
+                }
+                if model == "roberta_base":
+                    row["accuracy"] = 0.94 - 0.01 * alpha - 0.001 * seed
+                else:
+                    row["token_weighted_loss"] = 3.1 + 0.01 * alpha + 0.001 * seed
+                    row["token_weighted_perplexity"] = 22.0 + alpha + 0.1 * seed
+                rows.append(row)
+    return rows
+
+
+# @lat: [[evaluation#Evaluation and Verification#Screening Median Text Timing Noise Sweep#Verification]]
+def main() -> None:
+    verify_evaluator_arguments()
+    verify_grid_and_command()
+    summary = summarize(fixture_protocol(), fixture_rows())
+    assert len(summary) == 4
+    assert {row["metric"] for row in summary} == {"accuracy", "token_weighted_perplexity"}
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        write_csv(root / "summary.csv", summary)
+        render(summary, root / "figure")
+        vision = []
+        for model in ("cct7", "imagenet_vit_small", "imagenet_vit_base"):
+            for alpha in (0.01, 1.0):
+                vision.append(
+                    {
+                        "model": model,
+                        "alpha": alpha,
+                        "accuracy_change_pp_mean": -alpha,
+                        "accuracy_change_pp_ci_low": -alpha - 0.1,
+                        "accuracy_change_pp_ci_high": -alpha + 0.1,
+                    }
+                )
+        write_csv(root / "aggregate.csv", vision)
+        render_accuracy_models(summary, root, root / "combined")
+        assert (root / "figure.png").is_file()
+        assert (root / "figure.pdf").is_file()
+        assert (root / "combined.png").is_file()
+        assert (root / "combined.pdf").is_file()
+    print("Screening median text timing-noise sweep verification passed.")
+
+
+if __name__ == "__main__":
+    main()

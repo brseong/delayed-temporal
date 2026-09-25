@@ -232,7 +232,7 @@ The validation screening median is $(r_{t,\mathrm{NP}},r_{t,\mathrm{NL}})=(0.010
 
 For multiplier $\alpha$, every model-wide $\phi_{\mathrm{NP}}$ event uses $\alpha r_{t,\mathrm{NP}}$ and every model-wide $\phi_{\mathrm{NL}}$ event uses $\alpha r_{t,\mathrm{NL}}$. Each encoder converts its dimensionless fraction through its own declared local time window. Other non-ideality axes remain disabled.
 
-The initial formal grid is $\alpha\in\{0.003,0.01,0.03,0.1,0.3,1\}$ with seeds 0--2. CCT-7 uses the complete 10,000-image CIFAR-10 test split; ViT-S/16 and ViT-B/16 use the same fixed 5,000-image ImageNet-1k validation prefix. Each model freezes one label-free calibration before clean and noisy evaluation.
+The initial formal grid is $\alpha\in\{0.003,0.01,0.03,0.1,0.3,1\}$ with seeds 0--2; the later $\alpha=0.05$ request adds three replicas per model without changing the protocol. CCT-7 uses the complete 10,000-image CIFAR-10 test split; ViT-S/16 and ViT-B/16 use the same fixed 5,000-image ImageNet-1k validation prefix. Each model freezes one label-free calibration before clean and noisy evaluation.
 
 ### Condition Execution
 
@@ -263,6 +263,38 @@ The reducer joins only results with the same protocol identity and rejects confl
 Pure-Python verification covers measurement selection, multiplier scaling, extensible cell identities, multi-root merging, and summary rendering.
 
 [[scripts/verification/verify_screening_median_model_sweep.py#main]] requires 9 smoke cells and 54 initial formal cells, rejects execution axes in the protocol identity, and rejects incompatible or conflicting artifact unions.
+
+## Screening Median Text Timing Noise Sweep
+
+This campaign applies the same measured encoder noise pair to converted RoBERTa-B and GPT-2 while retaining each task's established metric.
+
+The seven multipliers are $\alpha\in\{0.003,0.01,0.03,0.05,0.1,0.3,1\}$ with seeds 0--2. RoBERTa-B evaluates all 872 SST-2 validation examples; GPT-2 evaluates all 2,891 nonempty WikiText-2 test examples and reports token-weighted corpus perplexity.
+
+The two text evaluators accept separate linear and logarithmic timing-noise fractions. Each run uses the screening-median pair, float64 temporal payloads, frozen label-free calibration, a four-standard-deviation deadline margin, and noise at all encoder outputs.
+
+### Condition Execution
+
+Each condition authenticates source, checkpoint, calibration, data population, measured pair, multiplier, and seed before evaluation.
+
+[[scripts/experiments/run_screening_median_text_condition.py#main]] records task metrics, event misses, nominal-deadline occupancy, pre-clamp output counts, and the applied linear and logarithmic fractions.
+
+### Campaign Execution
+
+The controller prepares one clean baseline and calibration per model before releasing six smoke replicas and 42 formal replicas.
+
+[[scripts/experiments/run_screening_median_text_sweep.py#main]] distributes resumable conditions across baekryun GPUs, preserves immutable request shards, and keeps multiplier and GPU choices outside the scientific protocol identity.
+
+### Summary Artifacts
+
+The reducer keeps task metrics separate rather than combining accuracy and perplexity on one scale.
+
+[[scripts/analysis/summarize_screening_median_text_sweep.py#main]] reports RoBERTa accuracy change in percentage points and GPT-2 corpus perplexity change in percent, each with a three-seed Student-$t$ interval. It also adds RoBERTa-B to the CCT-7, ViT-S/16, and ViT-B/16 accuracy comparison without placing GPT-2 perplexity on the accuracy axis.
+
+### Verification
+
+Pure-Python verification covers separate NP/NL controls, the complete cell grid, command construction, task-native reduction, and figure generation.
+
+[[scripts/verification/verify_screening_median_text_sweep.py#main]] requires distinct measured fractions, the fixed deadline margin, 42 unique formal cells, and separate accuracy and perplexity summaries.
 
 ## ViT-B Cumulative Encoder Block Timing Noise
 

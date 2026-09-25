@@ -314,9 +314,23 @@ def validate_site_reports(log: str, sites: set[str] | None, result: dict[str, An
     result["calibration_site_count"] = len(sites)
 
 
-def parse_evaluation(log: str, family: str, sites: set[str] | None = None) -> dict[str, Any]:
+def parse_evaluation(
+    log: str,
+    family: str,
+    sites: set[str] | None = None,
+    *,
+    expected_samples: int | None = None,
+) -> dict[str, Any]:
+    """Parse one complete text evaluation with an optional smoke population."""
+
     config = MODEL_CONFIG[family]
-    samples = config["evaluation_samples"]
+    samples = (
+        int(config["evaluation_samples"])
+        if expected_samples is None
+        else int(expected_samples)
+    )
+    if samples <= 0 or samples > int(config["evaluation_samples"]):
+        raise ValueError("text evaluation sample count is outside the fixed population")
     return (parse_gpt2(log, samples, sites)
             if config["evaluator_family"] == "gpt2" else parse_classification(log, samples, sites))
 
