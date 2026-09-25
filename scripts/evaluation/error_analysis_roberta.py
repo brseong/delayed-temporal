@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import sys
 from typing import Any, Literal, cast
@@ -102,8 +103,8 @@ class Arguments:
     spiking_mlp: bool
     activation: Literal["relu", "gelu"]
 
-    # Keep the same four Gaussian fields across every evaluator so scripts can
-    # configure replicas without model-specific timing parameters.
+    # Encoder-specific overrides preserve a measured NP/NL noise pair while the
+    # shared fraction remains available for one-scale experiments.
     gaussian_time_noise: bool
     time_noise_std_frac: float
     time_noise_mean: float
@@ -112,6 +113,9 @@ class Arguments:
     # Quantile collection remains a deterministic calibration diagnostic.
     collect_quantiles: bool
     report_clamp_stats: bool
+    linear_time_noise_std_frac: float | None = None
+    log_time_noise_std_frac: float | None = None
+    time_noise_deadline_margin_std: float = 0.0
     dtype: Literal["float32", "float64"] = "float32"
     tensorboard: bool = True
     calibration_mode: Literal["none", "collect", "validate", "inference"] = "none"
@@ -194,6 +198,24 @@ def parse_arguments() -> Arguments:
         help="Gaussian time std as a fraction of each encoder's declared window.",
     )
     parser.add_argument(
+        "--linear-time-noise-std-frac",
+        type=float,
+        default=None,
+        help="Optional linear-encoder override for --time-noise-std-frac.",
+    )
+    parser.add_argument(
+        "--log-time-noise-std-frac",
+        type=float,
+        default=None,
+        help="Optional logarithmic-encoder override for --time-noise-std-frac.",
+    )
+    parser.add_argument(
+        "--time-noise-deadline-margin-std",
+        type=float,
+        default=0.0,
+        help="Deadline margin measured in local timing-noise standard deviations.",
+    )
+    parser.add_argument(
         "--time-noise-mean",
         type=float,
         default=0.0,
@@ -242,6 +264,9 @@ def parse_arguments() -> Arguments:
         activation=args.activation,
         gaussian_time_noise=args.gaussian_time_noise,
         time_noise_std_frac=args.time_noise_std_frac,
+        linear_time_noise_std_frac=args.linear_time_noise_std_frac,
+        log_time_noise_std_frac=args.log_time_noise_std_frac,
+        time_noise_deadline_margin_std=args.time_noise_deadline_margin_std,
         time_noise_mean=args.time_noise_mean,
         time_noise_seed=args.time_noise_seed,
         collect_quantiles=args.collect_quantiles,
@@ -291,8 +316,27 @@ def evaluate_roberta_model(args: Arguments) -> None:
     torch_dtype = torch.float32 if args.dtype == "float32" else torch.float64
     torch_device = torch.device(device_str)
 
-    # Convert the shared relative CLI scale exactly once; all decorated encoders in
-    # this evaluation use the resulting absolute timing standard deviation.
+    linear_time_noise_std_frac = (
+        float(args.time_noise_std_frac)
+        if args.linear_time_noise_std_frac is None
+        else float(args.linear_time_noise_std_frac)
+    )
+    log_time_noise_std_frac = (
+        float(args.time_noise_std_frac)
+        if args.log_time_noise_std_frac is None
+        else float(args.log_time_noise_std_frac)
+    )
+    for name, value in (
+        ("time_noise_std_frac", float(args.time_noise_std_frac)),
+        ("linear_time_noise_std_frac", linear_time_noise_std_frac),
+        ("log_time_noise_std_frac", log_time_noise_std_frac),
+        ("time_noise_deadline_margin_std", float(args.time_noise_deadline_margin_std)),
+    ):
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"{name} must be finite and non-negative")
+
+    # Convert each relative CLI scale at its encoder boundary; both overrides share
+    # one seeded generator and one deadline-margin ratio.
     gaussian_enabled = bool(
         model_backend == "spiking" and args.gaussian_time_noise
     )
@@ -313,7 +357,10 @@ def evaluate_roberta_model(args: Arguments) -> None:
     set_gaussian_time_noise(
         enabled=gaussian_enabled,
         time_std_fraction=float(args.time_noise_std_frac),
+        linear_time_std_fraction=linear_time_noise_std_frac,
+        log_time_std_fraction=log_time_noise_std_frac,
         time_mean=args.time_noise_mean,
+        deadline_margin_std_ratio=float(args.time_noise_deadline_margin_std),
         seed=args.time_noise_seed,
         device=torch_device,
     )
@@ -324,6 +371,8 @@ def evaluate_roberta_model(args: Arguments) -> None:
         **vars(args),
         "gaussian_time_noise_effective": gaussian_enabled,
         "time_noise_window_normalization": "encoder_local",
+        "linear_time_noise_std_frac_effective": linear_time_noise_std_frac,
+        "log_time_noise_std_frac_effective": log_time_noise_std_frac,
     }
     effective_attn_impl = "eager"
     if model_backend == "spiking" and args.spiking_attention:
@@ -336,9 +385,13 @@ def evaluate_roberta_model(args: Arguments) -> None:
         "Gaussian time noise — "
         f"enabled: {gaussian_enabled}, "
         f"std_frac: {args.time_noise_std_frac}, "
+        f"linear_std_frac: {linear_time_noise_std_frac}, "
+        f"log_std_frac: {log_time_noise_std_frac}, "
         "window_normalization: encoder_local, "
         f"mean_abs: {args.time_noise_mean}, "
-        f"seed: {args.time_noise_seed}"
+        f"seed: {args.time_noise_seed}, "
+        f"deadline_margin_std: {args.time_noise_deadline_margin_std}, "
+        "exponential_difference_internal: enabled"
     )
     if model_backend == "spiking":
         print(
@@ -552,8 +605,7 @@ def evaluate_roberta_model(args: Arguments) -> None:
             f"(rate={overflow_rate:.6g})"
         )
 
-    # Keep event and output denominators distinct when deriving report-only rates
-    # from the maintained five-field Gaussian statistics records.
+    # Keep event and output denominators distinct when deriving report-only rates.
     if gaussian_enabled:
         for site, counts in sorted(get_gaussian_noise_stats().items()):
             events = counts["events"]
@@ -565,9 +617,18 @@ def evaluate_roberta_model(args: Arguments) -> None:
             overflow_rate = (
                 counts["output_overflows"] / outputs if outputs else 0.0
             )
+            deadline_rate = counts["deadline_events"] / events if events else 0.0
+            ulp_min = counts["deadline_ulp_min"]
+            if not math.isfinite(ulp_min):
+                ulp_min = 0.0
+            ulp_max = counts["deadline_ulp_max"]
             print(
                 f"Gaussian[{site}] events={events}, misses={counts['misses']} "
-                f"(rate={miss_rate:.6g}), outputs={outputs}, "
+                f"(rate={miss_rate:.6g}), "
+                f"deadline_events={counts['deadline_events']} "
+                f"(rate={deadline_rate:.6g}), "
+                f"deadline_ulp_min={ulp_min:.9g}, "
+                f"deadline_ulp_max={ulp_max:.9g}, outputs={outputs}, "
                 f"underflows={counts['output_underflows']} "
                 f"(rate={underflow_rate:.6g}), "
                 f"overflows={counts['output_overflows']} "
@@ -577,6 +638,10 @@ def evaluate_roberta_model(args: Arguments) -> None:
                 f"Gaussian/{site}/events": events,
                 f"Gaussian/{site}/misses": counts["misses"],
                 f"Gaussian/{site}/miss_rate": miss_rate,
+                f"Gaussian/{site}/deadline_events": counts["deadline_events"],
+                f"Gaussian/{site}/deadline_event_rate": deadline_rate,
+                f"Gaussian/{site}/deadline_ulp_min": ulp_min,
+                f"Gaussian/{site}/deadline_ulp_max": ulp_max,
                 f"Gaussian/{site}/outputs": outputs,
                 f"Gaussian/{site}/output_underflows": counts["output_underflows"],
                 f"Gaussian/{site}/output_underflow_rate": underflow_rate,

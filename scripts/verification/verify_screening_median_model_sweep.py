@@ -38,7 +38,7 @@ from scripts.experiments.run_screening_median_model_condition import (
     _aggregate_cct_counts,
 )
 from scripts.experiments.run_poseidon_screening_median_model_sweep import (
-    _cell_gpu,
+    _assign_cells,
     _verify_smoke_gate,
 )
 from utils.transformers.models.spiking_cct import CCT7ForImageClassification
@@ -75,19 +75,13 @@ def verify_measurement_and_grid(hardware_summary: Path) -> None:
     assert len(smoke) == len(MODELS) * len(SEEDS) == 9
     assert len(formal) == len(MODELS) * len(SEEDS) * len(INITIAL_ALPHAS) == 54
     assert len({cell.identity for cell in formal}) == len(formal)
-    base_cells = [cell for cell in formal if cell.model == "imagenet_vit_base"]
-    assert sum(_cell_gpu(cell) == 2 for cell in base_cells) == 9
-    assert sum(_cell_gpu(cell) == 3 for cell in base_cells) == 9
-    subset = expected_cells(phase="formal", alphas=("0.1",))
-    assert {
-        cell.identity: _cell_gpu(cell)
-        for cell in subset
-        if cell.model == "imagenet_vit_base"
-    } == {
-        cell.identity: _cell_gpu(cell)
-        for cell in formal
-        if cell.model == "imagenet_vit_base" and cell.alpha == "0.1"
-    }
+    slots = tuple(("local", gpu) for gpu in range(8)) + tuple(
+        ("poseidon", gpu) for gpu in range(4)
+    )
+    assignments = _assign_cells(formal, slots)
+    assert len(assignments) == len(formal)
+    assert {(host, gpu) for _, host, gpu in assignments} == set(slots)
+    assert assignments == _assign_cells(formal, slots)
 
     counts = _aggregate_cct_counts(
         {
@@ -170,6 +164,8 @@ def fixture_protocol() -> dict:
         "precision": "float64",
         "deadline_margin_sigma_ratio": 4.0,
         "time_noise_scope": "model_wide",
+        "raw_timestamp_contract": "gaussian_raw_timestamp_v1",
+        "exponential_difference_internal_noise": "enabled_v1",
     }
     return {
         "schema_version": 1,
