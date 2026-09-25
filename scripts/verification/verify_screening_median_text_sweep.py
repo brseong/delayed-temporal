@@ -16,8 +16,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.analysis.summarize_screening_median_text_sweep import (
+    aligned_zero_limits,
+    negative_relative_perplexity,
     render,
-    render_accuracy_models,
+    render_model_comparison,
     summarize,
     write_csv,
 )
@@ -200,6 +202,18 @@ def main() -> None:
     summary = summarize(fixture_protocol(), fixture_rows())
     assert len(summary) == 4
     assert {row["metric"] for row in summary} == {"accuracy", "token_weighted_perplexity"}
+    gpt2 = next(
+        row for row in summary
+        if row["model"] == "gpt2" and row["alpha"] == 1.0
+    )
+    mean, low, high = negative_relative_perplexity(gpt2)
+    assert mean == -gpt2["metric_change_mean"]
+    assert low == -gpt2["metric_change_ci_high"]
+    assert high == -gpt2["metric_change_ci_low"]
+    left_limits = aligned_zero_limits([-20.0, 0.2])
+    right_limits = aligned_zero_limits([-50.0, 1.0])
+    assert abs((-left_limits[0]) / (left_limits[1] - left_limits[0]) - 0.88) < 1e-12
+    assert abs((-right_limits[0]) / (right_limits[1] - right_limits[0]) - 0.88) < 1e-12
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         write_csv(root / "summary.csv", summary)
@@ -217,7 +231,7 @@ def main() -> None:
                     }
                 )
         write_csv(root / "aggregate.csv", vision)
-        render_accuracy_models(summary, root, root / "combined")
+        render_model_comparison(summary, root, root / "combined")
         assert (root / "figure.png").is_file()
         assert (root / "figure.pdf").is_file()
         assert (root / "combined.png").is_file()

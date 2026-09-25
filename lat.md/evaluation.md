@@ -290,9 +290,11 @@ The controller places preparation outputs below the campaign artifacts root whil
 
 ### Summary Artifacts
 
-The reducer keeps task metrics separate rather than combining accuracy and perplexity on one scale.
+The reducer keeps task metrics on distinct axes while aligning their deterministic references and degradation direction.
 
-[[scripts/analysis/summarize_screening_median_text_sweep.py#main]] reports RoBERTa accuracy change in percentage points and GPT-2 corpus perplexity change in percent, each with a three-seed Student-$t$ interval. It also adds RoBERTa-B to the CCT-7, ViT-S/16, and ViT-B/16 accuracy comparison without placing GPT-2 perplexity on the accuracy axis.
+[[scripts/analysis/summarize_screening_median_text_sweep.py#main]] reports RoBERTa accuracy change in percentage points and GPT-2 corpus perplexity change in percent, each with a three-seed Student-$t$ interval.
+
+The combined model figure places classification accuracy change on the left axis and GPT-2 negative relative perplexity increase on the right axis. Both deterministic references are zero and degradation is negative. The axes share direction and zero but are not numerically comparable.
 
 ### Verification
 

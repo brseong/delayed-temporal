@@ -227,10 +227,39 @@ def render(summary: list[dict[str, Any]], output: Path) -> None:
     plt.close(figure)
 
 
-def render_accuracy_models(
+def negative_relative_perplexity(summary_row: dict[str, Any]) -> tuple[float, float, float]:
+    """Orient relative perplexity change so degradation is negative."""
+
+    if summary_row.get("metric") != "token_weighted_perplexity":
+        raise ValueError("negative relative perplexity requires a perplexity row")
+    return (
+        -float(summary_row["metric_change_mean"]),
+        -float(summary_row["metric_change_ci_high"]),
+        -float(summary_row["metric_change_ci_low"]),
+    )
+
+
+def aligned_zero_limits(
+    values: list[float], *, zero_position: float = 0.88
+) -> tuple[float, float]:
+    """Return limits that place zero at a fixed vertical axis fraction."""
+
+    if not values or not 0.0 < zero_position < 1.0:
+        raise ValueError("aligned limits require values and an interior zero position")
+    negative = max(0.0, -min(values))
+    positive = max(0.0, max(values))
+    scale = max(
+        negative / zero_position,
+        positive / (1.0 - zero_position),
+        1e-12,
+    )
+    return -scale * zero_position, scale * (1.0 - zero_position)
+
+
+def render_model_comparison(
     summary: list[dict[str, Any]], vision_root: Path, output: Path
 ) -> None:
-    """Add RoBERTa-B to the existing accuracy-change model comparison."""
+    """Render classification accuracy and GPT-2 perplexity on aligned axes."""
 
     with (vision_root / "aggregate.csv").open(newline="", encoding="utf-8") as handle:
         vision = list(csv.DictReader(handle))
@@ -261,7 +290,8 @@ def render_accuracy_models(
         for row in summary
         if row["model"] == "roberta_base"
     ]
-    figure, axis = plt.subplots(figsize=(8.2, 5.0), constrained_layout=True)
+    figure, axis = plt.subplots(figsize=(8.8, 5.0), constrained_layout=True)
+    accuracy_limits = []
     for model in labels:
         selected = sorted(
             (row for row in rows if row["model"] == model),
@@ -273,8 +303,43 @@ def render_accuracy_models(
         mean = [row["mean"] for row in selected]
         low = [row["low"] for row in selected]
         high = [row["high"] for row in selected]
+        accuracy_limits.extend([*low, *high])
         axis.plot(x, mean, marker="o", linewidth=2.0, label=labels[model])
         axis.fill_between(x, low, high, alpha=0.15)
+
+    perplexity_rows = sorted(
+        (row for row in summary if row["model"] == "gpt2"),
+        key=lambda row: row["alpha"],
+    )
+    if not perplexity_rows:
+        raise ValueError("combined model figure is missing gpt2")
+    perplexity_x = [row["alpha"] for row in perplexity_rows]
+    perplexity_intervals = [negative_relative_perplexity(row) for row in perplexity_rows]
+    perplexity_mean = [row[0] for row in perplexity_intervals]
+    perplexity_low = [row[1] for row in perplexity_intervals]
+    perplexity_high = [row[2] for row in perplexity_intervals]
+    perplexity_axis = axis.twinx()
+    perplexity_axis.plot(
+        perplexity_x,
+        perplexity_mean,
+        color="black",
+        linestyle="--",
+        marker="s",
+        linewidth=2.0,
+        label="GPT-2",
+    )
+    perplexity_axis.fill_between(
+        perplexity_x,
+        perplexity_low,
+        perplexity_high,
+        color="black",
+        alpha=0.10,
+    )
+    perplexity_axis.set_ylabel("Negative relative perplexity increase (%)")
+    axis.set_ylim(*aligned_zero_limits(accuracy_limits))
+    perplexity_axis.set_ylim(
+        *aligned_zero_limits([*perplexity_low, *perplexity_high])
+    )
     axis.set_xscale("log")
     axis.axvline(1.0, color="black", linestyle=":", linewidth=1.4)
     axis.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
@@ -288,9 +353,15 @@ def render_accuracy_models(
     )
     axis.set_xlabel("Noise scale multiplier")
     axis.set_ylabel("Accuracy change from deterministic baseline (pp)")
-    axis.set_title("Accuracy under measured encoder timing noise")
+    axis.set_title("Model sensitivity to measured encoder timing noise")
     axis.grid(alpha=0.25, which="both")
-    axis.legend(frameon=False)
+    accuracy_handles, accuracy_labels = axis.get_legend_handles_labels()
+    perplexity_handles, perplexity_labels = perplexity_axis.get_legend_handles_labels()
+    axis.legend(
+        accuracy_handles + perplexity_handles,
+        accuracy_labels + perplexity_labels,
+        frameon=False,
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output.with_suffix(".png"), dpi=220)
     figure.savefig(output.with_suffix(".pdf"))
@@ -312,10 +383,10 @@ def main() -> None:
     write_csv(output / "text_aggregate.csv", summary)
     write_csv(output / "text_baselines.csv", baselines(protocol))
     render(summary, output / "text_timing_noise_sensitivity")
-    render_accuracy_models(
+    render_model_comparison(
         summary,
         args.vision_root.resolve(strict=True),
-        output / "model_timing_noise_accuracy_with_roberta",
+        output / "model_timing_noise_model_comparison",
     )
 
 
