@@ -288,7 +288,7 @@ For the stopped run, each measured condition ends at the first $k$ whose three-s
 
 A separate 500-example seed-0 pilot attenuates the screening-median pair by a factor of 0.1 and evaluates $k\in\{1,2,4,8,12\}$. Top-1 accuracies are 42.2, 38.6, 39.6, 24.2, and 11.4 percent, respectively, against the reused clean value of 86.4 percent. The 1.0 percentage point increase from $k=2$ to $k=4$ is within the declared 2-point tolerance, so this pilot passes its screening gate. No 5,000-example evaluation is launched by this pilot.
 
-The formal 5,000-image scaled sparse sweep uses the screening median and $\alpha\in\{0.03,0.1\}$. At $\alpha=0.03$, mean Top-1 accuracy remains between 84.31 and 84.66 percent through $k=8$ and reaches 79.87 percent at $k=12$. At $\alpha=0.1$, it decreases from 41.99 percent at $k=1$ to 15.17 percent at $k=12$.
+The final 5,000-image scaled sparse sweep uses the screening median and $\alpha\in\{0.03,0.05,0.1\}$. The final evidence uses evaluator revision `24d168fee6f4b09899291a2936786edb0bdef3dc`. At $\alpha=0.03$, mean Top-1 accuracy remains between 84.37 and 84.66 percent through $k=8$ and reaches 80.29 percent at $k=12$. At $\alpha=0.05$, it changes from 81.45 percent at $k=1$ to 79.96 percent at $k=8$ and 70.81 percent at $k=12$. At $\alpha=0.1$, it decreases from 43.29 percent at $k=1$ to 14.55 percent at $k=12$.
 
 ### Summary Artifacts
 
@@ -302,7 +302,7 @@ The Slurm launcher accepts either the fixed grid or one explicit attenuation fac
 
 The Slurm launcher requires an explicit evaluator revision and rejects a checkout whose revision differs.
 
-The formal scaled sparse summary manifest records raw CSV SHA-256 `ed56d6141960ed989ec632400cbf690213fb02ccfdf7c8684b9819ff9e9ac15c`, summary CSV SHA-256 `f4a59a91b74fe962e0379d892a5ee51c1ee44cdc61b4ccf56e42805ab74c72f6`, and figure PDF SHA-256 `9e38b680d89aa0f30045dd12a87271d5b554afa406efc18ed58d064d9770e19f`.
+The formal scaled sparse summary manifest records raw CSV SHA-256 `16cfc5098f4c07697e9d58918319785db856821b746c5091c29c573fee202083`, summary CSV SHA-256 `36c7d539fd30514540d5b02af72c7aa7c021e47624a1fd416568e4b5f58e120c`, and figure PDF SHA-256 `2d19f9a4060a9049d79d100a8bf80e53114f247b432971655cf5c88f45bc9fb2`.
 
 ### Verification
 
