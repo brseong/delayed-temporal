@@ -300,6 +300,8 @@ The scaled sparse mode accepts one fixed screening-median condition, explicit no
 
 The Slurm launcher accepts either the fixed grid or one explicit attenuation factor while retaining the same frozen condition runner.
 
+The Slurm launcher requires an explicit evaluator revision and rejects a checkout whose revision differs.
+
 The formal scaled sparse summary manifest records raw CSV SHA-256 `ed56d6141960ed989ec632400cbf690213fb02ccfdf7c8684b9819ff9e9ac15c`, summary CSV SHA-256 `f4a59a91b74fe962e0379d892a5ee51c1ee44cdc61b4ccf56e42805ab74c72f6`, and figure PDF SHA-256 `9e38b680d89aa0f30045dd12a87271d5b554afa406efc18ed58d064d9770e19f`.
 
 ### Verification

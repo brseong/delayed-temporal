@@ -12,6 +12,7 @@ set -euo pipefail
 
 : "${DEPTH_RUNNER_SOURCE:?DEPTH_RUNNER_SOURCE is required}"
 : "${DEPTH_EVALUATOR_SOURCE:?DEPTH_EVALUATOR_SOURCE is required}"
+: "${DEPTH_EXPECTED_EVALUATOR_COMMIT:?DEPTH_EXPECTED_EVALUATOR_COMMIT is required}"
 : "${DEPTH_ASSETS:?DEPTH_ASSETS is required}"
 : "${DEPTH_EXPERIMENT:?DEPTH_EXPERIMENT is required}"
 : "${DEPTH_ENV_ARCHIVE:?DEPTH_ENV_ARCHIVE is required}"
@@ -27,7 +28,8 @@ evaluation_samples="${DEPTH_EVALUATION_SAMPLES:-5000}"
 
 authenticated_runner_commit="$(git -C "$DEPTH_RUNNER_SOURCE" rev-parse HEAD)"
 authenticated_evaluator_commit="$(git -C "$DEPTH_EVALUATOR_SOURCE" rev-parse HEAD)"
-[[ "$authenticated_evaluator_commit" == 52fd758dfee41c9eeb8f8124b6c1dde9ff16bc0f ]]
+[[ "$DEPTH_EXPECTED_EVALUATOR_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+[[ "$authenticated_evaluator_commit" == "$DEPTH_EXPECTED_EVALUATOR_COMMIT" ]]
 [[ -z "$(git -C "$DEPTH_RUNNER_SOURCE" status --porcelain --untracked-files=no)" ]]
 [[ -z "$(git -C "$DEPTH_EVALUATOR_SOURCE" status --porcelain --untracked-files=no)" ]]
 
@@ -115,7 +117,7 @@ srun --ntasks=1 --gres=gpu:1 \
     "$runner_root/scripts/experiments/run_vit_bss2_depth_condition.py" \
     --execution-mode slurm --runtime-root /work-tmp \
     --source-root "$evaluator_root" \
-    --expected-commit 52fd758dfee41c9eeb8f8124b6c1dde9ff16bc0f \
+    --expected-commit "$DEPTH_EXPECTED_EVALUATOR_COMMIT" \
     --model-id "$model_root" \
     --calibration-source "$experiment_root/input/calibration_source" \
     --calibration-dataset-path "$assets_root/datasets/imagenet_theta_selection_v1/train_seed0_5000" \
