@@ -24,4 +24,4 @@ Clipping, deadline miss, 전달된 시각의 오차와 관측 시간의 물리�
 
 마진의 효과를 비교할 때는 시간 노이즈, 인코딩 범위, 시간 상수와 이벤트 공유 범위를 명시해야 한다. 조건을 함께 바꾸면 결과의 원인도 섞인다.
 
-최대 길이와 연산 깊이, 가중치와 seed의 조건도 보존한다. LayerNorm 수치 안정화와 인코딩 하한은 [[operators#Spiking LayerNorm]]의 서로 다른 역할을 따른다. 추가 물리 감쇠·누설·에너지 실험은 [[deferred-experiments]]의 승격 조건 없이는 실행하지 않는다.
+최대 길이와 연산 깊이, 가중치와 seed의 조건도 보존한다. LayerNorm 수치 안정화와 인코딩 하한은 [[operators#Spiking LayerNorm]]의 서로 다른 역할을 따른다. 추가 물리 감쇠·누설 실험은 [[deferred-experiments]]의 승격 조건 없이는 실행하지 않는다.

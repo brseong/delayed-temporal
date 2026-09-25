@@ -408,7 +408,6 @@ def parse_arguments() -> Arguments:
             "omission preserves the existing model-wide injection scope."
         ),
     )
-
     # Static range mismatch and learned-parameter perturbations deliberately
     # remain separate controls rather than being folded into event timing noise.
     parser.add_argument("--mismatch-enabled", action=argparse.BooleanOptionalAction, default=False,
@@ -1200,7 +1199,8 @@ def evaluate_vit_model(args: Arguments) -> None:
         "window_normalization: encoder_local, "
         f"mean_abs: {args.time_noise_mean}, "
         f"seed: {args.time_noise_seed}, "
-        f"deadline_margin_std: {args.time_noise_deadline_margin_std}"
+        f"deadline_margin_std: {args.time_noise_deadline_margin_std}, "
+        "exponential_difference_internal: enabled"
     )
     print(
         "Gaussian time-noise scope — "

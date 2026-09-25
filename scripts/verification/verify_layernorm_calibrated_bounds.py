@@ -17,6 +17,8 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from utils.transformers.models import spiking_ops
 from utils.transformers.models.spiking_ops import SpikingLayerNorm
 from utils.transformers.calibration import (
+    OPERATOR_BACKED_OUTPUT_HEAD_VERSION,
+    VIT_CALIBRATION_POLICY_VERSION,
     bind_model_calibration,
     clear_model_calibration,
 )
@@ -41,18 +43,21 @@ FLAGS = tuple(product((False, True), repeat=3))
 KEY = ("", "centered_input")
 
 
-def _metadata(*, policy: int | None = 2, dtype: str = "float64") -> CalibrationMetadata:
+def _metadata(*, policy: int | None = VIT_CALIBRATION_POLICY_VERSION, dtype: str = "float64") -> CalibrationMetadata:
     return CalibrationMetadata(
         model_family="vit", model_id="layernorm-test", dataset_id="fixture",
         dataset_split="train", preprocessing="none", dtype=dtype,
         tau_s=1.0, tau_m=1.0, clip_margin=1e-5,
         max_sequence_length=None, input_shape=(4,),
         model_options=(("layer_norm_clip_margin", 1e-5), ("layer_norm_eps", 1e-12))
-        + (() if policy is None else (("vit_calibration_policy_version", policy),)),
+        + (() if policy is None else (
+            ("operator_backed_output_head_version", OPERATOR_BACKED_OUTPUT_HEAD_VERSION),
+            ("vit_calibration_policy_version", policy),
+        )),
     )
 
 
-def _collector(*, margin: float = 0.0, policy: int = 2, dtype: str = "float64"):
+def _collector(*, margin: float = 0.0, policy: int = VIT_CALIBRATION_POLICY_VERSION, dtype: str = "float64"):
     return create_calibration_collector(
         _metadata(policy=policy, dtype=dtype),
         (LayerCalibrationSpec("", "centered_input", CalibrationRangePolicy.SIGNED_SYMMETRIC,
@@ -61,7 +66,7 @@ def _collector(*, margin: float = 0.0, policy: int = 2, dtype: str = "float64"):
     )
 
 
-def _table(radius: float, *, policy: int = 2):
+def _table(radius: float, *, policy: int = VIT_CALIBRATION_POLICY_VERSION):
     collector = _collector(policy=policy)
     values = torch.tensor([-radius, radius], dtype=torch.float64)
     observe_calibration_activation(collector, *KEY, values)
@@ -82,7 +87,7 @@ def _layer(flags=(True, True, True), *, dtype=torch.float64):
     return layer
 
 
-def _bind(layer, radius: float, *, policy: int = 2):
+def _bind(layer, radius: float, *, policy: int = VIT_CALIBRATION_POLICY_VERSION):
     table = _table(radius, policy=policy)
     restored = calibration_table_from_dict(calibration_table_to_dict(table))
     assert restored == table

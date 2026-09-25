@@ -5,7 +5,10 @@ from numbers import Real
 
 from utils.transforms import exp_operator
 
-from .noise import clamp_gaussian_output, gaussian_time_noise_is_active
+from .noise import (
+    clamp_gaussian_output, gaussian_time_noise_is_active,
+    gaussian_noise_statistics_mask,
+)
 from .types import PotentialBounds, SpikeSample, TimeBounds, check_domain
 from .primitive import signed_pulse_width_modulation_operator
 from .potential_to_spike import neg_identity_transform, neg_log_transform
@@ -77,7 +80,7 @@ def _gaussian_multiplication_operator(
         reference_event.domain,
         V,
         domain_V,
-        observation_deadline=float(data_event.domain.max),
+        observation_deadline=float(data_event.observation_deadline),
     )
 
     # Gaussian excursions do not expand the ideal product rails. The encoder still
@@ -297,13 +300,12 @@ def _gaussian_exponential_function(
             "Gaussian exponential encoding must return SpikeSample"
         )
 
-    # The sampler already stores early arrivals at the window start and misses at
-    # the finite deadline. Clamp defensively to the declared carrier interval before
-    # applying an exponentially sensitive readout.
-    delivered_time = torch.clamp(
+    # Decode the delivered raw timestamp directly. The sampled event may lie outside
+    # the nominal code interval; only the final potential contract applies saturation.
+    delivered_time = torch.where(
+        event.fired,
         event.time,
-        min=float(event.domain.min),
-        max=float(event.domain.max),
+        event.time.new_tensor(float(event.domain.max)),
     )
 
     # Build the final exponent directly after applying each composition's fixed
@@ -1006,27 +1008,30 @@ def gelu_cubic_power_operator(
     if gaussian_enabled:
         encoder_kwargs["return_spike_sample"] = True
 
-    positive_time = neg_log_transform(
-        positive_carrier,
-        magnitude_domain,
-        tau_s=encoder_tau,
-        noise_site="gelu.cubic.log_positive",
-        **encoder_kwargs,
-    )
-    negative_time = neg_log_transform(
-        negative_carrier,
-        magnitude_domain,
-        tau_s=encoder_tau,
-        noise_site="gelu.cubic.log_negative",
-        **encoder_kwargs,
-    )
-    reference_time = neg_log_transform(
-        input_value.new_tensor(magnitude_upper),
-        magnitude_domain,
-        tau_s=encoder_tau,
-        noise_site="gelu.cubic.log_reference",
-        **encoder_kwargs,
-    )
+    with gaussian_noise_statistics_mask(positive_active):
+        positive_time = neg_log_transform(
+            positive_carrier,
+            magnitude_domain,
+            tau_s=encoder_tau,
+            noise_site="gelu.cubic.log_positive",
+            **encoder_kwargs,
+        )
+    with gaussian_noise_statistics_mask(negative_active):
+        negative_time = neg_log_transform(
+            negative_carrier,
+            magnitude_domain,
+            tau_s=encoder_tau,
+            noise_site="gelu.cubic.log_negative",
+            **encoder_kwargs,
+        )
+    with gaussian_noise_statistics_mask((positive_active | negative_active).any()):
+        reference_time = neg_log_transform(
+            input_value.new_tensor(magnitude_upper),
+            magnitude_domain,
+            tau_s=encoder_tau,
+            noise_site="gelu.cubic.log_reference",
+            **encoder_kwargs,
+        )
     if gaussian_enabled:
         if not all(
             isinstance(event, SpikeSample)
@@ -1043,20 +1048,22 @@ def gelu_cubic_power_operator(
     if negative_time_domain != time_domain or reference_time_domain != time_domain:
         raise RuntimeError("GELU cubic log encoders require one shared time domain")
 
-    positive_normalized, _ = exponential_difference_operator(
-        positive_time,
-        time_domain,
-        reference_time,
-        reference_time_domain,
-        tau_s=tau_value,
-    )
-    negative_normalized, _ = exponential_difference_operator(
-        negative_time,
-        negative_time_domain,
-        reference_time,
-        reference_time_domain,
-        tau_s=tau_value,
-    )
+    with gaussian_noise_statistics_mask(positive_active):
+        positive_normalized, _ = exponential_difference_operator(
+            positive_time,
+            time_domain,
+            reference_time,
+            reference_time_domain,
+            tau_s=tau_value,
+        )
+    with gaussian_noise_statistics_mask(negative_active):
+        negative_normalized, _ = exponential_difference_operator(
+            negative_time,
+            negative_time_domain,
+            reference_time,
+            reference_time_domain,
+            tau_s=tau_value,
+        )
     unit_domain = PotentialBounds(0.0, 1.0)
     positive_normalized = torch.where(
         positive_active,
@@ -1326,20 +1333,19 @@ def _gaussian_swiglu_function(
     if not isinstance(exponential_event, SpikeSample):
         raise RuntimeError("Gaussian SwiGLU encoding must return SpikeSample")
 
-    # Clamp the stored carrier to the finite observation window before evaluating
-    # the deadline response. Early samples already live at the window start, while
-    # missed samples retain the deadline only as metadata for downstream accounting.
-    delivered_time = torch.clamp(
+    # Decode the delivered raw timestamp directly. A missed event is still masked to
+    # reset below, so its finite observation-deadline carrier is never interpreted.
+    delivered_time = torch.where(
+        exponential_event.fired,
         exponential_event.time,
-        min=float(exponential_event.domain.min),
-        max=float(exponential_event.domain.max),
+        exponential_event.time.new_tensor(float(exponential_event.domain.max)),
     )
 
     # The raw deadline response is biased by exp(z_min/tau_s), where z=beta*u.
     # This is the same fixed factor produced by exp_operator in the deterministic
     # path and is independent of the sampled input event within this operator call.
-    deadline = delivered_time.new_tensor(float(exponential_event.domain.max))
-    biased_exp = torch.exp(-(deadline - delivered_time) / tau_s)
+    code_deadline = delivered_time.new_tensor(float(exponential_event.domain.max))
+    biased_exp = torch.exp(-(code_deadline - delivered_time) / tau_s)
     bias_cancellation_gain = exp(-scaled_domain_u_clamped.min / tau_s)
 
     # Apply the fixed synaptic-current gain only to delivered events. A missed

@@ -33,6 +33,9 @@ from utils.transformers.calibration import (
 
 
 ARTIFACTS = Path(os.environ.get("DELAYED_TEMPORAL_ARTIFACTS_ROOT", "/data/delayed-temporal/artifacts"))
+RUNTIME_ARTIFACTS = Path(
+    os.environ.get("DELAYED_TEMPORAL_RUNTIME_ROOT", str(ARTIFACTS / "runtime"))
+)
 TAG = "conversion_comparison_end_to_end_local_ranges_float64_v1"
 MODEL_CONFIG = {
     "cifar10_vit_small": {"dataset_id": "cifar10", "split": "test", "samples": 10_000},
@@ -244,9 +247,13 @@ def main() -> None:
     parser.add_argument("--gpu", type=int, choices=range(4), required=True)
     parser.add_argument("--host-label", choices=("local", "poseidon"), required=True)
     parser.add_argument("--python-bin", default="/opt/conda/envs/dt/bin/python")
+    parser.add_argument("--campaign-tag", default=TAG)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--runtime-root", type=Path, required=True)
     args = parser.parse_args()
+
+    if not re.fullmatch(r"[a-z0-9_.-]+", args.campaign_tag):
+        raise ValueError("campaign tag contains unsupported characters")
 
     expected_host = "baekryun-cuda129" if args.host_label == "local" else "poseidon1"
     if socket.gethostname() != expected_host:
@@ -274,11 +281,13 @@ def main() -> None:
     )
     dense_cache_root = ARTIFACTS / "logs/ann_baselines/v1"
     output = args.output_root.resolve()
-    required_output = (ARTIFACTS / "logs/conversion_comparison" / TAG / "vit" / args.model_key).resolve()
+    required_output = (
+        ARTIFACTS / "logs/conversion_comparison" / args.campaign_tag / "vit" / args.model_key
+    ).resolve()
     if output != required_output:
         raise ValueError("output path differs from the fixed comparison layout")
     runtime = args.runtime_root.resolve()
-    required_runtime = (ARTIFACTS / "runtime" / TAG / "vit" / args.model_key).resolve()
+    required_runtime = (RUNTIME_ARTIFACTS / args.campaign_tag / "vit" / args.model_key).resolve()
     if runtime != required_runtime:
         raise ValueError("runtime path differs from the fixed comparison layout")
     output.mkdir(parents=True, exist_ok=True)
@@ -288,7 +297,7 @@ def main() -> None:
         raise RuntimeError("comparison runtime must use a disk filesystem")
     commands = build_commands(args, output)
     manifest = {
-        "schema_version": 1, "tag": TAG, "model_key": args.model_key,
+        "schema_version": 1, "tag": args.campaign_tag, "model_key": args.model_key,
         "source_commit": args.expected_commit, "source_hashes": source_hashes,
         "checkpoint_path": str(args.model_id), "checkpoint_sha256": args.checkpoint_sha256,
         "calibration_dataset": calibration_dataset, "evaluation_dataset": evaluation_dataset,

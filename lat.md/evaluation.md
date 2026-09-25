@@ -174,6 +174,12 @@ The audited BERT, RoBERTa, and GPT-2 configurations use the same explicit LayerN
 
 The active paper campaign regenerates continuous-time task results after replacing the global range setting with explicit operator-local bounds.
 
+### Paper Reproduction Runbook
+
+The root README is the operator-facing runbook for every current ICLR experiment and figure except the deferred BrainScaleS-2 measurement workflow.
+
+It separates source-frozen reruns from rendering verified artifacts, lists the required self-contained data and checkpoint paths, and gives the artifact-first promotion and manuscript-build gates. The recorded global-range discrete-time figure is identified as historical evidence rather than a current-main execution path.
+
 [[scripts/experiments/run_full_calibrated_vit_comparison.py#main]] owns the ViT `collect → ANN → SNN` result path. It authenticates source, checkpoint, self-contained dataset, preprocessing, and calibration identities; preserves per-phase logs; and resumes only completed phases with matching hashes.
 
 ANN inference is cached separately from conversion evidence. [[scripts/runtime/ann_baseline.py#build_identity]] keys it by model family, checkpoint, evaluation data, preprocessing, numerical settings, batch size, and metric contract, but not the SNN source commit. [[scripts/runtime/ann_baseline.py#load]] re-parses the immutable log before reuse; any changed dense identity forces a fresh ANN evaluation. [[scripts/experiments/import_completed_ann_baseline.py#main]] applies the same checks when importing an older completed phase. Calibration and SNN phases continue to require the exact converted source.
@@ -188,13 +194,79 @@ After the ViT-B result authenticates its frozen calibration, the supervisor rele
 
 [[scripts/analysis/summarize_local_range_paper_campaign.py#main]] accepts only seven complete table pipelines and all 63 identity-consistent noise replicas. It authenticates phase logs and frozen calibration, rejects removed range keys, and requires the noise runs to share the completed ViT-B source, checkpoint, dataset, and calibration identities. It writes table, raw-replica, and cell-summary CSV files and renders the two-panel PDF and PNG with dense and clean-spiking references, three-replica 95% Student-$t$ intervals, and pooled deadline-miss counts on a logarithmic auxiliary axis. The Figure 4 legend uses the empty area on the right side of the right panel and does not cover plotted values.
 
+## Appendix Raw-Timestamp ViT-B Noise Rerun
+
+This campaign replaces the Appendix timing-noise evidence after the event-delivery semantics changed.
+
+[[scripts/experiments/run_appendix_vit_noise_campaign.py#main]] prepares one source-frozen ViT-B calibration and deterministic reference, writes a central 63-run assignment, and schedules disjoint local and poseidon1 partitions. The local GPU 0--7 permission is confined to this campaign manifest; other local campaigns keep their default GPU policy.
+
+[[scripts/experiments/run_vit_local_range_noise_condition.py#main]] remains the only condition evaluator. Each new manifest fixes raw timestamp delivery and enabled exponential-difference internal noise, rejects tmpfs and ramfs runtime paths, and authenticates the evaluator, data, preprocessing, checkpoint, calibration, and source.
+
+The reducer's noise-only mode accepts the new tag only after all 21 cells contain seeds 0, 1, and 2. It computes three-replica 95% Student-$t$ intervals and pooled event counts before the generated PDF or PNG can replace the manuscript figure.
+
+## Compact Transformer Diagnostic
+
+This diagnostic tests whether reduced Transformer depth and width change sensitivity to measured timing noise without introducing another temporal-operator implementation.
+
+[[utils/transformers/models/spiking_cct.py#CCT7ForImageClassification]] maps the seven official CCT-7/3x1 encoder blocks to the maintained ViT temporal modules. The compact Transformer adapter keeps `Potential` metadata from the convolutional tokenizer through learned sequence pooling and the classifier. Every learned convolution, affine map, and normalization module uses the maintained temporal operator class; ReLU, maximum pooling, and tensor reshaping are topology steps with explicit bounds.
+
+[[scripts/evaluation/error_analysis_cct.py#main]] loads the official CIFAR-10 checkpoint, verifies the dense reference, freezes ranges from two deterministic training passes, and evaluates the same 500 test examples for clean conversion, linear-encoder noise alone, or paired linear- and logarithmic-encoder timing noise. Each condition records the two fractions separately. Its calibration identity also records the operator-backed output-head version required by the maintained ViT calibration policy before range binding.
+
+The same frozen execution can evaluate isolated $\phi_{\mathrm{NP}}$ noise, isolated $\phi_{\mathrm{NL}}$ noise, and equal fractions on both encoders without reloading the model between conditions.
+
+The earlier mixed output head measurements are superseded because their learned tokenizer, sequence pool, and classifier remained dense. They are retained only for provenance and are not combined with measurements of the complete learned operations.
+
+The complete learned operations retain 96.0% clean accuracy, equal to the dense reference, on the fixed 500-image subset. Across three timing noise seeds, the linear encoder scores 43.87% with a 95% Student $t$ interval of [41.37%, 46.37%] at noise fraction 0.009160358, while the logarithmic encoder scores 89.00% [88.01%, 89.99%] at noise fraction 0.011524569. Equal noise on both encoders scores 82.27% [80.39%, 84.15%] at noise fraction 0.005 and 41.60% [38.50%, 44.70%] at noise fraction 0.008.
+
+These are exploratory 500-image sensitivity measurements. They evaluate independent primitive marginals and an equal noise joint stress condition, not a measured joint hardware distribution.
+
+The latest held-out hardware observations use noise fractions 0.005978843 for $\phi_{\mathrm{NP}}$ and 0.002473230 for $\phi_{\mathrm{NL}}$. On the same 500-image diagnostic over three seeds, isolated $\phi_{\mathrm{NP}}$ scores 81.53% [75.13%, 87.94%], isolated $\phi_{\mathrm{NL}}$ scores 95.87% [94.83%, 96.90%], and the unequal joint condition scores 80.27% [68.15%, 92.38%]. [[scripts/analysis/plot_cct_rt_candidates.py#main]] inserts the two isolated observations into their corresponding timing noise sweep curves. Because the unequal joint condition has two distinct fractions, the plot gives it no scalar horizontal coordinate and shows its accuracy as a line across the full plotting width. These values remain provisional until formal hardware revalidation.
+
+The logarithmic fraction in that exploratory result used the linear encoder span and is not an encoder-local $r_t$. It remains historical evidence and is not an input to the screening median campaign below.
+
+## Screening Median Model Timing Noise Sweep
+
+This campaign measures the top-1 accuracy change caused by direct Gaussian spike-time noise in three completely converted Transformer models.
+
+The validation screening median is $(r_{t,\mathrm{NP}},r_{t,\mathrm{NL}})=(0.010838111004060678,0.024617376541590685)$ at physical coordinates 184 and 1. The NP value is the median among four usable screened coordinates rather than a chip-wide median.
+
+For multiplier $\alpha$, every model-wide $\phi_{\mathrm{NP}}$ event uses $\alpha r_{t,\mathrm{NP}}$ and every model-wide $\phi_{\mathrm{NL}}$ event uses $\alpha r_{t,\mathrm{NL}}$. Each encoder converts its dimensionless fraction through its own declared local time window. Other non-ideality axes remain disabled.
+
+The initial formal grid is $\alpha\in\{0.003,0.01,0.03,0.1,0.3,1\}$ with seeds 0--2. CCT-7 uses the complete 10,000-image CIFAR-10 test split; ViT-S/16 and ViT-B/16 use the same fixed 5,000-image ImageNet-1k validation prefix. Each model freezes one label-free calibration before clean and noisy evaluation.
+
+### Condition Execution
+
+Each cell authenticates the measured pair, source, checkpoint, preprocessing, calibration, and data population before model-wide noise injection.
+
+[[scripts/experiments/run_screening_median_model_condition.py#main]] runs one model, multiplier, and seed. It records the separate linear and logarithmic fractions, prediction digest, accuracy, event counts, misses, nominal-deadline occupancy, and pre-clamp output counts.
+
+### Campaign Execution
+
+The campaign preserves completed cells and permits later multipliers without changing the scientific protocol identity.
+
+[[scripts/experiments/run_poseidon_screening_median_model_sweep.py#main]] prepares one frozen calibration and deterministic baseline per model, gates the formal phase on nine 500-image smoke runs, and schedules CCT, ViT-S, and ViT-B over Poseidon GPUs 0--3. Immutable request shards record each added multiplier set.
+
+Generated evidence remains under the fixed result root, while multiprocessing uses a separately configured short runtime root on disk so Unix socket paths remain within the system limit.
+
+### Summary Artifacts
+
+The reducer joins only results with the same protocol identity and rejects conflicting duplicate cells.
+
+[[scripts/analysis/summarize_screening_median_model_sweep.py#main]] writes baseline, raw-replica, three-seed summary, and model-wide accuracy tables. Its figure reports top-1 accuracy change from the deterministic baseline against the noise scale multiplier and marks $\alpha=1$ as the measured screening median.
+
+### Verification
+
+Pure-Python verification covers measurement selection, multiplier scaling, extensible cell identities, multi-root merging, and summary rendering.
+
+[[scripts/verification/verify_screening_median_model_sweep.py#main]] requires 9 smoke cells and 54 initial formal cells, rejects execution axes in the protocol identity, and rejects incompatible or conflicting artifact unions.
+
 ## ViT-B Cumulative Encoder Block Timing Noise
 
-This diagnostic measures converted ViT-B accuracy as timing noise is enabled in a contiguous prefix of encoder blocks from the input.
+This diagnostic measures converted ViT-B accuracy as timing noise is enabled in the first $k$ encoder blocks from the input.
 
-Both $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ are active inside each selected block, but each uses its own measured validation $r_t$ and local signal span. The two fractions are not averaged or replaced by one shared value.
+Both $\phi_{\mathrm{NP}}$ and $\phi_{\mathrm{NL}}$ are active inside each selected block, but each uses its own measured validation $r_t$ and local signal span. The two fractions are never averaged or replaced by one shared value.
 
-The authenticated hardware summary has SHA-256 `639a908ac4b86440ef706afcd98467117cbf0f1e5424ca3e8de5f4ef8802f6c0`. The best measured coordinate and screening median remain distinct measured conditions; the latter is not described as a chip-wide median.
+The authenticated hardware summary has SHA-256 `639a908ac4b86440ef706afcd98467117cbf0f1e5424ca3e8de5f4ef8802f6c0`. The coordinates selected using screening calibration repetitions use $(r_{t,\mathrm{NP}},r_{t,\mathrm{NL}})=(0.008752792479355493,0.015681047682163635)$ on held-out remeasurement; the screening median uses $(0.010838111004060678,0.024617376541590685)$. NP records its $5$--$91$ microsecond encoding interval and $300$ microsecond deadline, while NL records $5$--$25$ and $60$ microseconds. Neither condition is labeled chip-wide because the NP screen retained only 4 usable coordinates among 63 measured coordinates.
 
 ### Condition Execution
 
@@ -393,7 +465,7 @@ Central domain construction and tensor membership checks must fail consistently 
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_sampler_rng_contract]] checks full seeded-stream replay, generator advance across consecutive calls, and exact RNG non-consumption when every standard deviation is zero.
 
-[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_sampler_deadline_contract]] verifies that early events clamp to the start and fire, deadline equality fires, and only strict exceedance becomes a miss with a finite deadline carrier.
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_sampler_deadline_contract]] verifies that delivered early timestamps remain raw, deadline equality fires, and only strict exceedance becomes a miss with a finite receiver deadline carrier.
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_deadline_probability]] compares the closed-form strict Gaussian tail with seeded empirical misses and checks exact zero-scale probabilities at and beyond the inclusive deadline.
 
@@ -413,7 +485,7 @@ Measured marginal timing scales may differ between the linear and logarithmic en
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_multiplication_operator]] checks deterministic and zero-noise parity, isolated opening and reference misses, observation-time integration, ideal rails, and seeded output saturation.
 
-[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_exponential_function]] checks deterministic and zero-noise values, early-event start clamping, input-miss reset, the zero-extended Gaussian rail, and nonsaturating finite readout statistics.
+[[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_exponential_function]] checks deterministic and zero noise values, raw early event decoding, input miss reset, the Gaussian output interval including reset zero, and nonsaturating finite readout statistics.
 
 [[scripts/verification/verify_gaussian_time_noise.py#verify_gaussian_exponential_difference_operator]] checks zero-noise parity, opening-reset and closing-deadline readouts, internal-event reset, extended rails, and per-stage statistics.
 
@@ -563,11 +635,13 @@ This presentation change applies to future rendering with the updated plotter. E
 
 ## Symbolic Operation-Count Check
 
-The paper’s spike-operation and energy formulas have a dedicated symbolic regression checker independent of model execution.
+The paper’s SOP formulas have a dedicated symbolic regression checker independent of model execution.
 
 [[scripts/verification/verify_sop.py#main]] recomputes atomic operators, module costs, full ViT formulas, and published rounded values. It encodes fixed-scalar multiplication as free weight calibration through [[scripts/verification/verify_sop.py#free_scale]] instead of counting raw Python calls.
 
-This verifies internal arithmetic consistency under the stated cost model. It does not validate the physical energy constant, system boundary, routing, memory, static power, or circuit feasibility.
+This verifies internal arithmetic consistency under the stated SOP model. It does not validate routing, memory, circuit feasibility, or a physical hardware implementation.
+
+The checker targets the NeurIPS appendix values, including the 4.31, 16.3, and 56.9 billion ViT totals. The ICLR 2027 appendix uses a different cost model whose totals are 4.75, 17.87, and 62.36 billion; on 2026-09-24 a manual recomputation of its block, stem, final LayerNorm, and head formulas reproduced all four published totals, but no maintained checker covers them. See [[noise-timestamp-audit#ICLR 원고 연산자 표와 잡음 모델 대조]].
 
 ## Manuscript Terminology and Notation Check
 

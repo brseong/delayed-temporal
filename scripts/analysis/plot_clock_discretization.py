@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Regenerate the ICLR two-panel discrete-time simulation figure."""
+"""Regenerate the ICLR overlaid discrete-time simulation figure."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import math
 from pathlib import Path
 import sys
@@ -17,8 +15,6 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from scripts.analysis.plot_clock_time_step_sweep import (  # noqa: E402
-    expected_population,
-    expected_shards,
     load_verified_results,
 )
 
@@ -26,81 +22,28 @@ from scripts.analysis.plot_clock_time_step_sweep import (  # noqa: E402
 CLOCK_ROOT = (
     REPOSITORY_ROOT
     / "artifacts/logs/clock_driven/"
-    "vit_base_clock_driven_imagenet500_theta20_float64_fine_v1"
+    "vit_base_clock_driven_imagenet500_full_conversion_float64_fine_v3"
 )
 WINDOW_ROOT = (
     REPOSITORY_ROOT
     / "artifacts/logs/clock_driven/"
-    "vit_base_clock_driven_window_steps_384_768_imagenet500_theta20_float64_v1"
+    "vit_base_clock_driven_window_steps_384_768_imagenet500_"
+    "full_conversion_float64_v3"
 )
 OUTPUT_PREFIXES = (
     REPOSITORY_ROOT / "artifacts/figures/ViT-clock-discretization",
     REPOSITORY_ROOT / "paper/iclr_2027/figures/ViT-clock-discretization",
 )
+TIME_STEP_TAG = "vit_base_clock_driven_imagenet500_full_conversion_float64_fine_v3"
+WINDOW_STEP_TAG = (
+    "vit_base_clock_driven_window_steps_384_768_imagenet500_"
+    "full_conversion_float64_v3"
+)
+PLOTTED_TIME_STEPS = tuple(index / 100.0 for index in range(1, 11))
 PLOTTED_WINDOW_STEPS = (128, 256, 384, 512, 768, 1024, 2048)
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def load_extended_window_results(root: Path) -> list[dict[str, Any]]:
-    """Load the verified fixed-window-count results including 384 and 768."""
-
-    verification_path = root / "verification.json"
-    if not verification_path.is_file():
-        raise FileNotFoundError(
-            f"extended sweep verification is missing: {verification_path}"
-        )
-    verification = json.loads(verification_path.read_text(encoding="utf-8"))
-    if verification.get("status") != "complete":
-        raise ValueError("extended fixed-window sweep is not complete")
-
-    expected_files = (
-        ("summary.json", "summary_json_sha256"),
-        ("summary.csv", "summary_csv_sha256"),
-        ("raw_shards.csv", "raw_shards_csv_sha256"),
-    )
-    for filename, digest_field in expected_files:
-        path = root / filename
-        if not path.is_file() or _sha256(path) != verification.get(digest_field):
-            raise ValueError(f"extended sweep artifact identity differs: {path}")
-
-    results = verification.get("results")
-    expected_steps = (None, 64, *PLOTTED_WINDOW_STEPS)
-    if not isinstance(results, list) or len(results) != len(expected_steps):
-        raise ValueError("extended sweep condition count differs")
-    if verification.get("condition_count") != len(expected_steps):
-        raise ValueError("extended sweep verification condition count differs")
-    if verification.get("shard_run_count") != len(expected_steps) * expected_shards:
-        raise ValueError("extended sweep shard count differs")
-    if verification.get("evaluation_population") != expected_population:
-        raise ValueError("extended sweep evaluation population differs")
-
-    for expected_step, result in zip(expected_steps, results):
-        if result.get("time_steps_per_window") != expected_step:
-            raise ValueError("extended sweep condition order differs")
-        expected_condition = (
-            "continuous" if expected_step is None else f"steps_{expected_step}"
-        )
-        if result.get("condition") != expected_condition:
-            raise ValueError("extended sweep condition name differs")
-        correct = int(result["correct"])
-        samples = int(result["samples"])
-        if samples != expected_population or not 0 <= correct <= samples:
-            raise ValueError("extended sweep task counts differ")
-        if not math.isclose(
-            float(result["accuracy"]),
-            correct / samples,
-            rel_tol=0.0,
-            abs_tol=1.0e-15,
-        ):
-            raise ValueError("extended sweep accuracy differs from task counts")
-    return results
+ICLR_TEXT_WIDTH_INCHES = 5.5
+FIGURE_WIDTH_FRACTION = 0.40
+FIGURE_SIZE = (ICLR_TEXT_WIDTH_INCHES * FIGURE_WIDTH_FRACTION, 2.55)
 
 
 def plot_figure(
@@ -138,8 +81,8 @@ def plot_figure(
             "axes.labelsize": 8,
             "axes.titlesize": 9,
             "legend.fontsize": 7.5,
-            "xtick.labelsize": 7,
-            "ytick.labelsize": 7,
+            "xtick.labelsize": 5.5,
+            "ytick.labelsize": 6.5,
             "axes.spines.top": False,
             "axes.spines.right": False,
             "pdf.fonttype": 42,
@@ -148,103 +91,92 @@ def plot_figure(
     )
     blue = "#2166AC"
     grey = "#4D4D4D"
-    figure, axes = plt.subplots(1, 2, figsize=(7.0, 2.55), sharey=True)
+    orange = "#D95F02"
+    figure, bottom_axis = plt.subplots(figsize=FIGURE_SIZE)
+    top_axis = bottom_axis.twiny()
 
     time_steps = [float(row["time_step"]) for row in time_step_rows]
     time_step_accuracy = [float(row["accuracy"]) * 100.0 for row in time_step_rows]
-    discrete_line = axes[0].plot(
+    time_step_line = bottom_axis.plot(
         time_steps,
         time_step_accuracy,
         marker="o",
-        markersize=4.5,
-        linewidth=1.6,
+        markersize=4.0,
+        linewidth=1.5,
         color=blue,
-        label="Discrete-time simulation",
+        label="Same interval between simulation time steps",
         zorder=3,
     )[0]
-    continuous_line = axes[0].axhline(
+    continuous_line = bottom_axis.axhline(
         continuous,
         color=grey,
         linestyle="--",
-        linewidth=1.2,
-        label="Continuous-time conversion",
+        linewidth=1.1,
+        label="Continuous time",
         zorder=2,
     )
-    axes[0].set_title(
-        "(a) Same interval between simulation time steps",
-        pad=6,
-    )
-    axes[0].set_xlabel("Time-step width")
-    axes[0].set_ylabel("Top-1 accuracy (%)")
-    axes[0].set_xticks(time_steps)
-    axes[0].xaxis.set_major_formatter(FormatStrFormatter("%.2f"))
-    axes[0].set_xlim(min(time_steps) - 0.004, max(time_steps) + 0.004)
+    bottom_axis.set_ylabel("Top-1 accuracy (%)", labelpad=1)
+    bottom_axis.set_xticks(time_steps)
+    bottom_axis.xaxis.set_major_formatter(FormatStrFormatter("%.2f"))
+    bottom_axis.set_xlim(min(time_steps) - 0.004, max(time_steps) + 0.004)
+    bottom_axis.tick_params(axis="x", colors=blue, labelrotation=55, pad=1)
+    for label in bottom_axis.get_xticklabels():
+        label.set_horizontalalignment("right")
 
     positions = list(range(len(PLOTTED_WINDOW_STEPS)))
     window_accuracy = [
         float(row["accuracy"]) * 100.0 for row in plotted_window_rows
     ]
-    axes[1].plot(
+    window_line = top_axis.plot(
         positions,
         window_accuracy,
-        marker="o",
-        markersize=4.5,
-        linewidth=1.6,
-        color=blue,
+        marker="s",
+        markersize=3.8,
+        linewidth=1.5,
+        color=orange,
+        label="Same number of time steps in each time window",
         zorder=3,
-    )
-    axes[1].axhline(
-        continuous,
-        color=grey,
-        linestyle="--",
-        linewidth=1.2,
-        zorder=2,
-    )
-    axes[1].set_title(
-        "(b) Same number of time steps in each time window",
-        pad=6,
-    )
-    axes[1].set_xlabel("Number of time steps")
-    axes[1].set_xticks(
+    )[0]
+    top_axis.set_xticks(
         positions,
         labels=[str(steps) for steps in PLOTTED_WINDOW_STEPS],
     )
-    axes[1].set_xlim(-0.45, len(positions) - 0.55)
+    top_axis.set_xlim(-0.45, len(positions) - 0.55)
+    top_axis.tick_params(axis="x", colors=orange, pad=1)
+    top_axis.spines["top"].set_visible(True)
+    top_axis.spines["top"].set_color(orange)
 
-    for axis in axes:
-        axis.set_ylim(0.0, 100.0)
-        axis.set_yticks((0, 20, 40, 60, 80, 100))
-        axis.grid(axis="y", color="#D9D9D9", linewidth=0.6, zorder=0)
+    bottom_axis.set_ylim(-3.0, 100.0)
+    bottom_axis.set_yticks((0, 20, 40, 60, 80, 100))
+    bottom_axis.grid(axis="y", color="#D9D9D9", linewidth=0.6, zorder=0)
     figure.legend(
-        [discrete_line, continuous_line],
-        ["Discrete-time simulation", "Continuous-time conversion"],
+        [time_step_line, window_line, continuous_line],
+        [
+            "Same interval between\nsimulation time steps\n(bottom axis)",
+            "Same number of time steps\nin each time window\n(top axis)",
+            "Continuous time",
+        ],
         loc="lower center",
-        bbox_to_anchor=(0.5, -0.015),
-        ncol=2,
+        bbox_to_anchor=(0.5, 0.015),
         frameon=False,
-        columnspacing=2.2,
-        handlelength=2.4,
+        handlelength=2.0,
+        borderpad=0.35,
+        labelspacing=0.45,
+        fontsize=5.4,
     )
     figure.subplots_adjust(
-        left=0.09,
-        right=0.985,
-        top=0.88,
-        bottom=0.27,
-        wspace=0.20,
+        left=0.22,
+        right=0.97,
+        top=0.92,
+        bottom=0.40,
     )
 
     for output_prefix in output_prefixes:
         output_prefix.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(
-            output_prefix.with_suffix(".pdf"),
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
+        figure.savefig(output_prefix.with_suffix(".pdf"))
         figure.savefig(
             output_prefix.with_suffix(".png"),
             dpi=300,
-            bbox_inches="tight",
-            pad_inches=0.02,
         )
     plt.close(figure)
 
@@ -264,8 +196,16 @@ def main() -> None:
     )
     args = parser.parse_args()
     output_prefixes = tuple(args.output_prefix or OUTPUT_PREFIXES)
-    _, time_step_results = load_verified_results(args.time_step_root.resolve())
-    window_results = load_extended_window_results(args.window_root.resolve())
+    _, time_step_results = load_verified_results(
+        args.time_step_root.resolve(),
+        time_step_tag=TIME_STEP_TAG,
+        time_step_grid=PLOTTED_TIME_STEPS,
+    )
+    _, window_results = load_verified_results(
+        args.window_root.resolve(),
+        window_step_tag=WINDOW_STEP_TAG,
+        window_step_grid=PLOTTED_WINDOW_STEPS,
+    )
     plot_figure(
         time_step_results,
         window_results,

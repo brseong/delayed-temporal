@@ -1,6 +1,6 @@
 # TODO
 
-This file tracks work required for the current manuscript and maintained implementation. Optional experiment ideas are kept separately in [[deferred-experiments]] without checkboxes. Fully completed work units are archived in [[deprecated#완료된 TODO 기록]].
+This file tracks work required for the current ICLR manuscript and maintained implementation. Optional experiment ideas are kept separately in [[deferred-experiments]] without checkboxes. Fully completed work units are archived in [[deprecated#완료된 TODO 기록]].
 
 ## Active Experiment Work
 
@@ -43,19 +43,19 @@ This completed selection campaign is historical after global-range removal and c
 
 This is the canonical status ledger for manuscript-facing work; the former review checklist remains a provenance record, and duplicate actions are consolidated here.
 
-Source details and reviewer labels are consolidated in [[deprecated#과거 리뷰]]. Update task status here first, then reflect completed claims in `paper/neurips_2026/neurips_2026.tex` and the submission checklist.
+Source details and reviewer labels are consolidated in [[deprecated#과거 리뷰]]. Update task status here first, then reflect completed claims in `paper/iclr_2027/iclr2027_conference.tex` and the ICLR submission materials.
 
 ### Current ViT-B Noise and Time-Scale Update
 
 This checklist covers reporting from the active local-range 5k campaign; removed global-range campaigns remain historical evidence only.
 
 - [x] Remove the global range selection phase and define timing-noise scale relative to each encoder's declared local time window.
-- [ ] Complete the fresh ViT-B calibration and deterministic ANN/SNN evaluation on the fixed validation 5k subset.
-- [ ] Complete the nine-point timing-noise fraction and thirteen-point deadline-margin ratio sweeps with seeds 0, 1, and 2.
-- [ ] State that the frozen calibration covers the complete active site set and remains unchanged during validation and noise evaluation.
+- [x] Complete the fresh raw-timestamp ViT-B calibration and deterministic ANN/SNN evaluation on the fixed validation 5k subset.
+- [x] Complete the raw-timestamp nine-point timing-noise fraction and thirteen-point deadline-margin ratio sweeps with seeds 0, 1, and 2 while keeping exponential-difference internal noise enabled.
+- [x] State that the frozen calibration covers the complete 109-site active set and remains unchanged during validation and noise evaluation.
 - [ ] Explain how each dimensionless local code interval maps to a declared physical duration and state that all associated time constants must be rescaled consistently.
 - [ ] Report the injection scope, seeds, confidence interval and empirical miss statistics from the accepted local-range logs.
-- [ ] Mark every earlier shared-range and threshold-selection result as superseded for manuscript support.
+- [x] Mark the earlier shared-range, threshold-selection, and pre-raw-timestamp local-window results as superseded for manuscript support.
 
 ### P0 Claims, Novelty, and Structure
 
@@ -68,6 +68,7 @@ The central claim must describe the demonstrated fixed-form operator composition
 - [ ] Audit `lossless`, `near-lossless`, `exact`, and `highly accurate`; use constructive or approximate language unless a quantitative bound supports the stronger term.
 - [ ] Describe the MatMul $O(3MKN)$ to $O(MKN)$ change as a constant-factor operation-count reduction, not an asymptotic complexity improvement.
 - [ ] Fairly describe the latency and efficient-simulation benefits of small-$T$ discrete-time methods.
+- [x] Replace negative and literature-wide prior-work claims with contribution-first statements about operation counts, error evaluation, and the operator-design challenge.
 - [ ] Rebuild the paper in the order: problem and gap, model and assumptions, fixed operators, constructive composition, deterministic error, conversion evidence, perturbation sensitivity, and hardware limitations.
 - [x] Replace “quantifying the resulting clipping error” with “accounting for clipping introduced by the finite ranges”; do not add a separate layer-wise activation/logit error study solely to support clipping-error quantification.
 - [ ] Map each current paragraph, theorem, table, and figure to keep, shorten, move to appendix, delete, or rewrite before polishing the abstract and introduction.
@@ -77,6 +78,10 @@ The central claim must describe the demonstrated fixed-form operator composition
 Every retained theorem and operator claim must match the implemented equations, domains, finite-window behavior, and failure conditions.
 
 - [ ] Reclassify Theorem 1 as a quantitative theorem with conditions and bounds, a conditional theorem, or a constructive proposition.
+- [x] Replace blanket composition exactness with operator equations that hold exactly under stated domains and make finite-domain approximation accuracy depend on the domain choice.
+- [x] Replace arbitrary ANN function language with the listed arithmetic and evaluated Transformer operations.
+- [x] State the IF threshold, current-weight normalization, and reference time used by the negative-log example without expanding the elementary derivation.
+- [x] Restrict the double-exponential response to the spike-evoked LIF component and state the observation-time conditions for each single-exponential approximation.
 - [ ] Tabulate each primitive and composition with input domain, clipping condition, scale, and zero-error condition; keep quantitative claims within the reported ANN--SNN task fidelity rather than introducing a separate layer-wise clipping-error study.
 - [ ] Derive an $L$-block error relation where defensible; otherwise state why no useful end-to-end bound is available and limit the claim to empirical evidence.
 - [ ] Present all four signed multiplication sign cases and the causal source--sink routing used by the two parallel causal integration paths.
@@ -97,36 +102,39 @@ Every retained theorem and operator claim must match the implemented equations, 
 Performance tables must use comparable protocols and expose degradation rather than selecting only favorable model sizes.
 
 - [ ] Recompute every ANN-to-SNN absolute result and delta from generated artifacts, including the current GPT-2 metric policy and the new ViT-B operating point.
+- [ ] Keep headline conversion numbers provisional until the complete local-range evaluation bundles and GPT-2 metric policy are verified.
+- [ ] State once in the Introduction that all learned affine Transformer operations and output heads are operator-backed, while preprocessing, embedding lookup, shape-only operations, tensor return, argmax, and loss remain outside this claim.
 - [ ] Show checkpoint, preprocessing, training method, split, precision, and evaluation differences for every literature comparison.
+- [x] Distinguish direct numerical conversion deltas from prior rows that include quantization-aware training or other additional procedures.
 - [ ] Remove ranking and superiority language unless an existing result already matches the checkpoint and protocol exactly.
 - [ ] Summarize ViT-S, ViT-B/L, and GPT-2 together so the smallest observed degradation is not presented as universally representative.
 - [ ] Report GPT-2 token-weighted corpus perplexity as the primary metric and name the mean-of-batch-loss value only as a compatibility metric.
 
-### P0 Energy, Latency, and Hardware Claims
+### P0 SOP, Latency, and Hardware Claims
 
-Energy and feasibility claims must expose their system boundary and remain proxies unless supported by hardware-level evidence.
+SOP and feasibility claims must state their mapping assumptions and remain separate from physical hardware measurements.
 
-- [ ] Cite the source and conditions for $E_{\mathrm{AC}}=0.9$ pJ, including process, voltage, circuit type, and whether it is measured or estimated.
-- [ ] Label the present calculation as an idealized SOP-only estimate and list omitted memory, routing, fanout, synchronization, static current, comparator, calibration, conversion, mismatch, and integration-time costs.
-- [ ] Define the target substrate and a consistent system boundary before comparing against ANN or neuromorphic baselines.
+- [x] Remove the absolute energy column, fixed SOP coefficient, and claims of energy superiority from the manuscript.
+- [ ] Report Data SOP and Global SOP only as operation counts under the declared mapping, including the evaluated TTFS classification head and excluded hardware operations.
+- [ ] Describe each cited analog result as mechanism-level, primitive-level, composed-operator, or full-chip evidence; do not promote one level to another.
+- [x] Confirm that TTFSFormer and our totals use synaptic operations per inference and retain the comparable-to-prior wording without implying identical circuits or measured energy.
 - [ ] Estimate per-operator and end-to-end latency, including the selected code window and the physical-time rescaling assumption.
-- [ ] Do not infer energy superiority from operation-count equality; use a comparable ANN energy boundary or narrow the claim.
-- [ ] Audit external energy numbers such as SpikeZIP's 100.8 mJ for boundary compatibility before making direct comparisons.
-- [ ] Keep hardware-level superiority outside the claim because SPICE, FPGA, device-level, and silicon evidence are absent.
-- [ ] EBRAINS 계정에서 BrainScaleS-2의 여섯 `INA219StatusOnBoard` 전원 레일을 읽을 수 있는지 시험하고, shunt calibration과 conversion setting을 확인한 뒤에만 calibrated measurement로 해석한다.
-- [ ] 하나의 고정 mapping에서 ready 실행과 반복 active 실행을 교대로 측정하고, hardware throughput과 crossbar event count를 기록하여 total 및 dynamic energy, 95% interval과 power와 event rate 사이 기울기를 함께 보고한다.
+- [ ] Keep hardware superiority outside the claim because circuit and silicon evidence are absent.
 
 ### P1 Robustness and Non-Ideality Evidence
 
 Computational stress tests must be separated from calibrated device models and from one another.
 
 - [ ] Document each timing-noise distribution, magnitude, injection site, seed, repetition count, and confidence interval.
+- [ ] Keep BrainScaleS-2 measurement and model-injection claims in planned tense until the measurement artifacts and task results are complete.
 - [ ] Treat additive jitter with deadline misses as the maintained computational model; do not describe it as a calibrated neuronal noise process.
-- [ ] Report accuracy against empirical miss rate and the available counts by operator site as simulator diagnostics only; do not interpret them as a physical event population or energy estimate.
+- [ ] Report accuracy against empirical miss rate and the available counts by operator site as simulator diagnostics only; do not interpret them as a physical event population.
 - [ ] State whether timing error is injected at encoder outputs or at every internal $\Phi/\Psi$ boundary, and describe the latter coverage explicitly.
 - [ ] State that frozen threshold mismatch and every other uncertainty axis in [[deferred-experiments#Additional Robustness Axes]] are outside the current result.
 - [ ] Package the clean baseline, checkpoint, evaluator, manifests, and current jitter evidence before requesting analog hardware collaboration.
-- [ ] Reorder Section 5 as noise-free conversion fidelity, primitive operator measurements on BrainScaleS-2, and model robustness under the measured distributions with one deadline margin sweep.
+- [x] Align Figure 3 prose with the CCT/ViT screening median Gaussian sweep and the ViT-B cumulative block experiment; retain the computational margin sweep in the appendix.
+- [ ] Replace Figure 3 draft panels with authenticated formal curves and add observed results to the Abstract, robustness section, and Conclusion (review items 1, 6, 7, 8).
+- [ ] Reconcile the BSS2 Appendix physical timing, repetitions, and acceptance rules with the selected operator measurement artifacts (review item 11).
 - [ ] Keep the Gaussian timing-noise sweep in the main text only if measured BrainScaleS-2 conditions are located on the same sweep; otherwise move it to the appendix as a computational stress test.
 
 ### P1 Scalability and Exposition
@@ -137,7 +145,7 @@ The paper must explain the computation to an ML reader and bound extrapolation b
 - [ ] Tabulate each primitive's input, output, units, time constants, threshold, scale, and proposed neuron or circuit interpretation.
 - [ ] Explain one complete $\Psi$-after-$\Phi$ composition at the ANN-layer level.
 - [ ] Emphasize causal masking by omitted synapses and the logarithmic LayerNorm construction without overstating biological realization.
-- [ ] Estimate SOP, memory, fanout, communication, calibration, latency, and energy bottlenecks for ViT-H/14 or billion-parameter scale.
+- [ ] Estimate SOP, memory, fanout, communication, calibration, and latency bottlenecks for ViT-H/14 or billion-parameter scale.
 - [ ] Discuss how 3D and multimodal Transformers change sequence length, operators, routing, and temporal-window constraints.
 
 ### P2 Limitations and Reproducibility
@@ -154,9 +162,9 @@ The release must make unsupported scope and reproducibility boundaries explicit.
 - [ ] Record compute device, memory, per-run duration, total successful compute, and material failed or preliminary compute.
 - [ ] Verify licenses and usage terms for datasets, libraries, checkpoints, and released derived artifacts.
 
-### NeurIPS Submission Checklist Audit
+### ICLR Submission Requirements Audit
 
-Submission-form answers must be revalidated after the manuscript changes rather than inherited from the withdrawn version.
+Submission requirements must be revalidated for ICLR 2027 rather than inherited from the withdrawn NeurIPS version.
 
 - [ ] Reconcile Claims, Limitations, Assumptions/Proofs, Reproducibility, and Experimental Details answers with the final section references.
 - [ ] Update the statistical-significance answer: deterministic conversion results are singletons, while stochastic robustness results use three replicas and explicitly defined 95% Student-t intervals.
@@ -174,9 +182,9 @@ Work should proceed by evidence dependency so prose never outruns mathematical o
 3. Complete the mathematical and operator audit before changing theorem language.
 4. Isolate deterministic conversion errors and settle metric and baseline policy.
 5. Finalize the local-window and physical-time interpretation, then run only the approved robustness diagnostics.
-6. Rebuild the energy and latency section using an explicit system boundary.
+6. Rebuild the SOP and latency section under the declared mapping and remove absolute energy claims.
 7. Prepare the collaborator package before adding calibrated device claims.
-8. Rewrite the abstract and introduction last, then update the NeurIPS submission checklist.
+8. Rewrite the abstract and introduction last, then update the ICLR submission materials.
 
 ### Final Release Gate
 
@@ -186,8 +194,8 @@ The next public version is ready only when claims, equations, generated evidence
 - [ ] Every major equation has an independent verification record.
 - [ ] Every table and figure is reproducible from preserved generated artifacts.
 - [ ] Every comparison declares whether checkpoints and protocols are directly comparable.
-- [ ] Every energy table states its system boundary and included and excluded costs.
-- [ ] The NeurIPS LLM-use answer matches the actual workflow.
+- [ ] No absolute energy table or claim of energy superiority remains; every SOP table states its mapping and excluded operations.
+- [ ] The ICLR AI use statement matches the actual workflow.
 - [ ] Limitations include hardware non-validation, approximation error, scaling limits, and analog non-ideality scope.
 - [ ] The paper is understandable without reviewer responses or internal notes.
 - [ ] Negative settings and failure conditions are reported alongside favorable results.
@@ -249,3 +257,13 @@ Calibration measurement uses two deterministic collection passes before frozen v
 Selected calibration sites use signed-symmetric, lower-bounded, or upper-bounded endpoint policies. These are distinct from the three reasons for selecting a range in [[domain#Domain Propagation]]. Practical structural bounds remain analytic, but a finite interval that grows excessively can still require calibration.
 
 For nonnegative sites selected for one-sided calibration, the lower endpoint stays at zero and only the upper endpoint is calibrated. Logarithmic domains keep a separately configured positive lower endpoint; current ViT/GPT-2 bindings do not select that endpoint from data.
+
+## Timestamp 변경 뒤 원고 확인
+
+감사 결과에서 확인된 원고 및 결과의 일치 조건만 후속 작업으로 기록한다. 상세 근거는 [[noise-timestamp-audit]]에 있다.
+
+- [x] 원고에 실제 exponential difference 분해와 내부 encoding의 noise 주입을 명시했다.
+- [ ] 새 timestamp 구현으로 평가한 결과가 검증되기 전에는 기존 noise figure를 새 구현의 결과로 표시하지 않는다.
+- [x] 비활성 부호 경로와 내부 ED의 event 및 output 통계를 제외하고, 공유 참조는 사용하는 경우에만 센다. 출력·난수 상태 동일성은 [[noise#Active Signed-Branch Statistics]]에서 검증한다.
+- [ ] 2026-09-24 ICLR 연산자 표 대조 스크립트를 `scripts/verification/`으로 이식하고, ICLR appendix의 SOP 총계를 검사하는 항목을 [[scripts/verification/verify_sop.py#main]]에 추가한다. 근거는 [[noise-timestamp-audit#ICLR 원고 연산자 표와 잡음 모델 대조]]다.
+- [x] Scalar reference event가 operator 호출당 한 번 추출되는 규칙을 Appendix counting convention에 명시했다. Softmin의 reset 0 이후 log 입력 제한은 기존 범위 clamp와 별도 양의 log 하한 규약에서 직접 따르므로 중복 서술하지 않는다.

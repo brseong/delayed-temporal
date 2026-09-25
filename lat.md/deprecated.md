@@ -8,6 +8,12 @@ Deprecated. 이 문서는 2026-09-14 최초 지식 통합본의 역사적 설명
 
 현재 유효한 원칙은 [[neurips]], 동작은 [[domain]], [[operators]], [[noise]], [[calibration]], [[evaluation]]에서 확인한다. 과거의 추가 실험·삭제·수정 제안은 실행 지시가 아니며 [[todo]]나 [[deferred-experiments]]를 대체하지 않는다. 사용자 요청에 따라 한국어 리뷰와 용어 감사 문서만 남기고, 통합 완료한 나머지 원본 Markdown 11개는 삭제했다. 상세 원문은 아래 압축본에서 복구할 수 있다.
 
+## 과거 timestamp clamp
+
+Deprecated. Commit `8e946cc`까지 전달된 Gaussian timestamp는 nominal interval 양 끝으로 제한됐다. 새 구현 `ed42bfc`는 delivered raw time을 유지한다.
+
+과거 sampler는 raw sample로 deadline miss를 판정한 뒤 전달되는 time을 nominal 시작과 끝 사이로 clamp했다. Margin 안의 late event도 nominal 상한으로 되돌렸고, miss는 nominal 상한을 저장값으로 사용했다. 새 구현은 receiver cutoff를 별도 보관하며 전달된 early/late time을 그대로 소비한다. 상세 경로와 구별되는 potential clamp는 [[noise-timestamp-audit]]에 기록한다. 과거 실험 결과는 그때의 구현을 설명하는 근거로만 보존한다.
+
 ## 원본 복구
 
 Deprecated. 삭제한 통합 원본 11개의 전체 내용은 압축본으로 보존한다. 지식그래프 요약에 없는 긴 유도나 원문 문안이 필요할 때만 복구하며, 현재 계약으로 다시 등록하지 않는다.
@@ -250,7 +256,122 @@ Deprecated. Attention 없는 작은 변환 네트워크의 하드웨어 결과�
 
 동일 체크포인트와 평가 분할에서 일반 모델, 이상적 변환 모델, 단일 하드웨어 구현과 복제한 하드웨어 구현을 구별한다. 출력 투표나 독립 모델 앙상블을 논리 뉴런 복제와 혼동하지 않는다. 적어도 내부 층에서 오차 전달을 관측하고, 보정과 선택에는 평가 정답을 사용하지 않는다.
 
-여러 배치 위치와 반복에서 불확실성, 정확도와 자원 증가를 함께 보고해야 한다. 측정한 노이즈를 소프트웨어에서 재생한 결과를 전체 네트워크의 칩 실행으로 부르지 않는다. 요구 근거와 실제 완료 상태는 [[todo#Manuscript Revision Master Checklist#P0 Energy, Latency, and Hardware Claims]]에서 구분한다.
+여러 배치 위치와 반복에서 불확실성, 정확도와 자원 증가를 함께 보고해야 한다. 측정한 노이즈를 소프트웨어에서 재생한 결과를 전체 네트워크의 칩 실행으로 부르지 않는다. 요구 근거와 실제 완료 상태는 [[todo#Manuscript Revision Master Checklist#P0 SOP, Latency, and Hardware Claims]]에서 구분한다.
+
+## 폐기한 전원 및 절대 에너지 검토
+
+Deprecated. 고정 SOP 단가, 외부 연구의 전력 환산과 BrainScaleS-2 전원 레일 측정 계획은 현재 ICLR 원고 범위에서 제외하며, 아래 내용은 결정 근거로만 보존한다.
+
+### 폐기 결정
+
+Deprecated. 현재 ICLR 원고는 Data SOP와 Global SOP를 명시된 mapping 아래의 operation count로만 보고하고, 절대 energy 수치나 hardware energy superiority를 주장하지 않는다.
+
+기존 검토는 $0.9$ pJ/SOP를 analog synaptic event의 실측 단가로 사용할 수 없고, 공개된 BrainScaleS-2 workload의 chip power를 이 논문의 전체 Transformer로 옮길 근거도 없다고 판정했다. 따라서 mJ 환산, 전원 레일 측정 계획과 event당 energy 추정은 활성 계획에서 제거했다.
+
+### 절대 에너지 추정의 과거 근거 단계
+
+Deprecated. 절대 energy를 유지한다면 SOP 총합에 고정 단가를 곱하지 않고, 하나의 target analog substrate와 계산 구간을 정한 뒤 실제 입력에 따른 회로 전력을 시간에 따라 적분해야 한다는 검토였다.
+
+Horowitz의 $0.9$ pJ는 45 nm, 0.9 V 조건의 32-bit floating-point addition에 대한 rough estimate이며 analog synaptic event 또는 이 논문의 SOP 측정값이 아니다. 따라서 기존 $E_{\mathrm{AC}}=0.9$ pJ는 Data SOP와 Global SOP의 상대적인 count를 실제 chip energy로 바꾸는 근거가 될 수 없다.
+
+계산 구간은 입력이 준비된 시점부터 최종 출력이 준비된 시점까지로 고정한다. 한 번의 configuration과 calibration을 $M$회 inference가 공유한다면 전체 값은 다음처럼 정의했다.
+
+$$
+E_{\mathrm{Total}}=\int_0^T P_{\mathrm{run}}(t)\,dt+\frac{E_{\mathrm{configuration}}+E_{\mathrm{calibration}}}{M}.
+$$
+
+여기서 $T$는 실제 end-to-end latency이고, $P_{\mathrm{run}}$은 계산 중 활성화된 모든 chip power domain의 합이다. 준비 상태 전력을 $P_{\mathrm{ready}}$라고 할 때 계산 중 증가분만 보고하려면 다음 값을 별도로 제시했다.
+
+$$
+E_{\mathrm{dynamic}}=\int_0^T \left(P_{\mathrm{run}}(t)-P_{\mathrm{ready}}(t)\right)\,dt.
+$$
+
+$E_{\mathrm{dynamic}}$은 $E_{\mathrm{Total}}$을 대신하지 않는다. 두 값은 같은 workload와 같은 실행에서 얻고, 포함된 chip, board, host 및 input/output 범위를 명시해야 했다.
+
+Chip 전체 transient simulation이 불가능하면 실제 model activity를 사용한 component 합산을 차선으로 두었다. 각 $\Phi/\Psi$ 호출의 증가분은 고정 상수가 아니라 input value, spike time, pulse width, synaptic weight, fan-out, route, threshold와 code window의 함수로 측정해야 했다. Encoder와 decoder, synapse와 integrator, reset, reference spike와 synchronization 전달, comparator/WTA, memory, routing, control, 필요한 conversion과 input/output, static analog bias current, leakage 및 calibration을 포함하고 준비 상태 전력과 중복하여 더하지 않는 조건이었다.
+
+제작 전 값은 실제 회로와 mapping을 고정한 뒤 SPICE-level transient simulation으로 구하고, layout 이후의 parasitic element, process, supply voltage와 temperature 조건, circuit mismatch, 실제 workload의 spike-time 분포와 fan-out을 포함해야 했다. 정확도, deadline miss와 latency도 같은 조건에서 함께 보고하는 계획이었다.
+
+Silicon이 있으면 chip 전체 power를 주 결과로 두었다. NeuroBench는 configured idle power와 active power를 함께 보고하고 그 차이와 execution time으로 dynamic energy per sample을 계산한다. BrainScaleS-2의 measured result는 analog core, plasticity processors, periphery와 communication links를 포함한 약 200 mW와 throughput을 결합해 2.4 microjoule per image를 보고했다. TTFS analog memory test chip 연구는 complete output layer의 242 microwatt, 196 ns와 4.74 pJ per inference per neuron을 함께 보고했다. 이 값들은 범위가 다른 회로의 SOP 단가로 가져올 수 없다는 결론이었다.
+
+과거 계획은 Data SOP와 Global SOP를 algorithmic count, SPICE 또는 layout 이후 result를 제작 전 projection, measured silicon을 실제 workload의 energy로 구분했다. 현재 결정은 이 세 단계 중 절대 energy 보고 전체를 논문 범위에서 제외하고 SOP count만 유지한다.
+
+근거 문헌은 [Horowitz ISSCC 2014](https://doi.org/10.1109/ISSCC.2014.6757323), [NeuroBench](https://www.nature.com/articles/s41467-025-56739-4), [Accelergy](https://accelergy.mit.edu/paper.pdf), [BrainScaleS-2 measured result](https://pmc.ncbi.nlm.nih.gov/articles/PMC8794842/), [TTFS analog memory test chip](https://doi.org/10.1109/TVLSI.2024.3368849), [IBM analog chip](https://www.nature.com/articles/s41586-023-06337-5)이다.
+
+#### 선행 수식과 적용 범위
+
+Deprecated. 선행 연구는 전체 측정값을 event 수로 나눈 지표, component별 예측식과 circuit transient energy 식을 서로 다른 목적으로 사용했다.
+
+[Ostrau et al.](https://doi.org/10.3389/fnins.2022.873935)은 idle system, idle neuron, source event, neuron spike, event transmission, synaptic event와 plasticity의 static 및 activity cost를 순서대로 측정해 합산한다. [Darwin3](https://doi.org/10.1093/nsr/nwae102)는 다음 power model을 제시한다.
+
+$$
+P_{\mathrm{total}}=P_I+P_B+P_N n+P_S s.
+$$
+
+$P_I$는 application을 올리기 전 chip power, $P_B$는 node를 활성화한 baseline, $P_Nn$은 neuron update, $P_Ss$는 synaptic event 항이다. 이는 digital chip 식이므로 continuous-time analog TTFS에 그대로 대입할 수 없다.
+
+[Accelergy](https://accelergy.mit.edu/paper.pdf)의 방법은 다음 일반식으로 요약했다.
+
+$$
+E_{\mathrm{estimate}}=\sum_c\sum_a N_{c,a}\,\epsilon_{c,a}(\mathbf{u}).
+$$
+
+$N_{c,a}$는 workload에서 component $c$의 action $a$가 일어난 수이고, $\epsilon_{c,a}(\mathbf{u})$는 data pattern, multicast destination 수와 같은 runtime argument에 따른 action energy다. Analog primitive의 $\epsilon$은 별도 SPICE 또는 measurement로 calibration해야 했다.
+
+[Analog LIF circuit study](https://www.nature.com/articles/s44335-024-00013-1)는 transient simulation에서 회수 가능한 capacitor energy와 conduction 및 logic loss를 분리한다.
+
+$$
+E_{\mathrm{diss}}(t)=E_{\mathrm{supply}}-E_{\mathrm{cap}}=E_{\mathrm{cond}}+E_{\mathrm{logic}},
+\qquad
+\mathrm{ESOP}=\frac{E_{\mathrm{diss}}(t_{\mathrm{end}})}{N_{\mathrm{neur}}(N_{\mathrm{SPK}}+N_{\mathrm{CLK}})}.
+$$
+
+[NeuroBench](https://www.nature.com/articles/s41467-025-56739-4)의 system track은 다음 관계를 사용한다.
+
+$$
+E_{\mathrm{dynamic}}=(P_{\mathrm{active}}-P_{\mathrm{idle}})T.
+$$
+
+[Senk et al.](https://doi.org/10.1088/2634-4386/ae379a)은 전체 energy를 synaptic event 수로 나눈 보고 지표를 명시한다.
+
+$$
+E_{\mathrm{syn}}=\frac{\int_0^{T_{\mathrm{wall}}}P(t)\,dt}{T_{\mathrm{model}}\sum_\alpha N_\alpha K_{\mathrm{out},\alpha}\nu_\alpha}.
+$$
+
+이 식들은 측정한 전체 energy를 보고하고 정규화하는 식이지, 미측정 analog chip energy를 SOP 수만으로 예측하는 식이 아니다.
+
+### BrainScaleS-2 전원 레일 측정 계획
+
+Deprecated. 공개 software stack으로 chip carrier의 여섯 전원 레일을 읽어 준비 상태와 실제 workload의 power를 비교하는 계획이었으나 현재 ICLR 원고의 실험 범위에서 제외했다.
+
+[`haldls`의 `INA219Status`](https://github.com/electronicvisions/haldls/blob/35a398d0d5bfdfe54d6379696f0e43cb0ac7acf2/include/haldls/vx/i2c.h)는 bus voltage와 shunt voltage를 읽고 power로 변환한다. [`halco`](https://github.com/electronicvisions/halco/blob/39e621071808aeb1a283deedc36c7d1390eb274f/src/halco/hicann-dls/vx/xboard.cpp)는 `vdd12_digital`, `vdd25_digital`, `vdd12_analog`, `vdd25_analog`, `vdd12_madc`, `vdd12_pll` 좌표를 제공한다. [공개 hardware test](https://github.com/electronicvisions/haldls/blob/35a398d0d5bfdfe54d6379696f0e43cb0ac7acf2/tests/hw/stadls/vx/v3/hw/test-ina219.cpp)는 `PlaybackProgramBuilder`로 모든 레일을 읽고, [PyNN의 `InjectedReadout`](https://github.com/electronicvisions/pynn-brainscales/blob/b4069f4c00d21151b98b3a4edb3f5bfff6d3e28c/brainscales2/pynn_brainscales/brainscales2/__init__.py)은 실행 경계에서 hardware coordinate를 읽는다. [공개 저자 코드](https://github.com/fmi-basel/brainscales-2-surrogate-gradients/blob/master/src/py/strobe/backend.py)도 여섯 레일을 읽어 합산했다.
+
+[`toUncalibratedPower()`](https://github.com/electronicvisions/haldls/blob/35a398d0d5bfdfe54d6379696f0e43cb0ac7acf2/src/haldls/vx/i2c.cpp)는 bus voltage와 shunt voltage의 곱을 expected shunt resistance 0.027 ohm으로 나눈다. Board별 shunt calibration과 measurement uncertainty를 확인하기 전에는 calibrated measurement로 부를 수 없고, 포함 범위도 여섯 chip rail로 제한된다.
+
+하나의 inference보다 INA219 conversion이 길 수 있으므로 개별 inference를 직접 적분하지 않는 계획이었다. [공개 TTFS experiment 코드](https://github.com/JulianGoeltz/fastAndDeep/blob/51cff005767f19ec229cde943931c71578edf661/src/py/fastanddeep/fd_backend.py#L83-L88)의 12 bit, 8-sample averaging은 channel당 약 4.26 ms이므로 두 channel의 한 갱신은 약 8.52 ms다. 동일 input을 최소 약 100 ms 반복 실행하고 입력 event가 없는 준비 상태와 번갈아 측정하려 했다.
+
+$$
+E_{\mathrm{Total}}=\frac{P_{\mathrm{run}}}{R},
+\qquad
+E_{\mathrm{dynamic}}=\frac{P_{\mathrm{run}}-P_{\mathrm{ready}}}{R}.
+$$
+
+$P_{\mathrm{run}}$은 여섯 전원 레일의 합이고, $R$은 hardware timestamp와 완료한 inference 수로 구한 sustained throughput이다. TTFS의 적은 spike 수가 dynamic energy에 미치는 영향은 configuration, 실행시간, route, fan-out, weight와 spike-time 분포를 고정한 채 입력 event rate만 바꾸고 [Crossbar event counter](https://github.com/electronicvisions/pynn-brainscales/blob/b4069f4c00d21151b98b3a4edb3f5bfff6d3e28c/brainscales2/pynn_brainscales/brainscales2/examples/crossbar_event_counter_read.py)로 실제 event 수를 확인하는 계획이었다.
+
+### 폐기한 비교표 에너지 환산
+
+Deprecated. 과거 비교표는 total SOP에 $0.9$ pJ/SOP를 곱해 mJ를 만들고, TTFSFormer의 $4.9/17/59$ mJ와 SpikeZIP의 power 및 timestep을 이용한 파생값을 함께 검토했다.
+
+SpikeZIP-TF Table 8의 ViT-B/L power $6.30/19.85$ W와 식 (6)의 step당 1 ms를 결합하면 64-step 값은 $403.2/1270.4$ mJ였다. ViT-S는 parameter ratio로 step당 1.78295 billion activities를 추정해 64 step에서 114.109 billion activities와 102.70 mJ를 만들었다. 이 값들은 직접 보고된 동일 범위의 physical device energy가 아니므로 현재 비교에서 제거한다.
+
+### 폐기한 실행 계획
+
+Deprecated. 절대 energy 주장을 유지할 때 필요하다고 판단했던 작업이며 현재 TODO에서 제거했다.
+
+- $E_{\mathrm{AC}}=0.9$ pJ의 process, voltage와 circuit type을 추적하고 idealized SOP-only estimate의 누락 비용을 열거한다.
+- Target substrate와 system boundary를 정의하고 외부 energy 수치의 범위 호환성을 감사한다.
+- EBRAINS 계정에서 BrainScaleS-2의 여섯 `INA219StatusOnBoard` 전원 레일 read 권한과 shunt calibration을 확인한다.
+- 하나의 고정 mapping에서 준비 상태와 반복 active 실행을 교대로 측정하고 hardware throughput, crossbar event count와 power-event rate 기울기를 보고한다.
 
 ## 과거 실험과 범위 감사
 

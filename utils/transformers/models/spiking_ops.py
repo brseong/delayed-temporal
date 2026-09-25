@@ -9,7 +9,10 @@ from torch import nn
 from utils.transforms import neg_identity_transform
 from utils.transforms.calibration import CalibrationCollectorState
 from utils.transforms.functions import multiplication_operator, division_function
-from utils.transforms.noise import clamp_gaussian_output, gaussian_time_noise_is_active
+from utils.transforms.noise import (
+    clamp_gaussian_output, gaussian_time_noise_is_active,
+    gaussian_noise_statistics_mask,
+)
 from utils.transforms.potential_to_spike import neg_log_transform
 from utils.transforms.primitive import signed_pulse_width_duration
 from utils.transforms.spike_to_potential import exponential_difference_operator
@@ -405,30 +408,35 @@ class SpikingLayerNorm(nn.Module):
             # The variance code uses tau_s/2 so decoding produces its square root.
             # Since hi_var = hi_err^2, this also gives both log encoders the same
             # bias and fixed deadline: (tau_s/2) log(hi_var) = tau_s log(hi_err).
-            t_sigma = neg_log_transform(
-                var_x,
-                domain_var,
-                tau_s=tau_s / 2.0,
-                shared_time_bounds=shared_time_bounds,
-                return_spike_sample=True,
-                noise_site="layernorm.log_sigma",
-            )
-            t_err_pos = neg_log_transform(
-                x_err_pos,
-                domain_err,
-                tau_s=tau_s,
-                shared_time_bounds=shared_time_bounds,
-                return_spike_sample=True,
-                noise_site="layernorm.log_positive",
-            )
-            t_err_neg = neg_log_transform(
-                x_err_neg,
-                domain_err,
-                tau_s=tau_s,
-                shared_time_bounds=shared_time_bounds,
-                return_spike_sample=True,
-                noise_site="layernorm.log_negative",
-            )
+            with gaussian_noise_statistics_mask(
+                (positive_active | negative_active).any(dim=-1, keepdim=True)
+            ):
+                t_sigma = neg_log_transform(
+                    var_x,
+                    domain_var,
+                    tau_s=tau_s / 2.0,
+                    shared_time_bounds=shared_time_bounds,
+                    return_spike_sample=True,
+                    noise_site="layernorm.log_sigma",
+                )
+            with gaussian_noise_statistics_mask(positive_active):
+                t_err_pos = neg_log_transform(
+                    x_err_pos,
+                    domain_err,
+                    tau_s=tau_s,
+                    shared_time_bounds=shared_time_bounds,
+                    return_spike_sample=True,
+                    noise_site="layernorm.log_positive",
+                )
+            with gaussian_noise_statistics_mask(negative_active):
+                t_err_neg = neg_log_transform(
+                    x_err_neg,
+                    domain_err,
+                    tau_s=tau_s,
+                    shared_time_bounds=shared_time_bounds,
+                    return_spike_sample=True,
+                    noise_site="layernorm.log_negative",
+                )
             if not all(
                 isinstance(event, SpikeSample)
                 for event in (t_sigma, t_err_pos, t_err_neg)
@@ -456,20 +464,22 @@ class SpikingLayerNorm(nn.Module):
         if self.use_spiking_expdiff:
             # The event-aware operator owns both causal external rails, internal
             # exponential misses, and output saturation statistics.
-            y_pos, _ = exponential_difference_operator(
-                t_err_pos,
-                tb_err,
-                t_sigma,
-                tb_sigma,
-                tau_s=tau_s,
-            )
-            y_neg, _ = exponential_difference_operator(
-                t_err_neg,
-                tb_err,
-                t_sigma,
-                tb_sigma,
-                tau_s=tau_s,
-            )
+            with gaussian_noise_statistics_mask(positive_active):
+                y_pos, _ = exponential_difference_operator(
+                    t_err_pos,
+                    tb_err,
+                    t_sigma,
+                    tb_sigma,
+                    tau_s=tau_s,
+                )
+            with gaussian_noise_statistics_mask(negative_active):
+                y_neg, _ = exponential_difference_operator(
+                    t_err_neg,
+                    tb_err,
+                    t_sigma,
+                    tb_sigma,
+                    tau_s=tau_s,
+                )
             y_pos = torch.where(positive_active, y_pos, torch.zeros_like(y_pos))
             y_neg = torch.where(negative_active, y_neg, torch.zeros_like(y_neg))
             result = y_pos - y_neg
@@ -499,8 +509,16 @@ class SpikingLayerNorm(nn.Module):
         else:
             if isinstance(t_sigma, SpikeSample):
                 # All three log encoders describe two differential readouts and must
-                # use the same observation deadline before their rail masks combine.
+                # share both their nominal code interval and receiver cutoff.
                 if not (t_sigma.domain == t_err_pos.domain == t_err_neg.domain):
+                    raise ValueError(
+                        "LayerNorm log events require a shared code interval"
+                    )
+                if not (
+                    t_sigma.observation_deadline
+                    == t_err_pos.observation_deadline
+                    == t_err_neg.observation_deadline
+                ):
                     raise ValueError(
                         "LayerNorm log events require a shared observation deadline"
                     )
@@ -509,7 +527,9 @@ class SpikingLayerNorm(nn.Module):
                 # time-to-deadline pulse widths. Each miss leaves only its own rail at
                 # reset, matching signed PWM without invoking the disabled exponential-
                 # difference operator or sampling its internal exponential event.
-                deadline = t_sigma.time.new_tensor(float(t_sigma.domain.max))
+                deadline = t_sigma.time.new_tensor(
+                    float(t_sigma.observation_deadline)
+                )
                 sigma_pulse_width = torch.where(
                     t_sigma.fired,
                     (deadline - t_sigma.time).clamp_min(0.0),
@@ -1004,7 +1024,7 @@ class SpikingLinear(nn.Linear):
         signed_pulse_width = signed_pulse_width_duration(
             data_event,
             reference_event,
-            observation_deadline=float(data_event.domain.max),
+            observation_deadline=float(data_event.observation_deadline),
             time_bounds=data_event.domain,
         )
 
@@ -1017,7 +1037,7 @@ class SpikingLinear(nn.Linear):
         #     data_event_i, data_event.domain,
         #     reference_event, reference_event.domain,
         #     self.weight[j, i], weight_domain,
-        #     observation_deadline=float(data_event.domain.max),
+        #     observation_deadline=float(data_event.observation_deadline),
         # )
         # y_j = sum_i(pwm_ji) + bias_j
         y = nn.functional.linear(signed_pulse_width, self.weight, self.bias)
@@ -1286,7 +1306,7 @@ class SpikingConv2d(nn.Conv2d):
         signed_pulse_width = signed_pulse_width_duration(
             data_event,
             reference_event,
-            observation_deadline=float(data_event.domain.max),
+            observation_deadline=float(data_event.observation_deadline),
             time_bounds=data_event.domain,
         )
 
@@ -1297,7 +1317,7 @@ class SpikingConv2d(nn.Conv2d):
         #     data_event_at_input, data_event.domain,
         #     reference_event, reference_event.domain,
         #     self.weight[out_channel, in_channel, kh, kw], weight_domain,
-        #     observation_deadline=float(data_event.domain.max),
+        #     observation_deadline=float(data_event.observation_deadline),
         # )
         # y = sum_receptive_field(pwm_synapse) + bias
         #

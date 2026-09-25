@@ -40,14 +40,14 @@ TAG = "vit_base_bss2_encoder_depth_noise_float64_v1"
 HARDWARE_SUMMARY_SHA256 = (
     "639a908ac4b86440ef706afcd98467117cbf0f1e5424ca3e8de5f4ef8802f6c0"
 )
-CONDITIONS = ("clean", "best-measured-coordinate", "screening-median")
+CONDITIONS = ("clean", "screening-selected-coordinate", "screening-median")
 
 
 def canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-def hardware_conditions(path: Path) -> dict[str, dict[str, float | int | str]]:
+def hardware_conditions(path: Path) -> dict[str, dict[str, Any]]:
     """Read the two fixed measured conditions from the authenticated summary."""
     if identity.sha256_file(path) != HARDWARE_SUMMARY_SHA256:
         raise ValueError("BrainScaleS-2 encoder summary checksum differs")
@@ -59,13 +59,20 @@ def hardware_conditions(path: Path) -> dict[str, dict[str, float | int | str]]:
     best_nl = nl_data["best_calibration_selected"]
     median_np = np_data["screening_median"]
     median_nl = nl_data["screening_median"]
+    timing = {
+        "phi_np_encoding_window_s": tuple(np_data["encoding_window_s"]),
+        "phi_np_observation_deadline_s": float(np_data["observation_deadline_s"]),
+        "phi_nl_encoding_window_s": tuple(nl_data["encoding_window_s"]),
+        "phi_nl_observation_deadline_s": float(nl_data["observation_deadline_s"]),
+    }
     conditions = {
-        "best-measured-coordinate": {
+        "screening-selected-coordinate": {
             "linear_time_std_fraction": float(best_np["validation_rt"]),
             "log_time_std_fraction": float(best_nl["validation_rt"]),
             "phi_np_coordinate": int(best_np["physical_coordinate"]),
             "phi_nl_coordinate": int(best_nl["physical_coordinate"]),
-            "interpretation": "attainable upper-bound diagnostic",
+            "interpretation": "screening calibration-selected coordinate remeasurement",
+            **timing,
         },
         "screening-median": {
             "linear_time_std_fraction": float(median_np["validation_rt"]),
@@ -73,6 +80,7 @@ def hardware_conditions(path: Path) -> dict[str, dict[str, float | int | str]]:
             "phi_np_coordinate": int(median_np["physical_coordinate"]),
             "phi_nl_coordinate": int(median_nl["physical_coordinate"]),
             "interpretation": "median among usable screened coordinates",
+            **timing,
         },
     }
     for condition in conditions.values():

@@ -57,6 +57,18 @@ def signed_pulse_width_duration(
     explicit sequential simulation even in optimized affine and attention kernels.
     """
 
+    for name, event in (("t_A", t_A), ("t_B", t_B)):
+        if isinstance(event, SpikeSample) and not math.isclose(
+            float(event.observation_deadline),
+            float(observation_deadline),
+            rel_tol=0.0,
+            abs_tol=8.0 * math.ulp(max(abs(float(observation_deadline)), 1.0)),
+        ):
+            raise ValueError(
+                f"{name} SpikeSample observation deadline must equal "
+                "observation_deadline"
+            )
+
     config = get_clock_driven()
     if not config.enabled:
         deadline = observation_deadline
@@ -386,8 +398,7 @@ def signed_pulse_width_modulation_operator(
         TypeError: If the deadline or an event-aware declared domain has an invalid
             type.
         ValueError: If the deadline is invalid, a sample disagrees with its declared
-            domain, or a sample does not use the shared deadline as its
-            ``TimeBounds.max``.
+            code domain, or a sample does not use the shared observation deadline.
 
     Notes:
         This function never samples an event. Existing ``SpikeSample`` objects fan
@@ -451,9 +462,9 @@ def signed_pulse_width_modulation_operator(
             "observation_deadline must not precede either event-domain maximum"
         )
 
-    # A SpikeSample carries the code window used during sampling. Its separately
-    # declared domain must agree, and TimeBounds.max must be the shared deadline so
-    # a finite miss carrier cannot silently redefine the observation time.
+    # A SpikeSample carries both the code window and receiver cutoff used during
+    # sampling. Its separately declared code domain must agree, and both rails must
+    # use the requested shared observation deadline.
     for name, event, declared_domain in (
         ("t_A", t_A, domain_t_A),
         ("t_B", t_B, domain_t_B),
@@ -464,9 +475,10 @@ def signed_pulse_width_modulation_operator(
             raise TypeError(f"{name} SpikeSample requires a TimeBounds domain")
         if event.domain != declared_domain:
             raise ValueError(f"{name} SpikeSample domain must match its declared domain")
-        if float(event.domain.max) != deadline:
+        if float(event.observation_deadline) != deadline:
             raise ValueError(
-                f"{name} SpikeSample domain maximum must equal observation_deadline"
+                f"{name} SpikeSample observation deadline must equal "
+                "observation_deadline"
             )
 
     # Ordinary tensors already represent delivered events. Evaluate the cancelled

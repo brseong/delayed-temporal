@@ -26,6 +26,16 @@
 
 노이즈 분포와 이벤트 전달 규칙은 [[noise]], 수치와 통계의 계약은 [[evaluation]]을 따른다. 다른 버전의 정확도나 배치 평균 loss를 조건 확인 없이 합산하지 않는다. 증명 간소화는 [[neurips-mathematics#증명 간소화의 보존 조건]], 완료 상태는 [[todo#Manuscript Revision Master Checklist]]를 따른다.
 
+## ICLR 문장 정리 범위
+
+현재 ICLR 원고의 문장 정리는 기술적 의미와 실험 수치를 유지하면서 중복, 비문, 모호한 비교 기준과 표의 자유 기호를 제거하는 범위로 한정한다.
+
+초록부터 결론까지 conversion 용어, source ANN 대비 within-row $\Delta$, finite potential range, spike-time window, observation margin을 일관되게 쓴다. Eq. 2는 LIF와 IF를 분리하며 IF를 $\tau_m\to\infty$ 극한으로 명시한다.
+
+primitive 표는 약어와 observation time을 정의하고 pulse-width mapping을 부록과 일치시킨다. GELU의 tanh와 logistic 형식, $\sqrt{2/\pi}$와 $\sqrt{8/\pi}$ 계수의 관계도 본문과 부록에서 연결한다.
+
+이 문장 정리는 인용의 충분성이나 아직 공란인 BrainScaleS-2 결과를 완료 처리하지 않는다. 해당 작업은 [[todo#Manuscript Revision Master Checklist]]와 [[neurips-hardware]]의 근거 조건을 따른다.
+
 ## NeurIPS 부록 재사용 판정
 
 NeurIPS 부록은 현재 ICLR 정의와 실험 계약을 기준으로 선별하며, 과거 문장을 그대로 복사하지 않는다.
@@ -36,7 +46,7 @@ Experimental Details and Hyperparameters는 checkpoint, dataset split, calibrati
 
 Simulated Timing Noise Sweeps에는 현재 부록 그림을 재현하는 grid, subset, seed, replica, aggregation을 덧붙일 수 있다. 이 절은 BrainScaleS-2 측정과 분리한다.
 
-Natural Language Performance Details는 이미 본문 표에 있으므로 중복하지 않는다. 기존 모듈 단위 proof, theorem, 아키텍처별 energy estimate는 현재 정의와 충돌하거나 현행 SOP 부록으로 대체되었으므로 가져오지 않는다. Compute Resources는 최종 실행 환경을 다시 수집한 뒤에만 작성한다.
+Natural Language Performance Details는 이미 본문 표에 있으므로 중복하지 않는다. 기존 모듈 단위 proof와 theorem은 현재 정의와 충돌하거나 현행 SOP 부록으로 대체되었으므로 가져오지 않는다. 폐기한 절대 energy estimate는 [[deprecated#폐기한 전원 및 절대 에너지 검토]]에만 보존한다. Compute Resources는 최종 실행 환경을 다시 수집한 뒤에만 작성한다.
 
 실제 이전에서는 현행 코드와 대수적으로 일치하는 primitive 및 composition 식만 다시 유도하고, 평가에 사용한 checkpoint와 data population을 현행 artifact로 교체했다. 옛 robustness protocol은 현재 그림과 일치하지 않아 사용하지 않았다.
 

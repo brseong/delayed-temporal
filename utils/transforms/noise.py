@@ -75,7 +75,7 @@ class GaussianNoiseCounts(TypedDict):
     statistical denominators; deadline diagnostics retain scalar timing metadata.
     """
 
-    events: int  # Number of sampled spike events at this site.
+    events: int  # Sampled events excluding explicitly inactive signed branches.
     misses: int  # Number of sampled events arriving after the fixed deadline.
     deadline_events: int  # Nominal codewords exactly at the inclusive deadline.
     deadline_ulp_min: float  # Smallest deadline ULP observed for this site.
@@ -102,6 +102,38 @@ _GAUSSIAN_TIME_SCOPE: ContextVar[GaussianTimeNoiseScope | None] = ContextVar(
 # Keeping this store separate from the configuration lets a new replica clear its
 # measurements without coupling counter mutation to dataclass replacement.
 _GAUSSIAN_NOISE_STATS: dict[str, GaussianNoiseCounts] = {}
+
+# This mask affects accounting only, never sampling or the delivered values.
+_GAUSSIAN_STATISTICS_MASK: ContextVar[Tensor | None] = ContextVar(
+    "gaussian_statistics_mask", default=None,
+)
+
+
+@contextmanager
+def gaussian_noise_statistics_mask(active: Tensor):
+    """Exclude unused signed branches, including their internal readouts, from counts.
+
+    Carrier calculations and random draws are deliberately retained so this change
+    cannot change a seeded model output. Nested masks intersect and restore on exit.
+    """
+    if not isinstance(active, Tensor) or active.dtype != torch.bool:
+        raise TypeError("Gaussian statistics mask must be a boolean tensor")
+    parent = _GAUSSIAN_STATISTICS_MASK.get()
+    token = _GAUSSIAN_STATISTICS_MASK.set(active if parent is None else parent & active)
+    try:
+        yield
+    finally:
+        _GAUSSIAN_STATISTICS_MASK.reset(token)
+
+
+def _statistics_mask_for(value: Tensor) -> Tensor | None:
+    mask = _GAUSSIAN_STATISTICS_MASK.get()
+    if mask is None:
+        return None
+    if mask.device != value.device:
+        raise ValueError("Gaussian statistics mask and value must share a device")
+    # Never expand a scalar reference into one event per consumer.
+    return torch.broadcast_to(mask, value.shape)
 
 
 def clear_gaussian_noise_stats() -> None:
@@ -266,15 +298,19 @@ def clamp_gaussian_output(
     if not gaussian_time_noise_is_active():
         return clamped
 
-    # Count every raw output element in the saturation denominator. The live,
-    # statically keyed mapping lets repeated calls accumulate at the same site.
+    # Count only readouts belonging to active branches, without changing values.
     counts = _stats_for(_scoped_statistics_site(site))
-    counts["outputs"] += value.numel()
-
-    # Compare the raw readout with strict inequalities before returning the clamp.
-    # Values exactly on a rail remain representable and are not saturation events.
-    counts["output_underflows"] += int((value < domain.min).sum().item())
-    counts["output_overflows"] += int((value > domain.max).sum().item())
+    mask = _statistics_mask_for(value)
+    underflows, overflows = value < domain.min, value > domain.max
+    if mask is None:
+        total = value.new_tensor(value.numel(), dtype=torch.int64)
+    else:
+        total = mask.sum()
+        underflows, overflows = underflows & mask, overflows & mask
+    totals = torch.stack((total, underflows.sum(), overflows.sum())).to("cpu").tolist()
+    counts["outputs"] += int(totals[0])
+    counts["output_underflows"] += int(totals[1])
+    counts["output_overflows"] += int(totals[2])
 
     # Return the previously computed bounded tensor; statistics never modify the
     # physical value delivered to the next operator.
@@ -442,7 +478,7 @@ def _broadcast_gaussian_time_inputs(
         nominal_time: Deterministic encoder output inside ``domain``.
         time_mean: Scalar or broadcastable absolute Gaussian mean.
         time_std: Scalar or broadcastable non-negative absolute standard deviation.
-        domain: Fixed TTFS interval whose maximum is the observation deadline.
+        domain: Fixed nominal TTFS encoding interval.
 
     Returns:
         Broadcast nominal time, mean, and standard-deviation tensors sharing the
@@ -459,8 +495,8 @@ def _broadcast_gaussian_time_inputs(
     if not torch.is_floating_point(nominal_time):
         raise TypeError("nominal_time must be a floating-point tensor")
 
-    # TimeBounds.max is both the code endpoint and the physical observation
-    # deadline, so invalid endpoints would make every later miss decision ambiguous.
+    # TimeBounds declares the nominal code interval. The sampler may derive a later
+    # receiver cutoff from its upper endpoint and a validated observation margin.
     if not isinstance(domain, TimeBounds):
         raise TypeError("domain must be a TimeBounds instance")
     domain_min = float(domain.min)
@@ -516,14 +552,15 @@ def gaussian_deadline_miss_probability(
 ) -> Tensor:
     """Return the analytic probability that a Gaussian event misses its deadline.
 
-    This function evaluates ``P(t_nominal + N(time_mean, time_std) > domain.max)``
-    without drawing a random sample. Equality with ``domain.max`` is a delivered
-    event, matching the fixed-deadline rule used by the event sampler.
+    This function evaluates the probability that
+    ``t_nominal + N(time_mean, time_std)`` exceeds ``domain.max + deadline_margin``
+    without drawing a random sample. Equality with that receiver cutoff is delivered,
+    matching the inclusive rule used by the event sampler.
 
     Args:
         nominal_time: Deterministic encoder output inside ``domain``.
         time_std: Scalar or broadcastable absolute Gaussian standard deviation.
-        domain: Fixed TTFS interval whose maximum is the observation deadline.
+        domain: Fixed nominal TTFS encoding interval.
         time_mean: Scalar or broadcastable absolute Gaussian mean.
 
     Returns:
@@ -576,14 +613,15 @@ def _sample_gaussian_spike_time(
     """Sample one Gaussian timing error and classify event delivery.
 
     A single sampled timestamp determines both the delivered time and whether the
-    event misses ``domain.max``. Misses retain the deadline as finite tensor storage
-    while ``SpikeSample.fired`` preserves the physical distinction between a miss
-    and an event delivered exactly at the deadline.
+    event misses the receiver deadline. Delivered events retain that raw timestamp,
+    including values outside the nominal code interval. Misses retain the receiver
+    deadline as finite tensor storage while ``SpikeSample.fired`` preserves the
+    physical distinction between a miss and an event delivered exactly at cutoff.
 
     Args:
         nominal_time: Deterministic encoder output inside ``domain``.
         time_std: Scalar or broadcastable absolute Gaussian standard deviation.
-        domain: Fixed TTFS interval whose maximum is the observation deadline.
+        domain: Fixed nominal TTFS encoding interval.
         generator: Dedicated stateful RNG for the current evaluation replica.
         time_mean: Scalar or broadcastable absolute Gaussian mean.
 
@@ -628,24 +666,23 @@ def _sample_gaussian_spike_time(
     if not math.isfinite(normalized_margin) or normalized_margin < 0.0:
         raise ValueError("deadline_margin must be finite and non-negative")
 
-    # The upper endpoint is inclusive. A positive grace interval accepts a late
-    # arrival before the receiver deadline, but its stored carrier still saturates
-    # at the nominal code rail to preserve downstream bounds and clean arithmetic.
-    start = nominal.new_tensor(float(domain.min))
-    code_deadline = nominal.new_tensor(float(domain.max))
+    # The receiver cutoff is inclusive. Keep the code interval separate because a
+    # positive margin changes when the receiver stops waiting, not the encoder map.
+    receiver_deadline_value = float(domain.max) + normalized_margin
     receiver_deadline = nominal.new_tensor(
-        float(domain.max) + normalized_margin
+        receiver_deadline_value
     )
     fired = raw_time <= receiver_deadline
 
-    # Events earlier than the modeled interval are observable from its start. Do
-    # not upper-clamp here because late samples must first remain identifiable misses.
-    delivered_time = torch.clamp(raw_time, min=start, max=code_deadline)
-
-    # Replace every missed raw timestamp with a finite deadline carrier. Consumers
-    # must use fired—not the stored value—to distinguish misses from on-time arrivals.
-    stored_time = torch.where(fired, delivered_time, code_deadline)
-    return SpikeSample(time=stored_time, domain=domain, fired=fired)
+    # Preserve every delivered raw timestamp. Only misses receive a finite carrier,
+    # and their false delivery mask prevents consumers from treating it as an event.
+    stored_time = torch.where(fired, raw_time, receiver_deadline)
+    return SpikeSample(
+        time=stored_time,
+        domain=domain,
+        fired=fired,
+        observation_deadline=receiver_deadline_value,
+    )
 # ---------------------------------------------------------------------------
 # Gaussian encoder injection boundary
 # ---------------------------------------------------------------------------
@@ -742,6 +779,7 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
                     time=nominal_time,
                     domain=out_domain,
                     fired=torch.ones_like(nominal_time, dtype=torch.bool),
+                    observation_deadline=float(out_domain.max),
                 )
 
             # An omitted override preserves the historical shared-parameter path.
@@ -775,13 +813,20 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
             # Attribute sampled events to the physical values consumed downstream.
             site = kwargs.get("noise_site", func.__name__)
             counts = _stats_for(_scoped_statistics_site(site))
-            counts["events"] += sample.time.numel()
             deadline = nominal_time.new_tensor(float(out_domain.max))
+            mask = _statistics_mask_for(sample.time)
+            misses, endpoints = ~sample.fired, nominal_time == deadline
+            if mask is None:
+                total = sample.time.new_tensor(sample.time.numel(), dtype=torch.int64)
+            else:
+                total = mask.sum()
+                misses, endpoints = misses & mask, endpoints & mask
             miss_and_endpoint_counts = torch.stack(
-                ((~sample.fired).sum(), (nominal_time == deadline).sum())
+                (total, misses.sum(), endpoints.sum())
             ).to(device="cpu")
-            counts["misses"] += int(miss_and_endpoint_counts[0].item())
-            counts["deadline_events"] += int(miss_and_endpoint_counts[1].item())
+            counts["events"] += int(miss_and_endpoint_counts[0].item())
+            counts["misses"] += int(miss_and_endpoint_counts[1].item())
+            counts["deadline_events"] += int(miss_and_endpoint_counts[2].item())
             cpu_deadline = torch.tensor(
                 float(out_domain.max),
                 dtype=nominal_time.dtype,

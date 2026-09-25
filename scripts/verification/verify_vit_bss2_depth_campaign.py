@@ -58,10 +58,23 @@ def verify_fixed_conditions() -> None:
     conditions = hardware_conditions(
         ARTIFACTS / "brainscales2-primitives/20260924T_best_median_screen_summary.json"
     )
-    assert conditions["best-measured-coordinate"]["linear_time_std_fraction"] == 0.008752792479355493
-    assert conditions["best-measured-coordinate"]["log_time_std_fraction"] == 0.015681047682163635
+    assert conditions["screening-selected-coordinate"]["linear_time_std_fraction"] == 0.008752792479355493
+    assert conditions["screening-selected-coordinate"]["log_time_std_fraction"] == 0.015681047682163635
+    assert conditions["screening-selected-coordinate"]["interpretation"] == (
+        "screening calibration-selected coordinate remeasurement"
+    )
     assert conditions["screening-median"]["linear_time_std_fraction"] == 0.010838111004060678
     assert conditions["screening-median"]["log_time_std_fraction"] == 0.024617376541590685
+    assert conditions["screening-median"]["phi_np_encoding_window_s"] == (
+        5.0e-6,
+        91.0e-6,
+    )
+    assert conditions["screening-median"]["phi_np_observation_deadline_s"] == 300.0e-6
+    assert conditions["screening-median"]["phi_nl_encoding_window_s"] == (
+        5.0e-6,
+        25.0e-6,
+    )
+    assert conditions["screening-median"]["phi_nl_observation_deadline_s"] == 60.0e-6
     validate_condition_arguments(
         SimpleNamespace(
             condition="clean",
@@ -89,7 +102,7 @@ def verify_fixed_conditions() -> None:
             measured_noise_scale=1.0,
         ),
         SimpleNamespace(
-            condition="best-measured-coordinate",
+            condition="screening-selected-coordinate",
             first_block_count=0,
             seed=0,
             evaluation_samples=500,
@@ -351,10 +364,10 @@ def verify_summary_gate() -> None:
         )
 
         limits = parse_max_first_block_counts(
-            ["best-measured-coordinate=1", "screening-median=1"]
+            ["screening-selected-coordinate=1", "screening-median=1"]
         )
         assert limits == {
-            "best-measured-coordinate": 1,
+            "screening-selected-coordinate": 1,
             "screening-median": 1,
         }
         assert len(selected_cells(limits)) == 7
@@ -368,13 +381,13 @@ def verify_summary_gate() -> None:
             max_first_block_counts=limits,
             accuracy_threshold=0.9,
         )
-        assert decision["conditions"]["best-measured-coordinate"][
+        assert decision["conditions"]["screening-selected-coordinate"][
             "max_first_block_count"
         ] == 1
         render(truncated_summary, root / "depth_noise_accuracy_truncated")
         assert (root / "depth_noise_accuracy_truncated.pdf").is_file()
         must_reject(
-            lambda: parse_max_first_block_counts(["best-measured-coordinate=1"])
+            lambda: parse_max_first_block_counts(["screening-selected-coordinate=1"])
         )
         must_reject(
             lambda: validate_stopping_decision(

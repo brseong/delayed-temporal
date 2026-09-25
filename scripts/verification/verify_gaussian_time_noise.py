@@ -34,6 +34,7 @@ from utils.transforms.potential_to_spike import (
     neg_linear_transform,
     neg_log_transform,
 )
+from utils.transforms.primitive import signed_pulse_width_duration
 from utils.transforms.functions import (
     division_function,
     exponential_function,
@@ -475,16 +476,16 @@ def verify_gaussian_sampler_rng_contract() -> None:
 
 
 def verify_gaussian_sampler_deadline_contract() -> None:
-    """Verify start clamping, inclusive deadline delivery, and strict misses.
+    """Verify raw delivery, inclusive deadline delivery, and strict misses.
 
-    The sampler stores every result as a finite in-domain tensor, but the
-    ``fired`` mask must preserve the physical distinction between an event at the
-    observation deadline and an event that arrived too late. Deterministic mean
-    offsets create exact boundary cases without relying on random draws.
+    Delivered samples retain additive timing error even outside the nominal code
+    interval. The ``fired`` mask must still distinguish an event at the observation
+    deadline from one that arrived too late. Deterministic mean offsets create exact
+    boundary cases without relying on random draws.
 
     Raises:
-        AssertionError: If an early event is marked missed, deadline equality is
-            rejected, or a late event is stored without a false delivery mask.
+        AssertionError: If raw event time is lost, deadline equality is rejected, or
+            a late event is stored without a false delivery mask.
     """
     # The three raw timestamps become -0.75, 4.0, and 4.25. They deliberately
     # exercise the interval start, exact deadline, and strict post-deadline cases.
@@ -503,9 +504,8 @@ def verify_gaussian_sampler_deadline_contract() -> None:
         generator=generator,
     )
 
-    # An event earlier than the modeled interval is observable from its start. Its
-    # stored time is clamped upward, but it remains a physically delivered event.
-    assert sample.time[0].item() == domain.min
+    # An event earlier than the nominal code interval retains its sampled timestamp.
+    assert sample.time[0].item() == -0.75
     assert sample.fired[0].item() is True
 
     # The deadline is inclusive by contract. A raw timestamp equal to TimeBounds.max
@@ -518,8 +518,8 @@ def verify_gaussian_sampler_deadline_contract() -> None:
     assert sample.time[2].item() == domain.max
     assert sample.fired[2].item() is False
     assert torch.isfinite(sample.time).all()
-    assert bool(((sample.time >= domain.min) & (sample.time <= domain.max)).all())
     assert sample.domain == domain
+    assert sample.observation_deadline == domain.max
 
 
 def verify_gaussian_deadline_probability() -> None:
@@ -589,7 +589,7 @@ def verify_gaussian_deadline_probability() -> None:
 
 
 def verify_gaussian_deadline_margin() -> None:
-    """Verify late-arrival grace while retaining the nominal code interval."""
+    """Verify late-arrival grace and raw timestamps outside the code interval."""
     domain = TimeBounds(0.0, 4.0)
     nominal = torch.full((200_000,), 4.0, dtype=torch.float64)
     time_std = 0.25
@@ -617,9 +617,37 @@ def verify_gaussian_deadline_margin() -> None:
     empirical = float((~sample.fired).to(torch.float64).mean().item())
     assert abs(empirical - expected.item()) < 8e-4
     assert sample.domain == domain
-    assert bool((sample.time >= domain.min).all())
-    assert bool((sample.time <= domain.max).all())
-    assert bool((sample.time[sample.fired] == domain.max).any())
+    assert sample.observation_deadline == domain.max + margin
+    assert bool((sample.time[sample.fired] <= sample.observation_deadline).all())
+    assert bool((sample.time[sample.fired] > domain.max).any())
+    assert bool((sample.time[~sample.fired] == sample.observation_deadline).all())
+
+    # Event-aware readout must use the receiver cutoff rather than silently restoring
+    # the nominal code endpoint. The two raw timestamps 4.25 and 3.25 yield widths
+    # 0.25 and 1.25 at receiver time 4.5, hence a signed duration of -1.
+    data_event = _sample_gaussian_spike_time(
+        torch.tensor([4.0], dtype=torch.float64),
+        time_std=0.0,
+        time_mean=0.25,
+        domain=domain,
+        generator=torch.Generator().manual_seed(17),
+        deadline_margin=margin,
+    )
+    reference_event = _sample_gaussian_spike_time(
+        torch.tensor([3.0], dtype=torch.float64),
+        time_std=0.0,
+        time_mean=0.25,
+        domain=domain,
+        generator=torch.Generator().manual_seed(18),
+        deadline_margin=margin,
+    )
+    duration = signed_pulse_width_duration(
+        data_event,
+        reference_event,
+        observation_deadline=data_event.observation_deadline,
+        time_bounds=domain,
+    )
+    assert torch.equal(duration, torch.tensor([-1.0], dtype=torch.float64))
 
     for invalid in (-1.0, float("nan"), float("inf")):
         try:
@@ -1558,7 +1586,7 @@ def verify_gaussian_exponential_function() -> None:
     deterministic lower bound to zero but retain the same maximum response.
 
     Raises:
-        AssertionError: If zero-noise values, early-event clamping, reset behavior,
+        AssertionError: If zero-noise values, raw early-event decoding, reset behavior,
             event statistics, or the extended Gaussian output envelope regresses.
     """
     domain = PotentialBounds(-2.0, 2.0)
@@ -1601,8 +1629,7 @@ def verify_gaussian_exponential_function() -> None:
         assert zero_stats["exponential.input"]["misses"] == 0
 
         # The x=+2 codeword is nominally at time zero. A negative mean moves it
-        # before the interval, where storage clamps to the start and remains fired;
-        # decoding therefore returns the Gaussian path's minimum positive response.
+        # before the nominal interval and that raw timestamp remains delivered.
         set_gaussian_time_noise(
             enabled=True,
             time_std_fraction=0.0,
@@ -1617,7 +1644,7 @@ def verify_gaussian_exponential_function() -> None:
         )
         assert torch.allclose(
             early,
-            torch.exp(torch.tensor([-2.0], dtype=torch.float64)),
+            torch.exp(torch.tensor([-2.5], dtype=torch.float64)),
         )
         assert early_domain == zero_noise_domain
         early_stats = get_gaussian_noise_stats()
@@ -1718,11 +1745,13 @@ def verify_gaussian_exponential_difference_operator() -> None:
             time=torch.tensor([4.0], dtype=torch.float64),
             domain=time_domain,
             fired=torch.tensor([False]),
+            observation_deadline=float(time_domain.max),
         )
         delivered_close = SpikeSample(
             time=torch.tensor([2.0], dtype=torch.float64),
             domain=time_domain,
             fired=torch.tensor([True]),
+            observation_deadline=float(time_domain.max),
         )
         opening_reset, opening_reset_domain = exponential_difference_operator(
             opening_miss,
@@ -1744,11 +1773,13 @@ def verify_gaussian_exponential_difference_operator() -> None:
             time=torch.tensor([1.0], dtype=torch.float64),
             domain=time_domain,
             fired=torch.tensor([True]),
+            observation_deadline=float(time_domain.max),
         )
         closing_miss = SpikeSample(
             time=torch.tensor([4.0], dtype=torch.float64),
             domain=time_domain,
             fired=torch.tensor([False]),
+            observation_deadline=float(time_domain.max),
         )
         deadline_readout, deadline_readout_domain = exponential_difference_operator(
             delivered_open,
@@ -1797,6 +1828,23 @@ def verify_gaussian_exponential_difference_operator() -> None:
             "output_underflows": 0,
             "output_overflows": 0,
         }
+
+        # The configuration API must not accept a hidden internal-noise bypass.
+        # Rejecting the retired keyword locks the physical internal encoding to the
+        # same seeded Gaussian stream as every other sampled encoder boundary.
+        try:
+            set_gaussian_time_noise(
+                **{
+                    "enabled": True,
+                    "time_std_fraction": 0.1,
+                    "seed": 605,
+                    "exponential_difference_internal_noise": False,
+                }
+            )
+        except TypeError as error:
+            assert "unexpected keyword argument" in str(error)
+        else:
+            raise AssertionError("accepted disabled internal exponential-difference noise")
     finally:
         # Restore global state before the next composed operator verification.
         set_gaussian_time_noise(enabled=False)
@@ -3189,8 +3237,12 @@ def verify_gaussian_spiking_layernorm() -> None:
         expected_direct_exp = weight * expected_result + bias
         assert torch.allclose(direct_exp_output.value, expected_direct_exp)
         assert direct_exp_stats["layernorm.log_sigma"]["misses"] == 0
-        assert direct_exp_stats["layernorm.log_positive"]["misses"] == 4
-        assert direct_exp_stats["layernorm.log_negative"]["misses"] == 4
+        assert direct_exp_stats["layernorm.log_positive"]["misses"] == int(
+            ((nominal_pos + mean_shift > deadline) & positive_active).sum()
+        )
+        assert direct_exp_stats["layernorm.log_negative"]["misses"] == int(
+            ((nominal_neg + mean_shift > deadline) & negative_active).sum()
+        )
 
         # Enable every spiking stage with identical learned parameters. Zero scale
         # must preserve the established deterministic composition while exposing the
@@ -3224,9 +3276,11 @@ def verify_gaussian_spiking_layernorm() -> None:
         assert zero_stats["multiplication.data"]["events"] == 20
         assert zero_stats["multiplication.reference"]["events"] == 3
         assert zero_stats["layernorm.log_sigma"]["events"] == 2
-        assert zero_stats["layernorm.log_positive"]["events"] == value.numel()
-        assert zero_stats["layernorm.log_negative"]["events"] == value.numel()
-        assert zero_stats["exponential_difference.internal"]["events"] == 16
+        assert zero_stats["layernorm.log_positive"]["events"] == int(positive_active.sum())
+        assert zero_stats["layernorm.log_negative"]["events"] == int(negative_active.sum())
+        assert zero_stats["exponential_difference.internal"]["events"] == int(
+            (positive_active | negative_active).sum()
+        )
         assert all(site_stats["misses"] == 0 for site_stats in zero_stats.values())
 
         # A constant feature vector has zero centered magnitude on both rails. The
@@ -3253,9 +3307,11 @@ def verify_gaussian_spiking_layernorm() -> None:
         assert forced_stats["multiplication.data"]["misses"] == 20
         assert forced_stats["multiplication.reference"]["misses"] == 3
         assert forced_stats["layernorm.log_sigma"]["misses"] == 2
-        assert forced_stats["layernorm.log_positive"]["misses"] == value.numel()
-        assert forced_stats["layernorm.log_negative"]["misses"] == value.numel()
-        assert forced_stats["exponential_difference.internal"]["misses"] == 16
+        assert forced_stats["layernorm.log_positive"]["misses"] == int(positive_active.sum())
+        assert forced_stats["layernorm.log_negative"]["misses"] == int(negative_active.sum())
+        assert forced_stats["exponential_difference.internal"]["misses"] == int(
+            (positive_active | negative_active).sum()
+        )
 
         # Bias is broadcast over the batch after the reset-valued learned-weight
         # product. Noise never narrows the predeclared output rail to observed values.

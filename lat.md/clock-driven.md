@@ -70,7 +70,13 @@ An additional evaluation used 384 and 768 time steps per time window under the s
 
 The original benchmark remains unchanged. The combined summary for nine conditions, 189 shard records, verification hashes, and diagnostic figure are stored separately under `artifacts/logs/clock_driven/vit_base_clock_driven_window_steps_384_768_imagenet500_theta20_float64_v1/`.
 
-[[scripts/analysis/plot_clock_discretization.py#main]] verifies the fine sweep over global time-step width and the combined summary over time steps per window before regenerating the ICLR figure under `artifacts/figures/` and `paper/iclr_2027/figures/`.
+The full-conversion rerun uses source `77066b4`, one fresh policy-3 calibration over 5,000 training images, and 21 shards covering the first 500 validation images. Both resolution sweeps use float64 arithmetic with timing noise and parameter perturbations disabled.
+
+The interval sweep obtained 86.2%, 85.8%, 85.8%, 83.4%, 80.8%, 82.8%, 81.8%, 80.2%, 70.8%, and 61.0% at intervals 0.01 through 0.10. Its continuous-time reference obtained 86.4%.
+
+The equal-count sweep obtained 0.0%, 1.0%, 32.2%, 75.4%, 80.0%, 82.6%, and 86.2% at 128, 256, 384, 512, 768, 1024, and 2048 time steps per time window. Its continuous-time reference also obtained 86.4%, with prediction digests identical to the reference in the interval sweep.
+
+[[scripts/analysis/plot_clock_discretization.py#main]] verifies both full-conversion summaries and all 399 shard records before regenerating the single-panel ICLR figure under `artifacts/figures/` and `paper/iclr_2027/figures/`. The lower and upper horizontal axes identify the two independently varied simulation settings, and their curves use distinct colors and markers. The exported plot is sized for a right-side wrapfigure occupying 40% of the ICLR text width, allowing the compatibility text to continue beside it. The wrap is cleared before the next subsection so its heading returns to the full text width.
 
 The first attempt for this sweep was rejected because subtracting a large nonzero time-window origin exposed floating-point cancellation in an otherwise aligned duration. The completed execution admits only bounded arithmetic drift accumulated by explicit state updates and origin subtraction, while still rejecting a displacement of one quarter of a time step.
 

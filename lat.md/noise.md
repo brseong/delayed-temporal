@@ -29,23 +29,39 @@ $$
 \tilde{t}\le T_{\mathrm{obs}}.
 $$
 
-Early events are stored at the operation start. A late event stores the deadline only as a finite carrier value and sets `fired=False`; consumers must inspect the mask instead of substituting that placeholder into ordinary spike-time arithmetic. The model also defines the matching analytic tail probability.
+Every delivered event retains its sampled timestamp, including an early value below the nominal interval or a late value accepted by an observation margin. A missed event stores the receiver deadline only as a finite carrier value and sets `fired=False`; consumers must inspect the mask instead of substituting that placeholder into temporal arithmetic. The model also defines the matching analytic tail probability.
 
 The same Gaussian draw determines both the stored event time and whether the event misses its deadline; no independent event-dropout channel is sampled.
 
+## Active Signed-Branch Statistics
+
+Gaussian event and output counts exclude the inactive signed log branches of GELU and LayerNorm, including their internal exponential-difference encoding and readout.
+
+[[utils/transforms/noise.py#gaussian_noise_statistics_mask]] limits accounting only. The caller supplies its existing activity mask; the shared noise module applies it to events, misses, nominal endpoint counts, and output saturation counts. Nested masks intersect and restore on exception. Masks may broadcast to an observed tensor but cannot expand a scalar event into several events.
+
+GELU counts its scalar reference once only if at least one signed branch is active. LayerNorm counts its shared variance encoding once per feature row with an active signed branch. The masks surround both log encoding and exponential difference. Variance multiplication and the learned affine multiplication retain their existing event semantics.
+
+Masked carrier computations still consume the same random draws and produce the same tensors, which are removed by the existing output masks. This preserves exact seeded output and generator state. Inactive carrier draws are not reported as observed events.
+
+[[scripts/verification/verify_gaussian_statistics_masks.py#verify_signed_branch_counts]] checks positive, negative, zero and log-floor boundary inputs, the internal event and output counts, and all eight LayerNorm ablations. It compares outputs and generator state against unmasked accounting, not against a second model implementation.
+
+Existing logs cannot be corrected by subtracting a guessed inactive count. Their aggregates remain historical evidence; new statistics require a new evaluation source identity. The Appendix now states that numerical evaluations compose exponential difference internally and inject noise into that internal encoder.
+
 ## Fixed Observation Deadline
 
-Each event-aware encoder call uses the nominal end of the code interval as its physical observation deadline.
+Each encoder keeps one nominal code interval and one fixed receiver cutoff for its invocation.
 
-The maintained model fixes
+Without a margin the cutoff is the nominal endpoint:
 
 $$
 T_{\mathrm{obs}}=T_{\mathrm{code}}.
 $$
 
-Any sampled event later than this shared endpoint is a deadline miss. The model does not extend the observation window beyond the nominal latest codeword.
+Any sampled event later than this receiver cutoff is a deadline miss. A configured margin adds a nonnegative waiting duration; it does not change the nominal encoding map.
 
-The diagnostic deadline-margin sweep may allow events to arrive up to $m=k\sigma_t$ after $T_{\mathrm{code}}$, with $m\ge 0$. An event arriving during this additional interval is delivered, but its timestamp is clamped to the original upper endpoint of the encoding interval, so bounds and clean operator arithmetic do not change. This is a late-arrival tolerance diagnostic, not a calibrated hardware window.
+The diagnostic deadline margin sweep may allow events to arrive up to $m=k\sigma_t$ after $T_{\mathrm{code}}$, with $m\ge 0$. It keeps the nominal encoding interval fixed but records the receiver cutoff separately as $T_{\mathrm{obs}}=T_{\mathrm{code}}+m$. An event arriving during this additional interval is delivered at its sampled timestamp. This is a late arrival tolerance diagnostic, not a calibrated hardware window.
+
+The tensor paths, boundary cases, and manuscript comparison are recorded in [[noise-timestamp-audit]].
 
 ## Comparison with Stanojevic et al.
 
@@ -53,7 +69,7 @@ Stanojevic et al.'s $\zeta$ and the maintained deadline margin both allocate tem
 
 Stanojevic et al. set $t_{\max}^{(n)}=t_{\min}^{(n)}+(1+\zeta)X^{(n)}$, with $t_{\min}^{(n)}=t_{\max}^{(n-1)}$, using the maximum activation observed in training data to prevent the earliest output spike in layer $n$ from preceding all input spikes from layer $n-1$. This changes the nominal layer schedule and code interval. Their main construction can also force an inactive ReLU neuron to fire at $t_{\max}^{(n)}$. Their separately reported Gaussian timing perturbation experiment changes spike times, but the paper does not define a delivery mask at a receiver deadline or a grace rule after the nominal code window.
 
-The maintained diagnostic instead keeps the nominal code interval and potential bounds fixed, samples additive timing error, and classifies delivery against $T_{\mathrm{code}}+m$. An event arriving within $m=k\sigma_t$ is delivered with its stored timestamp limited to $T_{\mathrm{code}}$. The margin targets events delayed by noise rather than output firing before the preceding layer completes. Therefore the manuscript must not claim temporal slack or the margin alone as novel; the narrower distinction is the explicit deadline miss model and downstream potential readout and evaluation for both delivered and missed events across composed Transformer operators.
+The maintained diagnostic instead keeps the nominal code interval and potential bounds fixed, samples additive timing error, and classifies delivery against $T_{\mathrm{code}}+m$. An event arriving within $m=k\sigma_t$ retains that raw timestamp. Physical pulse-width modulation readout uses the extended receiver cutoff, whereas exponential decoding retains the nominal code mapping; bounded operator outputs still apply their declared potential limits. The margin targets events delayed by noise rather than output firing before the preceding layer completes. Therefore the manuscript must not claim temporal slack or the margin alone as novel; the narrower distinction is the explicit deadline miss model and downstream potential readout and evaluation for both delivered and missed events across composed Transformer operators.
 
 Primary source: [published article](https://doi.org/10.1016/j.neunet.2023.09.011).
 
@@ -80,7 +96,7 @@ V_{\mathrm{out}}
 =\operatorname{clamp}\!\left(V(T_{\mathrm{obs}})\right).
 $$
 
-`fired` selects the physical state evolution before readout. It is event metadata, not an output-validity flag. The simulator must not propagate an `invalid` result, abort the operator chain, or replace the readout with an arbitrary fallback.
+`SpikeSample.domain` retains the nominal code interval, while `SpikeSample.observation_deadline` records the inclusive receiver cutoff. `fired` selects the physical state evolution before readout. It is event metadata, not an output validity flag. The simulator must not propagate an `invalid` result, abort the operator chain, or replace the readout with an arbitrary fallback.
 
 For signed PWM with reset potential $V_{\mathrm{reset}}$, event times $t_A,t_B$, delivery indicators $f_A,f_B\in\{0,1\}$, and drive $I$, define the two causal pulse widths
 
@@ -138,7 +154,19 @@ Event-aware noise applies only where a consumer can interpret a delivered-event 
 
 The maintained production integration covers the three affine adapters, multiplication, exponential, division, exponential difference, spiking LayerNorm, softmin and activation compositions, and attention value integration. Every noisy production event originates at the decorated encoder boundary; tensor-only branches remain only as noise-off parity references.
 
+Exponential difference always applies Gaussian timing noise to its internal identity encoding when timing noise is enabled. Disabling that internal noise is unsupported, so the configuration and evaluator expose no bypass for this physical event boundary.
+
 Missing-event semantics are already fixed by [[noise#Observation-Time Potential Invariant]]. Extending coverage means implementing each operator's ordinary physical state trajectory up to $T_{\mathrm{obs}}$ and reading the resulting clamped potential; it does not require another validity policy discussion.
+
+### Explicit ViT Encoder Block Scope
+
+The optional explicit scope restricts sampling and statistics to selected ViT encoder blocks without creating another noise model.
+
+[[utils/transforms/noise.py#gaussian_time_noise_scope]] marks one block active or inactive. [[utils/transforms/noise.py#gaussian_time_noise_is_active]] preserves model-wide behavior by default, while explicit inactive regions consume no RNG state and create no Gaussian counters.
+
+[[utils/transformers/models/spiking_vit/modeling_spiking_vit.py#ViTEncoder#forward]] applies the scope around each selected block. Embeddings, the final normalization, the classifier, and blocks outside the selected input-side prefix remain deterministic.
+
+The runtime configuration stores $k$ before model construction so pretrained configuration loading cannot discard the selected prefix. Timing noise parameters and sampler state remain in the shared noise configuration.
 
 ## Interpretation Limits
 
@@ -158,7 +186,7 @@ The previous ViT-B/16 campaign used the removed global-range contract and is sup
 
 The maintained order is one schema-2 training calibration, deterministic dense and spiking references, a timing-noise fraction sweep at deadline-margin ratio 4, and a deadline-margin ratio sweep at one fixed fraction. Static range mismatch, parameter perturbation, 50k validation, W&B, and TensorBoard are excluded.
 
-Until timing error draws for inactive members of signed pairs are removed, site counts are simulator diagnostics and are not interpreted as physical event totals or energy estimates.
+Until timing error draws for inactive members of signed pairs are removed, site counts are simulator diagnostics and are not interpreted as physical event totals.
 
 Every stage keeps the noise-free tensor path as a parity reference. No stage may introduce `gaussian_multiplication_operator`, an operator-specific sampler, or invalid-result propagation.
 
@@ -196,25 +224,37 @@ For $\theta=20$, $\sigma_t=2\theta r_t=40r_t$ and the deadline margin is the req
 
 ## Local-Window Timing Noise Sweep
 
-The replacement campaign varies a dimensionless timing-noise fraction at fixed deadline-margin ratio 4 after one frozen ViT-B calibration.
+The maintained sweep varies a dimensionless timing-noise fraction at fixed deadline-margin ratio 4 after one frozen ViT-B calibration.
 
 Each encoder uses $\sigma_t=r_tT$ for its own declared time-window length $T$. Nine logarithmically spaced fractions and seeds 0, 1, and 2 provide the accuracy curve and its 95% Student-$t$ interval. Exact points are fixed in the new manifest and are not inherited from the superseded campaign.
 
 The exact fractions are $r_t=10^{-5}10^{i/8}$ for integer indices 0 through 8. The numerical grid matches the earlier display, but its maintained meaning is now a fraction of each encoder's own window rather than a fraction of one global range.
 
-The completed mean top-1 accuracies are 86.0267, 86.0000, 85.9800, 86.0133, 85.9533, 85.8800, 85.8200, 85.6600, and 85.5133 percent in increasing fraction order. At $r_t=10^{-4}$, the 95% Student-$t$ interval is 84.9638--86.0628 percent. The clean spiking reference is 86.00 percent.
+The completed raw-timestamp means are 86.0267, 86.0000, 85.9733, 85.9733, 85.9600, 85.8800, 85.7867, 85.6333, and 85.5133 percent in increasing fraction order. At $r_t=10^{-4}$, the 95% Student-$t$ interval is 85.1118--85.9149 percent. The clean spiking reference is 86.00 percent.
+
+The previous values at source `b1a6bf8f7baa89250201c9af96d05b6154249de5` used the superseded timestamp handling. They remain immutable provenance and are not combined with the current result.
 
 ## Deadline-Margin Ratio Sweep
 
-The replacement campaign fixes one local-window noise fraction and varies the nonnegative ratio between deadline margin and local timing-noise standard deviation.
+The maintained campaign fixes one local-window noise fraction and varies the nonnegative ratio between deadline margin and local timing-noise standard deviation.
 
 For each encoder, $m=k\sigma_t$ uses that encoder's local $\sigma_t$. Calibration's 5% range margin is unrelated and remains frozen. Accuracy and deadline misses are simulator robustness diagnostics rather than calibrated hardware behavior.
 
 The fixed fraction is $r_t=10^{-5}$ and the ratios are $k\in\{0,0.5,1,1.5,2,2.5,3,4,5,6,8,10,12\}$. The condition $r_t=10^{-5},k=4$ is shared with the timing-noise fraction sweep and is executed only once per seed.
 
-The completed mean top-1 accuracy is 77.32 percent at $k=0$ and reaches 86.02 percent at $k=3$ and 86.0267 percent at $k=4$. The pooled deadline-miss rate falls from 10.1118 percent at $k=0$ to 0.000628 percent at $k=4$; no misses are observed at $k\in\{8,10,12\}$.
+The completed mean top-1 accuracy is 77.3267 percent at $k=0$ and reaches 86.0133 percent at $k=3$ and 86.0267 percent at $k=4$. The pooled deadline-miss rate falls from 6.9153 percent at $k=0$ to 0.000423 percent at $k=4$; no misses are observed at $k\in\{8,10,12\}$.
 
-The verified bundle contains 63 replica runs and 21 unique cells at source `b1a6bf8f7baa89250201c9af96d05b6154249de5`. `noise_raw_runs.csv` and `noise_summary.csv` have SHA-256 values `5dc9666048d61483c84e8c1af145213803bc2188a6abac003ea4fe42a2542266` and `5af6ea532113ccabf2b187f117387576e4e67f9f2e8cd307d27d2c29a6b1ee10`; the promoted PDF has SHA-256 `9572d722fab9f374db6202bf98cb9b6a0e486bfb6ff8e4cdc527fb9522ee478d`.
+The earlier completed values and promoted figure at source `b1a6bf8f7baa89250201c9af96d05b6154249de5` used the superseded timestamp handling. They are not reused or combined with the maintained rerun.
+
+## Raw-Timestamp Appendix Rerun
+
+The Appendix rerun regenerates the ViT-B baseline and both one-dimensional sweeps under the current event-delivery rule.
+
+Delivered spikes retain their sampled timestamps, missed events use observation-time readout, and exponential difference always applies timing noise to its internal encoding. The frozen manifest records these contracts alongside source, evaluator, checkpoint, data, preprocessing, and calibration hashes.
+
+The verified campaign contains 21 unique cells and 63 replicas at source `741e6abc20bdf8c7e2a82158d068649d81ff87b0`. Its central assignment partitions run identifiers between baekryun and poseidon1, permits GPUs 0--7 only as a campaign-specific local exception, and writes runtime data only to disk-backed paths below `artifacts/`.
+
+The frozen calibration contains 109 sites and has SHA-256 `4ef054f6c7004dbe3f3d186a973622aec02253caaa7ce08af950c605a062338c`. The accepted raw and summary CSV files have SHA-256 values `08639201b508e5d46e7cb86bdc949ad6f500f0fe1ea8579773b3c65cd575c632` and `ee1c6552bc012c7668103f896db152dffbadef041e7a6e5eb42a52aa01ac70f1`.
 
 ## Gaussian Noise Statistics
 

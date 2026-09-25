@@ -258,7 +258,13 @@ class SpikingConv1D(Conv1D):
         # Convert both sampled events into causal pulse widths against the shared
         # deadline. A one-sided miss leaves the surviving rail visible with its sign;
         # no event ordering, additional sampling, or per-token reference is introduced.
-        deadline = data_event.time.new_tensor(float(data_event.domain.max))
+        if data_event.observation_deadline != reference_event.observation_deadline:
+            raise ValueError(
+                "Gaussian SpikingConv1D events require a shared observation deadline"
+            )
+        deadline = data_event.time.new_tensor(
+            float(data_event.observation_deadline)
+        )
         data_pulse_width = torch.where(
             data_event.fired,
             (deadline - data_event.time).clamp_min(0.0),
@@ -278,7 +284,7 @@ class SpikingConv1D(Conv1D):
         #     data_event_i, data_event.domain,
         #     reference_event, reference_event.domain,
         #     self.weight[i, j], weight_domain,
-        #     observation_deadline=float(data_event.domain.max),
+        #     observation_deadline=float(data_event.observation_deadline),
         # )
         # y_j = sum_i(pwm_ij) + bias_j
         #
