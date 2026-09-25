@@ -20,7 +20,7 @@ set -euo pipefail
 : "${SLURM_ARRAY_TASK_ID:?Slurm array index is required}"
 
 task_index="$SLURM_ARRAY_TASK_ID"
-[[ "$task_index" =~ ^[0-9]+$ && "$task_index" -lt 30 ]]
+[[ "$task_index" =~ ^[0-9]+$ ]]
 [[ -n "${CUDA_VISIBLE_DEVICES:-}" && "$CUDA_VISIBLE_DEVICES" != *,* ]]
 evaluation_samples="${DEPTH_EVALUATION_SAMPLES:-5000}"
 [[ "$evaluation_samples" == 500 || "$evaluation_samples" == 5000 ]]
@@ -31,13 +31,28 @@ authenticated_evaluator_commit="$(git -C "$DEPTH_EVALUATOR_SOURCE" rev-parse HEA
 [[ -z "$(git -C "$DEPTH_RUNNER_SOURCE" status --porcelain --untracked-files=no)" ]]
 [[ -z "$(git -C "$DEPTH_EVALUATOR_SOURCE" status --porcelain --untracked-files=no)" ]]
 
-scales=(0.03 0.1)
 prefixes=(1 2 4 8 12)
-scale_index="$((task_index / 15))"
-within_scale="$((task_index % 15))"
+if [[ -n "${DEPTH_MEASURED_NOISE_SCALE:-}" ]]; then
+    scale="$DEPTH_MEASURED_NOISE_SCALE"
+    python3 - "$scale" <<'PY'
+import math
+import sys
+
+value = float(sys.argv[1])
+if not math.isfinite(value) or not 0.0 < value <= 1.0:
+    raise SystemExit("DEPTH_MEASURED_NOISE_SCALE must be finite and in (0, 1]")
+PY
+    [[ "$task_index" -lt 15 ]]
+    within_scale="$task_index"
+else
+    scales=(0.03 0.1)
+    [[ "$task_index" -lt 30 ]]
+    scale_index="$((task_index / 15))"
+    within_scale="$((task_index % 15))"
+    scale="${scales[$scale_index]}"
+fi
 prefix_index="$((within_scale / 3))"
 seed="$((within_scale % 3))"
-scale="${scales[$scale_index]}"
 prefix="${prefixes[$prefix_index]}"
 
 task_uid="$(id -u)"
