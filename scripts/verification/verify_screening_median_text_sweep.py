@@ -23,6 +23,7 @@ from scripts.analysis.summarize_screening_median_text_sweep import (
 )
 from scripts.evaluation import error_analysis_gpt2, error_analysis_roberta
 from scripts.experiments.run_screening_median_text_condition import evaluator_command
+from scripts.experiments.run_vit_local_range_noise_condition import parse_physical_counts
 from scripts.experiments.run_screening_median_text_sweep import (
     preparation_artifacts_root,
     preparation_root,
@@ -125,6 +126,28 @@ def verify_preparation_layout() -> None:
     )
 
 
+def verify_text_physical_count_report() -> None:
+    """Require the text report to retain deadline and output count populations."""
+
+    fixture = (
+        "Gaussian[linear.data] events=100, misses=2 (rate=0.02), "
+        "deadline_events=3 (rate=0.03), deadline_ulp_min=1e-12, "
+        "deadline_ulp_max=2e-12, outputs=50, underflows=4 (rate=0.08), "
+        "overflows=5 (rate=0.1)"
+    )
+    counts = parse_physical_counts(fixture)
+    assert counts["events"] == 100
+    assert counts["misses"] == 2
+    assert counts["deadline_events"] == 3
+    assert counts["outputs"] == 50
+    assert counts["underflows"] == 4
+    assert counts["overflows"] == 5
+    for evaluator in (error_analysis_roberta, error_analysis_gpt2):
+        source = Path(evaluator.__file__).read_text(encoding="utf-8")
+        assert 'f"deadline_events={counts[' in source
+        assert 'f"deadline_ulp_min={ulp_min:' in source
+
+
 def fixture_protocol() -> dict:
     return {
         "resources": {
@@ -173,6 +196,7 @@ def main() -> None:
     verify_evaluator_arguments()
     verify_grid_and_command()
     verify_preparation_layout()
+    verify_text_physical_count_report()
     summary = summarize(fixture_protocol(), fixture_rows())
     assert len(summary) == 4
     assert {row["metric"] for row in summary} == {"accuracy", "token_weighted_perplexity"}

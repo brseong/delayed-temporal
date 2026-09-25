@@ -1121,9 +1121,18 @@ def evaluate_gpt2_model(args: Arguments) -> None:
             overflow_rate = (
                 counts["output_overflows"] / outputs if outputs else 0.0
             )
+            deadline_rate = counts["deadline_events"] / events if events else 0.0
+            ulp_min = counts["deadline_ulp_min"]
+            if not math.isfinite(ulp_min):
+                ulp_min = 0.0
+            ulp_max = counts["deadline_ulp_max"]
             print(
                 f"Gaussian[{site}] events={events}, misses={counts['misses']} "
-                f"(rate={miss_rate:.6g}), outputs={outputs}, "
+                f"(rate={miss_rate:.6g}), "
+                f"deadline_events={counts['deadline_events']} "
+                f"(rate={deadline_rate:.6g}), "
+                f"deadline_ulp_min={ulp_min:.9g}, "
+                f"deadline_ulp_max={ulp_max:.9g}, outputs={outputs}, "
                 f"underflows={counts['output_underflows']} "
                 f"(rate={underflow_rate:.6g}), "
                 f"overflows={counts['output_overflows']} "
@@ -1133,6 +1142,10 @@ def evaluate_gpt2_model(args: Arguments) -> None:
                 f"Gaussian/{site}/events": events,
                 f"Gaussian/{site}/misses": counts["misses"],
                 f"Gaussian/{site}/miss_rate": miss_rate,
+                f"Gaussian/{site}/deadline_events": counts["deadline_events"],
+                f"Gaussian/{site}/deadline_event_rate": deadline_rate,
+                f"Gaussian/{site}/deadline_ulp_min": ulp_min,
+                f"Gaussian/{site}/deadline_ulp_max": ulp_max,
                 f"Gaussian/{site}/outputs": outputs,
                 f"Gaussian/{site}/output_underflows": counts["output_underflows"],
                 f"Gaussian/{site}/output_underflow_rate": underflow_rate,

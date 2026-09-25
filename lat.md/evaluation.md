@@ -272,6 +272,8 @@ The seven multipliers are $\alpha\in\{0.003,0.01,0.03,0.05,0.1,0.3,1\}$ with see
 
 The two text evaluators accept separate linear and logarithmic timing-noise fractions. Each run uses the screening-median pair, float64 temporal payloads, frozen label-free calibration, a four-standard-deviation deadline margin, and noise at all encoder outputs.
 
+Both text evaluators report event counts, misses, deadline occupancy, numerical resolution, and output clamp counts with their own denominators.
+
 ### Condition Execution
 
 Each condition authenticates source, checkpoint, calibration, data population, measured pair, multiplier, and seed before evaluation.
