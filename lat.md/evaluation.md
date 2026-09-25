@@ -216,6 +216,8 @@ For the stopped run, each measured condition ends at the first $k$ whose three-s
 
 A separate 500-example seed-0 pilot attenuates the screening-median pair by a factor of 0.1 and evaluates $k\in\{1,2,4,8,12\}$. Top-1 accuracies are 42.2, 38.6, 39.6, 24.2, and 11.4 percent, respectively, against the reused clean value of 86.4 percent. The 1.0 percentage point increase from $k=2$ to $k=4$ is within the declared 2-point tolerance, so this pilot passes its screening gate. No 5,000-example evaluation is launched by this pilot.
 
+The formal 5,000-image scaled sparse sweep uses the screening median and $\alpha\in\{0.03,0.1\}$. At $\alpha=0.03$, mean Top-1 accuracy remains between 84.31 and 84.66 percent through $k=8$ and reaches 79.87 percent at $k=12$. At $\alpha=0.1$, it decreases from 41.99 percent at $k=1$ to 15.17 percent at $k=12$.
+
 ### Summary Artifacts
 
 The reducer reports cumulative sensitivity without assigning a causal failure to one individual block.
@@ -223,6 +225,8 @@ The reducer reports cumulative sensitivity without assigning a causal failure to
 [[scripts/analysis/summarize_vit_bss2_depth.py#main]] writes raw and summary CSV files, a summary manifest, and PDF/PNG figures. Full-grid behavior remains the default. Explicit maximum block counts require an authenticated pilot root and a validated accuracy threshold; omitted completed runs remain untouched.
 
 The scaled sparse mode accepts one fixed screening-median condition, explicit noise factors and prefix depths, and one authenticated clean converted-model result. It requires three seeds per noisy cell and plots the factors as separate curves sharing the same clean point.
+
+The formal scaled sparse summary manifest records raw CSV SHA-256 `ed56d6141960ed989ec632400cbf690213fb02ccfdf7c8684b9819ff9e9ac15c`, summary CSV SHA-256 `f4a59a91b74fe962e0379d892a5ee51c1ee44cdc61b4ccf56e42805ab74c72f6`, and figure PDF SHA-256 `9e38b680d89aa0f30045dd12a87271d5b554afa406efc18ed58d064d9770e19f`.
 
 ### Verification
 
