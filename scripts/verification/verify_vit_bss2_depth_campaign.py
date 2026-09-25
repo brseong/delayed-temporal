@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import struct
 from types import SimpleNamespace
 import sys
 import tempfile
@@ -40,6 +41,7 @@ from scripts.experiments.run_vit_bss2_depth_condition import (
     validate_condition_arguments,
     validate_execution_arguments,
 )
+from scripts.runtime import identity
 
 
 def must_reject(callable_) -> None:
@@ -352,7 +354,20 @@ def verify_summary_gate() -> None:
         )
         render_scaled_sparse(scaled_summary, scaled_root / "scaled_accuracy")
         assert (scaled_root / "scaled_accuracy.pdf").is_file()
-        assert (scaled_root / "scaled_accuracy.png").is_file()
+        scaled_png = scaled_root / "scaled_accuracy.png"
+        assert scaled_png.is_file()
+        with scaled_png.open("rb") as handle:
+            header = handle.read(24)
+        assert header[:8] == b"\x89PNG\r\n\x1a\n"
+        assert struct.unpack(">II", header[16:24]) == (737, 473)
+        repeat = scaled_root / "scaled_accuracy_repeat"
+        render_scaled_sparse(scaled_summary, repeat)
+        assert identity.sha256_file(repeat.with_suffix(".pdf")) == identity.sha256_file(
+            scaled_root / "scaled_accuracy.pdf"
+        )
+        assert identity.sha256_file(repeat.with_suffix(".png")) == identity.sha256_file(
+            scaled_png
+        )
         must_reject(
             lambda: load_scaled_sparse_runs(
                 scaled_root,

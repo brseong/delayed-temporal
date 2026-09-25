@@ -41,6 +41,10 @@ COLORS = {
     "screening-median": "#d62728",
 }
 SCALED_SPARSE_CONDITION = "screening-median"
+PAPER_PANEL_WIDTH_IN = 3.35
+PAPER_PANEL_HEIGHT_IN = 2.15
+PAPER_PANEL_FONT_SIZE = 7.0
+PAPER_PANEL_LEGEND_SIZE = 6.0
 
 
 def parse_max_first_block_counts(values: list[str]) -> dict[str, int] | None:
@@ -472,8 +476,11 @@ def summarize_scaled_sparse(
 
 
 def render_scaled_sparse(summary: list[dict[str, Any]], output: Path) -> None:
-    """Render the two fixed noise-scale curves on one accuracy axis."""
-    fig, axis = plt.subplots(figsize=(6.4, 4.2), constrained_layout=True)
+    """Render the scaled sparse summary in the compact layout used by the paper."""
+    fig, axis = plt.subplots(
+        figsize=(PAPER_PANEL_WIDTH_IN, PAPER_PANEL_HEIGHT_IN),
+        constrained_layout=True,
+    )
     colors = plt.get_cmap("tab10")
     for index, scale in enumerate(
         sorted({float(row["measured_noise_scale"]) for row in summary})
@@ -484,16 +491,38 @@ def render_scaled_sparse(summary: list[dict[str, Any]], output: Path) -> None:
         mean = [100.0 * float(row["accuracy_mean"]) for row in rows]
         low = [100.0 * float(row["accuracy_ci_low"]) for row in rows]
         high = [100.0 * float(row["accuracy_ci_high"]) for row in rows]
-        axis.plot(x, mean, marker="o", color=color, label=fr"$\alpha={scale:g}$")
-        axis.fill_between(x, low, high, color=color, alpha=0.16)
+        axis.plot(
+            x,
+            mean,
+            marker="o",
+            markersize=0.55 * PAPER_PANEL_FONT_SIZE,
+            linewidth=0.18 * PAPER_PANEL_FONT_SIZE,
+            color=color,
+            label=fr"$\alpha={scale:g}$",
+        )
+        axis.fill_between(x, low, high, color=color, alpha=0.15)
     depths = sorted({int(row["first_block_count"]) for row in summary})
     axis.set_xticks(depths)
-    axis.set_xlabel("Number of noisy encoder blocks from the input")
-    axis.set_ylabel("Top-1 accuracy (%)")
-    axis.grid(alpha=0.25)
-    axis.legend(frameon=False, title="Noise scale relative to the screening median")
-    for suffix in ("pdf", "png"):
-        fig.savefig(output.with_suffix(f".{suffix}"), dpi=220, bbox_inches="tight")
+    axis.set_xlabel(
+        r"Noisy encoder blocks $K$", fontsize=0.95 * PAPER_PANEL_FONT_SIZE
+    )
+    axis.set_ylabel("Top-1 accuracy (%)", fontsize=0.95 * PAPER_PANEL_FONT_SIZE)
+    axis.tick_params(axis="both", labelsize=0.80 * PAPER_PANEL_FONT_SIZE)
+    axis.grid(alpha=0.25, which="both")
+    axis.legend(
+        frameon=False,
+        fontsize=PAPER_PANEL_LEGEND_SIZE,
+        ncol=2,
+        columnspacing=0.8,
+        handlelength=1.8,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.01),
+    )
+    fig.savefig(output.with_suffix(".png"), dpi=220)
+    fig.savefig(
+        output.with_suffix(".pdf"),
+        metadata={"CreationDate": None, "ModDate": None},
+    )
     plt.close(fig)
 
 

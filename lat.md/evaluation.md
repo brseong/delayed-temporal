@@ -296,13 +296,13 @@ The reducer reports cumulative sensitivity without assigning a causal failure to
 
 [[scripts/analysis/summarize_vit_bss2_depth.py#main]] writes raw and summary CSV files, a summary manifest, and PDF/PNG figures. Full-grid behavior remains the default. Explicit maximum block counts require an authenticated pilot root and a validated accuracy threshold; omitted completed runs remain untouched.
 
-The scaled sparse mode accepts one fixed screening-median condition, explicit noise factors and prefix depths, and one authenticated clean converted-model result. It requires three seeds per noisy cell and plots the factors as separate curves sharing the same clean point.
+The scaled sparse mode accepts one fixed screening-median condition, explicit noise factors and prefix depths, and one authenticated clean converted-model result. It requires three seeds per noisy cell and plots the factors as separate curves sharing the same clean point. The formal scaled sparse renderer owns the compact layout used by the paper: 3.35 by 2.15 inches, 7-point labels, and a legend with two columns above the axes.
 
 The Slurm launcher accepts either the fixed grid or one explicit attenuation factor while retaining the same frozen condition runner.
 
 The Slurm launcher requires an explicit evaluator revision and rejects a checkout whose revision differs.
 
-The formal scaled sparse summary manifest records raw table digest `d66a7f0a7a6fcbf6ac501ab374526532f929edcda53472e04b99b1288bb98724`, summary table digest `dbfb111a40bc9406c8506ce96b0ad4f9cfa7486c95cacdbdc524bf601a571f72`, and figure digest `e57e0c8f5414fcad91a45ffa69599f31ca0e984b6d21fffa5ac87fbe84084672`.
+The formal scaled sparse summary manifest records raw table digest `d66a7f0a7a6fcbf6ac501ab374526532f929edcda53472e04b99b1288bb98724`, summary table digest `dbfb111a40bc9406c8506ce96b0ad4f9cfa7486c95cacdbdc524bf601a571f72`, and figure digest `3a35f6e15ea27e53a3322d9b85ce3272c4578acad04fc3bc31ac7c05288d2499`.
 
 ### Verification
 
