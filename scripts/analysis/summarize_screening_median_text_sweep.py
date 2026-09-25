@@ -13,6 +13,9 @@ import statistics
 import sys
 from typing import Any
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
@@ -24,21 +27,25 @@ from scripts.experiments.screening_median_text_sweep import TEXT_MODELS, TEXT_SE
 
 
 T_CRITICAL_DF2_975 = 4.302652729696142
+PAPER_PANEL_WIDTH_IN = 3.35
+PAPER_PANEL_HEIGHT_IN = 2.15
+PAPER_PANEL_FONT_SIZE = 7.0
+PAPER_PANEL_LEGEND_SIZE = 6.0
 
 
 @dataclass(frozen=True)
 class ComparisonFigureStyle:
     """Control the physical size and typography of the combined model panel."""
 
-    width_in: float = 8.8
-    height_in: float = 5.0
-    font_size: float = 10.0
-    legend_size: float = 9.0
-    legend_columns: int = 1
-    legend_above: bool = False
+    width_in: float = PAPER_PANEL_WIDTH_IN
+    height_in: float = PAPER_PANEL_HEIGHT_IN
+    font_size: float = PAPER_PANEL_FONT_SIZE
+    legend_size: float = PAPER_PANEL_LEGEND_SIZE
+    legend_columns: int = 2
+    legend_above: bool = True
     gpt2_max_alpha: float | None = None
-    show_title: bool = True
-    compact_labels: bool = False
+    show_title: bool = False
+    compact_labels: bool = True
     annotate_measured: bool = True
 
 
@@ -147,8 +154,12 @@ def summarize(
             )
         else:
             clean = float(resource["converted_clean"]["token_weighted_perplexity"])
-            mean, low, high = interval(
-                [float(row["token_weighted_perplexity"]) for row in selected]
+            perplexities = [
+                float(row["token_weighted_perplexity"]) for row in selected
+            ]
+            mean, low, high = interval(perplexities)
+            inverse_mean, inverse_low, inverse_high = interval(
+                [-100.0 * (1.0 - clean / value) for value in perplexities]
             )
             loss_clean = float(resource["converted_clean"]["token_weighted_loss"])
             loss_mean, loss_low, loss_high = interval(
@@ -164,6 +175,9 @@ def summarize(
                 metric_change_ci_low=100.0 * (low / clean - 1.0),
                 metric_change_ci_high=100.0 * (high / clean - 1.0),
                 metric_change_unit="percent",
+                relative_inverse_perplexity_change_mean=inverse_mean,
+                relative_inverse_perplexity_change_ci_low=inverse_low,
+                relative_inverse_perplexity_change_ci_high=inverse_high,
                 converted_clean_token_weighted_loss=loss_clean,
                 token_weighted_loss_mean=loss_mean,
                 token_weighted_loss_ci_low=loss_low,
@@ -247,20 +261,28 @@ def render(summary: list[dict[str, Any]], output: Path) -> None:
     figure.suptitle("Text-model sensitivity to measured encoder timing noise")
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output.with_suffix(".png"), dpi=220)
-    figure.savefig(output.with_suffix(".pdf"))
+    figure.savefig(
+        output.with_suffix(".pdf"),
+        metadata={"CreationDate": None, "ModDate": None},
+    )
     plt.close(figure)
 
 
-def negative_relative_perplexity(summary_row: dict[str, Any]) -> tuple[float, float, float]:
-    """Orient relative perplexity change so degradation is negative."""
+def relative_inverse_perplexity_change(
+    summary_row: dict[str, Any],
+) -> tuple[float, float, float]:
+    """Return seed-aggregated relative inverse-perplexity change and interval."""
 
     if summary_row.get("metric") != "token_weighted_perplexity":
-        raise ValueError("negative relative perplexity requires a perplexity row")
-    return (
-        -float(summary_row["metric_change_mean"]),
-        -float(summary_row["metric_change_ci_high"]),
-        -float(summary_row["metric_change_ci_low"]),
+        raise ValueError("inverse-perplexity change requires a perplexity row")
+    values = (
+        float(summary_row["relative_inverse_perplexity_change_mean"]),
+        float(summary_row["relative_inverse_perplexity_change_ci_low"]),
+        float(summary_row["relative_inverse_perplexity_change_ci_high"]),
     )
+    if any(not math.isfinite(value) for value in values):
+        raise ValueError("inverse-perplexity change requires finite values")
+    return values
 
 
 def aligned_zero_limits(
@@ -369,7 +391,9 @@ def render_model_comparison(
     if not perplexity_rows:
         raise ValueError("combined model figure is missing gpt2")
     perplexity_x = [row["alpha"] for row in perplexity_rows]
-    perplexity_intervals = [negative_relative_perplexity(row) for row in perplexity_rows]
+    perplexity_intervals = [
+        relative_inverse_perplexity_change(row) for row in perplexity_rows
+    ]
     perplexity_mean = [row[0] for row in perplexity_intervals]
     perplexity_low = [row[1] for row in perplexity_intervals]
     perplexity_high = [row[2] for row in perplexity_intervals]
@@ -395,11 +419,11 @@ def render_model_comparison(
     tick_size = 0.80 * style.font_size
     if style.compact_labels:
         accuracy_label = "Accuracy change (pp)"
-        perplexity_label = "Negative PPL increase (%)"
+        perplexity_label = "Inverse-PPL change (%)"
         x_label = r"Noise scale $\alpha$"
     else:
         accuracy_label = "Accuracy change from deterministic baseline (pp)"
-        perplexity_label = "Negative relative perplexity increase (%)"
+        perplexity_label = "Relative inverse-perplexity change (%)"
         x_label = "Noise scale multiplier"
     perplexity_axis.set_ylabel(perplexity_label, fontsize=axis_label_size)
     axis.set_ylim(*aligned_zero_limits(accuracy_limits))
@@ -412,11 +436,11 @@ def render_model_comparison(
     if style.annotate_measured:
         axis.text(
             1.0,
-            0.02,
+            0.98,
             "Measured screening median",
             transform=axis.get_xaxis_transform(),
             ha="right",
-            va="bottom",
+            va="top",
             fontsize=tick_size,
         )
     axis.set_xlabel(x_label, fontsize=axis_label_size)
@@ -446,7 +470,10 @@ def render_model_comparison(
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output.with_suffix(".png"), dpi=220)
-    figure.savefig(output.with_suffix(".pdf"))
+    figure.savefig(
+        output.with_suffix(".pdf"),
+        metadata={"CreationDate": None, "ModDate": None},
+    )
     plt.close(figure)
 
 
@@ -457,17 +484,33 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--vision-root", type=Path, required=True)
     parser.add_argument("--allow-incomplete", action="store_true")
-    parser.add_argument("--comparison-width-in", type=float, default=8.8)
-    parser.add_argument("--comparison-height-in", type=float, default=5.0)
-    parser.add_argument("--comparison-font-size", type=float, default=10.0)
-    parser.add_argument("--comparison-legend-size", type=float, default=9.0)
-    parser.add_argument("--comparison-legend-columns", type=int, default=1)
-    parser.add_argument("--comparison-legend-above", action="store_true")
+    parser.add_argument(
+        "--comparison-width-in", type=float, default=PAPER_PANEL_WIDTH_IN
+    )
+    parser.add_argument(
+        "--comparison-height-in", type=float, default=PAPER_PANEL_HEIGHT_IN
+    )
+    parser.add_argument(
+        "--comparison-font-size", type=float, default=PAPER_PANEL_FONT_SIZE
+    )
+    parser.add_argument(
+        "--comparison-legend-size", type=float, default=PAPER_PANEL_LEGEND_SIZE
+    )
+    parser.add_argument("--comparison-legend-columns", type=int, default=2)
+    parser.add_argument(
+        "--comparison-legend-above",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--comparison-gpt2-max-alpha", type=float)
     parser.add_argument(
-        "--comparison-title", action=argparse.BooleanOptionalAction, default=True
+        "--comparison-title", action=argparse.BooleanOptionalAction, default=False
     )
-    parser.add_argument("--comparison-compact-labels", action="store_true")
+    parser.add_argument(
+        "--comparison-compact-labels",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument(
         "--comparison-measured-label",
         action=argparse.BooleanOptionalAction,

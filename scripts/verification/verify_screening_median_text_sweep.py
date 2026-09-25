@@ -17,8 +17,12 @@ if str(ROOT) not in sys.path:
 
 from scripts.analysis.summarize_screening_median_text_sweep import (
     ComparisonFigureStyle,
+    PAPER_PANEL_FONT_SIZE,
+    PAPER_PANEL_HEIGHT_IN,
+    PAPER_PANEL_LEGEND_SIZE,
+    PAPER_PANEL_WIDTH_IN,
     aligned_zero_limits,
-    negative_relative_perplexity,
+    relative_inverse_perplexity_change,
     render,
     render_model_comparison,
     summarize,
@@ -223,10 +227,33 @@ def main() -> None:
         row for row in summary
         if row["model"] == "gpt2" and row["alpha"] == 1.0
     )
-    mean, low, high = negative_relative_perplexity(gpt2)
-    assert mean == -gpt2["metric_change_mean"]
-    assert low == -gpt2["metric_change_ci_high"]
-    assert high == -gpt2["metric_change_ci_low"]
+    mean, low, high = relative_inverse_perplexity_change(gpt2)
+    clean = gpt2["converted_clean_metric"]
+    expected = [
+        -100.0 * (1.0 - clean / value) for value in (23.0, 23.1, 23.2)
+    ]
+    assert mean == sum(expected) / len(expected)
+    assert -100.0 < low <= mean <= high
+    twice_clean = {
+        "metric": "token_weighted_perplexity",
+        "relative_inverse_perplexity_change_mean": -50.0,
+        "relative_inverse_perplexity_change_ci_low": -50.0,
+        "relative_inverse_perplexity_change_ci_high": -50.0,
+    }
+    assert relative_inverse_perplexity_change(twice_clean) == (
+        -50.0,
+        -50.0,
+        -50.0,
+    )
+    paper_style = ComparisonFigureStyle()
+    assert paper_style.width_in == PAPER_PANEL_WIDTH_IN == 3.35
+    assert paper_style.height_in == PAPER_PANEL_HEIGHT_IN == 2.15
+    assert paper_style.font_size == PAPER_PANEL_FONT_SIZE == 7.0
+    assert paper_style.legend_size == PAPER_PANEL_LEGEND_SIZE == 6.0
+    assert paper_style.legend_columns == 2
+    assert paper_style.legend_above
+    assert paper_style.compact_labels
+    assert not paper_style.show_title
     left_limits = aligned_zero_limits([-20.0, 0.2])
     right_limits = aligned_zero_limits([-50.0, 1.0])
     assert abs((-left_limits[0]) / (left_limits[1] - left_limits[0]) - 0.88) < 1e-12

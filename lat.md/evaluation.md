@@ -294,11 +294,11 @@ The reducer keeps task metrics on distinct axes while aligning their determinist
 
 [[scripts/analysis/summarize_screening_median_text_sweep.py#main]] reports RoBERTa accuracy change in percentage points and GPT-2 corpus perplexity change in percent, each with a three-seed Student-$t$ interval.
 
-The combined model figure places classification accuracy change on the left axis and GPT-2 negative relative perplexity increase on the right axis. Both deterministic references are zero and degradation is negative. The axes share direction and zero but are not numerically comparable.
+The combined model figure places classification accuracy change on the left axis and GPT-2 relative inverse-perplexity change on the right axis. Each seed is mapped to $100(\mathrm{PPL}_{\mathrm{clean}}/\mathrm{PPL}_{\mathrm{noisy}}-1)$ before computing the three-seed Student-$t$ interval. This is the relative change in inverse perplexity, not a relative perplexity increase. It is zero at the deterministic reference and approaches $-100\%$ as perplexity worsens. The aggregate table retains the untransformed perplexity and relative increase. The axes share direction and zero but are not numerically comparable.
 
 Formal reduction requires all three replicas for every requested text-model condition. The explicit draft mode omits incomplete conditions and therefore supports interim figures without representing a partial replica set as a confidence interval.
 
-The combined renderer exposes physical size, typography, legend placement, and an explicit GPT-2 display cutoff while retaining the underlying aggregate table. This permits a compact manuscript panel and records which completed GPT-2 points an interim figure displays.
+The combined renderer defaults to the scaled sparse depth figure's paper format: a $3.35\times2.15$ inch panel, 7 point typography, a 6 point legend in two columns above the axes, compact labels, and no title. It still exposes these settings and an explicit GPT-2 display cutoff while retaining the underlying aggregate table.
 
 ### Verification
 
