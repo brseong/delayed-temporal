@@ -14,6 +14,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.experiments import run_appendix_vit_noise_campaign as campaign
+from scripts.analysis.summarize_local_range_paper_campaign import (
+    validate_noise_campaign_manifest,
+)
 from scripts.experiments.run_vit_local_range_noise_condition import (
     APPENDIX_RAW_TIMESTAMP_TAG,
     ED_INTERNAL_NOISE_CONTRACT,
@@ -85,6 +88,36 @@ def main() -> None:
     assert "--time-noise-exponential-difference-internal" not in command
     assert "--no-time-noise-exponential-difference-internal" not in command
     assert command[command.index("--campaign-tag") + 1] == APPENDIX_RAW_TIMESTAMP_TAG
+    with tempfile.TemporaryDirectory(prefix="appendix-vit-noise-manifest-") as directory:
+        path = Path(directory) / "manifest.json"
+        path.write_text(json.dumps(manifest))
+        rows = [dict(row) for row in manifest["assignments"]]
+        validate_noise_campaign_manifest(
+            path,
+            rows,
+            noise_tag=APPENDIX_RAW_TIMESTAMP_TAG,
+            reference_result={"calibration_sha256": manifest["calibration_sha256"]},
+            reference_manifest={
+                "source_commit": manifest["source_commit"],
+                "checkpoint_sha256": manifest["checkpoint_sha256"],
+            },
+        )
+        rows[0]["physical_gpu"] = 7 if rows[0]["physical_gpu"] != 7 else 6
+        try:
+            validate_noise_campaign_manifest(
+                path,
+                rows,
+                noise_tag=APPENDIX_RAW_TIMESTAMP_TAG,
+                reference_result={"calibration_sha256": manifest["calibration_sha256"]},
+                reference_manifest={
+                    "source_commit": manifest["source_commit"],
+                    "checkpoint_sha256": manifest["checkpoint_sha256"],
+                },
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("changed GPU assignment was accepted")
     print("Appendix ViT-B raw-timestamp campaign verification passed")
 
 

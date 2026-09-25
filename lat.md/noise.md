@@ -230,7 +230,9 @@ Each encoder uses $\sigma_t=r_tT$ for its own declared time-window length $T$. N
 
 The exact fractions are $r_t=10^{-5}10^{i/8}$ for integer indices 0 through 8. The numerical grid matches the earlier display, but its maintained meaning is now a fraction of each encoder's own window rather than a fraction of one global range.
 
-The previous values at source `b1a6bf8f7baa89250201c9af96d05b6154249de5` used the superseded timestamp handling. They remain immutable provenance and are not current manuscript evidence.
+The completed raw-timestamp means are 86.0267, 86.0000, 85.9733, 85.9733, 85.9600, 85.8800, 85.7867, 85.6333, and 85.5133 percent in increasing fraction order. At $r_t=10^{-4}$, the 95% Student-$t$ interval is 85.1118--85.9149 percent. The clean spiking reference is 86.00 percent.
+
+The previous values at source `b1a6bf8f7baa89250201c9af96d05b6154249de5` used the superseded timestamp handling. They remain immutable provenance and are not combined with the current result.
 
 ## Deadline-Margin Ratio Sweep
 
@@ -240,6 +242,8 @@ For each encoder, $m=k\sigma_t$ uses that encoder's local $\sigma_t$. Calibratio
 
 The fixed fraction is $r_t=10^{-5}$ and the ratios are $k\in\{0,0.5,1,1.5,2,2.5,3,4,5,6,8,10,12\}$. The condition $r_t=10^{-5},k=4$ is shared with the timing-noise fraction sweep and is executed only once per seed.
 
+The completed mean top-1 accuracy is 77.3267 percent at $k=0$ and reaches 86.0133 percent at $k=3$ and 86.0267 percent at $k=4$. The pooled deadline-miss rate falls from 6.9153 percent at $k=0$ to 0.000423 percent at $k=4$; no misses are observed at $k\in\{8,10,12\}$.
+
 The earlier completed values and promoted figure at source `b1a6bf8f7baa89250201c9af96d05b6154249de5` used the superseded timestamp handling. They are not reused or combined with the maintained rerun.
 
 ## Raw-Timestamp Appendix Rerun
@@ -248,7 +252,9 @@ The Appendix rerun regenerates the ViT-B baseline and both one-dimensional sweep
 
 Delivered spikes retain their sampled timestamps, missed events use observation-time readout, and exponential difference always applies timing noise to its internal encoding. The frozen manifest records these contracts alongside source, evaluator, checkpoint, data, preprocessing, and calibration hashes.
 
-The campaign contains 21 unique cells and 63 replicas. Its central assignment partitions run identifiers between baekryun and poseidon1, permits GPUs 0--7 only as a campaign-specific local exception, and writes runtime data only to disk-backed paths below `artifacts/`.
+The verified campaign contains 21 unique cells and 63 replicas at source `741e6abc20bdf8c7e2a82158d068649d81ff87b0`. Its central assignment partitions run identifiers between baekryun and poseidon1, permits GPUs 0--7 only as a campaign-specific local exception, and writes runtime data only to disk-backed paths below `artifacts/`.
+
+The frozen calibration contains 109 sites and has SHA-256 `4ef054f6c7004dbe3f3d186a973622aec02253caaa7ce08af950c605a062338c`. The accepted raw and summary CSV files have SHA-256 values `08639201b508e5d46e7cb86bdc949ad6f500f0fe1ea8579773b3c65cd575c632` and `ee1c6552bc012c7668103f896db152dffbadef041e7a6e5eb42a52aa01ac70f1`.
 
 ## Gaussian Noise Statistics
 
