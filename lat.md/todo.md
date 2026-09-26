@@ -77,6 +77,16 @@ The central claim must describe the demonstrated fixed-form operator composition
 
 Every retained theorem and operator claim must match the implemented equations, domains, finite-window behavior, and failure conditions.
 
+- [x] [[iclr-appendix-consistency#ICLR 부록 일관성 검토]]에 따라 NP 순위상관 기준의 부호를 수정하고, 기준 시간상수와 개별 합성의 시간상수 관계를 명시한다.
+
+- [x] Verify the current ICLR exponential-difference implementation with integration drive $-1$, and expose its local time interval and fixed decoding gain. Keep the obsolete NeurIPS table issue separate; see [[neurips-mathematics#SwiGLU 합성의 의미 검증]].
+- [x] Document the SwiGLU exponential clamp, common logarithmic reference, signed integration and delivery conditions. Implement positive and negative accumulation explicitly in the shared primitive and verify the composition independently.
+- [ ] Verify Llama SwiGLU at intended projection ranges and numerical precision; the small float32 model does not establish float16 or bfloat16 fidelity.
+- [x] Preserve RMSNorm output bounds across float16 and bfloat16 rounding; verify actual promoted outputs against dtype-representable scalar endpoints.
+- [x] Replace the observed RMSNorm cancellation errors with float64 operator intermediates; enforce tight reference tolerances over the recorded ranges, epsilon values, input sizes, and time constants.
+
+RMSNorm inactive-input control and extreme time-constant configurations are outside this numerical correction at the user's request; their earlier observations remain in [[deprecated#RMSNorm 수치 수정 전 반례]].
+
 - [ ] Reclassify Theorem 1 as a quantitative theorem with conditions and bounds, a conditional theorem, or a constructive proposition.
 - [x] Replace blanket composition exactness with operator equations that hold exactly under stated domains and make finite-domain approximation accuracy depend on the domain choice.
 - [x] Replace arbitrary ANN function language with the listed arithmetic and evaluated Transformer operations.
@@ -125,6 +135,8 @@ SOP and feasibility claims must state their mapping assumptions and remain separ
 
 Computational stress tests must be separated from calibrated device models and from one another.
 
+- [x] [[iclr-appendix-consistency#보고 누락: 절대 시간 변동과 신호 구간]]에 따라 원고가 보고한다고 한 절대 측정값과 코드별 관측 기한 초과율의 제시 범위를 실제 근거에 맞춘다.
+
 - [ ] Document each timing-noise distribution, magnitude, injection site, seed, repetition count, and confidence interval.
 - [ ] Keep BrainScaleS-2 measurement and model-injection claims in planned tense until the measurement artifacts and task results are complete.
 - [ ] Treat additive jitter with deadline misses as the maintained computational model; do not describe it as a calibrated neuronal noise process.
@@ -140,6 +152,10 @@ Computational stress tests must be separated from calibrated device models and f
 ### P1 Scalability and Exposition
 
 The paper must explain the computation to an ML reader and bound extrapolation beyond evaluated models.
+
+- [x] [[iclr-detail-review#서론·방법론·실험 결과 적용 상태]]에 따라 본문 01–02, 11–12, 14–24의 15개 항목을 반영했다. 본문에서 덜어낸 측정·재현 정보는 부록에 보존했다.
+- [x] [[iclr-detail-review#결론 적용 상태]]에 따라 본문 25의 측정·잡음 가정 재설명을 줄이고 핵심 한계와 후속 연구 방향을 남겼다.
+- [ ] [[iclr-detail-review#ICLR 본문의 과도한 세부 설명 검토]]의 나머지 본문 03–10, 13은 후속 범위에 따라 적용 여부를 결정한다. 부록은 상세함을 허용한다.
 
 - [ ] Add one end-to-end potential-to-time-to-potential flow diagram and a small numerical example.
 - [ ] Tabulate each primitive's input, output, units, time constants, threshold, scale, and proposed neuron or circuit interpretation.
@@ -166,12 +182,16 @@ The release must make unsupported scope and reproducibility boundaries explicit.
 
 Submission requirements must be revalidated for ICLR 2027 rather than inherited from the withdrawn NeurIPS version.
 
+- [x] [[iclr-format-audit#ICLR 2027 제출 서식 점검]]에서 공식 2027 규정·배포 템플릿과 현재 PDF를 대조했다. 본문은 9쪽 이내이며 스타일 파일은 공식본과 일치한다.
+- [x] [[iclr-format-audit#필수 수정과 서식 복원#부록 표의 본문 폭 재점검]]에서 Table 7·10이 사용자 수정 뒤 기본 본문 폭 안에 들어간 것을 확인했다.
+- [ ] [[iclr-format-audit#필수 수정과 서식 복원#표 글자 크기와 수동 간격 조정]]에 따라 문서 전체에 적용되는 간격 설정과 그림 주변 수동 여백을 점검한 뒤 본문 분량·그림 캡션·PDF 참조 링크를 다시 확인한다. 표의 `\small` 일괄 제거는 필수 조치로 취급하지 않는다.
+
 - [ ] Reconcile Claims, Limitations, Assumptions/Proofs, Reproducibility, and Experimental Details answers with the final section references.
 - [ ] Update the statistical-significance answer: deterministic conversion results are singletons, while stochastic robustness results use three replicas and explicitly defined 95% Student-t intervals.
 - [ ] Complete the currently unfinished compute-resources justification with hardware, memory, wall time, and aggregate compute.
 - [ ] Recheck code/data access, anonymous-release URLs, exact commands, environment versions, and which experiments are omitted.
 - [ ] Audit ethics, broader impacts, safeguards, licenses, new assets, human-subject and IRB `N/A` answers against the final released assets.
-- [ ] Make the declaration of LLM use match the actual use in prose, code, derivation, and verification.
+- [ ] [[iclr-format-audit#필수 수정과 서식 복원#AI use statement 누락]]에 따라 참고문헌 앞에 필수 명시문을 추가하고 실제 원고·코드·유도·검증 사용 범위를 OpenReview 응답과 일치시킨다.
 
 ### Recommended Execution Order
 

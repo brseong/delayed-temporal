@@ -29,8 +29,9 @@ from scripts.experiments.screening_median_text_sweep import TEXT_MODELS, TEXT_SE
 T_CRITICAL_DF2_975 = 4.302652729696142
 PAPER_PANEL_WIDTH_IN = 3.35
 PAPER_PANEL_HEIGHT_IN = 2.15
-PAPER_PANEL_FONT_SIZE = 7.0
-PAPER_PANEL_LEGEND_SIZE = 6.0
+PAPER_PANEL_FONT_SIZE = 8.0
+PAPER_PANEL_AXIS_LABEL_SIZE = 12.5
+PAPER_PANEL_LEGEND_SIZE = 8.0
 
 
 @dataclass(frozen=True)
@@ -40,13 +41,13 @@ class ComparisonFigureStyle:
     width_in: float = PAPER_PANEL_WIDTH_IN
     height_in: float = PAPER_PANEL_HEIGHT_IN
     font_size: float = PAPER_PANEL_FONT_SIZE
+    axis_label_size: float = PAPER_PANEL_AXIS_LABEL_SIZE
     legend_size: float = PAPER_PANEL_LEGEND_SIZE
-    legend_columns: int = 2
+    legend_columns: int = 5
     legend_above: bool = True
     gpt2_max_alpha: float | None = None
     show_title: bool = False
     compact_labels: bool = True
-    annotate_measured: bool = True
 
 
 def load_rows(root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -316,6 +317,7 @@ def render_model_comparison(
         style.width_in <= 0
         or style.height_in <= 0
         or style.font_size <= 0
+        or style.axis_label_size <= 0
         or style.legend_size <= 0
         or style.legend_columns < 1
     ):
@@ -415,11 +417,11 @@ def render_model_comparison(
         color="black",
         alpha=0.10,
     )
-    axis_label_size = 0.95 * style.font_size
+    axis_label_size = style.axis_label_size
     tick_size = 0.80 * style.font_size
     if style.compact_labels:
-        accuracy_label = "Accuracy change (pp)"
-        perplexity_label = "Inverse-PPL change (%)"
+        accuracy_label = "Accuracy change\n(pp)"
+        perplexity_label = "Inverse-PPL\nchange (%)"
         x_label = r"Noise scale $\alpha$"
     else:
         accuracy_label = "Accuracy change from deterministic baseline (pp)"
@@ -431,18 +433,7 @@ def render_model_comparison(
         *aligned_zero_limits([*perplexity_low, *perplexity_high])
     )
     axis.set_xscale("log")
-    axis.axvline(1.0, color="black", linestyle=":", linewidth=1.4)
     axis.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
-    if style.annotate_measured:
-        axis.text(
-            1.0,
-            0.98,
-            "Measured screening median",
-            transform=axis.get_xaxis_transform(),
-            ha="right",
-            va="top",
-            fontsize=tick_size,
-        )
     axis.set_xlabel(x_label, fontsize=axis_label_size)
     axis.set_ylabel(accuracy_label, fontsize=axis_label_size)
     if style.show_title:
@@ -464,8 +455,9 @@ def render_model_comparison(
         frameon=False,
         fontsize=style.legend_size,
         ncol=style.legend_columns,
-        columnspacing=0.8,
-        handlelength=1.8,
+        columnspacing=0.4,
+        handlelength=1.0,
+        handletextpad=0.3,
         **legend_options,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -494,9 +486,13 @@ def main() -> None:
         "--comparison-font-size", type=float, default=PAPER_PANEL_FONT_SIZE
     )
     parser.add_argument(
+        "--comparison-axis-label-size", type=float,
+        default=PAPER_PANEL_AXIS_LABEL_SIZE,
+    )
+    parser.add_argument(
         "--comparison-legend-size", type=float, default=PAPER_PANEL_LEGEND_SIZE
     )
-    parser.add_argument("--comparison-legend-columns", type=int, default=2)
+    parser.add_argument("--comparison-legend-columns", type=int, default=5)
     parser.add_argument(
         "--comparison-legend-above",
         action=argparse.BooleanOptionalAction,
@@ -508,11 +504,6 @@ def main() -> None:
     )
     parser.add_argument(
         "--comparison-compact-labels",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
-    parser.add_argument(
-        "--comparison-measured-label",
         action=argparse.BooleanOptionalAction,
         default=True,
     )
@@ -533,13 +524,13 @@ def main() -> None:
             width_in=args.comparison_width_in,
             height_in=args.comparison_height_in,
             font_size=args.comparison_font_size,
+            axis_label_size=args.comparison_axis_label_size,
             legend_size=args.comparison_legend_size,
             legend_columns=args.comparison_legend_columns,
             legend_above=args.comparison_legend_above,
             gpt2_max_alpha=args.comparison_gpt2_max_alpha,
             show_title=args.comparison_title,
             compact_labels=args.comparison_compact_labels,
-            annotate_measured=args.comparison_measured_label,
         ),
     )
 

@@ -4,11 +4,11 @@ The maintained noise model adds Gaussian error directly to TTFS spike times and 
 
 ## Configuration
 
-Direct timing noise uses one process-wide configuration and a dedicated random generator seeded once per experiment replica.
+Direct timing noise uses one shared configuration and a dedicated random generator seeded once per experiment replica on each configured device.
 
 The process-wide configuration stores a dimensionless time-window fraction, optional per-encoder-kind fractions, the absolute time mean, deadline-margin ratio, seed, and generator, and validates them before installation.
 
-The generator advances across forward calls. Reconfiguring it restarts a replica; an individual forward must not reseed it. Because this state is process-wide, the maintained path rejects `DataParallel` execution.
+Each generator advances across forward calls on its device. The first device keeps the original seed and subsequent devices use deterministic offsets; reconfiguring restarts a replica, while an individual forward must not reseed it. Because this state is shared by the process, the maintained path rejects `DataParallel` execution.
 
 Evaluation entry points expose a dimensionless standard-deviation fraction $r_t$. For an encoder with declared time-window length $T$, that invocation uses $\sigma_t=r_tT$; optional linear and logarithmic overrides follow the same local rule. There is no global absolute conversion scale.
 
@@ -122,9 +122,9 @@ The existing potential-to-spike decorator is the only production injection point
 
 [[utils/transforms/noise.py#inject_spike_time_noise]] first calls the deterministic encoder and then samples timing noise when the consumer requests `return_spike_sample=True`. Both [[utils/transforms/potential_to_spike.py#neg_linear_transform]] and [[utils/transforms/potential_to_spike.py#neg_log_transform]] carry this decorator.
 
-There is no separate Gaussian multiplication operator or secondary sampling helper. Physical consumers receive a time-and-delivery record, while noise-free callers preserve the deterministic `(time, bounds)` interface. One configuration may select different standard deviations for the linear and logarithmic encodings while retaining one generator and one deadline rule.
+There is no separate Gaussian multiplication operator or secondary sampling helper. Physical consumers receive a record of time and delivery, while deterministic callers preserve the `(time, bounds)` interface. One configuration may select different standard deviations for the linear and logarithmic encodings while retaining one generator per configured device and one deadline rule.
 
-Measured encoder overrides support a marginal timing noise sensitivity test. They do not turn independently measured primitive statistics into a calibrated BrainScaleS-2 system prediction, and they do not model cross-primitive correlation or state coupling.
+Measured encoder overrides support a marginal timing noise sensitivity test by scaling the measured fraction to each model encoder's local time-window width. This proportionality is assumed rather than measured across model windows, so independently measured primitive statistics do not yield a calibrated BrainScaleS-2 system prediction; cross-primitive correlation and state coupling also remain unmodeled.
 
 ## Layer-Shared Reference Event
 

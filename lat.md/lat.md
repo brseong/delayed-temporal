@@ -4,6 +4,7 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[code-layout]] — Stable evaluator entry points, reusable runtime helpers, campaign boundaries, and dependency checks.
 - [[domain]] — Potentials, bounds, TTFS encodings, scale parameters, and finite-window semantics.
 - [[operators]] — Primitive temporal integration and the composite Transformer operator vocabulary.
+- [[rmsnorm]] — RMSNorm operator composition, finite domains, Llama integration, and verification.
 - [[models]] — Hugging Face model-family adapters, checkpoint compatibility, and ablation controls.
 - [[output-heads]] — Output projection range flow, artifact identity, and verification.
 - [[decisions]] — Rationale and trade-offs behind the project’s major architectural choices.
@@ -15,6 +16,7 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[text-calibration]] — Complete BERT, RoBERTa and GPT-2 range collection, held-out evaluation, and evaluator lifecycle.
 - [[evaluation]] — Experiment entry points, metrics, diagnostics, sweeps, and verification boundaries.
 - [[quick-family-checks]] — Small model comparisons and calibration requirements before language-model evaluation.
+- [[llama-appendix]] — Bounded two-dataset Llama calibration, timing noise conditions, and result identity.
 - [[comparison-costs]] — ViT comparison SOP derivation and source audit.
 - [[conversion-comparison]] — Current calibrated ViT results, timm preprocessing, text companion results, and table contract.
 - [[vit-calibration-audit]] — Historical audit of the superseded 48/96-site ViT calibration path.
@@ -27,7 +29,10 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[neurips-windows]] — 입력 범위, 표현 범위와 관측 시간의 관계.
 - [[neurips-writing]] — 원고 용어, 근거와 비교를 일관되게 작성하는 원칙.
 - [[iclr-flow-review]] — ICLR 2027 원고의 문단별 역할, 연결 판정, 전체 흐름과 수정 우선순위.
+- [[iclr-detail-review]] — ICLR 본문의 과도한 세부 설명 25개 검토 항목과 유지할 정보; 부록은 축약 대상에서 제외.
 - [[rebuttal]] — Reviewer-risk 항목 1–12의 합의된 판단, 원고 조치와 rebuttal 답변 근거.
 - [[deprecated]] — 현재 계약에서 분리한 과거 리뷰, 설계, 구현 상태와 실험 기록.
 - [[todo]] — Required manuscript and implementation work, including the only active experiment checklist.
 - [[deferred-experiments]] — Optional experiment ideas with explicit promotion conditions and no active checkboxes.
+- [[iclr-appendix-consistency]] — ICLR 부록의 부호·시간상수·측정 보고 일관성 및 연산량 검산.
+- [[iclr-format-audit]] — ICLR 2027 공식 제출 서식과 현행 PDF의 대조 및 필수 수정 항목.

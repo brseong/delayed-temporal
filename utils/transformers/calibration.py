@@ -24,7 +24,7 @@ _CALIBRATION_NAME_ATTRIBUTE = "_delayed_temporal_calibration_module_name"
 VIT_CALIBRATION_POLICY_VERSION = 3
 TEXT_CALIBRATION_POLICY_VERSION = 2
 OPERATOR_BACKED_OUTPUT_HEAD_VERSION = 1
-TEXT_CALIBRATION_FAMILIES = frozenset({"bert", "roberta", "gpt2"})
+TEXT_CALIBRATION_FAMILIES = frozenset({"bert", "roberta", "gpt2", "llama"})
 
 
 def _vit_calibration_policy_enabled(
@@ -72,7 +72,7 @@ def _explicit_calibration_policy_enabled(
     if options.get("operator_backed_output_head_version") != OPERATOR_BACKED_OUTPUT_HEAD_VERSION:
         raise ValueError("text calibration requires operator-backed output heads")
     if metadata.model_family not in TEXT_CALIBRATION_FAMILIES:
-        raise ValueError("text_calibration_policy_version requires BERT, RoBERTa or GPT-2")
+        raise ValueError("text_calibration_policy_version requires BERT, RoBERTa, GPT-2 or Llama")
     return True
 
 
@@ -89,6 +89,8 @@ def _calibration_execution_dtype(module: nn.Module, tensor_name: str) -> torch.d
     """Resolve the real projection dtype for separate or fused Q/K/V weights."""
     if tensor_name in {"query", "key", "value"}:
         projection = getattr(module, tensor_name, None)
+        if projection is None:
+            projection = getattr(module, f"{tensor_name[0]}_proj", None)
         if projection is None:
             projection = getattr(module, "c_attn", None)
         if projection is None or not isinstance(getattr(projection, "weight", None), Tensor):

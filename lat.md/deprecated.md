@@ -828,3 +828,61 @@ The next session should resolve publication consistency without silently expandi
 3. Decide whether the tracked appendix drafting note should be incorporated into the manuscript or retained as a separate internal record.
 4. Push `44ddb0b` and the precision-control handoff commit after confirming the intended remote branch.
 5. Do not use the present float64 reference as a pure dtype intervention; the optional control that holds the softmin score radius fixed is in [[deferred-experiments#Mechanism and Operator Ablations]].
+
+## SwiGLU 설명의 조건 생략
+
+2026-09-25 첫 대화 설명은 SwiGLU를 표준 sigmoid 식과 등호로 연결하면서 지수 입력 clamp, 유한 정밀도 및 이벤트 전달 조건을 생략했다.
+
+당시 설명은 $\psi_{\mathrm{ED}}$의 내부 구현을 생략했다. 이어진 검증에서는 NeurIPS 보관본의 네 연산자 분류와 ED 전류 부호 문제를 현재 원고와 구분하지 않았다. 현재 ICLR은 ED를 primitive interface로 채택했으므로, ED를 남긴 식 자체는 불완전한 interface 표현이 아니다. 현재 검증과 보완된 전개는 [[neurips-mathematics#SwiGLU 합성의 의미 검증]]에 있다.
+
+### 두 적분 경로의 축약 계산
+
+이전 signed PWM 구현은 두 인과적 적분 시간을 뺀 뒤 전류를 곱했다. 현재 공통 primitive는 전류의 양·음수 부분으로 두 nonnegative accumulator를 계산한 뒤 뺀다.
+
+두 표현은 이상적인 실수 연산에서 동치다. 이전 문서의 “두 경로는 가능한 물리 해석일 뿐 tensor가 계산하지 않는다”는 설명은 더 이상 이 primitive에 해당하지 않는다. 최적화된 affine 및 attention의 시간차 reduction은 같은 국소 적분 시간 계산을 공유한다.
+
+## Llama RMSNorm의 dense 구현
+
+2026-09-25 초기 Llama 어댑터는 RMSNorm의 dense 식을 유지하고 출력 범위만 전달했다. 이후 이 경로는 기존 연산자의 합성으로 교체되었다.
+
+현재 구현과 유한 범위 조건은 [[rmsnorm#RMSNorm Operator Composition]]에 있다. 초기 구현에 관한 설명은 현재 RMSNorm 경로에 적용되지 않는다.
+
+## RMSNorm 검증의 과도한 범위 해석
+
+2026-09-25 첫 구현 완료 설명은 연산자 합성을 “완전히” 구현했다고 표현했다. 작은 표본의 오차와 단순 bounds 검사만으로 물리적 마스크 구성이나 모든 dtype의 bounds 보존까지 입증된 것은 아니었다.
+
+현재 [[rmsnorm#RMSNorm Operator Composition#Rigorous Audit]]는 대수 동치의 조건, 입력 마스크의 추가 정보, 기본 epsilon의 수치 반례, 저정밀도 bounds 위반 및 파생 시간 범위 검증의 한계를 구분한다. 초기 통과 결과는 그때 검사한 사례에만 해당한다.
+
+## RMSNorm 수치 수정 전 반례
+
+2026-09-25 float64 중간 계산과 dtype별 bounds 반올림을 도입하기 전에 관측한 반례다. 현재 정확도·범위 회귀 검사는 [[rmsnorm#RMSNorm Operator Composition#Rigorous Audit#Numerical Precision and Bounds]]에 있다.
+
+### 당시 수치 검증
+
+현재 dtype과 선언 범위만으로 작은 오차가 보장되지는 않는다. 기본 epsilon의 범위 의존 오차, 저정밀도 bounds 위반, 표현 불가능한 시간 설정을 재현했다.
+
+수정 전 원래 검사 행의 최대 절대오차는 float64 약 $7.8\times10^{-15}$, float32 약 $3.5\times10^{-6}$였다. epsilon $10^{-12}$와 범위 $[-40.172,40.172]$의 작은 입력에서는 float64 약 $4.54\times10^{-10}$, float32 약 $6.84\times10^{-2}$가 관측되어 별도의 느슨한 허용오차를 사용했었다. 현재 float32 검사는 이 허용오차를 제거했다.
+
+verify_numerical_counterexamples의 성공은 다음 문제가 재현되었다는 뜻이며 문제가 해결되었다는 뜻이 아니다. 이 항목을 일반 동치성 테스트의 느슨한 허용오차로 처리하지 않는다.
+
+| 검사 조건 | 현재 관측 결과 | 판정 |
+| --- | --- | --- |
+| float32, epsilon $10^{-6}$, 입력 $(-0.001,0.0005,0.00025,0)$, 범위 $[-1,1]$ | 최대 절대오차 약 $1.01\times10^{-5}$ | 이전 표본의 $3.5\times10^{-6}$을 일반 상한으로 쓸 수 없음 |
+| 같은 입력과 epsilon, 범위 $[-40.172,40.172]$ | 약 $4.02\times10^{-4}$ | 기본 epsilon에서도 넓은 범위의 시간 차 상쇄 오차가 관측됨 |
+| 같은 입력과 epsilon, 범위 $[-10^4,10^4]$ | 약 $4.48\times10^{-2}$ | 합법적 유한 범위만으로 높은 정확도가 보장되지 않음 |
+| 차원 3, gain 1, 입력 $(1,0,0)$, float16 | 출력 $1.732421875>\sqrt3$ | 선언된 출력 bounds 위반 |
+| 같은 조건, bfloat16 | 출력 $1.734375>\sqrt3$ | 선언된 출력 bounds 위반 |
+| float32, $\tau_s=10^{-45}$, 입력 $(-0.9,0.2,0.7,0)$ | 최대 절대오차 약 $0.555$ | 양의 유한 시간 상수라도 이상적 스케일 불변성이 수치적으로 유지되지 않음 |
+| Gaussian 사용, $\tau_s=10^{38}$ 또는 Python 최소 양의 float | 예외 전에 난수 상태가 변경됨 | 전체 파생 시간 범위의 사전 검증이 부족함 |
+
+저정밀도 bounds 위반은 최종 clamp의 Python 상한 자체가 텐서 dtype으로 반올림되면서 발생한다. 텐서를 같은 dtype에서 Python 상한과 비교하면 상한도 반올림되어 위반을 놓칠 수 있다. 이번 검사는 출력값을 float64로 변환한 뒤 원래 선언된 scalar bounds와 비교했다. 이 문제는 HF와 근사적으로 같은 값을 낸다는 사실과 별개의 메타데이터 계약 위반이다.
+
+제곱 평균의 수치 오차가 정규화에 전파되는 이유도 분리할 수 있다. 이 문단에서 $\widehat m>0$를 계산된 분모 전위라 하면, 나머지를 정확하게 계산했을 때 활성 좌표의 역제곱근 차이는
+
+$$
+\left|\frac1{\sqrt{\widehat m}}-\frac1{\sqrt m}\right|
+=\frac{|\widehat m-m|}
+{\sqrt{\widehat m}\sqrt m(\sqrt{\widehat m}+\sqrt m)}.
+$$
+
+따라서 작은 분모에서 같은 절대 제곱 오차가 더 큰 출력 오차로 이어진다. 넓은 선언 범위와 작은 입력 사이의 시간 차 정밀도 문제가 epsilon이 극소일 때만 발생하는 것은 아니다. 위 식은 오차 전달의 항등식이며, 현재 모든 연산에 대한 완전한 부동소수점 오차 상한은 아니다.

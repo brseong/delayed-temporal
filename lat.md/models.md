@@ -52,6 +52,18 @@ GPT-2 adapts causal self-attention, cache-aware decoding, pre-norm blocks, and t
 
 The adapter does not support cross-attention in its spiking `GPT2Attention`. With spiking MLP enabled, the paper configuration's `gelu_new` activation uses [[utils/transforms/functions.py#gelu_approximation]]; dense MLP ablations and other configured activations retain direct evaluation with a distinct persisted identity.
 
+### Llama
+
+The Llama path preserves decoder language modeling, attention with shared key and value heads, rotary position embeddings, cached autoregressive generation, RMSNorm, and the pretrained gated feed forward structure.
+
+[[utils/transformers/models/spiking_llama/modeling_spiking_llama.py#LlamaModel]] carries fixed potential ranges from the token embedding table through pre-norm decoder blocks. Every learned projection, including the language model head, uses [[utils/transformers/models/spiking_ops.py#SpikingLinear]] with the original parameter names and shapes.
+
+[[utils/transformers/models/spiking_llama/modeling_spiking_llama.py#LlamaMLP]] sends the gate and up projections to the established [[utils/transforms/functions.py#swiglu_function]] composition, while the down projection consumes its propagated potential range. RMSNorm now uses [[rmsnorm#RMSNorm Operator Composition]] through [[utils/transforms/functions.py#rmsnorm_function]], with pretrained fixed gains and an analytic fixed output range.
+
+[[utils/transformers/models/spiking_llama/modeling_spiking_llama.py#LlamaAttention]] propagates conservative query and key ranges through the rotary transformation, keeps value ranges synchronized with the cache, and can select the shared spiking attention backend. The shared backend expands key and value heads to the query head count before its temporal score composition. [[scripts/verification/verify_spiking_llama.py#main]] loads one state dictionary into the Hugging Face and local models, checks deterministic logits, validates the SwiGLU feed forward computation against the dense formula, and exercises cache growth.
+
+[[utils/transformers/models/spiking_llama/calibration.py#llama_calibration_specs]] declares residual, gate/up, rotary query/key, value, and attention score sites. A frozen table from the training population replaces the corresponding analytic execution ranges at those sites; embedding lookup, RMSNorm output, and other operator ranges remain analytic. The same table is used for clean and timing noise evaluation.
+
 ## Attention Backend Selection
 
 Attention is registered as a Hugging Face backend named `spiking_sdpa` and selected through each model’s configuration.

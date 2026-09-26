@@ -4,9 +4,8 @@ import wandb
 from functools import cache
 from typing import cast
 
-from transformers.utils.import_utils import is_torch_greater_or_equal
 from transformers.utils import logging
-from transformers.utils.import_utils import is_torch_npu_available, is_torch_xpu_available
+from transformers.utils.import_utils import is_torch_npu_available
 from utils.transforms.functions import scaled_dot_product_function, softmin_function
 from utils.transforms.noise import clamp_gaussian_output, gaussian_time_noise_is_active
 from utils.transforms.potential_to_spike import neg_identity_transform
@@ -24,9 +23,6 @@ logger = logging.get_logger(__name__)
 # dtype's minimum normal value. This is a configuration constant, not data-derived.
 _SOFTMIN_LOG_SAFETY_MARGIN = 2.0
 
-_is_torch_greater_or_equal_than_2_5 = is_torch_greater_or_equal("2.5", accept_dev=True)
-_is_torch_greater_or_equal_than_2_8 = is_torch_greater_or_equal("2.8", accept_dev=True)
-_is_torch_xpu_available = is_torch_xpu_available()
 _is_torch_npu_available = is_torch_npu_available()
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -39,12 +35,6 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
         return hidden_states
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
-
-def use_gqa_in_sdpa(attention_mask: torch.Tensor | None, key: torch.Tensor) -> bool:
-    if _is_torch_xpu_available:
-        return _is_torch_greater_or_equal_than_2_8
-    return _is_torch_greater_or_equal_than_2_5 and attention_mask is None
-
 
 @cache
 def attention_score_representability_bounds(
@@ -465,14 +455,14 @@ def spiking_sdpa_attention_forward(
             "`sdpa` attention does not support `output_attentions=True`."
             " Please set your attention to `eager` if you want any of these features."
         )
-    sdpa_kwargs = {}
-    if hasattr(module, "num_key_value_groups"):
-        if not use_gqa_in_sdpa(attention_mask, key):
-            n_rep = int(cast(int, module.num_key_value_groups))
-            key = repeat_kv(key, n_rep)
-            value = repeat_kv(value, n_rep)
-        else:
-            sdpa_kwargs = {"enable_gqa": True}
+    # The temporal score composition consumes one explicit key/value head per query
+    # head and deliberately does not implement PyTorch's enable_gqa shortcut. Expand
+    # only when the model actually supplies fewer key/value heads; equal-head models
+    # retain their tensors unchanged even when they expose a group-count attribute.
+    if hasattr(module, "num_key_value_groups") and query.shape[1] != key.shape[1]:
+        n_rep = int(cast(int, module.num_key_value_groups))
+        key = repeat_kv(key, n_rep)
+        value = repeat_kv(value, n_rep)
 
     is_causal_flag = bool(is_causal) if is_causal is not None else bool(getattr(module, "is_causal", True))
     is_causal_flag = query.shape[2] > 1 and attention_mask is None and is_causal_flag
@@ -536,7 +526,6 @@ def spiking_sdpa_attention_forward(
         query_bounds=kwargs.get("query_bounds"),
         key_bounds=kwargs.get("key_bounds"),
         value_bounds=kwargs.get("value_bounds"),
-        **sdpa_kwargs,
     )
     
     attn_output = attn_output.transpose(1, 2).contiguous()

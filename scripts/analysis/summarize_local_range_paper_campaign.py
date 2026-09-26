@@ -448,6 +448,9 @@ def render_figure(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    axis_label_size = 18
+    tick_label_size = 17
+    legend_size = 19
     fraction_rows = sorted((row for row in summary if row["deadline_margin_sigma_ratio"] == 4.0),
                            key=lambda row: row["time_noise_std_fraction"])
     ratio_rows = sorted((row for row in summary if row["time_noise_std_fraction"] == 1e-5),
@@ -470,12 +473,12 @@ def render_figure(
                      color="#666666", label="Dense reference")
         axis.errorbar(x, y, yerr=[lower, upper], marker="o", linewidth=1.5, capsize=2,
                       color="#2f5597", label="Noisy accuracy")
-        axis.set_xlabel(label)
-        axis.set_ylabel("Top-1 accuracy (%)")
+        axis.set_xlabel(label, fontsize=axis_label_size)
+        axis.set_ylabel("Top-1 accuracy (%)", fontsize=axis_label_size)
         axis.grid(True, alpha=0.25)
+        axis.tick_params(axis="both", labelsize=tick_label_size)
         if key == "time_noise_std_fraction":
             axis.set_xscale("log")
-            axis.legend(loc="best")
         else:
             secondary = axis.twinx()
             rates = [100 * row["miss_rate"] for row in rows]
@@ -489,19 +492,29 @@ def render_figure(
                 secondary.scatter(zero_x, [floor] * len(zero_x), marker="v",
                                   facecolors="white", edgecolors="#c65911", zorder=3)
             secondary.set_yscale("log")
-            secondary.set_ylabel("Deadline-miss rate (%)")
+            secondary.set_ylabel("Deadline-miss rate (%)", fontsize=axis_label_size)
+            secondary.tick_params(axis="both", labelsize=tick_label_size)
             handles, labels = axis.get_legend_handles_labels()
             extra_handles, extra_labels = secondary.get_legend_handles_labels()
-            axis.legend(
+            fig.legend(
                 handles + extra_handles,
                 labels + extra_labels,
-                loc="center right",
-                bbox_to_anchor=(0.98, 0.5),
-                borderaxespad=0.0,
+                loc="upper center",
+                bbox_to_anchor=(0.5, 1.0),
+                ncol=4,
+                frameon=False,
+                fontsize=legend_size,
+                handlelength=1.0,
+                handletextpad=0.4,
+                columnspacing=0.7,
             )
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.84))
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
+    fig.savefig(
+        path.with_suffix(".pdf"),
+        bbox_inches="tight",
+        metadata={"CreationDate": None, "ModDate": None},
+    )
     fig.savefig(path.with_suffix(".png"), dpi=180, bbox_inches="tight")
     plt.close(fig)
 

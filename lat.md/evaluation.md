@@ -10,6 +10,7 @@ Evaluation runners under `scripts/evaluation` are model-family-specific because 
 - [[scripts/evaluation/error_analysis_bert.py#evaluate_bert_model]] evaluates BERT sequence classification.
 - [[scripts/evaluation/error_analysis_roberta.py#evaluate_roberta_model]] evaluates RoBERTa sequence classification.
 - [[scripts/evaluation/error_analysis_gpt2.py#evaluate_gpt2_model]] evaluates GPT-2 causal language modeling.
+- [[scripts/evaluation/error_analysis_llama.py#main]] evaluates Llama causal language modeling and the measured timing noise sweep.
 
 Shell drivers under `scripts/experiments` supply experiment matrices and use `scripts/lib/gpu_pool.sh` to distribute independent runs. They assume locally available checkpoints, datasets, GPUs, and logging credentials as specified by each script.
 
@@ -28,6 +29,30 @@ Task metrics retain each evaluator's established aggregation so operator convers
 ViT, BERT, and RoBERTa report classification accuracy. The complete GPT-2 campaign masks padding labels, accumulates negative log likelihood and valid-token count, and reports token-weighted corpus perplexity as its primary metric. It also retains $\exp$ of the unweighted mean of per-batch losses as an explicitly named compatibility metric.
 
 Quick tests and `max_eval_batches` are smoke-test controls, not final evaluation protocols. Final comparisons should keep dataset split, preprocessing, batch limit, precision, checkpoint, and random seed fixed across backends.
+
+### Llama Clean and Timing Noise Evaluation
+
+The Llama evaluator compares dense and converted checkpoint perplexity on the fixed WikiText-2 test population and measures timing noise sensitivity using one frozen calibration table.
+
+`--mode collect` observes 5,000 seeded WikiText-2 training texts in two passes: extrema first, then a 2,048-bin histogram. Each calibrated side receives a 5% margin. The resulting table is validated and frozen before clean or noisy evaluation. Both backends use identical tokenization and double precision.
+
+`--mode clean` evaluates the Hugging Face and converted models on 2,891 nonempty test texts, batch size 8 and length 128. `--mode noise` scales the measured linear and logarithmic timing noise fractions together and reports relative inverse perplexity against the converted clean reference. Three seeds are used for each alpha. Each condition writes a separate result file with its population, calibration, and hardware summary identity.
+
+For Llama 2 7B float64 evaluation, [[scripts/evaluation/error_analysis_llama.py#place_decoder_on_devices]] partitions decoder layers across two devices while keeping embeddings, final normalization, and the output head on the first device. It evaluates the dense and converted models sequentially to avoid holding both parameter sets at once.
+
+Reduced calibration or evaluation populations are smoke tests only. [[scripts/experiments/run_llama_iclr_noise.py#main]] requires the complete clean reference before distributing the noise conditions across free GPUs and aggregating means and 95% Student-$t$ intervals over three seeds.
+
+An expedited diagnostic evaluates the same checkpoint on the first 128 WikiText-2 and IMDb test texts, using a frozen calibration from 32 WikiText-2 training texts and three timing noise multipliers at seeds 0, 1, and 2. [[scripts/evaluation/error_analysis_llama.py#prepare_batches]] applies the same tokenization and loss aggregation to both datasets. These results are separate from the full paper experiment.
+
+[[scripts/experiments/run_llama_iclr_campaign.py#main]] waits for the fixed table, runs the full clean comparison, and then starts the complete timing noise grid on GPUs that are free at launch. Existing results are reused only when their model, calibration, population, alpha, and seed identities agree.
+
+The controller can stop after the complete WikiText-2 source and converted comparison without launching the timing noise grid. Comparison with the language model table uses corpus perplexity weighted by valid token counts, not the exponential of the unweighted mean of batch losses.
+
+The full clean comparison can partition 2,891 texts at batch boundaries across independent device groups, including cluster jobs. Each remote checkpoint must match the local safetensors, configuration, tokenizer, and frozen calibration identities before evaluation. The reducer permits different device names and dataset paths across hosts, but requires identical data fingerprints and implementation and calibration digests, with exact population coverage. It combines losses by valid token counts and calibration clipping counts by tensor elements. Each worker has separate mutable state; the aggregate elapsed time is the sum of worker evaluation times.
+
+On devices with less memory, a logical batch of eight texts can be processed in smaller groups. Summing negative log likelihood by valid token count reconstructs the original batch loss, so the reported batch size and metric contract do not change. The aggregate records each worker's physical group size.
+
+[[scripts/verification/verify_llama_clean_shards.py#main]] checks shard coverage, weighted reduction, clipping aggregation, and rejection of a malformed shard without running model inference.
 
 ## Maintained Calibration Workflow
 
@@ -176,9 +201,17 @@ The active paper campaign regenerates continuous-time task results after replaci
 
 ### Paper Reproduction Runbook
 
-The root README is the operator-facing runbook for every current ICLR experiment and figure except the deferred BrainScaleS-2 measurement workflow.
+The root README is the runbook for every current ICLR experiment and figure.
 
-It separates source-frozen reruns from rendering verified artifacts, lists the required self-contained data and checkpoint paths, and gives the artifact-first promotion and manuscript-build gates. The recorded global-range discrete-time figure is identified as historical evidence rather than a current-main execution path.
+It separates raw reruns at a fixed source revision from rendering verified artifacts, lists the required local data and checkpoint paths, and gives the evidence promotion and manuscript build gates.
+
+### ICLR 2027 Evidence Reproduction
+
+The integrated driver binds active manuscript tables and figures to authenticated completed evidence without duplicating the scientific campaign contracts.
+
+[[scripts/experiments/reproduce_iclr_2027.py#main]] inventories every manuscript result and its experiment owner, verifies table values and publication figure hashes, invokes the focused campaign verifiers, rebuilds generated figures in an isolated artifact directory, promotes the verified PDF and PNG pairs, and compiles the manuscript.
+
+The driver does not collapse raw experiments from multiple hosts into a second scheduler. Conversion, clock-driven, screening median, cumulative encoder block, and Appendix timing-noise reruns remain owned by their existing controllers and fixed source revisions. [[scripts/analysis/summarize_vit_bss2_depth.py#main]] accepts a separate output directory so paper reconstruction cannot rewrite its authenticated input tree.
 
 [[scripts/experiments/run_full_calibrated_vit_comparison.py#main]] owns the ViT `collect → ANN → SNN` result path. It authenticates source, checkpoint, self-contained dataset, preprocessing, and calibration identities; preserves per-phase logs; and resumes only completed phases with matching hashes.
 
@@ -188,11 +221,11 @@ ANN inference is cached separately from conversion evidence. [[scripts/runtime/a
 
 [[scripts/experiments/run_poseidon_local_range_paper_campaign.py#main]] schedules the four Table 3 ViT rows and the Table 4 RoBERTa-B, RoBERTa-L, and GPT-2 rows across explicitly selected free `poseidon1` devices. It can resume only the noise tasks from an explicit completed ViT-B calibration source. Runtime files and logs stay below `/data/delayed-temporal/artifacts`; tmpfs and ramfs are rejected.
 
-The reducer may receive that completed ViT-B pipeline explicitly. It authenticates the pipeline, then takes Figure 4's clean references and every noise run identity from that same source instead of combining calibration evidence from different commits.
+The reducer may receive the completed reference pipeline explicitly. It authenticates that pipeline and takes Figure 5's clean references and noise run identities from it.
 
-After the ViT-B result authenticates its frozen calibration, the supervisor releases the 63 unique Figure 4 stochastic replicas through [[scripts/experiments/run_vit_local_range_noise_condition.py#main]]. The noise stage contains nine timing-noise fractions and thirteen deadline-margin ratios with three seeds, evaluating their shared condition once per seed. The discrete-time simulation is outside this campaign.
+After the completed result authenticates frozen calibration, the supervisor releases 63 unique Figure 5 noise replicas through [[scripts/experiments/run_vit_local_range_noise_condition.py#main]]. The noise stage contains nine timing noise fractions and thirteen deadline margin ratios with three seeds, evaluating their shared condition once per seed. The discrete time simulation is outside this campaign.
 
-[[scripts/analysis/summarize_local_range_paper_campaign.py#main]] accepts only seven complete table pipelines and all 63 identity-consistent noise replicas. It authenticates phase logs and frozen calibration, rejects removed range keys, and requires the noise runs to share the completed ViT-B source, checkpoint, dataset, and calibration identities. It writes table, raw-replica, and cell-summary CSV files and renders the two-panel PDF and PNG with dense and clean-spiking references, three-replica 95% Student-$t$ intervals, and pooled deadline-miss counts on a logarithmic auxiliary axis. The Figure 4 legend uses the empty area on the right side of the right panel and does not cover plotted values.
+[[scripts/analysis/summarize_local_range_paper_campaign.py#main]] accepts seven complete table pipelines and 63 noise runs with matching identities. It authenticates phase logs and frozen calibration, rejects removed range keys, and checks that the noise runs share the completed source, checkpoint, dataset, and calibration. It writes table, raw run, and summary data files, then renders Figure 5 with dense and clean spiking references, 95% Student-$t$ intervals across three replicas, and pooled deadline miss counts on a logarithmic auxiliary axis. The Figure 5 legend remains in one row above both panels. Axis titles, tick values, and legend text are sized for the manuscript body after placement.
 
 ## Appendix Raw-Timestamp ViT-B Noise Rerun
 
@@ -298,7 +331,7 @@ The combined model figure places classification accuracy change on the left axis
 
 Formal reduction requires all three replicas for every requested text-model condition. The explicit draft mode omits incomplete conditions and therefore supports interim figures without representing a partial replica set as a confidence interval.
 
-The combined renderer defaults to the scaled sparse depth figure's paper format: a $3.35\times2.15$ inch panel, 7 point typography, a 6 point legend in two columns above the axes, compact labels, and no title. It still exposes these settings and an explicit GPT-2 display cutoff while retaining the underlying aggregate table.
+The combined renderer uses 12.5 point axis labels so they approach manuscript body size after placement. Long vertical labels wrap within the compact panel. The 8 point legend remains on one row above the axes. The paper panel does not draw a vertical line at $\alpha=1$; the plotted point remains. Figure options remain available while the aggregate data stay unchanged.
 
 ### Verification
 
@@ -342,13 +375,13 @@ The reducer reports cumulative sensitivity without assigning a causal failure to
 
 [[scripts/analysis/summarize_vit_bss2_depth.py#main]] writes raw and summary CSV files, a summary manifest, and PDF/PNG figures. Full-grid behavior remains the default. Explicit maximum block counts require an authenticated pilot root and a validated accuracy threshold; omitted completed runs remain untouched.
 
-The scaled sparse mode accepts one fixed screening-median condition, explicit noise factors and prefix depths, and one authenticated clean converted-model result. It requires three seeds per noisy cell and plots the factors as separate curves sharing the same clean point. The formal scaled sparse renderer owns the compact layout used by the paper: 3.35 by 2.15 inches, 7-point labels, and a legend with two columns above the axes.
+The scaled sparse mode accepts one screening median condition, explicit noise factors and block depths, and an authenticated clean converted model result. It requires three seeds per noisy condition and plots the factors as separate curves that share the clean point. The formal renderer uses 12.5 point axis labels with a wrapped vertical label, while the 8 point legend remains on one row.
 
 The Slurm launcher accepts either the fixed grid or one explicit attenuation factor while retaining the same frozen condition runner.
 
 The Slurm launcher requires an explicit evaluator revision and rejects a checkout whose revision differs.
 
-The formal scaled sparse summary manifest records raw table digest `d66a7f0a7a6fcbf6ac501ab374526532f929edcda53472e04b99b1288bb98724`, summary table digest `dbfb111a40bc9406c8506ce96b0ad4f9cfa7486c95cacdbdc524bf601a571f72`, and figure digest `3a35f6e15ea27e53a3322d9b85ce3272c4578acad04fc3bc31ac7c05288d2499`.
+The formal summary manifest records digests for the raw data, summary data, and publication figure, allowing presentation changes to be checked without changing the evaluation data.
 
 ### Verification
 

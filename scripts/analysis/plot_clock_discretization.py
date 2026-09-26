@@ -149,31 +149,36 @@ def plot_figure(
     bottom_axis.set_ylim(-3.0, 100.0)
     bottom_axis.set_yticks((0, 20, 40, 60, 80, 100))
     bottom_axis.grid(axis="y", color="#D9D9D9", linewidth=0.6, zorder=0)
-    figure.legend(
+    legend = figure.legend(
         [time_step_line, window_line, continuous_line],
         [
             "Same interval between\nsimulation time steps\n(bottom axis)",
             "Same number of time steps\nin each time window\n(top axis)",
             "Continuous time",
         ],
-        loc="lower center",
-        bbox_to_anchor=(0.5, 0.015),
+        loc="lower left",
+        bbox_to_anchor=(0.0, 0.015),
         frameon=False,
-        handlelength=2.0,
-        borderpad=0.35,
-        labelspacing=0.45,
-        fontsize=5.4,
+        handlelength=3.5,
+        borderpad=0.2,
+        labelspacing=0.2,
+        fontsize=8.0,
     )
+    for label in legend.get_texts():
+        label.set_linespacing(1.0)
     figure.subplots_adjust(
         left=0.22,
         right=0.97,
         top=0.92,
-        bottom=0.40,
+        bottom=0.48,
     )
 
     for output_prefix in output_prefixes:
         output_prefix.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(output_prefix.with_suffix(".pdf"))
+        figure.savefig(
+            output_prefix.with_suffix(".pdf"),
+            metadata={"CreationDate": None, "ModDate": None},
+        )
         figure.savefig(
             output_prefix.with_suffix(".png"),
             dpi=300,

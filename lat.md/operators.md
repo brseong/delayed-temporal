@@ -6,13 +6,13 @@ The operator system builds Transformer arithmetic from a small timing-and-integr
 
 Pulse-width modulation uses causal event-to-deadline integration rails, with signed temporal differences formed by subtracting two rails sharing one deadline.
 
-[[utils/transforms/primitive.py#unsigned_pulse_width_modulation_operator]] computes $V(T_{\mathrm{obs}}-t)$ on one causal rail whose configured deadline is no earlier than its event domain. [[utils/transforms/primitive.py#signed_pulse_width_modulation_operator]] evaluates the cancelled expression $V(t_B-t_A)$ directly for delivered tensors and exposes the two time-to-deadline durations only when a `SpikeSample` mask is needed.
+[[utils/transforms/primitive.py#unsigned_pulse_width_modulation_operator]] computes $V(T_{\mathrm{obs}}-t)$ on one causal rail whose configured deadline is no earlier than its event domain. [[utils/transforms/primitive.py#signed_pulse_width_modulation_operator]] splits the drive into its positive and negative parts and subtracts two nonnegative accumulator values for both ordinary timestamps and `SpikeSample` inputs.
 
 The event-aware signed wrapper assigns reset duration zero to each missed rail independently. Two delivered events recover $V(t_B-t_A)$, an $A$-only event produces $V(T_{\mathrm{obs}}-t_A)$, a $B$-only event produces $-V(T_{\mathrm{obs}}-t_B)$, and two misses produce zero. Its returned domain remains the ideal both-event range so later saturation accounting can identify one-sided excursions before clamping.
 
 ### Differential Physical Realization
 
-A differential accumulator can realize the signed operator with causal, non-negative current paths while the maintained tensor code evaluates only its terminal equation.
+A differential accumulator realizes the signed operator with two nonnegative states. The shared tensor primitive explicitly computes these states before subtraction.
 
 Split a signed drive into $V^+=\max(V,0)$ and $V^-=\max(-V,0)$, and let $d_A$ and $d_B$ be the delivered event-to-deadline durations, or zero for a missed event. Two physical accumulator rails may then store
 
@@ -28,7 +28,9 @@ $$
 Q^+-Q^-=(V^+-V^-)(d_A-d_B)=V(d_A-d_B).
 $$
 
-This mapping has four possible current paths from the two timing rails and the two drive signs, but only two accumulator rails. It is a physically plausible differential PWM realization, not an additional computation performed by the behavioral tensor implementation. Device mismatch, common-mode limits, capacitor reset, and differential sensing remain circuit-level concerns outside the maintained simulator.
+This mapping has four possible current connections from the two event times and the two drive signs, but only two accumulators. The tensor primitive implements the two stated sums without resampling events or deciding which event arrives first. Device mismatch, capacitor reset, and differential sensing remain concerns outside the simulator.
+
+[[utils/transforms/primitive.py#signed_pulse_width_duration]] shares the same duration calculation with the primitive and retains subtraction before the optimized affine or attention reduction. Clock execution advances the two durations sequentially and preserves integer step counts at readout. The two forms are algebraically equivalent; floating-point reassociation need not be bitwise identical.
 
 The signed wrapper returns one potential and derives its ideal range from the shared drive and signed time interval, avoiding the looser range obtained by treating deadline-terminated rails as independent. The former algebraic single-rail helper has been removed; maintained callers now use these causal primitives or an explicitly equivalent optimized reduction.
 
@@ -91,6 +93,12 @@ The pretrained activation function is invariant to the positive physical time co
 Fixed scalar multiplication is conceptually absorbable into a synaptic weight in the paper’s operation-count abstraction, even when the reference tensor implementation calls the generic multiplication function. The manuscript writes $\alpha\cdot_{\mkern-2mu\scriptscriptstyle\Psi}z$ for a contribution delivered with fixed gain $\alpha$ by the receiving $\Psi$ operator; the smaller, lightly tightened subscript preserves this distinction without dominating the multiplication mark. [[evaluation#Symbolic Operation-Count Check]] preserves that distinction.
 
 SwiGLU treats the exponential neuron’s deadline response as `biased_exp` and applies a fixed current gain derived from the declared domain. The gain cancels the identity encoder’s constant offset without adding a runtime operator. [[utils/transforms/functions.py#_gaussian_swiglu_function]] and the deterministic branch share the same $[0,1]$ gate contract.
+
+### RMSNorm
+
+RMSNorm omits centering and composes signed multiplication, logarithmic encoding with a halved denominator time constant, and unrestricted exponential difference.
+
+[[rmsnorm#RMSNorm Operator Composition]] gives the complete Phi/Psi form, finite domains, shared denominator event, Llama adapter, and verification. [[utils/transforms/functions.py#rmsnorm_function]] is the single composition owner; the model adapter only handles pretrained gains, dtype conversion, and frozen output bounds.
 
 ## Spiking Linear and Convolution
 

@@ -43,14 +43,14 @@ def _clock_time_bounds(
     return time_bounds
 
 
-def signed_pulse_width_duration(
+def _causal_pulse_width_durations(
     t_A: torch.Tensor | float | SpikeSample,
     t_B: torch.Tensor | float | SpikeSample,
     *,
     observation_deadline: float,
     time_bounds: TimeBounds | None = None,
-) -> torch.Tensor | float:
-    """Return two causal event-to-deadline accumulators after recombination.
+) -> tuple[torch.Tensor | float, torch.Tensor | float]:
+    """Return the two nonnegative event-to-deadline durations before subtraction.
 
     Continuous execution uses the algebraic duration. Clock-driven execution
     advances both rail accumulators once per clock step and therefore retains an
@@ -92,7 +92,7 @@ def signed_pulse_width_duration(
                 )
         else:
             duration_B = max(raw_duration_B, 0.0)
-        return duration_A - duration_B
+        return duration_A, duration_B
 
     resolved_bounds = _clock_time_bounds(
         observation_deadline,
@@ -123,10 +123,7 @@ def signed_pulse_width_duration(
                 accumulator_b += step
         loop_steps = max(deadline_step - first_step, 0)
         record_clock_updates("pwm", time_steps=loop_steps, elements=2)
-        return (
-            round(accumulator_a / step)
-            - round(accumulator_b / step)
-        ) * step
+        return round(accumulator_a / step) * step, round(accumulator_b / step) * step
 
     reference = time_A if isinstance(time_A, torch.Tensor) else time_B
     if not isinstance(reference, torch.Tensor):
@@ -173,11 +170,36 @@ def signed_pulse_width_duration(
         elements=2 * tensor_A.numel(),
     )
     duration_bounds = TimeBounds(0.0, float(resolved_bounds.range))
-    return clocked_difference(
-        accumulator_A,
-        accumulator_B,
-        time_bounds=duration_bounds,
+    return (
+        clocked_difference(accumulator_A, 0.0, time_bounds=duration_bounds),
+        clocked_difference(accumulator_B, 0.0, time_bounds=duration_bounds),
     )
+
+
+def signed_pulse_width_duration(
+    t_A: torch.Tensor | float | SpikeSample,
+    t_B: torch.Tensor | float | SpikeSample,
+    *,
+    observation_deadline: float,
+    time_bounds: TimeBounds | None = None,
+) -> torch.Tensor | float:
+    """Subtract the shared causal durations for optimized weighted reductions."""
+
+    duration_A, duration_B = _causal_pulse_width_durations(
+        t_A, t_B, observation_deadline=observation_deadline, time_bounds=time_bounds,
+    )
+    if not get_clock_driven().enabled:
+        return duration_A - duration_B
+    resolved_bounds = _clock_time_bounds(
+        observation_deadline, t_A, t_B, time_bounds=time_bounds,
+    )
+    if isinstance(duration_A, torch.Tensor):
+        return clocked_difference(
+            duration_A, duration_B,
+            time_bounds=TimeBounds(0.0, float(resolved_bounds.range)),
+        )
+    step = clock_time_step(resolved_bounds)
+    return (round(duration_A / step) - round(duration_B / step)) * step
 
 
 def pulse_width_duration(
@@ -372,13 +394,12 @@ def signed_pulse_width_modulation_operator(
     *,
     observation_deadline: float,
 ) -> tuple[torch.Tensor, PotentialBounds]:
-    """Recover a signed temporal difference with event-aware deadline readout.
+    """Recover a signed potential by subtracting two nonnegative accumulators.
 
-    A physical realization can let each delivered event start an independent rail
-    that remains active until one shared future deadline. The tensor implementation
-    evaluates the algebraically cancelled expression directly when both inputs are
-    ordinary delivered times. When either input is a ``SpikeSample``, it instead
-    forms each causal duration explicitly so a missed event contributes reset zero.
+    Each delivered event starts a causal duration ending at one shared deadline;
+    a missed event contributes reset zero. Positive and negative parts of the drive
+    connect these durations to opposite accumulators. Neither event must precede
+    the other, and neither accumulator requires a negative current.
 
     Args:
         t_A: First delivered time or event-aware sample.
@@ -481,16 +502,19 @@ def signed_pulse_width_modulation_operator(
                 "observation_deadline"
             )
 
-    # Ordinary tensors already represent delivered events. Evaluate the cancelled
-    # expression directly, avoiding deadline-sized intermediates and their redundant
-    # subtraction in the common deterministic path.
-    signed_duration = signed_pulse_width_duration(
+    # Split the drive, not the event order. Both durations are causal and reuse
+    # the same delivered events; no additional encoding or random draw is needed.
+    duration_A, duration_B = _causal_pulse_width_durations(
         t_A,
         t_B,
         observation_deadline=deadline,
         time_bounds=readout_bounds,
     )
-    result = V * signed_duration
+    drive_positive = V.clamp_min(0.0)
+    drive_negative = (-V).clamp_min(0.0)
+    positive_accumulator = drive_positive * duration_A + drive_negative * duration_B
+    negative_accumulator = drive_positive * duration_B + drive_negative * duration_A
+    result = positive_accumulator - negative_accumulator
 
     # Derive the ideal both-event range directly from the signed time difference.
     # Treating the two physical rails as independent intervals would lose their

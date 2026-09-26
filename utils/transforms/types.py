@@ -43,7 +43,21 @@ class ClosedBounds:
         return clamped
 
 
-class PotentialBounds(ClosedBounds): pass
+class PotentialBounds(ClosedBounds):
+    def outward_rounded(self, dtype: torch.dtype) -> 'PotentialBounds':
+        """Enclose this interval with finite endpoints representable in dtype."""
+        torch.finfo(dtype)  # Reject non-floating dtypes before conversion.
+        endpoints = torch.tensor([self.min, self.max], dtype=torch.float64)
+        rounded = endpoints.to(dtype)
+        directions = torch.tensor([-math.inf, math.inf], dtype=dtype)
+        inward = torch.tensor([
+            rounded[0].item() > self.min,
+            rounded[1].item() < self.max,
+        ])
+        rounded = torch.where(inward, torch.nextafter(rounded, directions), rounded)
+        if not bool(torch.isfinite(rounded).all()):
+            raise ValueError("potential bounds have no finite enclosure in the output dtype")
+        return PotentialBounds(rounded[0].item(), rounded[1].item())
 
 class TimeBounds(ClosedBounds): pass
 

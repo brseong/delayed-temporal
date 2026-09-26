@@ -3,6 +3,22 @@
   "description": "Preflight patterns for manuscript-facing terminology and mathematical notation. Entries index reviewed decisions and do not override the manuscript.",
   "entries": [
     {
+      "id": "phi-operator-called-encoder",
+      "term": "encoder used for a potential-to-spike operator",
+      "description": "Reserve encoder for Transformer encoders; call potential-to-spike mappings phi operators or operations.",
+      "disposition": "forbid",
+      "surfaces": [
+        "manuscript"
+      ],
+      "patterns": [
+        "\\b(?:temporal|negative-potential|negative-log|logarithmic) encoders?\\b",
+        "\\bencoders? (?:windows?|invocations?|synchronization)\\b",
+        "\\bphysical encoding paths?\\b"
+      ],
+      "ignore_case": true,
+      "source": "User terminology decision (2026-09-25)"
+    },
+    {
       "id": "prohibited-rail-related-label",
       "term": "prohibited rail-related label",
       "description": "Repository instructions prohibit this label in manuscript-facing content.",

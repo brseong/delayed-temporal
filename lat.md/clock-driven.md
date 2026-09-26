@@ -12,13 +12,13 @@ This path is a deterministic evaluation mode. Gaussian spike-time noise, static 
 
 The central temporal primitives own the clock policy rather than individual model adapters. The absolute step width configuration uses one global width; the equal interval count configuration derives a local width from each declared time window.
 
-Potential-to-spike encoders test threshold delivery at every clock edge and place crossings on the first non-earlier edge. PWM readout updates active accumulators once per step, and exponential readout applies one decay or growth update per step.
+$\phi$ operators test threshold delivery at every clock edge and place crossings on the first non-earlier edge. PWM readout updates active accumulators once per step, and exponential readout applies one decay or growth update per step.
 
 Affine and attention kernels retain their tensor reductions, but their temporal inputs come from the same explicit PWM loop as the scalar primitive. The implementation keeps one current-state tensor and does not allocate a time-leading history tensor or skip steps with a closed-form expression.
 
 A second clock configuration divides every declared time window into the same requested number of equal time steps. The step width is derived independently from each fixed window.
 
-The encoder observes both endpoints, while PWM and exponential readout execute one state update for every interval. The iteration count therefore remains independent of the physical time-window length.
+Each $\phi$ operation observes both endpoints, while PWM and exponential readout execute one state update for every interval. The iteration count therefore remains independent of the physical time-window length.
 
 Clock index recovery accounts for dtype roundoff from both repeated state updates and subtracting a nonzero time window origin. The allowance scales with the represented coordinate magnitude and remains capped at one quarter of a time step, so a materially unaligned duration is rejected.
 
@@ -32,13 +32,13 @@ The first maintained evaluation uses calibrated ViT-B/16 on the fixed ImageNet-1
 
 A source-matched frozen calibration table and the selected threshold remain unchanged across the continuous and clock-driven runs. Four contiguous shards cover the fixed 5,000 images exactly once and run on GPUs 4–7; correct and total counts are summed only after coverage validation.
 
-Each shard records the time bin, task counts, prediction digest, encoder rounding, code-window lengths, and executed state-update counts. The aggregate preserves all shard records and reports one accuracy over exactly 5,000 images.
+Each shard records the time bin, task counts, prediction digest, $\phi$ operation rounding, code-window lengths, and executed state-update counts. The aggregate preserves all shard records and reports one accuracy over exactly 5,000 images.
 
 The evaluator prints accuracy to eight decimal places. Result validation compares the serialized value at that precision and stores the exact ratio of correct predictions to evaluated samples.
 
 Completed tag `vit_base_clock_driven_imagenet5k_theta20_float64_v2` used execution source `0c5c394`. The continuous evaluation obtained 4,300/5,000 (86.00%), while clock-driven execution with time bin 1.0 obtained 3/5,000 (0.06%).
 
-This result measures one coarse time bin and does not establish behavior at finer time bins. `verification.json` preserves the complete shard coverage, identities, hashes, and positive encoder, PWM, and exponential update counts.
+This result measures one coarse time bin and does not establish behavior at finer time bins. `verification.json` preserves the complete shard coverage, identities, hashes, and positive $\phi$ operator, PWM, and exponential update counts.
 
 The maintained fine sweep evaluates one continuous reference and time bins 0.01, 0.02, ..., 0.10 on the first 500 images of the fixed validation ordering. The population is divided into 21 balanced contiguous shards, and every shard contains at most 24 images. Each aggregate is accepted only after exact 500-image coverage and identity validation.
 
@@ -62,7 +62,7 @@ The continuous reference obtained 432/500 (86.4%). The 64, 128, 256, 512, 1024, 
 
 Accuracy collapsed at 64 through 256 time steps, recovered partially at 512, and reached within 2.2 and 2.0 percentage points of the continuous reference at 1024 and 2048 time steps. The 2048 result exceeds the 1024 result by 0.2 percentage points; both observations are retained without monotonicity assumptions.
 
-The verification record confirms seven conditions, 147 shard runs, exact 500-image coverage per condition, one source and calibration identity, disabled timing noise, and the requested minimum and maximum interval count at every recorded site. Encoder observation uses one more clock edge than the interval count, while pulse-width modulation and exponential readout execute exactly the requested count per call.
+The verification record confirms seven conditions, 147 shard runs, exact 500-image coverage per condition, one source and calibration identity, disabled timing noise, and the requested minimum and maximum interval count at every recorded site. $\phi$ operator observation uses one more clock edge than the interval count, while pulse-width modulation and exponential readout execute exactly the requested count per call.
 
 The authoritative outputs are `summary.csv`, `summary.json`, `raw_shards.csv`, and `verification.json` under `artifacts/logs/clock_driven/vit_base_clock_driven_window_steps_imagenet500_theta20_float64_v1/`. The generated figure files are under its `figures/` directory.
 
@@ -78,6 +78,16 @@ The equal-count sweep obtained 0.0%, 1.0%, 32.2%, 75.4%, 80.0%, 82.6%, and 86.2%
 
 [[scripts/analysis/plot_clock_discretization.py#main]] verifies both full-conversion summaries and all 399 shard records before regenerating the single-panel ICLR figure under `artifacts/figures/` and `paper/iclr_2027/figures/`. The lower and upper horizontal axes identify the two independently varied simulation settings, and their curves use distinct colors and markers. The exported plot is sized for a right-side wrapfigure occupying 40% of the ICLR text width, allowing the compatibility text to continue beside it. The wrap is cleared before the next subsection so its heading returns to the full text width.
 
+The plotted image is raised within its right-side wrapfigure so its top axis labels align with the subsection heading; the caption remains below the legend.
+
+The legend begins near the left edge and spans the figure width below the axes. Larger text and compact line spacing keep the labels readable at this width.
+
+The $\phi$ operation window step histogram for fixed global step width $0.01$ uses one image with the completed sweep's source commit, checkpoint, preprocessing, and frozen calibration. Its 651 $\phi$ operation windows are checked against the existing shard log for site counts, minimum and maximum steps, and total $\phi$ operator updates before [[scripts/analysis/plot_clock_window_step_distribution.py#main]] writes the PDF and PNG. Each $\phi$ operator application contributes once; the histogram does not weight windows by event or tensor size. The median is 3,248 steps, the mean is 6,747.16, and the range is 100--105,331.
+
+The population variance across the 651 $\phi$ operation windows is $9.16\times10^7$ steps$^2$; this is a one-image diagnostic, not an aggregate of the 500-image accuracy sweep.
+
+The ICLR Appendix includes the validated histogram PDF, whose axes count steps and applications of $\phi$ operations, beside the discrete-time simulation details and links it from the main accuracy discussion. The distribution comes from one image and must not be reported as an aggregate over the 500-image accuracy sweep.
+
 The first attempt for this sweep was rejected because subtracting a large nonzero time-window origin exposed floating-point cancellation in an otherwise aligned duration. The completed execution admits only bounded arithmetic drift accumulated by explicit state updates and origin subtraction, while still rejecting a displacement of one quarter of a time step.
 
 It shares the earlier calibration table only after confirming that every changed path is unable to affect calibration. Runtime validation substitutes the recorded source revision and the calibration table's recorded ViT evaluator digest, while requiring every other metadata field to match exactly.
@@ -88,17 +98,17 @@ Changes inside a shared temporal operator are accepted for calibration reuse onl
 
 The verification cases distinguish clock semantics from ordinary floating-point evaluation.
 
-### Causal Encoder Clocking
+### Causal Phi Operator Clocking
 
-An encoded threshold crossing is observed by a sequential edge loop at the first clock edge at or after its continuous time, and its declared deadline is aligned by the same rule.
+A $\phi$ operator threshold crossing is observed by a sequential edge loop at the first clock edge at or after its continuous time, and its declared deadline is aligned by the same rule.
 
 ### Equal Steps in Each Time Window
 
 This verification checks that different physical time-window lengths use the same configured interval count.
 
-Every encoder site must report the requested minimum and maximum window count. Encoder observation executes one more edge than the interval count, while PWM and exponential loops execute exactly the interval count per call.
+Every $\phi$ operator application must report the requested minimum and maximum window count. $\phi$ operator observation executes one more edge than the interval count, while PWM and exponential loops execute exactly the interval count per call.
 
-The evaluator rejects simultaneous absolute and window-relative resolution settings, and final reporting rejects any shard whose encoder or state update counts disagree with its declared setting.
+The evaluator rejects simultaneous absolute and window-relative resolution settings, and final reporting rejects any shard whose $\phi$ operator or state update counts disagree with its declared setting.
 
 ### PWM State Updates
 
@@ -114,7 +124,7 @@ ViT affine and attention tensor kernels consume the same clock-driven PWM durati
 
 ### Disabled-Mode Parity
 
-Disabling clock-driven execution preserves the continuous-time encoder, PWM, and exponential results.
+Disabling clock-driven execution preserves the continuous-time $\phi$ operator, PWM, and exponential results.
 
 ### ViT Runtime Isolation
 
@@ -134,6 +144,6 @@ Duplicate indices or indices outside the valid range are rejected. Final reporti
 
 Final reporting accepts only all 11 conditions, 21 contiguous shards per condition, exact 500 image coverage, matching identities, positive state update counts, and matching generated summaries.
 
-### Composed Encoder Statistics
+### Composed Phi Operator Statistics
 
-Result validation requires the identity and logarithmic encoder statistics while preserving additional named encoder sites emitted by composed operators such as GELU.
+Result validation requires the identity and logarithmic $\phi$ operator statistics while preserving additional named $\phi$ operator applications emitted by composed operators such as GELU.

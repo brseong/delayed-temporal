@@ -82,7 +82,7 @@ def _explicit_signed_pwm(
     return accumulator_a - accumulator_b
 
 
-# @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Causal Encoder Clocking]]
+# @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Causal Phi Operator Clocking]]
 def verify_causal_encoder_clocking() -> None:
     set_clock_driven(enabled=True, time_step=0.25)
     values = torch.tensor([1.0, 0.6, 0.0, -0.6, -1.0], dtype=torch.float64)
@@ -363,6 +363,8 @@ def verify_disabled_mode_parity() -> None:
 
 def _runtime_args(**overrides: object) -> SimpleNamespace:
     defaults: dict[str, object] = {
+        "evaluation_samples": 0,
+        "quick_test": False,
         "max_eval_batches": 0,
         "benchmark_warmup_batches": 0,
         "benchmark_measure_batches": 0,
@@ -380,6 +382,7 @@ def _runtime_args(**overrides: object) -> SimpleNamespace:
         "log_time_noise_std_frac": None,
         "time_noise_mean": 0.0,
         "time_noise_deadline_margin_std": 0.0,
+        "time_noise_vit_first_block_count": None,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -864,7 +867,7 @@ def verify_completed_sweep_reporting() -> None:
             raise AssertionError("variable encoder window step count was accepted")
 
 
-# @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Composed Encoder Statistics]]
+# @lat: [[clock-driven#Clock-Driven TTFS Evaluation#Verification#Composed Phi Operator Statistics]]
 def verify_composed_encoder_statistics() -> None:
     log = """GPU model: NVIDIA RTX A6000
 Evaluation metadata — model: checkpoint, dataset: imagenet-1k, split: validation, samples: 62, precision: float64, source: disk:/tmp/validation_first_500, fingerprint: abcdef

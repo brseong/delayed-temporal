@@ -248,9 +248,10 @@ def main() -> None:
     paper_style = ComparisonFigureStyle()
     assert paper_style.width_in == PAPER_PANEL_WIDTH_IN == 3.35
     assert paper_style.height_in == PAPER_PANEL_HEIGHT_IN == 2.15
-    assert paper_style.font_size == PAPER_PANEL_FONT_SIZE == 7.0
-    assert paper_style.legend_size == PAPER_PANEL_LEGEND_SIZE == 6.0
-    assert paper_style.legend_columns == 2
+    assert paper_style.font_size == PAPER_PANEL_FONT_SIZE == 8.0
+    assert paper_style.axis_label_size == 12.5
+    assert paper_style.legend_size == PAPER_PANEL_LEGEND_SIZE == 8.0
+    assert paper_style.legend_columns == 5
     assert paper_style.legend_above
     assert paper_style.compact_labels
     assert not paper_style.show_title
@@ -275,24 +276,27 @@ def main() -> None:
                     }
                 )
         write_csv(root / "aggregate.csv", vision)
-        render_model_comparison(summary, root, root / "combined")
-        render_model_comparison(
-            summary,
-            root,
-            root / "combined_compact",
-            style=ComparisonFigureStyle(
-                width_in=3.2,
-                height_in=2.1,
-                font_size=7.6,
-                legend_size=5.8,
-                legend_columns=2,
-                legend_above=True,
-                gpt2_max_alpha=0.01,
-                show_title=False,
-                compact_labels=True,
-                annotate_measured=False,
-            ),
-        )
+        with patch(
+            "matplotlib.axes.Axes.axvline",
+            side_effect=AssertionError("combined figure must not imply a threshold"),
+        ):
+            render_model_comparison(summary, root, root / "combined")
+            render_model_comparison(
+                summary,
+                root,
+                root / "combined_compact",
+                style=ComparisonFigureStyle(
+                    width_in=3.2,
+                    height_in=2.1,
+                    font_size=7.6,
+                    legend_size=5.8,
+                    legend_columns=2,
+                    legend_above=True,
+                    gpt2_max_alpha=0.01,
+                    show_title=False,
+                    compact_labels=True,
+                ),
+            )
         assert (root / "figure.png").is_file()
         assert (root / "figure.pdf").is_file()
         assert (root / "combined.png").is_file()

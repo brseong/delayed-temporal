@@ -43,8 +43,9 @@ COLORS = {
 SCALED_SPARSE_CONDITION = "screening-median"
 PAPER_PANEL_WIDTH_IN = 3.35
 PAPER_PANEL_HEIGHT_IN = 2.15
-PAPER_PANEL_FONT_SIZE = 7.0
-PAPER_PANEL_LEGEND_SIZE = 6.0
+PAPER_PANEL_FONT_SIZE = 8.0
+PAPER_PANEL_AXIS_LABEL_SIZE = 12.5
+PAPER_PANEL_LEGEND_SIZE = 8.0
 
 
 def parse_max_first_block_counts(values: list[str]) -> dict[str, int] | None:
@@ -503,18 +504,17 @@ def render_scaled_sparse(summary: list[dict[str, Any]], output: Path) -> None:
         axis.fill_between(x, low, high, color=color, alpha=0.15)
     depths = sorted({int(row["first_block_count"]) for row in summary})
     axis.set_xticks(depths)
-    axis.set_xlabel(
-        r"Noisy encoder blocks $K$", fontsize=0.95 * PAPER_PANEL_FONT_SIZE
-    )
-    axis.set_ylabel("Top-1 accuracy (%)", fontsize=0.95 * PAPER_PANEL_FONT_SIZE)
+    axis.set_xlabel(r"Noisy encoder blocks $K$", fontsize=PAPER_PANEL_AXIS_LABEL_SIZE)
+    axis.set_ylabel("Top-1 accuracy\n(%)", fontsize=PAPER_PANEL_AXIS_LABEL_SIZE)
     axis.tick_params(axis="both", labelsize=0.80 * PAPER_PANEL_FONT_SIZE)
     axis.grid(alpha=0.25, which="both")
     axis.legend(
         frameon=False,
         fontsize=PAPER_PANEL_LEGEND_SIZE,
-        ncol=2,
-        columnspacing=0.8,
-        handlelength=1.8,
+        ncol=4,
+        columnspacing=0.4,
+        handlelength=1.0,
+        handletextpad=0.3,
         loc="lower center",
         bbox_to_anchor=(0.5, 1.01),
     )
@@ -562,6 +562,11 @@ def main() -> None:
     parser.add_argument("--phase", choices=tuple(PHASE_SAMPLES), required=True)
     parser.add_argument("--input-root", type=Path, required=True)
     parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Write summaries and figures here instead of modifying the input root.",
+    )
+    parser.add_argument(
         "--max-first-block-count",
         action="append",
         default=[],
@@ -588,6 +593,8 @@ def main() -> None:
     parser.add_argument("--clean-reference-result", type=Path)
     args = parser.parse_args()
     root = args.input_root.resolve(strict=True)
+    output = args.output_dir.resolve() if args.output_dir is not None else root
+    output.mkdir(parents=True, exist_ok=True)
     scaled_options = (
         args.scaled_sparse_condition is not None,
         bool(args.measured_noise_scale),
@@ -616,11 +623,11 @@ def main() -> None:
             expected_samples=PHASE_SAMPLES[args.phase],
         )
         summary = summarize_scaled_sparse(raw, clean_metrics=clean_metrics)
-        raw_path = root / "depth_noise_scaled_sparse_raw.csv"
-        summary_path = root / "depth_noise_scaled_sparse_summary.csv"
+        raw_path = output / "depth_noise_scaled_sparse_raw.csv"
+        summary_path = output / "depth_noise_scaled_sparse_summary.csv"
         write_csv(raw_path, raw, tuple(raw[0]))
         write_csv(summary_path, summary, tuple(summary[0]))
-        figure = root / "depth_noise_scaled_sparse_accuracy"
+        figure = output / "depth_noise_scaled_sparse_accuracy"
         render_scaled_sparse(summary, figure)
         manifest = {
             "schema_version": 1,
@@ -643,7 +650,9 @@ def main() -> None:
                 "noise fractions; not causal attribution to an individual block"
             ),
         }
-        runtime_files.atomic_json(root / "scaled_sparse_summary_manifest.json", manifest)
+        runtime_files.atomic_json(
+            output / "scaled_sparse_summary_manifest.json", manifest
+        )
         print(json.dumps(manifest, indent=2, sort_keys=True))
         return
 
@@ -667,11 +676,11 @@ def main() -> None:
         stopping_decision["root"] = str(decision_root)
     raw, source_hashes = load_runs(root, args.phase, max_first_block_counts)
     summary = summarize(raw)
-    raw_path = root / "depth_noise_raw.csv"
-    summary_path = root / "depth_noise_summary.csv"
+    raw_path = output / "depth_noise_raw.csv"
+    summary_path = output / "depth_noise_summary.csv"
     write_csv(raw_path, raw, tuple(raw[0]))
     write_csv(summary_path, summary, tuple(summary[0]))
-    figure = root / "depth_noise_accuracy"
+    figure = output / "depth_noise_accuracy"
     render(summary, figure)
     manifest = {
         "schema_version": 1,
@@ -688,7 +697,7 @@ def main() -> None:
             "not causal attribution to an individual block"
         ),
     }
-    runtime_files.atomic_json(root / "summary_manifest.json", manifest)
+    runtime_files.atomic_json(output / "summary_manifest.json", manifest)
     print(json.dumps(manifest, indent=2, sort_keys=True))
 
 

@@ -29,7 +29,17 @@ Pretrained checkpoints and datasets are external assets. Existing experiment man
 
 ## Reproducing the ICLR 2027 experiments and figures
 
-This runbook covers every executable experiment used by the current ICLR manuscript except the pending BrainScaleS-2 measurements. It distinguishes rerunning an experiment from rendering a figure from verified artifacts. Run commands from the repository root unless a command changes directory explicitly.
+The canonical entry point maps every active manuscript result to its experiment owner, verifies the completed evidence, rebuilds all publication figures, and compiles the paper. Run it from the repository root:
+
+```bash
+python3 scripts/experiments/reproduce_iclr_2027.py inventory
+python3 scripts/experiments/reproduce_iclr_2027.py check
+python3 scripts/experiments/reproduce_iclr_2027.py all
+```
+
+`check` does not modify files. `all` runs the focused verifiers, regenerates figures below `artifacts/reproduction/iclr_2027/`, promotes the verified PDF and PNG pairs to the paper tree, and writes the compiled manuscript below the same reproduction root. Use `--artifacts-root`, `--paper-root`, or `--python-bin` when the defaults do not apply.
+
+The integrated path rebuilds the manuscript from completed, authenticated experiment evidence. Raw experimental reruns remain with their campaign controllers because the recorded results span different source revisions and execution environments. The `inventory` output is the authoritative mapping from manuscript results to those controllers.
 
 ### Scope
 
@@ -39,9 +49,10 @@ This runbook covers every executable experiment used by the current ICLR manuscr
 | Table 4, language-model conversion | SST-2 validation 872; WikiText-2 test 2,891 nonempty texts | same campaign | `table_results.csv` plus the generated manuscript values |
 | Table 3, ViT operation cost | checkpoint configurations for ViT-S/16, ViT-B/16, and ViT-L/16 | `scripts/analysis/vit_comparison_costs.py` | SOP totals checked against the manuscript |
 | Discrete-time simulation figure | fixed first 500 ImageNet-1k validation images | verified historical sweep artifacts and `scripts/analysis/plot_clock_discretization.py` | `ViT-clock-discretization.pdf` and `.png` |
+| Main timing-noise model comparison | CCT-7, ViT-S/16, ViT-B/16, RoBERTa-B, and GPT-2; three seeds | screening median model and text campaign controllers | `model-timing-noise-current.pdf` and `.png` |
+| Main ViT-B encoder block timing-noise panel | fixed ImageNet-1k validation 5k; four scales, five block depths, and three seeds | `scripts/experiments/run_vit_bss2_depth_campaign.py` | `vit-b-depth-timing-noise.pdf` and `.png` |
 | Appendix simulated timing-noise figure | fixed first 5,000 ImageNet-1k validation images; 21 cells and three seeds | the Poseidon campaign and `scripts/analysis/summarize_local_range_paper_campaign.py` | `ViT-noise-eval.pdf` and `.png` |
 | Framework schematic | no experiment | `paper/iclr_2027/figures/potential-time-framework.tex` | `potential-time-framework.pdf` and `.png` |
-| BrainScaleS-2 primitive-level error figure | pending measurements | not included in this runbook | no result may be substituted for the placeholder |
 
 The conversion campaign uses double precision, continuous spike times, frozen layer-wise calibration, W&B disabled, and TensorBoard disabled. Each model collects its own calibration from 5,000 training examples using two passes, 2,048 histogram bins, observed extrema, and 5% interval-width expansion on each side. Validation and test labels do not enter calibration.
 
@@ -150,21 +161,19 @@ mkdir -p "$RUN_ARTIFACTS/results/paper_end_to_end_local_range_poseidon_v1/sop"
 
 ### Recreate the discrete-time simulation figure
 
-The current paper figure is backed by verified historical artifacts with $\theta=20$, double precision, no timing noise, and the first 500 ImageNet validation images. The time-step-width sweep records source commit `ec058e5707c1550077ef55a1a95bca1d347a8849`; the fixed-steps-per-window extension records `2869ef440f618515fe227dd6c9173a5b9ecae232`.
-
-Current `main` no longer has the global $\theta$ execution contract. Therefore, `scripts/experiments/run_clock_driven_vit.py` on current `main` is a new local-range experiment, not an exact rerun of the paper's $\theta=20$ figure. To reproduce the published plot, verify and render the recorded artifacts:
+The current paper figure is backed by the verified complete conversion sweeps in double precision on the first 500 ImageNet-1k validation images. Both sweeps retain the same frozen calibration and disable timing noise. To reproduce the published plot, verify and render the completed artifacts:
 
 ```bash
 "$PYTHON_BIN" scripts/verification/verify_clock_driven.py
 "$PYTHON_BIN" scripts/analysis/plot_clock_discretization.py \
   --time-step-root \
-    artifacts/logs/clock_driven/vit_base_clock_driven_imagenet500_theta20_float64_fine_v1 \
+    artifacts/logs/clock_driven/vit_base_clock_driven_imagenet500_full_conversion_float64_fine_v3 \
   --window-root \
-    artifacts/logs/clock_driven/vit_base_clock_driven_window_steps_384_768_imagenet500_theta20_float64_v1 \
+    artifacts/logs/clock_driven/vit_base_clock_driven_window_steps_384_768_imagenet500_full_conversion_float64_v3 \
   --output-prefix artifacts/figures/ViT-clock-discretization
 ```
 
-An exact experimental rerun requires detached worktrees at the two source commits and the contracts recorded in each artifact's `experiment.json` or `verification.json`. Do not present a current-main local-range rerun as the same experiment. The maintained current-main controller can be inspected with:
+An exact experimental rerun requires the source revision and contracts recorded in each artifact's `experiment.json`. The maintained controller can be inspected with:
 
 ```bash
 "$PYTHON_BIN" scripts/experiments/run_clock_driven_vit.py --help
@@ -172,16 +181,16 @@ An exact experimental rerun requires detached worktrees at the two source commit
 
 ### Build and promote figures
 
-Generated figures stay in `artifacts/figures/` until their evidence passes verification. Promote only the final PDF and its PNG preview:
+The integrated driver rebuilds and promotes every active figure. For a manual promotion, copy only a verified PDF and its PNG preview from the evidence path recorded by `inventory`:
 
 ```bash
 install -m 0644 artifacts/figures/ViT-clock-discretization.pdf \
   paper/iclr_2027/figures/ViT-clock-discretization.pdf
 install -m 0644 artifacts/figures/ViT-clock-discretization.png \
   paper/iclr_2027/figures/ViT-clock-discretization.png
-install -m 0644 "$RUN_ARTIFACTS/figures/ViT-noise-eval-end-to-end.pdf" \
+install -m 0644 artifacts/figures/appendix_vit_base_local_range_raw_timestamp_float64_v2/ViT-noise-eval.pdf \
   paper/iclr_2027/figures/ViT-noise-eval.pdf
-install -m 0644 "$RUN_ARTIFACTS/figures/ViT-noise-eval-end-to-end.png" \
+install -m 0644 artifacts/figures/appendix_vit_base_local_range_raw_timestamp_float64_v2/ViT-noise-eval.png \
   paper/iclr_2027/figures/ViT-noise-eval.png
 ```
 
@@ -229,9 +238,11 @@ test -s artifacts/runtime/iclr2027/iclr2027_conference.pdf
 
 Inspect the final PDF, captions, legends, axes, table values, and page layout manually. The paper tree is an independent Git checkout, so review and commit its changes separately from the code repository.
 
-### Deferred BrainScaleS-2 experiment
+### BrainScaleS-2-derived timing-noise figures
 
-The main-text primitive-level error figure remains pending until the BrainScaleS-2 measurements are available. EBRAINS login, hardware job submission, data download, and hardware-derived plotting are intentionally outside this runbook. Preserve every existing BrainScaleS-2 artifact; do not delete it, replace it with the simulated Gaussian timing-noise sweep, or populate the placeholder from unverified measurements.
+The active main text panels use the authenticated screening median pair in `artifacts/brainscales2-primitives/20260924T_best_median_screen_summary.json`. The model comparison panel is reduced from the completed vision and text screening median campaigns; the ViT-B panel is reduced from the completed cumulative encoder block campaign. `reproduce_iclr_2027.py all` validates those inputs and regenerates both panels before compiling the manuscript.
+
+These panels evaluate Gaussian timing noise parameterized by measured variation; they are not complete BrainScaleS-2 deployments. Preserve every BrainScaleS-2 or `bss2` artifact and never replace authenticated measurement input with simulated data.
 
 ## Basic evaluation
 

@@ -1285,11 +1285,10 @@ def _gaussian_swiglu_function(
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Evaluate SwiGLU through event-aware exponential, division, and products.
 
-    This private implementation follows
-    ``v * (u * f_DIV(1, 1 + psi_NE(phi_NP(beta * u))))``. The direct exponential
-    input is sampled explicitly because its delivery mask must select between a
-    decoded response and reset zero. A fixed current gain cancels the encoded
-    domain's multiplicative exponential bias exactly as in the deterministic path.
+    The direct exponential input is beta * tau_s * u, subject to the declared
+    finite-domain clamp. Its event is sampled explicitly because its delivery mask
+    selects between a decoded response and reset zero. Before forming 1 + E, the
+    same fixed gain as in the deterministic path cancels the encoder offset in E.
     Division and both multiplication stages then reuse their public operators,
     which dispatch to Gaussian physical readouts under the same configuration.
 
@@ -1322,7 +1321,7 @@ def _gaussian_swiglu_function(
         scaled_u, scaled_domain_u, tau_s=tau_value, limit=20.0,
     )
 
-    # Step 2: Apply phi_NP(beta*u) at the shared encoder boundary. One sampled event
+    # Step 2: Apply phi_NP(beta*tau_s*u). One sampled event
     # supplies both the finite carrier time and the delivery decision for psi_NE.
     exponential_event = neg_identity_transform(
         scaled_u_clamped,
@@ -1341,7 +1340,7 @@ def _gaussian_swiglu_function(
         exponential_event.time.new_tensor(float(exponential_event.domain.max)),
     )
 
-    # The raw deadline response is biased by exp(z_min/tau_s), where z=beta*u.
+    # The raw deadline response is biased by exp(z_min/tau_s), with z=beta*tau_s*u.
     # This is the same fixed factor produced by exp_operator in the deterministic
     # path and is independent of the sampled input event within this operator call.
     code_deadline = delivered_time.new_tensor(float(exponential_event.domain.max))
@@ -1370,7 +1369,7 @@ def _gaussian_swiglu_function(
         name="swiglu_exponential_result",
     )
 
-    # Step 3: f_DIV(1, 1 + psi_NE(phi_NP(beta*u))) constructs the sigmoid-like gate.
+    # Step 3: Form 1 + E only after applying the exponential's fixed gain.
     # The reset-inclusive exponential rail makes one the valid positive lower bound.
     one_plus_exp = 1.0 + exp_out
     one_plus_exp_domain = PotentialBounds(
@@ -1396,8 +1395,8 @@ def _gaussian_swiglu_function(
         name="swiglu_gate",
     )
 
-    # Step 4: psi_M(u, sigmoid) forms the gated Swish value. Its event-aware
-    # multiplication applies opening/reference miss physics and output rail logging.
+    # Step 4: multiplication_operator(u, sigmoid) forms the gated Swish value,
+    # including missed input events and output saturation accounting.
     swish_out, swish_domain = multiplication_operator(
         u,
         domain_u,
@@ -1406,7 +1405,7 @@ def _gaussian_swiglu_function(
     )
     swish_out, swish_domain = clamp_swish_output(swish_out, domain_u, beta=beta)
 
-    # Step 5: psi_M(v, swish) completes v*u*sigmoid using a second independently
+    # Step 5: multiplication_operator(v, swish) completes the second independently
     # sampled multiplication call while preserving the propagated potential bounds.
     return multiplication_operator(
         v,
@@ -1429,20 +1428,21 @@ def swiglu_function(
 ) -> tuple[torch.Tensor, PotentialBounds]:
     """Evaluate SwiGLU with a bias-corrected exponential gate.
 
-    The public entry point selects the private event-aware Gaussian implementation
-    or the original deterministic five-stage composition while preserving one API,
+    The public entry point selects Gaussian or deterministic execution with one API,
     one algebraic definition, and the same propagated output contract. In the
     deterministic path, the negative exponential neuron's fixed current gain
     removes the identity encoder's domain-dependent temporal offset before division.
     
-    According to Lemma 4.5 (SwiGLU Operator) in the paper:
-    f_SwiGLU(u, v) := ψ_M(v, ψ_M(u, f_DIV(1, 1 + ψ_NE(φ_NP(β u)))))
-    
-    where:
-    - ψ_M is multiplication_operator
-    - φ_NP is neg_identity_transform (Negative Potential operator)
-    - ψ_NE is normalized_exp_operator (Negative Exp-Temporal operator)
-    - f_DIV is division_function
+    For z = beta * tau_s * u in a declared interval [a, b], T = b - a:
+    E = exp(-a/tau_s) * psi_NE(T; phi_NP(z)),
+    G = psi_ED(phi_NL(1), phi_NL(1 + E); tau_s),
+    S = psi_Int(phi_NP(G), phi_NP(0); u),
+    y = psi_Int(phi_NP(S), phi_NP(0); v).
+    Both log encoders share [1, 1 + exp(-a/tau_s)]. Each product uses its own
+    zero-containing identity-code interval. Int uses two nonnegative accumulators.
+    The ideal result is v * u * sigmoid(beta * u); finite clamps, rounding,
+    clock steps and missing events have the separately implemented readout rules.
+    psi_ED is a primitive interface whose simulator uses Int, NP and NE internally.
     
     Args:
         u: First input potential
@@ -1451,7 +1451,7 @@ def swiglu_function(
         domain_v: Potential bounds for v
         beta: Scaling constant for sigmoid computation (default: 1.0)
         tau_s: Positive exponential and logarithmic time constant. Input scaling
-            cancels this physical time constant, so the gate remains exactly
+            cancels this physical time constant in the ideal gate
             ``sigmoid(beta * u)``.
     
     Returns:
@@ -1490,7 +1490,7 @@ def swiglu_function(
         scaled_u, scaled_domain_u, tau_s=tau_value, limit=20.0,
     )
     
-    # Step 2: Encode z = beta*u as t_z = z_max-z, then observe the ordinary decaying
+    # Step 2: Encode z = beta*tau_s*u as t_z = z_max-z, then observe the decaying
     # exponential at the fixed code-window deadline. That physical response carries
     # the constant factor exp(z_min/tau_s) in addition to exp(-z/tau_s).
     t_betau, domain_t_betau = neg_identity_transform(
@@ -1513,7 +1513,7 @@ def swiglu_function(
         bias_cancellation_gain * biased_exp_domain.max,
     )
     
-    # Step 3: Compute sigmoid σ(β u) = f_DIV(1, 1 + ψ_NE(φ_NP(β u)))
+    # Step 3: Form division only after correcting the exponential's fixed gain.
     one_plus_exp = 1.0 + exp_out
     # The shared division domain must contain both the constant numerator 1 and the
     # denominator 1 + exp_out; using 1 + exp_domain.min would clamp the numerator.
@@ -1537,20 +1537,136 @@ def swiglu_function(
         name="swiglu_gate",
     )
     
-    # Step 4: Compute Swish: ψ_M(u, σ(β u)) = u * σ(β u)
+    # Step 4: Compute Swish through multiplication_operator(u, gate).
     swish_out, swish_domain = multiplication_operator(
         u, domain_u,
         sigmoid_out, sigmoid_domain,
     )
     swish_out, swish_domain = clamp_swish_output(swish_out, domain_u, beta=beta)
     
-    # Step 5: Final multiplication: ψ_M(v, swish_out) = v * u * σ(β u)
+    # Step 5: Multiply v by the signed Swish output through the same operator.
     final_out, final_domain = multiplication_operator(
         v, domain_v,
         swish_out, swish_domain,
     )
     
     return final_out, final_domain
+
+
+
+@check_domain
+def rmsnorm_function(
+    x: torch.Tensor,
+    domain_x: PotentialBounds,
+    *,
+    eps: float = 1.0e-6,
+    tau_s: float = 1.0,
+    clip_margin: float = 1.0e-8,
+) -> tuple[torch.Tensor, PotentialBounds]:
+    """Normalize the last dimension through multiplication, NL and ED.
+
+    Squaring uses Int(NP(x), NP(0); x). A fixed mean and epsilon bias produce
+    m = mean(x*x) + eps. Encode m on [l*l, U*U] with tau_s/2 and each signed
+    magnitude on [l, U] with tau_s. Their common reference and deadline give
+    ED(t_magnitude, t_moment; tau_s) = magnitude / sqrt(m) for delivered events.
+
+    The positive floor suppresses magnitudes below l; epsilon remains a separate
+    denominator bias. Both signs reuse one denominator event. Gaussian misses
+    retain the causal readout of ED, including its internal encoding event.
+    Returned activations preserve the caller dtype; structural output bounds are
+    rounded outward to enclose that dtype's endpoints.
+    Learned weights are fixed gains applied by the model adapter.
+    """
+    for name, value in (("eps", eps), ("tau_s", tau_s), ("clip_margin", clip_margin)):
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise TypeError(f"RMSNorm {name} must be a real scalar")
+        if not isfinite(value) or value <= 0.0:
+            raise ValueError(f"RMSNorm {name} must be finite and positive")
+    if not x.is_floating_point() or x.ndim == 0 or x.shape[-1] == 0:
+        raise ValueError("RMSNorm requires a floating tensor with a nonempty feature dimension")
+
+    # Preserve small differences between large event times and accumulator states.
+    # All execution modes use the same operators in double precision; only the
+    # returned activation is converted back to the caller's dtype.
+    input_dtype = x.dtype
+    input_value = x
+    domain_x = domain_x.outward_rounded(input_dtype)
+    x = x.to(torch.float64)
+
+    radius = max(abs(float(domain_x.min)), abs(float(domain_x.max)))
+    square_max = radius * radius
+    log_max = (square_max + float(eps)) ** 0.5
+    # Widen the log interval below sqrt(eps), never change the stabilizer to fit it.
+    # The extra factor handles an all-zero declared input interval with positive eps.
+    log_min = min(float(clip_margin), float(eps) ** 0.5, 0.5 * log_max)
+    magnitude_domain = PotentialBounds(log_min, log_max)
+    moment_domain = PotentialBounds(log_min * log_min, log_max * log_max)
+    shared_time_bounds = TimeBounds(0.0, float(tau_s) * (log(log_max) - log(log_min)))
+
+    # Check every derived positive interval before sampling any input event.
+    endpoints = x.new_tensor([
+        log_min, log_max, moment_domain.min, moment_domain.max,
+        log_min / log_max, log_max / log_min,
+    ])
+    if not bool((torch.isfinite(endpoints) & (endpoints > 0.0)).all()):
+        raise ValueError("RMSNorm logarithmic bounds must be representable in the tensor dtype")
+
+    square, _ = multiplication_operator(x, domain_x, x, domain_x)
+    square = clamp_gaussian_output(
+        square, PotentialBounds(0.0, square_max),
+        site="rmsnorm.square", name="rmsnorm_square",
+    )
+    moment = moment_domain.clamp(
+        square.mean(dim=-1, keepdim=True) + float(eps), name="rmsnorm_mean_square",
+    )
+    positive = x.clamp_min(0.0)
+    negative = (-x).clamp_min(0.0)
+    positive_active = (input_value > 0.0) & (input_value >= log_min)
+    negative_active = (input_value < 0.0) & (-input_value >= log_min)
+    sampled = gaussian_time_noise_is_active()
+
+    with gaussian_noise_statistics_mask(
+        (positive_active | negative_active).any(dim=-1, keepdim=True)
+    ):
+        moment_code = neg_log_transform(
+            moment, moment_domain, tau_s=float(tau_s) / 2.0,
+            shared_time_bounds=shared_time_bounds, return_spike_sample=sampled,
+            noise_site="rmsnorm.log_mean_square",
+        )
+    moment_time = moment_code if isinstance(moment_code, SpikeSample) else moment_code[0]
+    moment_times = moment_code.domain if isinstance(moment_code, SpikeSample) else moment_code[1]
+
+    responses = []
+    for magnitude, active, site in (
+        (positive, positive_active, "rmsnorm.log_positive"),
+        (negative, negative_active, "rmsnorm.log_negative"),
+    ):
+        with gaussian_noise_statistics_mask(active):
+            magnitude_code = neg_log_transform(
+                magnitude_domain.clamp(magnitude, name="rmsnorm_log_magnitude"),
+                magnitude_domain, tau_s=float(tau_s),
+                shared_time_bounds=shared_time_bounds, return_spike_sample=sampled,
+                noise_site=site,
+            )
+            magnitude_time = (
+                magnitude_code if isinstance(magnitude_code, SpikeSample) else magnitude_code[0]
+            )
+            magnitude_times = (
+                magnitude_code.domain if isinstance(magnitude_code, SpikeSample) else magnitude_code[1]
+            )
+            response, _ = exponential_difference_operator(
+                magnitude_time, magnitude_times, moment_time, moment_times,
+                tau_s=float(tau_s),
+            )
+        responses.append(torch.where(active, response, torch.zeros_like(response)))
+
+    result_limit = x.shape[-1] ** 0.5
+    result_domain = PotentialBounds(-result_limit, result_limit)
+    result = clamp_gaussian_output(
+        responses[0] - responses[1], result_domain,
+        site="rmsnorm.normalized_output", name="rmsnorm_normalized",
+    )
+    return result.to(input_dtype), result_domain.outward_rounded(input_dtype)
 
 if __name__ == "__main__":
     # Test for exponential_function and division_function

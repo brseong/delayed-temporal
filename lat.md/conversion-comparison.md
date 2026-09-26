@@ -8,6 +8,8 @@ The evaluated ViT path uses the time-constant cubic construction and treats fixe
 
 Calibration collection and SNN evaluation call the same canonical [[utils/transforms/functions.py#gelu_approximation]]. The final product combines the input with the gate, while the cubic and gate constants do not create extra time encodings. The general multiplication operator is unchanged.
 
+The ViT and RoBERTa ANN references use the exact GELU specified by their checkpoints, evaluated through the error function, while their converted models use the cubic tanh composition. GPT-2 uses the checkpoint's cubic tanh `gelu_new` on both sides. The matched difference $\Delta=\mathrm{SNN}-\mathrm{ANN}$ therefore includes GELU formula error for ViT and RoBERTa as well as other deterministic conversion effects.
+
 The GELU output lower bound is -0.170041. LayerNorm uses the positive logarithmic input floor $10^{-5}$, checkpoint epsilon $10^{-12}$ for the four ViT checkpoints, and output bounds policy 4. Results produced under an earlier range contract are not reused.
 
 ## Evaluation Contract
@@ -41,6 +43,8 @@ The completed campaign keeps declared potential bounds through every learned out
 | SST-2 RoBERTa-B | validation 872 | 94.50% | 94.38% | -0.11 pp |
 | SST-2 RoBERTa-L | validation 872 | 96.44% | 96.44% | 0.00 pp |
 | WikiText-2 GPT-2 | 2,891 nonempty test texts | 21.984180 PPL | 21.984387 PPL | +0.000207 PPL |
+
+The RoBERTa-B SST-2 row is 824/872 correct for ANN and 823/872 for SNN. The exact difference is $-100/872=-0.1146789$ percentage points; the table rounds this to $-0.11$ pp, so an upper bound must be at least 0.1146789 pp.
 
 The authenticated bundle uses source `b1a6bf8f7baa89250201c9af96d05b6154249de5`. `table_results.csv` has SHA-256 `dadb127870b16049a68fad3dc8c5e273fee077a1b7c30856fe6074aa3685e62c`; the deterministic table values required no manuscript-number change after rounding.
 

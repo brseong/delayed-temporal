@@ -19,7 +19,7 @@ run in one process without DataParallel replication.
 import math
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import wraps
 from typing import Callable, Literal, TypedDict
 
@@ -55,7 +55,8 @@ class GaussianTimeNoiseConfig:
     linear_deadline_margin_std_ratio: float | None = None
     log_deadline_margin_std_ratio: float | None = None
     seed: int = 0  # Replica seed used once when constructing the dedicated generator.
-    generator: torch.Generator | None = None  # Stateful RNG owned by this configuration.
+    generator: torch.Generator | None = None  # First selected device's stream.
+    generators: dict[str, torch.Generator] = field(default_factory=dict)
     explicit_scope_required: bool = False
 
 
@@ -85,14 +86,14 @@ class GaussianNoiseCounts(TypedDict):
     output_overflows: int  # Readouts strictly above the declared output maximum.
 
 
-# The direct timing model has one process-wide configuration so every decorated
-# encoder in a replica consumes the same stateful random stream. Configuration is
+# The direct timing model has one shared configuration and one random stream per
+# configured device. Configuration is
 # replaced atomically by the setter instead of mutating its fields across calls.
 _GLOBAL_GAUSSIAN_TIME_CONFIG = GaussianTimeNoiseConfig()
 
 # Scoped ViT experiments activate timing noise only while a selected encoder block
 # executes. Context-local state restores correctly across nested calls and exceptions,
-# while the process-wide configuration continues to own the single RNG stream.
+# while the shared configuration continues to own the device random streams.
 _GAUSSIAN_TIME_SCOPE: ContextVar[GaussianTimeNoiseScope | None] = ContextVar(
     "gaussian_time_noise_scope",
     default=None,
@@ -328,15 +329,15 @@ def set_gaussian_time_noise(
     linear_deadline_margin_std_ratio: float | None = None,
     log_deadline_margin_std_ratio: float | None = None,
     seed: int = 0,
-    device: torch.device | str = "cpu",
+    device: torch.device | str | tuple[torch.device | str, ...] = "cpu",
     explicit_scope_required: bool = False,
 ) -> None:
     """Install process-wide direct Gaussian spike-time noise configuration.
 
     Each successful call starts a new experiment replica: it constructs and seeds
-    one generator for the requested sampling device, replaces the complete global
-    configuration, and clears measurements from the previous replica. The generator
-    then advances across encoder calls; individual forwards must never reseed it.
+    one generator for each requested sampling device, replaces the complete global
+    configuration, and clears measurements from the previous replica. Each generator
+    then advances across encoder calls on its device; individual forwards must never reseed it.
 
     Args:
         enabled: Whether event-aware encoders apply direct Gaussian timing noise.
@@ -347,8 +348,8 @@ def set_gaussian_time_noise(
         deadline_margin_std_ratio: Non-negative grace measured in local standard deviations.
         linear_deadline_margin_std_ratio: Optional linear-code grace ratio.
         log_deadline_margin_std_ratio: Optional logarithmic-code grace ratio.
-        seed: Integer seed used once to initialize the replica generator.
-        device: Device on which the encoder's spike-time samples will be drawn.
+        seed: Integer seed for the first configured device; further devices use deterministic offsets.
+        device: Device or ordered tuple of devices on which Gaussian timing samples are drawn.
         explicit_scope_required: Require an active :func:`gaussian_time_noise_scope`
             before sampling or recording statistics.
 
@@ -413,12 +414,26 @@ def set_gaussian_time_noise(
     ):
         raise ValueError("deadline margins must be non-negative")
 
-    # A disabled configuration owns no generator. An enabled replica gets exactly
-    # one device-matched stream seeded here and advanced later by encoder sampling.
+    # Keep the original seed and draw order on the first device. Further devices
+    # receive independent streams; one replica still owns all of their states.
     generator = None
+    generators: dict[str, torch.Generator] = {}
     if enabled:
-        generator = torch.Generator(device=torch.device(device))
-        generator.manual_seed(seed)
+        requested_devices = device if isinstance(device, tuple) else (device,)
+        if not requested_devices:
+            raise ValueError("Gaussian time noise requires at least one device")
+        for index, requested in enumerate(requested_devices):
+            normalized_device = torch.device(requested)
+            if normalized_device.type == "cuda" and normalized_device.index is None:
+                normalized_device = torch.device("cuda", torch.cuda.current_device())
+            key = str(normalized_device)
+            if key in generators:
+                raise ValueError("Gaussian time noise devices must be distinct")
+            selected = torch.Generator(device=normalized_device)
+            device_seed = seed if index == 0 else (seed + index * 1_000_003) % (2**63 - 1)
+            selected.manual_seed(device_seed)
+            generators[key] = selected
+        generator = next(iter(generators.values()))
 
     # Build the full replacement before touching shared state. Consequently, any
     # validation, device, or seed failure preserves both the old replica and counts.
@@ -433,6 +448,7 @@ def set_gaussian_time_noise(
         log_deadline_margin_std_ratio=normalized_log_margin,
         seed=seed,
         generator=generator,
+        generators=generators,
         explicit_scope_required=explicit_scope_required,
     )
 
@@ -702,7 +718,7 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
     configuration to return one finite timestamp and its deadline-delivery mask.
 
     Keeping sampling at this boundary makes linear and logarithmic encoders share
-    one advancing generator, one inclusive deadline rule, and one statistics schema.
+    one advancing generator per configured device, one inclusive deadline rule, and one statistics schema.
     Their absolute standard deviations and deadline margins may be overridden in
     the same configuration for measured marginal-noise sensitivity experiments.
 
@@ -765,9 +781,10 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
                 )
             if not isinstance(out_domain, TimeBounds):
                 raise TypeError("sampled spike encoders must return TimeBounds")
-            if not isinstance(gaussian_cfg.generator, torch.Generator):
+            generator = gaussian_cfg.generators.get(str(output.device))
+            if not isinstance(generator, torch.Generator):
                 raise RuntimeError(
-                    "enabled Gaussian time noise requires a torch.Generator"
+                    "Gaussian timing noise has no generator for the encoder device"
                 )
 
             # Explicitly unselected model regions retain the SpikeSample return type
@@ -805,7 +822,7 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
                 nominal_time,
                 time_std=time_std,
                 domain=out_domain,
-                generator=gaussian_cfg.generator,
+                generator=generator,
                 time_mean=gaussian_cfg.time_mean,
                 deadline_margin=deadline_margin,
             )
