@@ -1,0 +1,16 @@
+# Python 3.12
+jupyter
+scikit-learn
+jax[cuda12]
+jaxtyping
+wandb
+datasets
+evaluate
+scikit-learn
+tqdm
+cupy-cuda12x
+remote_plot
+timm
+seaborn
+-e git+https://github.com/huggingface/transformers.git#egg=transformers
+-e git+https://github.com/fangwei123456/spikingjelly.git#egg=spikingjelly

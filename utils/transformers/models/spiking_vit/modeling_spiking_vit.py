@@ -1,0 +1,1118 @@
+# coding=utf-8
+# Copyright 2021 Google AI, Ross Wightman, The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""PyTorch ViT model."""
+
+import collections.abc
+import math
+from collections.abc import Callable
+from typing import Optional, Union
+
+import torch
+from torch import nn
+
+from transformers import initialization as init
+from transformers.activations import ACT2FN
+from transformers.modeling_layers import GradientCheckpointingLayer
+from transformers.modeling_outputs import (
+    BaseModelOutput,
+    BaseModelOutputWithPooling,
+    ImageClassifierOutput,
+    MaskedImageModelingOutput,
+)
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.processing_utils import Unpack
+from transformers.utils import TransformersKwargs, auto_docstring, logging, torch_int
+from transformers.utils.generic import can_return_tuple, merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
+from transformers.models.vit.configuration_vit import ViTConfig
+
+from torch.profiler import profile, record_function, ProfilerActivity
+
+from utils.transforms.functions import (
+    clamp_gelu_output,
+    clamp_swish_output,
+    gelu_approximation,
+    tanh,
+)
+from utils.transforms.types import Potential, PotentialBounds
+from utils.transforms.noise import gaussian_time_noise_scope
+from utils.transformers.calibration import (
+    calibrated_potential,
+    model_calibration_is_bound,
+    validate_symmetric_encoder_bounds,
+)
+from utils.transformers.models.spiking_ops import (
+    SpikingConv2d,
+    SpikingLayerNorm,
+    SpikingLinear,
+    _apply_norm,
+)
+
+
+class ViTEmbeddings(nn.Module):
+    """
+    Construct the CLS token, position and patch embeddings. Optionally, also the mask token.
+    """
+
+    def __init__(self, config: ViTConfig, use_mask_token: bool = False):
+        super().__init__()
+
+        self.cls_token = nn.Parameter(torch.randn(1, 1, config.hidden_size))
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size)) if use_mask_token else None
+        self.patch_embeddings = ViTPatchEmbeddings(config)
+        num_patches = self.patch_embeddings.num_patches
+        self.position_embeddings = nn.Parameter(torch.randn(1, num_patches + 1, config.hidden_size))
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.patch_size = config.patch_size
+        self.config = config
+
+    def freeze_embedding_bounds(
+        self,
+        position: torch.Tensor,
+        *,
+        refresh: bool = False,
+    ) -> tuple[PotentialBounds, PotentialBounds]:
+        """Freeze checkpoint-owned token and position envelopes outside data flow."""
+        versions = (
+            int(self.cls_token._version),
+            int(self.mask_token._version) if self.mask_token is not None else None,
+            int(self.position_embeddings._version),
+            tuple(position.shape),
+        )
+        cached = self.__dict__.get("_frozen_embedding_bounds")
+        if cached is not None and not refresh:
+            cached_versions, token_bounds, position_bounds = cached
+            if cached_versions != versions:
+                raise RuntimeError(
+                    "ViT embedding parameters changed after bounds were frozen; "
+                    "call freeze_embedding_bounds(..., refresh=True)"
+                )
+            return token_bounds, position_bounds
+
+        token_lower = float(self.cls_token.detach().min().item())
+        token_upper = float(self.cls_token.detach().max().item())
+        if self.mask_token is not None:
+            token_lower = min(token_lower, float(self.mask_token.detach().min().item()))
+            token_upper = max(token_upper, float(self.mask_token.detach().max().item()))
+        token_bounds = PotentialBounds(token_lower, token_upper)
+        position_bounds = PotentialBounds(
+            float(position.detach().min().item()),
+            float(position.detach().max().item()),
+        )
+        if not refresh:
+            self.__dict__["_frozen_embedding_bounds"] = (
+                versions,
+                token_bounds,
+                position_bounds,
+            )
+        return token_bounds, position_bounds
+
+    def interpolate_pos_encoding(self, embeddings: torch.Tensor, height: int, width: int) -> torch.Tensor:
+        """
+        This method allows to interpolate the pre-trained position encodings, to be able to use the model on higher resolution
+        images. This method is also adapted to support torch.jit tracing.
+
+        Adapted from:
+        - https://github.com/facebookresearch/dino/blob/de9ee3df6cf39fac952ab558447af1fa1365362a/vision_transformer.py#L174-L194, and
+        - https://github.com/facebookresearch/dinov2/blob/e1277af2ba9496fbadf7aec6eba56e8d882d1e35/dinov2/models/vision_transformer.py#L179-L211
+        """
+
+        num_patches = embeddings.shape[1] - 1
+        num_positions = self.position_embeddings.shape[1] - 1
+
+        # always interpolate when tracing to ensure the exported model works for dynamic input shapes
+        if not torch.jit.is_tracing() and num_patches == num_positions and height == width:
+            return self.position_embeddings
+
+        class_pos_embed = self.position_embeddings[:, :1]
+        patch_pos_embed = self.position_embeddings[:, 1:]
+
+        dim = embeddings.shape[-1]
+
+        new_height = height // self.patch_size
+        new_width = width // self.patch_size
+
+        sqrt_num_positions = torch_int(num_positions**0.5)
+        patch_pos_embed = patch_pos_embed.reshape(1, sqrt_num_positions, sqrt_num_positions, dim)
+        patch_pos_embed = patch_pos_embed.permute(0, 3, 1, 2)
+
+        patch_pos_embed = nn.functional.interpolate(
+            patch_pos_embed,
+            size=(new_height, new_width),
+            mode="bicubic",
+            align_corners=False,
+        )
+
+        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+
+        return torch.cat((class_pos_embed, patch_pos_embed), dim=1)
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        bool_masked_pos: Optional[torch.BoolTensor] = None,
+        interpolate_pos_encoding: bool = False,
+    ) -> Potential:
+        batch_size, num_channels, height, width = pixel_values.shape
+        patch_potential = self.patch_embeddings(
+            pixel_values,
+            interpolate_pos_encoding=interpolate_pos_encoding,
+        )
+        embeddings = patch_potential.value
+        lower = float(patch_potential.domain.min)
+        upper = float(patch_potential.domain.max)
+
+        if interpolate_pos_encoding:
+            position = self.interpolate_pos_encoding(embeddings, height, width)
+        else:
+            position = self.position_embeddings
+        token_bounds, position_bounds = self.freeze_embedding_bounds(
+            position,
+            refresh=interpolate_pos_encoding,
+        )
+
+        if bool_masked_pos is not None:
+            seq_length = embeddings.shape[1]
+            mask_tokens = self.mask_token.expand(batch_size, seq_length, -1)
+            # replace the masked visual tokens by mask_tokens
+            mask = bool_masked_pos.unsqueeze(-1).type_as(mask_tokens)
+            embeddings = embeddings * (1.0 - mask) + mask_tokens * mask
+            lower = min(lower, float(token_bounds.min))
+            upper = max(upper, float(token_bounds.max))
+
+        # add the [CLS] token to the embedded patch tokens
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+        embeddings = torch.cat((cls_tokens, embeddings), dim=1)
+        lower = min(lower, float(token_bounds.min))
+        upper = max(upper, float(token_bounds.max))
+
+        # add positional encoding to each token
+        embeddings = embeddings + position
+        lower += float(position_bounds.min)
+        upper += float(position_bounds.max)
+
+        embeddings = self.dropout(embeddings)
+        if self.training and self.dropout.p > 0.0:
+            scale = 1.0 / (1.0 - float(self.dropout.p))
+            lower = min(0.0, lower * scale)
+            upper = max(0.0, upper * scale)
+
+        bounds = PotentialBounds(min(lower, 0.0), max(upper, 0.0))
+        return Potential(embeddings, bounds)
+
+
+class ViTPatchEmbeddings(nn.Module):
+    """
+    This class turns `pixel_values` of shape `(batch_size, num_channels, height, width)` into the initial
+    `hidden_states` (patch embeddings) of shape `(batch_size, seq_length, hidden_size)` to be consumed by a
+    Transformer.
+    """
+
+    def __init__(self, config: ViTConfig):
+        super().__init__()
+        image_size, patch_size = config.image_size, config.patch_size
+        num_channels, hidden_size = config.num_channels, config.hidden_size
+
+        image_size = image_size if isinstance(image_size, collections.abc.Iterable) else (image_size, image_size)
+        patch_size = patch_size if isinstance(patch_size, collections.abc.Iterable) else (patch_size, patch_size)
+        num_patches = (image_size[1] // patch_size[1]) * (image_size[0] // patch_size[0])
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.num_channels = num_channels
+        self.num_patches = num_patches
+
+        self._use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
+
+        # The image processor owns the fixed numeric range reaching the patch
+        # projection. Keep the serialized endpoints beside the module so every batch
+        # uses identical PWM rails; missing metadata is diagnosed in ``forward`` only
+        # when the spiking projection actually needs it.
+        pixel_value_min = getattr(config, "pixel_value_min", None)
+        pixel_value_max = getattr(config, "pixel_value_max", None)
+        self._pixel_value_domain = (
+            PotentialBounds(float(pixel_value_min), float(pixel_value_max))
+            if pixel_value_min is not None and pixel_value_max is not None
+            else None
+        )
+
+        if self._use_spiking_mlp:
+            self.projection = SpikingConv2d(num_channels, hidden_size, kernel_size=patch_size, stride=patch_size)
+        else:
+            self.projection = nn.Conv2d(num_channels, hidden_size, kernel_size=patch_size, stride=patch_size)
+
+    def freeze_parameter_bounds(
+        self,
+        *,
+        refresh: bool = False,
+    ) -> PotentialBounds:
+        """Freeze the dense-ablation convolution envelope for the fixed pixel range."""
+        if self._pixel_value_domain is None:
+            raise RuntimeError("pixel preprocessing bounds are unavailable")
+        versions = (
+            int(self.projection.weight._version),
+            int(self.projection.bias._version) if self.projection.bias is not None else None,
+        )
+        cached = self.__dict__.get("_frozen_parameter_bounds")
+        if cached is not None and not refresh:
+            cached_versions, bounds = cached
+            if cached_versions != versions:
+                raise RuntimeError(
+                    "ViT patch projection parameters changed after bounds were frozen; "
+                    "call freeze_parameter_bounds(refresh=True)"
+                )
+            return bounds
+
+        weight = self.projection.weight.detach().to(dtype=torch.float64)
+        lower_input = float(self._pixel_value_domain.min)
+        upper_input = float(self._pixel_value_domain.max)
+        lower_terms = torch.minimum(weight * lower_input, weight * upper_input)
+        upper_terms = torch.maximum(weight * lower_input, weight * upper_input)
+        lower = lower_terms.sum(dim=(1, 2, 3))
+        upper = upper_terms.sum(dim=(1, 2, 3))
+        if self.projection.bias is not None:
+            bias = self.projection.bias.detach().to(dtype=torch.float64)
+            lower = lower + bias
+            upper = upper + bias
+        bounds = PotentialBounds(
+            min(0.0, float(lower.min().item())),
+            max(0.0, float(upper.max().item())),
+        )
+        self.__dict__["_frozen_parameter_bounds"] = (versions, bounds)
+        return bounds
+
+    def forward(self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = False) -> Potential:
+        """Project preprocessed pixels with a preprocessing-defined fixed range.
+
+        The spiking convolution must receive the same finite PWM input rail for every
+        image batch. That rail is computed by the evaluator from image-processor
+        rescaling and normalization metadata, serialized in the model configuration,
+        and widened to include zero for the shared signed-PWM reference event.
+
+        Args:
+            pixel_values: Preprocessed image tensor in channels-first layout.
+            interpolate_pos_encoding: Whether the surrounding embedding layer may
+                interpolate positional encodings for a different image resolution.
+
+        Returns:
+            Patch embeddings with spatial positions flattened into token order.
+
+        Raises:
+            RuntimeError: If a spiking projection has no fixed preprocessing range.
+        """
+        # Validate image shape before consulting range metadata so malformed model
+        # inputs retain the standard Hugging Face diagnostics.
+        batch_size, num_channels, height, width = pixel_values.shape
+        if num_channels != self.num_channels:
+            raise ValueError(
+                "Make sure that the channel dimension of the pixel values match with the one set in the configuration."
+                f" Expected {self.num_channels} but got {num_channels}."
+            )
+        if not interpolate_pos_encoding:
+            if height != self.image_size[0] or width != self.image_size[1]:
+                raise ValueError(
+                    f"Input image size ({height}*{width}) doesn't match model"
+                    f" ({self.image_size[0]}*{self.image_size[1]})."
+                )
+        
+        # The converted patch projection may not fall back to current-batch extrema.
+        # A missing range means preprocessing and model calibration are incompatible,
+        # so fail before any PWM event is encoded or parameter-bound cache is created.
+        if self._pixel_value_domain is None:
+            raise RuntimeError(
+                "ViT patch projection requires fixed pixel_value_min and "
+                "pixel_value_max from image preprocessing"
+            )
+        if self._use_spiking_mlp:
+            projected = self.projection(
+                Potential(pixel_values, self._pixel_value_domain)
+            )
+            embeddings = projected.value.flatten(2).transpose(1, 2)
+            output_domain = projected.domain
+        else:
+            # The dense ablation performs the same checkpoint-compatible convolution
+            # but does not invoke a temporal encoder, so it needs no PWM input rail.
+            embeddings = self.projection(pixel_values).flatten(2).transpose(1, 2)
+            output_domain = self.freeze_parameter_bounds()
+        return Potential(embeddings, output_domain)
+
+
+# Copied from transformers.models.bert.modeling_bert.eager_attention_forward
+def eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    dropout: float = 0.0,
+    **kwargs: Unpack[TransformersKwargs],
+):
+    # Take the dot product between "query" and "key" to get the raw attention scores.
+    attn_weights = torch.matmul(query, key.transpose(2, 3)) * (query.size(-1) ** -0.5)
+
+    if attention_mask is not None:
+        attention_mask = attention_mask[:, :, :, : key.shape[-2]]
+        attn_weights = attn_weights + attention_mask
+
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1)
+    attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+
+    attn_output = torch.matmul(attn_weights, value)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    return attn_output, attn_weights
+
+
+class ViTSelfAttention(nn.Module):
+    def __init__(self, config: ViTConfig):
+        super().__init__()
+        if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
+            raise ValueError(
+                f"The hidden size {config.hidden_size} is not a multiple of the number of attention "
+                f"heads {config.num_attention_heads}."
+            )
+
+        self.config = config
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+        self.dropout_prob = config.attention_probs_dropout_prob
+        self.is_causal = False
+
+        self.query = SpikingLinear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
+        self.key = SpikingLinear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
+        self.value = SpikingLinear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
+
+    def forward(self, pot: Potential) -> tuple[Potential, torch.Tensor]:
+        """Apply ViT self-attention and preserve the selected backend's domain.
+
+        Dense eager attention remains a convex combination of the projected value
+        vectors and therefore retains their incoming domain. The spiking backend
+        instead uses the selected value interval for its output clamp. Explicit
+        calibration preserves each projection's fixed interval through dispatch;
+        callers without it retain the global threshold interval. Neither path
+        derives execution bounds from the current tensor.
+
+        Args:
+            pot: Hidden-state tensor paired with its declared potential bounds.
+
+        Returns:
+            The attention context with its backend-specific fixed domain and the
+            optional attention-weight tensor returned by the selected interface.
+        """
+        # Reshape the three learned projections into explicit head dimensions while
+        # retaining their Potential domains beside the underlying value tensors.
+        batch_size = pot.value.shape[0]
+        new_shape = batch_size, -1, self.num_attention_heads, self.attention_head_size
+
+        # Q/K/V projection preserves the existing Potential-based range propagation.
+        pot_k: Potential = self.key(pot)
+        pot_v: Potential = self.value(pot)
+        pot_q: Potential = self.query(pot)
+
+        if self.config._attn_implementation == "spiking_sdpa" and model_calibration_is_bound(self):
+            calibrated_projections: list[Potential] = []
+            for tensor_name, projected in (("query", pot_q), ("key", pot_k), ("value", pot_v)):
+                # Collection uses only the projection's declared analytic interval,
+                # never extrema from the current activation. Frozen execution
+                # instead attaches and enforces this site's persisted interval.
+                radius = max(
+                    abs(float(projected.domain.min)), abs(float(projected.domain.max)),
+                )
+                collection_bounds = PotentialBounds(-radius, radius)
+                selected = calibrated_potential(
+                    self,
+                    tensor_name,
+                    projected.value,
+                    collection_bounds=collection_bounds,
+                )
+                validate_symmetric_encoder_bounds(
+                    selected.domain, selected.value.dtype, name=tensor_name,
+                )
+                calibrated_projections.append(selected)
+            pot_q, pot_k, pot_v = calibrated_projections
+
+        key_layer   = pot_k.value.view(*new_shape).transpose(1, 2)
+        value_layer = pot_v.value.view(*new_shape).transpose(1, 2)
+        query_layer = pot_q.value.view(*new_shape).transpose(1, 2)
+
+        attention_interface: Callable = eager_attention_forward
+        if self.config._attn_implementation != "eager":
+            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+        # Eager attention is a normalized convex combination, so it retains the
+        # projected-value domain unless the spiking backend selects its fixed interval.
+        kwargs = {}
+        context_domain = pot_v.domain
+        if self.config._attn_implementation == "spiking_sdpa":
+            # The model-wide logarithmic scale supplies attention's single tau;
+            # attention itself exposes no tau_s or tau_m distinction.
+            kwargs["tau"] = getattr(self.config, "tau_s", 1.0)
+
+            # ViT's fixed source maximum is the configured patch grid plus one class
+            # token. Runtime image interpolation beyond this capacity is rejected by
+            # the backend instead of silently widening its physical output rail.
+            image_size = self.config.image_size
+            patch_size = self.config.patch_size
+            image_hw = (
+                tuple(image_size)
+                if isinstance(image_size, collections.abc.Iterable)
+                else (image_size, image_size)
+            )
+            patch_hw = (
+                tuple(patch_size)
+                if isinstance(patch_size, collections.abc.Iterable)
+                else (patch_size, patch_size)
+            )
+            source_length_max = (
+                (int(image_hw[0]) // int(patch_hw[0]))
+                * (int(image_hw[1]) // int(patch_hw[1]))
+                + 1
+            )
+            kwargs["source_length_max"] = source_length_max
+            kwargs.update(
+                query_bounds=pot_q.domain,
+                key_bounds=pot_k.domain,
+                value_bounds=pot_v.domain,
+            )
+            context_domain = pot_v.domain
+
+        # Dense attention dropout independently removes normalized weights and
+        # scales survivors. During training its weighted sum includes zero and both
+        # projected-value endpoints scaled by 1/(1-p); evaluation remains unchanged.
+        elif self.training and self.dropout_prob > 0.0:
+            if self.dropout_prob >= 1.0:
+                context_domain = PotentialBounds(0.0, 0.0)
+            else:
+                dropout_scale = 1.0 / (1.0 - self.dropout_prob)
+                dropout_candidates = (
+                    0.0,
+                    float(context_domain.min) * dropout_scale,
+                    float(context_domain.max) * dropout_scale,
+                )
+                context_domain = PotentialBounds(
+                    min(dropout_candidates),
+                    max(dropout_candidates),
+                )
+
+        # The selected attention implementation consumes the same fixed maximum used
+        # above; the shared helper cache returns the identical immutable domain in the
+        # spiking backend when it clamps the value-integration output.
+        context_layer, attention_probs = attention_interface(
+            self, query_layer, key_layer, value_layer, None,
+            is_causal=self.is_causal,
+            dropout=0.0 if not self.training else self.dropout_prob,
+            **kwargs,
+        )
+
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.reshape(new_context_layer_shape)
+
+        # Reshaping merges heads but does not change numerical endpoints, so attach
+        # the domain selected before dispatch without measuring the context tensor.
+        return Potential(context_layer, context_domain), attention_probs
+
+
+class ViTSelfOutput(nn.Module):
+    """
+    The residual connection is defined in ViTLayer instead of here (as is the case with other models), due to the
+    layernorm applied before each block.
+    """
+
+    def __init__(self, config: ViTConfig):
+        super().__init__()
+        self.dense = SpikingLinear(config.hidden_size, config.hidden_size)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(self, pot: Potential) -> Potential:
+        pot_out: Potential = self.dense(pot)
+        # Dropout은 eval 시 항등 변환 → 도메인 불변
+        return Potential(self.dropout(pot_out.value), pot_out.domain)
+
+
+class ViTAttention(nn.Module):
+    def __init__(self, config: ViTConfig):
+        super().__init__()
+        self.attention = ViTSelfAttention(config)
+        self.output = ViTSelfOutput(config)
+
+    def forward(self, pot: Potential) -> Potential:
+        pot_attn, _ = self.attention(pot)
+        return self.output(pot_attn)
+
+
+class ViTIntermediate(nn.Module):
+    def __init__(self, config: ViTConfig):
+        super().__init__()
+        self.dense = SpikingLinear(config.hidden_size, config.intermediate_size)
+        self._use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
+        self._spiking_mlp_exact_gelu = getattr(config, "spiking_mlp_exact_gelu", False)
+        self._eps = 1e-5
+        self._hidden_act_name = config.hidden_act if isinstance(config.hidden_act, str) else None
+        # 항상 활성 함수 초기화 (spiking 경로도 GELU 먼저 적용)
+        if isinstance(config.hidden_act, str):
+            self.intermediate_act_fn = ACT2FN[config.hidden_act]
+        else:
+            self.intermediate_act_fn = config.hidden_act
+
+    def forward(self, pot: Potential) -> Potential:
+        """Apply the selected ViT MLP activation from a fixed pre-activation range.
+
+        An explicitly bound operator-composed GELU observes the raw affine output
+        during collection and consumes its frozen layer-wise range during validation
+        or inference. Direct and composed GELU outputs use the shared constant lower
+        bound and the fixed input maximum. ReLU, SiLU, and Tanh keep their respective
+        fixed range rules, without constructing metadata from the current tensor.
+
+        Args:
+            pot: Normalized block activation on a fixed zero-containing range.
+
+        Returns:
+            Activated MLP intermediate paired with an analytic fixed range.
+
+        Raises:
+            ValueError: If a dense activation has no maintained analytic range rule.
+            RuntimeError: If calibration is bound without the declared activation
+                input site.
+        """
+        # The affine projection memoizes exact output endpoints for the incoming fixed
+        # domain. Every direct activation rule below consumes those endpoints rather
+        # than reducing the produced tensor.
+        pot_z: Potential = self.dense(pot)
+
+        # Only modules named by the active calibration table receive a binding. In
+        # collection this records the unclamped affine output and returns its analytic
+        # safety range; frozen modes count excursions before returning the persisted
+        # clamp range consumed by every following GELU sub-operator.
+        if model_calibration_is_bound(self):
+            pot_z = calibrated_potential(
+                self,
+                "activation_input",
+                pot_z.value,
+                collection_bounds=pot_z.domain,
+            )
+
+        if self._use_spiking_mlp:
+            if self._spiking_mlp_exact_gelu:
+                x = pot_z.value
+                sqrt_2_over_pi = 0.7978845608028654
+                out = 0.5 * x * (1.0 + torch.tanh(sqrt_2_over_pi * (x + 0.044715 * x ** 3)))
+                return Potential(*clamp_gelu_output(out, pot_z.domain))
+            else:
+                return Potential(*gelu_approximation(*pot_z))
+
+        # GELU and SiLU use their fixed lower bounds and input upper endpoints.
+        out = self.intermediate_act_fn(pot_z.value)
+        if self._hidden_act_name == "relu":
+            output_domain = PotentialBounds(
+                max(0.0, float(pot_z.domain.min)),
+                max(0.0, float(pot_z.domain.max)),
+            )
+        elif self._hidden_act_name in {
+            "gelu",
+            "gelu_fast",
+            "gelu_new",
+            "gelu_pytorch_tanh",
+        }:
+            return Potential(*clamp_gelu_output(out, pot_z.domain))
+        elif self._hidden_act_name in {"silu", "swish"}:
+            return Potential(*clamp_swish_output(out, pot_z.domain))
+        elif self._hidden_act_name == "tanh":
+            output_domain = PotentialBounds(
+                math.tanh(float(pot_z.domain.min)),
+                math.tanh(float(pot_z.domain.max)),
+            )
+        else:
+            raise ValueError(
+                "ViT dense activation requires a maintained analytic range rule"
+            )
+        return Potential(out, output_domain)
+
+
+class ViTOutput(nn.Module):
+    def __init__(self, config: ViTConfig):
+        super().__init__()
+        self.dense = SpikingLinear(config.intermediate_size, config.hidden_size)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(self, pot_inter: Potential, pot_skip: Potential) -> Potential:
+        pot_dense: Potential = self.dense(pot_inter)    # PotentialBounds 전파
+        dropped = self.dropout(pot_dense.value)
+        out = dropped + pot_skip.value
+        # 잔차 연결 구간 산술: (a + b) ∈ [a_min + b_min, a_max + b_max]
+        domain_out = PotentialBounds(
+            pot_dense.domain.min + pot_skip.domain.min,
+            pot_dense.domain.max + pot_skip.domain.max,
+        )
+        return Potential(out, domain_out)
+
+
+class ViTLayer(GradientCheckpointingLayer):
+    """This corresponds to the Block class in the timm implementation."""
+
+    def __init__(self, config: ViTConfig):
+        super().__init__()
+        self.chunk_size_feed_forward = config.chunk_size_feed_forward
+        self.seq_len_dim = 1
+        self.attention = ViTAttention(config)
+        self.intermediate = ViTIntermediate(config)
+        self.output = ViTOutput(config)
+        _tau_s = getattr(config, "tau_s", 1.0)
+        _use_spiking_ln = getattr(config, "use_spiking_layernorm", True)
+        if _use_spiking_ln:
+            _sln_kwargs = dict(
+                tau_s=_tau_s, eps=config.layer_norm_eps,
+                clip_margin=getattr(config, "clip_margin", 1.0e-5),
+                use_spiking_mul=getattr(config, "spiking_ln_mul", True),
+                use_spiking_log=getattr(config, "spiking_ln_log", True),
+                use_spiking_expdiff=getattr(config, "spiking_ln_expdiff", True),
+            )
+            self.layernorm_before = SpikingLayerNorm(config.hidden_size, **_sln_kwargs)
+            self.layernorm_after = SpikingLayerNorm(config.hidden_size, **_sln_kwargs)
+        else:
+            self.layernorm_before = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+            self.layernorm_after = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+    def forward(self, pot: Potential) -> Potential:
+        """Apply one pre-norm ViT block with optional frozen residual ranges.
+
+        Without layer-wise calibration, both residual outputs retain conservative
+        analytic interval addition. When this block is explicitly bound to a
+        collector or frozen runtime, those same analytic intervals are collection
+        safety rails and the persisted layer ranges reset propagation across depth.
+
+        Args:
+            pot: Incoming hidden state paired with its fixed potential range.
+
+        Returns:
+            Block output on its analytic or calibrated fixed residual range.
+        """
+        # ─── Pre-norm + Attention ────────────────────────────────────────────
+        pot_norm1: Potential = _apply_norm(self.layernorm_before, pot)
+        pot_attn:  Potential = self.attention(pot_norm1)
+
+        # The first residual can widen recursively across blocks. Preserve its exact
+        # analytic sum for collection or calibration-free execution, but let a bound
+        # runtime clamp and replace it with the persisted per-layer range.
+        res1_value = pot_attn.value + pot.value
+        res1_analytic_bounds = PotentialBounds(
+            pot_attn.domain.min + pot.domain.min,
+            pot_attn.domain.max + pot.domain.max,
+        )
+        if model_calibration_is_bound(self):
+            pot_res1 = calibrated_potential(
+                self,
+                "attention_residual",
+                res1_value,
+                collection_bounds=res1_analytic_bounds,
+            )
+        else:
+            pot_res1 = Potential(res1_value, res1_analytic_bounds)
+
+        # ─── Post-norm + MLP ─────────────────────────────────────────────────
+        pot_norm2: Potential = _apply_norm(self.layernorm_after, pot_res1)
+        pot_inter: Potential = self.intermediate(pot_norm2)
+
+        # ViTOutput performs the second exact residual addition. Collection observes
+        # the raw result, while validation and inference count excursions before
+        # clamping to the persisted block-output range.
+        pot_output = self.output(pot_inter, pot_res1)
+        if model_calibration_is_bound(self):
+            return calibrated_potential(
+                self,
+                "output",
+                pot_output.value,
+                collection_bounds=pot_output.domain,
+            )
+        return pot_output
+
+
+class ViTEncoder(nn.Module):
+    def __init__(self, config: ViTConfig):
+        super().__init__()
+        self.config = config
+        self.layer = nn.ModuleList([ViTLayer(config) for _ in range(config.num_hidden_layers)])
+        print("Number of layers:", config.num_hidden_layers)
+        self.gradient_checkpointing = False
+        first_block_count = getattr(config, "time_noise_vit_first_block_count", None)
+        if first_block_count is not None:
+            if isinstance(first_block_count, bool) or not isinstance(first_block_count, int):
+                raise TypeError("time_noise_vit_first_block_count must be an integer")
+            if not 0 <= first_block_count <= len(self.layer):
+                raise ValueError(
+                    "time_noise_vit_first_block_count must be inside the encoder depth"
+                )
+        self.time_noise_vit_first_block_count = first_block_count
+
+    def forward(self, hidden_states: Potential) -> Potential:
+        """Enter the ViT stack through the embedding-derived potential range.
+
+        Patch projection, class-token, and position-embedding bounds are propagated
+        into this method, so the first block needs no independent global range.
+
+        Args:
+            hidden_states: Patch, class-token, and position embeddings with bounds.
+
+        Returns:
+            Final encoder output after fixed-domain block propagation.
+
+        Raises:
+            TypeError: If embeddings arrive without their declared bounds.
+        """
+        if not isinstance(hidden_states, Potential):
+            raise TypeError("ViT encoder requires embeddings with declared bounds")
+        pot = Potential(
+            hidden_states.domain.clamp(hidden_states.value, name="vit_encoder_input"),
+            hidden_states.domain,
+        )
+
+        # Every block receives an analytic fixed range; selected internal boundaries
+        # may replace it with a persisted calibration range without batch reductions.
+        for index, layer_module in enumerate(self.layer):
+            if self.time_noise_vit_first_block_count is None:
+                pot = layer_module(pot)          # Potential → Potential (전파)
+                continue
+            with gaussian_time_noise_scope(
+                active=index < self.time_noise_vit_first_block_count,
+                label=f"vit.encoder.block.{index}",
+            ):
+                pot = layer_module(pot)
+        return pot
+
+
+@auto_docstring
+class ViTPreTrainedModel(PreTrainedModel):
+    config: ViTConfig
+    base_model_prefix = "vit"
+    main_input_name = "pixel_values"
+    input_modalities = ("image",)
+    supports_gradient_checkpointing = True
+    _no_split_modules = ["ViTEmbeddings", "ViTLayer"]
+    _supports_sdpa = True
+    _supports_flash_attn = True
+    _supports_flex_attn = True
+    _supports_attention_backend = True
+    _can_record_outputs = {
+        "hidden_states": ViTLayer,
+        "attentions": ViTSelfAttention,
+    }
+
+    @torch.no_grad()
+    def _init_weights(self, module: Union[nn.Linear, nn.Conv2d, nn.LayerNorm]):
+        """Initialize the weights"""
+        if isinstance(module, (nn.Linear, nn.Conv2d)):
+            init.trunc_normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if module.bias is not None:
+                init.zeros_(module.bias)
+        elif isinstance(module, (nn.LayerNorm, SpikingLayerNorm)):
+            init.zeros_(module.bias)
+            init.ones_(module.weight)
+        elif isinstance(module, ViTEmbeddings):
+            init.trunc_normal_(module.position_embeddings, mean=0.0, std=self.config.initializer_range)
+            init.trunc_normal_(module.cls_token, mean=0.0, std=self.config.initializer_range)
+            if module.mask_token is not None:
+                init.zeros_(module.mask_token)
+
+
+@auto_docstring
+class ViTModel(ViTPreTrainedModel):
+    def __init__(self, config: ViTConfig, add_pooling_layer: bool = True, use_mask_token: bool = False):
+        r"""
+        add_pooling_layer (bool, *optional*, defaults to `True`):
+            Whether to add a pooling layer
+        use_mask_token (`bool`, *optional*, defaults to `False`):
+            Whether to use a mask token for masked image modeling.
+        """
+        super().__init__(config)
+        self.config = config
+
+        self.embeddings = ViTEmbeddings(config, use_mask_token=use_mask_token)
+        self.encoder = ViTEncoder(config)
+
+        if getattr(config, "use_spiking_layernorm", True):
+            self.layernorm = SpikingLayerNorm(
+                config.hidden_size,
+                eps=config.layer_norm_eps,
+                clip_margin=getattr(config, "clip_margin", 1.0e-5),
+                tau_s=getattr(config, "tau_s", 1.0),
+                use_spiking_mul=getattr(config, "spiking_ln_mul", True),
+                use_spiking_log=getattr(config, "spiking_ln_log", True),
+                use_spiking_expdiff=getattr(config, "spiking_ln_expdiff", True),
+            )
+        else:
+            self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.pooler = ViTPooler(config) if add_pooling_layer else None
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def get_input_embeddings(self) -> ViTPatchEmbeddings:
+        return self.embeddings.patch_embeddings
+
+    @merge_with_config_defaults
+    @capture_outputs(tie_last_hidden_states=False)
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: Optional[torch.Tensor] = None,
+        bool_masked_pos: Optional[torch.BoolTensor] = None,
+        interpolate_pos_encoding: Optional[bool] = None,
+        return_potential: bool = False,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> BaseModelOutputWithPooling:
+        r"""
+        bool_masked_pos (`torch.BoolTensor` of shape `(batch_size, num_patches)`, *optional*):
+            Boolean masked positions. Indicates which patches are masked (1) and which aren't (0).
+        """
+
+        if pixel_values is None:
+            raise ValueError("You have to specify pixel_values")
+
+        # TODO: maybe have a cleaner way to cast the input (from `ImageProcessor` side?)
+        expected_dtype = self.embeddings.patch_embeddings.projection.weight.dtype
+        if pixel_values.dtype != expected_dtype:
+            pixel_values = pixel_values.to(expected_dtype)
+
+        embedding_output = self.embeddings(
+            pixel_values, bool_masked_pos=bool_masked_pos, interpolate_pos_encoding=interpolate_pos_encoding
+        )
+
+        pot: Potential = self.encoder(embedding_output)   # 도메인 전파
+        pot = _apply_norm(self.layernorm, pot)
+        sequence_output = pot.value
+        pooled_output = self.pooler(pot) if self.pooler is not None else None
+
+        output = BaseModelOutputWithPooling(
+            last_hidden_state=sequence_output,
+            pooler_output=pooled_output,
+        )
+        if not isinstance(return_potential, bool):
+            raise TypeError("return_potential must be a bool")
+        return (output, pot) if return_potential else output
+
+
+class ViTPooler(nn.Module):
+    def __init__(self, config: ViTConfig):
+        super().__init__()
+        if config.pooler_act != "tanh":
+            raise ValueError("operator-backed ViT pooler supports tanh only")
+        self.dense = SpikingLinear(config.hidden_size, config.pooler_output_size)
+        self.tau_s = getattr(config, "tau_s", 1.0)
+
+    def forward(self, hidden_states: Potential) -> torch.Tensor:
+        """Pool the first token without dropping its declared range."""
+        if not isinstance(hidden_states, Potential):
+            raise TypeError("operator-backed ViT pooler requires Potential input")
+        first_token = Potential(hidden_states.value[:, 0], hidden_states.domain)
+        projected = self.dense(first_token)
+        pooled_output, _ = tanh(
+            projected.value,
+            projected.domain,
+            tau_s=self.tau_s,
+        )
+        return pooled_output
+
+
+@auto_docstring(
+    custom_intro="""
+    ViT Model with a decoder on top for masked image modeling, as proposed in [SimMIM](https://huggingface.co/papers/2111.09886).
+
+    <Tip>
+
+    Note that we provide a script to pre-train this model on custom data in our [examples
+    directory](https://github.com/huggingface/transformers/tree/main/examples/pytorch/image-pretraining).
+
+    </Tip>
+    """
+)
+class ViTForMaskedImageModeling(ViTPreTrainedModel):
+    def __init__(self, config: ViTConfig):
+        super().__init__(config)
+
+        self.vit = ViTModel(config, add_pooling_layer=False, use_mask_token=True)
+
+        self.decoder = nn.Sequential(
+            SpikingConv2d(
+                in_channels=config.hidden_size,
+                out_channels=config.encoder_stride**2 * config.num_channels,
+                kernel_size=1,
+            ),
+            nn.PixelShuffle(config.encoder_stride),
+        )
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: Optional[torch.Tensor] = None,
+        bool_masked_pos: Optional[torch.BoolTensor] = None,
+        interpolate_pos_encoding: Optional[bool] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> MaskedImageModelingOutput:
+        r"""
+        bool_masked_pos (`torch.BoolTensor` of shape `(batch_size, num_patches)`):
+            Boolean masked positions. Indicates which patches are masked (1) and which aren't (0).
+
+        Examples:
+        ```python
+        >>> from transformers import AutoImageProcessor, ViTForMaskedImageModeling
+        >>> import torch
+        >>> from PIL import Image
+        >>> import requests
+
+        >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
+        >>> image = Image.open(requests.get(url, stream=True).raw)
+
+        >>> image_processor = AutoImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
+        >>> model = ViTForMaskedImageModeling.from_pretrained("google/vit-base-patch16-224-in21k")
+
+        >>> num_patches = (model.config.image_size // model.config.patch_size) ** 2
+        >>> pixel_values = image_processor(images=image, return_tensors="pt").pixel_values
+        >>> # create random boolean mask of shape (batch_size, num_patches)
+        >>> bool_masked_pos = torch.randint(low=0, high=2, size=(1, num_patches)).bool()
+
+        >>> outputs = model(pixel_values, bool_masked_pos=bool_masked_pos)
+        >>> loss, reconstructed_pixel_values = outputs.loss, outputs.reconstruction
+        >>> list(reconstructed_pixel_values.shape)
+        [1, 3, 224, 224]
+        ```"""
+
+        if bool_masked_pos is not None and (self.config.patch_size != self.config.encoder_stride):
+            raise ValueError(
+                "When `bool_masked_pos` is provided, `patch_size` must be equal to `encoder_stride` to ensure that "
+                "the reconstructed image has the same dimensions as the input. "
+                f"Got `patch_size` = {self.config.patch_size} and `encoder_stride` = {self.config.encoder_stride}."
+            )
+
+        outputs, sequence_potential = self.vit(
+            pixel_values,
+            bool_masked_pos=bool_masked_pos,
+            interpolate_pos_encoding=interpolate_pos_encoding,
+            return_potential=True,
+            **kwargs,
+        )
+
+        # Reshape to (batch_size, num_channels, height, width)
+        sequence_output = sequence_potential.value[:, 1:]
+        batch_size, sequence_length, num_channels = sequence_output.shape
+        height = width = math.floor(sequence_length**0.5)
+        sequence_output = sequence_output.permute(0, 2, 1).reshape(batch_size, num_channels, height, width)
+
+        # Reconstruct pixels with an operator-backed 1x1 projection. PixelShuffle
+        # only rearranges entries and therefore preserves the projection range.
+        decoded = self.decoder[0](
+            Potential(sequence_output, sequence_potential.domain)
+        )
+        reconstructed_pixel_values = self.decoder[1](decoded.value)
+
+        masked_im_loss = None
+        if bool_masked_pos is not None:
+            size = self.config.image_size // self.config.patch_size
+            bool_masked_pos = bool_masked_pos.reshape(-1, size, size)
+            mask = (
+                bool_masked_pos.repeat_interleave(self.config.patch_size, 1)
+                .repeat_interleave(self.config.patch_size, 2)
+                .unsqueeze(1)
+                .contiguous()
+            )
+            reconstruction_loss = nn.functional.l1_loss(pixel_values, reconstructed_pixel_values, reduction="none")
+            masked_im_loss = (reconstruction_loss * mask).sum() / (mask.sum() + 1e-5) / self.config.num_channels
+
+        return MaskedImageModelingOutput(
+            loss=masked_im_loss,
+            reconstruction=reconstructed_pixel_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+@auto_docstring(
+    custom_intro="""
+    ViT Model transformer with an image classification head on top (a linear layer on top of the final hidden state of
+    the [CLS] token) e.g. for ImageNet.
+
+    <Tip>
+
+        Note that it's possible to fine-tune ViT on higher resolution images than the ones it has been trained on, by
+        setting `interpolate_pos_encoding` to `True` in the forward of the model. This will interpolate the pre-trained
+        position embeddings to the higher resolution.
+
+    </Tip>
+    """
+)
+class ViTForImageClassification(ViTPreTrainedModel):
+    def __init__(self, config: ViTConfig):
+        super().__init__(config)
+
+        self.num_labels = config.num_labels
+        self.vit = ViTModel(config, add_pooling_layer=False)
+
+        # Classifier head
+        self.classifier = (
+            SpikingLinear(config.hidden_size, config.num_labels)
+            if config.num_labels > 0
+            else nn.Identity()
+        )
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        interpolate_pos_encoding: Optional[bool] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> ImageClassifierOutput:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the image classification/regression loss. Indices should be in `[0, ...,
+            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
+            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+        """
+
+        outputs, sequence_potential = self.vit(
+            pixel_values,
+            interpolate_pos_encoding=interpolate_pos_encoding,
+            return_potential=True,
+            **kwargs,
+        )
+
+        pooled_potential = Potential(
+            sequence_potential.value[:, 0, :],
+            sequence_potential.domain,
+        )
+        if isinstance(self.classifier, SpikingLinear):
+            logits = self.classifier(pooled_potential).value
+        else:
+            logits = self.classifier(pooled_potential.value)
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(labels, logits, self.config, **kwargs)
+
+        return ImageClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+__all__ = ["SpikingLayerNorm", "SpikingLinear", "ViTForImageClassification", "ViTForMaskedImageModeling", "ViTModel", "ViTPreTrainedModel"]

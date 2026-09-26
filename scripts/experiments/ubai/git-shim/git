@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -lt 3 ] || [ "$1" != "-C" ]; then
+    echo "authenticated git shim only supports git -C <root>" >&2
+    exit 2
+fi
+
+source_root="$2"
+shift 2
+
+case "$source_root" in
+    /data/depth-runner)
+        commit="${DEPTH_AUTHENTICATED_RUNNER_COMMIT:?missing runner commit}"
+        ;;
+    /data/depth-evaluator)
+        commit="${DEPTH_AUTHENTICATED_EVALUATOR_COMMIT:?missing evaluator commit}"
+        ;;
+    *)
+        echo "authenticated git shim rejects source root: $source_root" >&2
+        exit 2
+        ;;
+esac
+
+if [ "$#" -eq 2 ] && [ "$1" = "rev-parse" ] && [ "$2" = "HEAD" ]; then
+    printf '%s\n' "$commit"
+    exit 0
+fi
+
+if [ "$#" -eq 3 ] && [ "$1" = "status" ] && [ "$2" = "--porcelain" ] \
+    && [ "$3" = "--untracked-files=no" ]; then
+    exit 0
+fi
+
+echo "authenticated git shim rejects command: $*" >&2
+exit 2
