@@ -1,0 +1,1837 @@
+from dataclasses import dataclass
+import hashlib
+import json
+import math
+from pathlib import Path
+import sys
+import time
+from typing import Any, Literal
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import torch, wandb, argparse
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from utils.transformers.optional_tensorboard import create_summary_writer
+from torch.nn.parallel import DataParallel
+from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
+from transformers import AttentionInterface, AutoModelForImageClassification
+from transformers.models.vit import ViTImageProcessor
+from utils.transformers.models.spiking_vit.modeling_spiking_vit import (
+    ViTEncoder,
+    ViTForImageClassification,
+    ViTSelfAttention,
+)
+from utils.transformers.models.spiking_ops import (
+    SpikingConv2d,
+    SpikingLayerNorm,
+    SpikingLinear,
+)
+from utils.transforms import types as transform_types
+from utils.transforms.clock import (
+    get_clock_driven_stats,
+    get_clock_update_stats,
+    set_clock_driven,
+)
+from utils.transforms.types import Potential
+from utils.transforms.calibration import (
+    CalibrationMode,
+    create_calibration_collector,
+    create_calibration_runtime,
+    get_calibration_clipping_report,
+    load_calibration_table,
+    save_calibration_table,
+    validate_calibration_table_specs,
+)
+from utils.transforms.noise import (
+    get_gaussian_noise_stats,
+    install_range_mismatch,
+    set_gaussian_time_noise,
+)
+from utils.transformers.models.spiking_vit.configuration_spiking_vit import ViTConfig
+from utils.transformers.calibration import bind_model_calibration, clear_model_calibration
+from utils.transformers.models.spiking_vit.calibration import (
+    build_vit_calibration_metadata,
+    collect_vit_calibration_table,
+    image_processor_pixel_bounds,
+    select_calibration_subset,
+    vit_calibration_specs,
+)
+from utils.transformers.integrations.spiking_sdpa_attention import spiking_sdpa_attention_forward
+from tqdm import tqdm
+
+_TB_LOG_BATCHES = 10  # 처음 N 배치에서만 히스토그램 로그
+_QUANTILE_DIR = _REPO_ROOT / "artifacts" / "quantiles"
+
+AttentionInterface.register("spiking_sdpa", spiking_sdpa_attention_forward)
+# import os
+# os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+
+@dataclass
+class Arguments:
+    """Command-line configuration consumed by the ViT evaluator.
+
+    Dynamic event noise is represented only by direct Gaussian spike-time error.
+    Timing-noise fractions are dimensionless and applied to each encoder's declared
+    time window. Optional linear and logarithmic values override the shared default
+    without introducing another sampling path.
+    """
+
+    # Evaluation, backend, and model-conversion controls are independent of the
+    # selected non-ideality experiments.
+    experiment_name: str
+    model_backend: Literal["hf", "spiking"]
+    model_id: str
+    dataset_id: str
+    evaluation_dataset_path: str
+    evaluation_split: str
+    evaluation_shard_count: int
+    evaluation_shard_index: int
+    image_preprocessing_config: str
+    batch_size: int
+    evaluation_samples: int
+    device: Literal["cuda", "cpu"]
+    precision: Literal["float32", "float64", "bfloat16", "float16"]
+    max_eval_batches: int
+    benchmark_warmup_batches: int
+    benchmark_measure_batches: int
+    spiking_layernorm: bool
+    spiking_attention: bool
+    spiking_ln_mul: bool
+    spiking_ln_log: bool
+    spiking_ln_expdiff: bool
+    spiking_mlp: bool
+    spiking_mlp_exact_gelu: bool
+    spiking_mlp_exact_gelu_layers: tuple[int, ...]
+    activation: Literal["relu", "gelu"]
+    clock_driven: bool
+    clock_time_step: float
+    clock_time_steps_per_window: int
+
+    # Layer-wise calibration is an explicit artifact lifecycle. Collection uses a
+    # deterministic subset of the training split; frozen phases only load and apply
+    # the resulting table while recording clipping statistics.
+    calibration_mode: Literal["none", "collect", "validate", "inference"]
+    calibration_path: str
+    calibration_samples: int
+    calibration_seed: int
+    calibration_bins: int
+    calibration_lower_quantile: float
+    calibration_upper_quantile: float
+    calibration_margin_fraction: float
+
+    # Direct Gaussian timing noise uses one relative default plus optional linear
+    # and logarithmic overrides, one absolute mean, and one shared replica seed.
+    gaussian_time_noise: bool
+    time_noise_std_frac: float
+    linear_time_noise_std_frac: float | None
+    log_time_noise_std_frac: float | None
+    time_noise_mean: float
+    time_noise_deadline_margin_std: float
+    time_noise_seed: int
+    time_noise_vit_first_block_count: int | None
+
+    # Static device and parameter non-idealities remain separate from event timing
+    # so their effects can be swept and attributed independently.
+    mismatch_enabled: bool
+    mismatch_range_std_frac: float
+    mismatch_seed: int
+    weight_noise_std: float
+    bias_noise_std: float
+
+    # Diagnostic and smoke-evaluation controls do not alter operator definitions.
+    collect_quantiles: bool
+    report_clamp_stats: bool
+    quick_test: bool
+    tensorboard: bool
+    source_commit: str
+    checkpoint_sha256: str
+
+def parse_arguments() -> Arguments:
+    """Parse the ViT evaluator command line into its typed configuration.
+
+    The maintained dynamic-noise interface exposes one direct Gaussian timing
+    model. Its standard deviation is entered as a fraction of the identity-code
+    window and converted to absolute time inside evaluation, while the mean and
+    seed are already absolute replica parameters. Static mismatch and parameter
+    perturbation options remain independent.
+
+    Returns:
+        A fully populated :class:`Arguments` instance.
+    """
+    # General evaluation and spiking-ablation options remain unchanged so this
+    # migration affects only the dynamic event-noise interface.
+    parser = argparse.ArgumentParser(description="Evaluate ViT model with Spiking SDPA attention.")
+    parser.add_argument("--experiment_name", type=str,
+                        help="Name of the experiment for logging purposes.")
+    parser.add_argument("--model_backend", type=str, choices=["hf", "spiking"], default="hf",
+                        help="Model backend to use (hf: vanilla HF ViT, spiking: spiking_vit class).")
+    parser.add_argument("--model_id", type=str, default="/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k",
+                        help="Pretrained ViT model ID from Hugging Face.")
+    parser.add_argument("--dataset_id", type=str, default="cifar10",
+                        help="Dataset ID from Hugging Face datasets library.")
+    parser.add_argument(
+        "--evaluation-dataset-path",
+        type=str,
+        default="",
+        help=(
+            "Optional datasets.save_to_disk artifact. When supplied, evaluation "
+            "does not call load_dataset or access a remote dataset registry."
+        ),
+    )
+    parser.add_argument(
+        "--evaluation-split",
+        type=str,
+        default="",
+        help=(
+            "Split key for a saved DatasetDict and metadata label for a saved "
+            "Dataset; defaults to the dataset configuration's evaluation split."
+        ),
+    )
+    parser.add_argument(
+        "--image-preprocessing-config",
+        type=str,
+        default="",
+        help=(
+            "Optional checked JSON specification for the checkpoint's timm "
+            "evaluation transform. An empty value preserves the checkpoint's "
+            "Hugging Face image processor."
+        ),
+    )
+    parser.add_argument("--batch_size", type=int, default=32,
+                        help="Batch size for evaluation.")
+    parser.add_argument(
+        "--evaluation-samples",
+        type=int,
+        default=0,
+        help="Evaluate exactly this many examples from the saved dataset prefix; 0 uses all.",
+    )
+    parser.add_argument("--max_eval_batches", type=int, default=0,
+                        help="If > 0, stop after this many evaluation batches for smoke testing.")
+    parser.add_argument(
+        "--benchmark-warmup-batches",
+        type=int,
+        default=0,
+        help="CUDA benchmark warm-up batches excluded from accuracy and timing.",
+    )
+    parser.add_argument(
+        "--benchmark-measure-batches",
+        type=int,
+        default=0,
+        help="If > 0, time exactly this many batches after benchmark warm-up.",
+    )
+    parser.add_argument("--device", type=str, choices=["cuda", "cpu"], default="cuda",
+                        help="Device to run the evaluation on (e.g., 'cuda' or 'cpu').")
+    parser.add_argument("--precision", type=str, choices=["float32", "float64", "bfloat16", "float16"], default="float32",
+                        help="PyTorch precision (dtype) to use (default: float32).")
+    parser.add_argument("--spiking-layernorm", action=argparse.BooleanOptionalAction, default=True,
+                        help="Use SpikingLayerNorm instead of standard nn.LayerNorm.")
+    parser.add_argument("--spiking-attention", action=argparse.BooleanOptionalAction, default=True,
+                        help="Use spiking SDPA attention instead of standard eager attention.")
+    parser.add_argument("--spiking-ln-mul", action=argparse.BooleanOptionalAction, default=True,
+                        help="[SpikingLayerNorm] Stage 1: use ψ_M for variance (vs direct x²).")
+    parser.add_argument("--spiking-ln-log", action=argparse.BooleanOptionalAction, default=True,
+                        help="[SpikingLayerNorm] Stage 2: use φ_NL for spike encoding (vs standard log).")
+    parser.add_argument("--spiking-ln-expdiff", action=argparse.BooleanOptionalAction, default=True,
+                        help="[SpikingLayerNorm] Stage 3: use ψ_ED for normalisation (vs direct exp).")
+    parser.add_argument("--spiking-mlp", action=argparse.BooleanOptionalAction, default=True,
+                        help="Use φ_NL clip activation in MLP (vs GELU). Implements ψ_L via PWM.")
+    parser.add_argument("--spiking-mlp-exact-gelu", action=argparse.BooleanOptionalAction, default=False,
+                        help="Replace every temporal GELU with the same tanh formula evaluated densely.")
+    parser.add_argument(
+        "--spiking-mlp-exact-gelu-layers",
+        type=int,
+        nargs="*",
+        default=(),
+        help=(
+            "Zero-based ViT encoder layers whose temporal GELU is replaced by "
+            "the same tanh formula evaluated densely."
+        ),
+    )
+    parser.add_argument("--activation", type=str, choices=["relu", "gelu"], default="gelu",
+                        help="Activation function to use when --no-spiking-mlp is set (default: gelu).")
+    parser.add_argument(
+        "--clock-driven",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Execute TTFS events, PWM durations, and exponential readouts with "
+            "explicit sequential discrete-time updates."
+        ),
+    )
+    parser.add_argument(
+        "--clock-time-step",
+        "--clock-time-bin",
+        dest="clock_time_step",
+        type=float,
+        default=0.0,
+        help=(
+            "Global time-bin width for --clock-driven execution; disabled runs "
+            "require 0."
+        ),
+    )
+    parser.add_argument(
+        "--clock-time-steps-per-window",
+        type=int,
+        default=0,
+        help=(
+            "Number of equal time steps in every declared time window for "
+            "--clock-driven execution; mutually exclusive with --clock-time-step."
+        ),
+    )
+    parser.add_argument(
+        "--evaluation-shard-count",
+        type=int,
+        default=1,
+        help="Number of contiguous evaluation shards (default: 1).",
+    )
+    parser.add_argument(
+        "--evaluation-shard-index",
+        type=int,
+        default=0,
+        help="Zero-based contiguous evaluation shard index (default: 0).",
+    )
+
+    # Layer-wise calibration is intentionally separate from the old diagnostic
+    # quantile hook. Collection writes one reusable artifact from a deterministic
+    # training subset, while validate/inference only consume that frozen artifact.
+    parser.add_argument(
+        "--calibration-mode",
+        choices=("none", "collect", "validate", "inference"),
+        default="none",
+        help="Create or consume a layer-wise calibration artifact.",
+    )
+    parser.add_argument(
+        "--calibration-path",
+        type=str,
+        default="",
+        help="Calibration JSON path; required unless calibration mode is none.",
+    )
+    parser.add_argument(
+        "--calibration-samples",
+        type=int,
+        default=1024,
+        help="Fixed number of training samples selected for both collection passes.",
+    )
+    parser.add_argument(
+        "--calibration-seed",
+        type=int,
+        default=0,
+        help="Seed defining the deterministic training-subset permutation.",
+    )
+    parser.add_argument(
+        "--calibration-bins",
+        type=int,
+        default=2048,
+        help="Number of fixed histogram bins per calibrated layer output.",
+    )
+    parser.add_argument(
+        "--calibration-lower-quantile",
+        type=float,
+        default=0.0,
+        help="Lower histogram endpoint; defaults to the observed minimum.",
+    )
+    parser.add_argument(
+        "--calibration-upper-quantile",
+        type=float,
+        default=1.0,
+        help="Upper histogram endpoint; defaults to the observed maximum.",
+    )
+    parser.add_argument(
+        "--calibration-margin-fraction",
+        type=float,
+        default=0.05,
+        help="Per-side range expansion after endpoint selection.",
+    )
+
+    # Direct Gaussian spike-time noise uses the common four-option CLI shared by
+    # every model family.
+    parser.add_argument(
+        "--gaussian-time-noise",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Apply direct Gaussian error to every event-aware spike time.",
+    )
+    parser.add_argument(
+        "--time-noise-std-frac",
+        type=float,
+        default=0.0,
+        help="Gaussian time std as a fraction of each encoder's declared time window.",
+    )
+    parser.add_argument(
+        "--linear-time-noise-std-frac",
+        type=float,
+        default=None,
+        help=(
+            "Optional linear-encoding Gaussian std fraction; defaults to "
+            "--time-noise-std-frac."
+        ),
+    )
+    parser.add_argument(
+        "--log-time-noise-std-frac",
+        type=float,
+        default=None,
+        help=(
+            "Optional logarithmic-encoding Gaussian std fraction; defaults to "
+            "--time-noise-std-frac."
+        ),
+    )
+    parser.add_argument(
+        "--time-noise-mean",
+        type=float,
+        default=0.0,
+        help="Gaussian timing mean in absolute time units (default: 0.0).",
+    )
+    parser.add_argument(
+        "--time-noise-deadline-margin-std",
+        type=float,
+        default=0.0,
+        help=(
+            "Late-arrival grace as a multiple of Gaussian sigma; accepted late "
+            "events saturate at the nominal code endpoint."
+        ),
+    )
+    parser.add_argument(
+        "--time-noise-seed",
+        type=int,
+        default=0,
+        help="Seed for the evaluator replica's dedicated timing-noise generator.",
+    )
+    parser.add_argument(
+        "--time-noise-vit-first-block-count",
+        type=int,
+        default=None,
+        help=(
+            "Restrict Gaussian timing noise to the first K ViT encoder blocks; "
+            "omission preserves the existing model-wide injection scope."
+        ),
+    )
+    # Static range mismatch and learned-parameter perturbations deliberately
+    # remain separate controls rather than being folded into event timing noise.
+    parser.add_argument("--mismatch-enabled", action=argparse.BooleanOptionalAction, default=False,
+                        help="[C] Static per-module range-relative offset (frozen).")
+    parser.add_argument("--mismatch-range-std-frac", type=float, default=0.0,
+                        help="[C] Frozen offset std relative to half the local potential range.")
+    parser.add_argument(
+        "--mismatch-seed",
+        type=int,
+        default=0,
+        help="Seed for the dedicated frozen range-mismatch replica.",
+    )
+    parser.add_argument("--weight-noise-std", type=float, default=0.0,
+                        help="Standard deviation of Gaussian noise to add to weights (default: 0.0).")
+    parser.add_argument("--bias-noise-std", type=float, default=0.0,
+                        help="Standard deviation of Gaussian noise to add to biases (default: 0.0).")
+    parser.add_argument("--collect-quantiles", action="store_true",
+                        help="Collect and print 99.9%% quantiles of absolute activations.")
+    parser.add_argument(
+        "--report-clamp-stats",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Aggregate and print named fixed-domain clamp counts across evaluation.",
+    )
+    parser.add_argument("--quick-test", action="store_true",
+                        help="Run a quick test with a small subset of the dataset and fewer batches.")
+    parser.add_argument(
+        "--tensorboard",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write TensorBoard histograms (disable on storage-constrained sweeps).",
+    )
+    parser.add_argument(
+        "--source-commit",
+        type=str,
+        default="unspecified",
+        help="Immutable source revision recorded in the evaluation log.",
+    )
+    parser.add_argument(
+        "--checkpoint-sha256",
+        type=str,
+        default="unspecified",
+        help="Precomputed checkpoint artifact digest recorded in the log.",
+    )
+
+    # Parse once, then copy every field explicitly into the dataclass so omissions
+    # or stale option names fail visibly during this staged interface migration.
+    args = parser.parse_args()
+    return Arguments(
+        experiment_name=args.experiment_name,
+        model_backend=args.model_backend,
+        model_id=args.model_id,
+        dataset_id=args.dataset_id,
+        evaluation_dataset_path=args.evaluation_dataset_path,
+        evaluation_split=args.evaluation_split,
+        evaluation_shard_count=args.evaluation_shard_count,
+        evaluation_shard_index=args.evaluation_shard_index,
+        image_preprocessing_config=args.image_preprocessing_config,
+        batch_size=args.batch_size,
+        evaluation_samples=args.evaluation_samples,
+        device=args.device,
+        precision=args.precision,
+        max_eval_batches=args.max_eval_batches,
+        benchmark_warmup_batches=args.benchmark_warmup_batches,
+        benchmark_measure_batches=args.benchmark_measure_batches,
+        spiking_layernorm=args.spiking_layernorm,
+        spiking_attention=args.spiking_attention,
+        spiking_ln_mul=args.spiking_ln_mul,
+        spiking_ln_log=args.spiking_ln_log,
+        spiking_ln_expdiff=args.spiking_ln_expdiff,
+        spiking_mlp=args.spiking_mlp,
+        spiking_mlp_exact_gelu=args.spiking_mlp_exact_gelu,
+        spiking_mlp_exact_gelu_layers=tuple(args.spiking_mlp_exact_gelu_layers),
+        activation=args.activation,
+        clock_driven=args.clock_driven,
+        clock_time_step=args.clock_time_step,
+        clock_time_steps_per_window=args.clock_time_steps_per_window,
+        calibration_mode=args.calibration_mode,
+        calibration_path=args.calibration_path,
+        calibration_samples=args.calibration_samples,
+        calibration_seed=args.calibration_seed,
+        calibration_bins=args.calibration_bins,
+        calibration_lower_quantile=args.calibration_lower_quantile,
+        calibration_upper_quantile=args.calibration_upper_quantile,
+        calibration_margin_fraction=args.calibration_margin_fraction,
+        gaussian_time_noise=args.gaussian_time_noise,
+        time_noise_std_frac=args.time_noise_std_frac,
+        linear_time_noise_std_frac=args.linear_time_noise_std_frac,
+        log_time_noise_std_frac=args.log_time_noise_std_frac,
+        time_noise_mean=args.time_noise_mean,
+        time_noise_deadline_margin_std=args.time_noise_deadline_margin_std,
+        time_noise_seed=args.time_noise_seed,
+        time_noise_vit_first_block_count=args.time_noise_vit_first_block_count,
+        mismatch_enabled=args.mismatch_enabled,
+        mismatch_range_std_frac=args.mismatch_range_std_frac,
+        mismatch_seed=args.mismatch_seed,
+        weight_noise_std=args.weight_noise_std,
+        bias_noise_std=args.bias_noise_std,
+        collect_quantiles=args.collect_quantiles,
+        report_clamp_stats=args.report_clamp_stats,
+        quick_test=args.quick_test,
+        tensorboard=args.tensorboard,
+        source_commit=args.source_commit,
+        checkpoint_sha256=args.checkpoint_sha256,
+    )
+
+
+def validate_vit_calibration_arguments(
+    args: Arguments,
+) -> CalibrationMode | None:
+    """Validate the ViT calibration artifact lifecycle before external setup.
+
+    ``none`` preserves analytic fixed ranges without binding calibration state.
+    Collection must use a clean deterministic spiking model, while validation and
+    inference may reuse the frozen clean table under separately configured robustness
+    noise. All statistical controls remain explicit and are persisted in the table.
+
+    Args:
+        args: Parsed ViT evaluator configuration.
+
+    Returns:
+        The internal calibration mode, or ``None`` when calibration is disabled.
+
+    Raises:
+        TypeError: If calibration fields have invalid scalar types.
+        ValueError: If paths, counts, quantiles, margins, or backend combinations are
+            invalid for the selected lifecycle phase.
+    """
+    # Convert the user-facing disabled value separately because CalibrationMode has
+    # only the three active phases shared by collectors and frozen runtimes.
+    if not isinstance(args.calibration_mode, str):
+        raise TypeError("calibration_mode must be a string")
+    if args.calibration_mode == "none":
+        return None
+    try:
+        mode = CalibrationMode(args.calibration_mode)
+    except ValueError as error:
+        raise ValueError("unsupported calibration_mode") from error
+    if args.model_backend != "spiking":
+        raise ValueError("layer-wise calibration requires model_backend=spiking")
+    if not isinstance(args.calibration_path, str):
+        raise TypeError("calibration_path must be a string")
+    if not args.calibration_path.strip():
+        raise ValueError("calibration_path is required for active calibration")
+
+    # Counts and seed define the exact deterministic training subset and histogram
+    # layout. Reject Boolean aliases and invalid ranges before loading any dataset.
+    for name, value in (
+        ("calibration_samples", args.calibration_samples),
+        ("calibration_seed", args.calibration_seed),
+        ("calibration_bins", args.calibration_bins),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{name} must be an integer")
+    if args.calibration_samples <= 0:
+        raise ValueError("calibration_samples must be positive")
+    if args.calibration_seed < 0:
+        raise ValueError("calibration_seed must be non-negative")
+    if args.calibration_bins < 2:
+        raise ValueError("calibration_bins must be at least two")
+
+    # Signed residual calibration needs ordered probability cutoffs and a
+    # non-negative per-side margin. The collector performs the same validation, but
+    # checking here avoids expensive model and data initialization on bad CLI input.
+    for name, value in (
+        ("calibration_lower_quantile", args.calibration_lower_quantile),
+        ("calibration_upper_quantile", args.calibration_upper_quantile),
+        ("calibration_margin_fraction", args.calibration_margin_fraction),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{name} must be a real number")
+        if not math.isfinite(float(value)):
+            raise ValueError(f"{name} must be finite")
+    if not 0.0 <= args.calibration_lower_quantile <= 1.0:
+        raise ValueError("calibration_lower_quantile must lie in [0, 1]")
+    if not 0.0 <= args.calibration_upper_quantile <= 1.0:
+        raise ValueError("calibration_upper_quantile must lie in [0, 1]")
+    if args.calibration_lower_quantile > args.calibration_upper_quantile:
+        raise ValueError("calibration quantiles must be ordered")
+    if args.calibration_margin_fraction < 0.0:
+        raise ValueError("calibration_margin_fraction must be non-negative")
+
+    # Collection measures only the clean deterministic model. Frozen phases are
+    # allowed to add these independent robustness axes after metadata compatibility
+    # has been established against the clean table.
+    if mode is CalibrationMode.COLLECT and (
+        args.gaussian_time_noise
+        or args.clock_driven
+        or args.mismatch_enabled
+        or args.mismatch_range_std_frac != 0.0
+        or args.weight_noise_std != 0.0
+        or args.bias_noise_std != 0.0
+    ):
+        raise ValueError(
+            "calibration collection requires clock-driven execution, timing noise, "
+            "mismatch, and parameter perturbations to be disabled"
+        )
+    return mode
+
+
+def validate_vit_runtime_arguments(args: Arguments) -> None:
+    """Reject ambiguous offline-dataset and benchmark configurations early."""
+
+    for name, value in (
+        ("evaluation_samples", args.evaluation_samples),
+        ("max_eval_batches", args.max_eval_batches),
+        ("benchmark_warmup_batches", args.benchmark_warmup_batches),
+        ("benchmark_measure_batches", args.benchmark_measure_batches),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+    if args.evaluation_samples and args.quick_test:
+        raise ValueError("evaluation_samples and quick_test are mutually exclusive")
+    if args.evaluation_samples and args.max_eval_batches:
+        raise ValueError("evaluation_samples and max_eval_batches are mutually exclusive")
+    if args.evaluation_samples and args.benchmark_measure_batches:
+        raise ValueError(
+            "evaluation_samples and benchmark measure batches are mutually exclusive"
+        )
+    first_block_count = args.time_noise_vit_first_block_count
+    if first_block_count is not None:
+        if isinstance(first_block_count, bool) or not isinstance(first_block_count, int):
+            raise TypeError("time_noise_vit_first_block_count must be an integer")
+        if first_block_count < 0:
+            raise ValueError("time_noise_vit_first_block_count must be non-negative")
+        if args.model_backend != "spiking" or not args.gaussian_time_noise:
+            raise ValueError(
+                "ViT block-scoped timing noise requires a noisy spiking backend"
+            )
+    if args.benchmark_warmup_batches and not args.benchmark_measure_batches:
+        raise ValueError(
+            "benchmark warm-up batches require benchmark measure batches"
+        )
+    if args.benchmark_measure_batches and args.max_eval_batches:
+        raise ValueError(
+            "benchmark measure batches and max_eval_batches are mutually exclusive"
+        )
+    if args.evaluation_dataset_path:
+        dataset_path = Path(args.evaluation_dataset_path).expanduser()
+        if not dataset_path.exists():
+            raise ValueError(
+                f"evaluation dataset path does not exist: {dataset_path}"
+            )
+    if args.image_preprocessing_config:
+        preprocessing_path = Path(args.image_preprocessing_config).expanduser()
+        if not preprocessing_path.is_file():
+            raise ValueError(
+                f"image preprocessing config does not exist: {preprocessing_path}"
+            )
+    if args.evaluation_shard_count <= 0:
+        raise ValueError("evaluation_shard_count must be positive")
+    if not 0 <= args.evaluation_shard_index < args.evaluation_shard_count:
+        raise ValueError(
+            "evaluation_shard_index must be inside evaluation_shard_count"
+        )
+    if not isinstance(args.clock_driven, bool):
+        raise TypeError("clock_driven must be a bool")
+    clock_time_step = float(args.clock_time_step)
+    clock_time_steps_per_window = args.clock_time_steps_per_window
+    if isinstance(clock_time_steps_per_window, bool) or not isinstance(
+        clock_time_steps_per_window, int
+    ):
+        raise TypeError("clock_time_steps_per_window must be an integer")
+    if args.clock_driven:
+        if args.model_backend != "spiking":
+            raise ValueError("clock-driven execution requires model_backend=spiking")
+        fixed_step = math.isfinite(clock_time_step) and clock_time_step > 0.0
+        fixed_window = clock_time_steps_per_window > 0
+        if fixed_step == fixed_window:
+            raise ValueError(
+                "clock-driven execution requires exactly one positive clock time "
+                "step or time steps per window"
+            )
+        if (
+            args.gaussian_time_noise
+            or args.time_noise_std_frac != 0.0
+            or args.linear_time_noise_std_frac is not None
+            or args.log_time_noise_std_frac is not None
+            or args.time_noise_mean != 0.0
+            or args.time_noise_deadline_margin_std != 0.0
+        ):
+            raise ValueError(
+                "clock-driven evaluation requires Gaussian timing noise to be disabled"
+            )
+    elif clock_time_step != 0.0 or clock_time_steps_per_window != 0:
+        raise ValueError(
+            "clock parameters must be zero when clock-driven is disabled"
+        )
+
+
+def select_evaluation_examples(
+    dataset: Any,
+    *,
+    evaluation_samples: int,
+    quick_test: bool,
+) -> Any:
+    """Select one deterministic evaluation prefix without changing its order."""
+    if isinstance(evaluation_samples, bool) or not isinstance(evaluation_samples, int):
+        raise TypeError("evaluation_samples must be an integer")
+    if evaluation_samples < 0:
+        raise ValueError("evaluation_samples must be non-negative")
+    if evaluation_samples and quick_test:
+        raise ValueError("evaluation_samples and quick_test are mutually exclusive")
+    if evaluation_samples > len(dataset):
+        raise ValueError("evaluation_samples exceeds the saved evaluation population")
+    if evaluation_samples:
+        return dataset.select(range(evaluation_samples))
+    if quick_test:
+        return dataset.select(range(min(5000, len(dataset))))
+    return dataset
+
+
+def require_finite_logits(logits: torch.Tensor) -> None:
+    """Reject invalid numeric output before it can become a finite accuracy."""
+    if not bool(torch.isfinite(logits).all()):
+        raise ValueError("Evaluation logits contain NaN or infinite values")
+
+
+def log_evaluation_progress(
+    *, experiment_name: str, backend: str, completed_batches: int,
+    total_batches: int, correct: int, evaluated_samples: int,
+    expected_samples: int, elapsed_seconds: float,
+) -> None:
+    """Flush cumulative accuracy to the ordinary log without marking completion."""
+    counts = (completed_batches, total_batches, correct, evaluated_samples, expected_samples)
+    if any(type(value) is not int for value in counts) or not (
+        0 < completed_batches <= total_batches
+        and 0 <= correct <= evaluated_samples <= expected_samples
+        and evaluated_samples > 0
+    ):
+        raise ValueError("Invalid evaluation progress counts")
+    if not math.isfinite(elapsed_seconds) or elapsed_seconds < 0:
+        raise ValueError("Invalid evaluation progress duration")
+    print("Evaluation progress — " + json.dumps({
+        "experiment_name": experiment_name,
+        "backend": backend,
+        "status": "partial",
+        "completed_batches": completed_batches,
+        "total_batches": total_batches,
+        "correct": correct,
+        "evaluated_samples": evaluated_samples,
+        "expected_samples": expected_samples,
+        "accuracy": correct / evaluated_samples,
+        "elapsed_seconds": round(elapsed_seconds, 3),
+        "estimated_remaining_seconds": round(
+            elapsed_seconds * (expected_samples - evaluated_samples) / evaluated_samples, 3,
+        ),
+    }, sort_keys=True, allow_nan=False), flush=True)
+
+
+def load_evaluation_dataset(
+    args: Arguments,
+    *,
+    configured_split: str,
+) -> tuple[Dataset, str, str]:
+    """Load the registry dataset or an offline ``save_to_disk`` artifact."""
+
+    split = args.evaluation_split.strip() or configured_split
+    if not args.evaluation_dataset_path:
+        dataset = load_dataset(
+            args.dataset_id,
+            split=split,
+            cache_dir="/data/nas/datasets/",
+        )
+        if not isinstance(dataset, Dataset):
+            raise TypeError("evaluation split did not resolve to a Dataset")
+        return dataset, split, f"registry:{args.dataset_id}"
+
+    dataset_path = Path(args.evaluation_dataset_path).expanduser().resolve()
+    loaded = load_from_disk(str(dataset_path))
+    if isinstance(loaded, DatasetDict):
+        if split not in loaded:
+            raise ValueError(
+                f"saved DatasetDict has no split {split!r}: {dataset_path}"
+            )
+        dataset = loaded[split]
+    elif isinstance(loaded, Dataset):
+        dataset = loaded
+    else:
+        raise TypeError(
+            "evaluation dataset path must contain a saved Dataset or DatasetDict"
+        )
+    return dataset, split, f"disk:{dataset_path}"
+
+
+def evaluation_shard_bounds(
+    population: int,
+    shard_count: int,
+    shard_index: int,
+) -> tuple[int, int]:
+    """Return one contiguous, balanced half-open range over an evaluation set."""
+
+    if population < 0 or shard_count <= 0:
+        raise ValueError("population must be non-negative and shard_count positive")
+    if not 0 <= shard_index < shard_count:
+        raise ValueError("shard_index must be inside shard_count")
+    shard_base, shard_remainder = divmod(population, shard_count)
+    shard_start = shard_index * shard_base + min(shard_index, shard_remainder)
+    shard_size = shard_base + int(shard_index < shard_remainder)
+    return shard_start, shard_start + shard_size
+
+DATASET_CONFIGS = {
+    "cifar10": {
+        "split": "test",
+        "calibration_split": "train",
+        "image_key": "img",
+        "label_key": "label",
+    },
+    "imagenet-1k": {
+        "split": "validation",
+        "calibration_split": "train",
+        "image_key": "image",
+        "label_key": "label",
+    },
+}
+
+
+class TimmEvaluationProcessor:
+    """Apply one explicitly recorded timm evaluation transform to PIL images."""
+
+    def __init__(self, spec: dict[str, Any], *, config_sha256: str) -> None:
+        from timm.data import create_transform
+
+        self.preprocessing_backend = "timm"
+        self.preprocessing_config_sha256 = config_sha256
+        self.input_size = tuple(spec["input_size"])
+        self.interpolation = spec["interpolation"]
+        self.crop_pct = float(spec["crop_pct"])
+        self.crop_mode = spec["crop_mode"]
+        self.image_mean = tuple(float(value) for value in spec["mean"])
+        self.image_std = tuple(float(value) for value in spec["std"])
+        self.do_resize = True
+        self.size = {"height": self.input_size[1], "width": self.input_size[2]}
+        self.do_center_crop = self.crop_mode == "center"
+        self.crop_size = dict(self.size)
+        self.do_rescale = True
+        self.rescale_factor = 1.0 / 255.0
+        self.do_normalize = True
+        self.antialias = True
+        self._transform = create_transform(
+            input_size=self.input_size,
+            is_training=False,
+            interpolation=self.interpolation,
+            mean=self.image_mean,
+            std=self.image_std,
+            crop_pct=self.crop_pct,
+            crop_mode=self.crop_mode,
+        )
+
+    def __call__(self, images: list[Any], *, return_tensors: str) -> dict[str, torch.Tensor]:
+        if return_tensors != "pt" or not images:
+            raise ValueError("timm evaluation preprocessing requires a nonempty PyTorch batch")
+        return {"pixel_values": torch.stack([self._transform(image) for image in images])}
+
+
+def load_vit_image_processor(model_id: str, config_path: str) -> Any:
+    """Load either the legacy checkpoint processor or a checked timm specification."""
+    if not config_path:
+        fallback = (
+            "google/vit-base-patch16-224-in21k"
+            if model_id == "mpiorczynski/relu-vit-base-patch16-224"
+            else model_id
+        )
+        return ViTImageProcessor.from_pretrained(fallback)
+
+    path = Path(config_path).expanduser().resolve()
+    raw = path.read_bytes()
+    payload = json.loads(raw)
+    if payload.get("schema_version") != 1 or set(payload) != {"schema_version", "models"}:
+        raise ValueError("unsupported timm preprocessing configuration schema")
+    model_name = Path(model_id).resolve().name
+    models = payload.get("models")
+    if not isinstance(models, dict) or model_name not in models:
+        raise ValueError(f"timm preprocessing configuration has no entry for {model_name}")
+    spec = models[model_name]
+    required = {"input_size", "interpolation", "mean", "std", "crop_pct", "crop_mode"}
+    if not isinstance(spec, dict) or set(spec) != required:
+        raise ValueError("timm preprocessing entry has unexpected fields")
+    if spec["input_size"] != [3, 224, 224]:
+        raise ValueError("comparison timm preprocessing requires 3x224x224 input")
+    if spec["interpolation"] != "bicubic" or spec["crop_mode"] != "center":
+        raise ValueError("comparison timm preprocessing requires bicubic center crop")
+    if spec["mean"] != [0.5, 0.5, 0.5] or spec["std"] != [0.5, 0.5, 0.5]:
+        raise ValueError("comparison timm preprocessing normalization differs")
+    if spec["crop_pct"] != 0.9:
+        raise ValueError("comparison timm preprocessing crop fraction differs")
+    return TimmEvaluationProcessor(
+        spec,
+        config_sha256=hashlib.sha256(raw).hexdigest(),
+    )
+
+def configure_vit_exact_gelu_layers(
+    model: nn.Module,
+    layer_indices: tuple[int, ...],
+) -> None:
+    """Select ViT blocks that evaluate the maintained GELU formula densely.
+
+    The ablation preserves both MLP affine layers and the tanh-approximation
+    formula. It changes only whether the nonlinear formula is assembled from
+    temporal operators, allowing an accuracy difference to be attributed to the
+    selected block's temporal GELU implementation rather than to a different
+    mathematical activation.
+
+    Args:
+        model: A local spiking ViT image-classification model.
+        layer_indices: Unique zero-based encoder-block indices to bypass.
+
+    Raises:
+        ValueError: If an index is duplicated or outside the encoder depth.
+        RuntimeError: If the supplied model does not expose the expected local
+            spiking ViT encoder/intermediate topology.
+    """
+    # An empty selection is the normal production path. Returning before topology
+    # inspection keeps the option harmless for dense backends and ordinary runs.
+    if not layer_indices:
+        return
+
+    # Repeating an index usually indicates a malformed sweep condition. Reject it
+    # instead of silently collapsing the experiment identity to a set.
+    if len(set(layer_indices)) != len(layer_indices):
+        raise ValueError(
+            "spiking_mlp_exact_gelu_layers must contain unique layer indices"
+        )
+
+    # Resolve the local adapter's explicit block list once. A clear topology error
+    # is preferable to partially mutating a model from an incompatible backend.
+    try:
+        encoder_layers = model.vit.encoder.layer
+    except AttributeError as exc:
+        raise RuntimeError(
+            "per-layer exact-GELU ablation requires the local spiking ViT topology"
+        ) from exc
+
+    # Validate the complete selection before changing any module so an invalid
+    # later index cannot leave the model in a partially configured state.
+    depth = len(encoder_layers)
+    invalid = tuple(index for index in layer_indices if index < 0 or index >= depth)
+    if invalid:
+        raise ValueError(
+            f"exact-GELU layer indices {invalid} are outside [0, {depth})"
+        )
+
+    # Resolve and validate every target before mutation. This preserves the same
+    # all-or-nothing behavior when a custom model exposes only part of the adapter.
+    intermediates = tuple(encoder_layers[index].intermediate for index in layer_indices)
+    for index, intermediate in zip(layer_indices, intermediates, strict=True):
+        if not hasattr(intermediate, "_spiking_mlp_exact_gelu"):
+            raise RuntimeError(
+                f"ViT encoder layer {index} has no selectable temporal GELU"
+            )
+
+    # Toggle only the nonlinear branch inside each selected intermediate module.
+    # All unselected blocks retain the temporal GELU and share the same noise run.
+    for intermediate in intermediates:
+        intermediate._spiking_mlp_exact_gelu = True
+
+    print(
+        "Dense-formula GELU ablation layers: "
+        + ", ".join(str(index) for index in layer_indices)
+    )
+
+def apply_parameter_noise(model: nn.Module, weight_std: float, bias_std: float):
+    if weight_std <= 0 and bias_std <= 0:
+        return
+
+    print(f"Applying parameter noise: weight_std={weight_std}, bias_std={bias_std}")
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if 'weight' in name and weight_std > 0:
+                noise = torch.randn_like(param) * weight_std
+                param.mul_(1 + noise)
+            elif 'bias' in name and bias_std > 0:
+                noise = torch.randn_like(param) * bias_std * param.abs().max() 
+                param.add_(noise)
+
+def evaluate_vit_model(args: Arguments) -> None:
+    """Evaluate one ViT backend under the requested non-idealities.
+
+    The evaluator installs dimensionless timing-noise fractions once per replica;
+    each encoder converts them using its own declared time window. Because the
+    configuration and generator are process-wide mutable
+    state, Gaussian execution explicitly rejects multi-GPU ``DataParallel``.
+
+    Args:
+        args: Parsed ViT evaluation, conversion, and non-ideality settings.
+
+    Raises:
+        RuntimeError: If Gaussian timing noise would execute through
+            ``DataParallel`` across multiple CUDA devices.
+        ValueError: If Gaussian parameters fail shared noise validation.
+    """
+    # ---------------------------------------------------------
+    # 0. 시드 설정
+    # ---------------------------------------------------------
+    torch.manual_seed(42)
+    validate_vit_runtime_arguments(args)
+    calibration_mode = validate_vit_calibration_arguments(args)
+    
+    # Precision mapping
+    dtype_map = {
+        "float32": torch.float32,
+        "float64": torch.float64,
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+    }
+    dtype = dtype_map[args.precision]
+    
+    # ---------------------------------------------------------
+    # 1. 설정 (Configuration)
+    # ---------------------------------------------------------
+    model_backend = args.model_backend
+    model_id = args.model_id
+    dataset_id = args.dataset_id
+    batch_size = args.batch_size
+    device_str = args.device
+
+    ds_config = DATASET_CONFIGS.get(
+        dataset_id,
+        {
+            "split": "test",
+            "calibration_split": "train",
+            "image_key": "image",
+            "label_key": "label",
+        },
+    )
+    split = args.evaluation_split.strip() or ds_config["split"]
+    calibration_split = ds_config["calibration_split"]
+    image_key = ds_config["image_key"]
+    label_key = ds_config["label_key"]
+
+    # GPU 사용 가능 여부 확인
+    device = torch.device(device_str)
+
+    linear_time_noise_std_frac = (
+        float(args.time_noise_std_frac)
+        if args.linear_time_noise_std_frac is None
+        else float(args.linear_time_noise_std_frac)
+    )
+    log_time_noise_std_frac = (
+        float(args.time_noise_std_frac)
+        if args.log_time_noise_std_frac is None
+        else float(args.log_time_noise_std_frac)
+    )
+    for name, value in (
+        ("time_noise_std_frac", float(args.time_noise_std_frac)),
+        ("linear_time_noise_std_frac", linear_time_noise_std_frac),
+        ("log_time_noise_std_frac", log_time_noise_std_frac),
+    ):
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"{name} must be finite and non-negative")
+    gaussian_enabled = bool(
+        model_backend == "spiking" and args.gaussian_time_noise
+    )
+    clock_driven_enabled = bool(
+        model_backend == "spiking" and args.clock_driven
+    )
+    mismatch_enabled = bool(
+        model_backend == "spiking"
+        and args.mismatch_enabled
+        and args.mismatch_range_std_frac > 0.0
+    )
+
+    if gaussian_enabled and mismatch_enabled:
+        raise ValueError(
+            "Gaussian timing noise and static range mismatch must be "
+            "evaluated as separate experiment axes"
+        )
+    if clock_driven_enabled and (
+        mismatch_enabled
+        or args.weight_noise_std != 0.0
+        or args.bias_noise_std != 0.0
+    ):
+        raise ValueError(
+            "clock-driven evaluation requires mismatch and parameter noise to be disabled"
+        )
+    if args.mismatch_seed < 0:
+        raise ValueError("mismatch seed must be non-negative")
+    if (
+        not math.isfinite(float(args.time_noise_deadline_margin_std))
+        or args.time_noise_deadline_margin_std < 0.0
+    ):
+        raise ValueError(
+            "time-noise deadline margin must be finite and non-negative"
+        )
+
+    # Per-layer selection has meaning only inside the temporal MLP path. Reject
+    # combinations that would otherwise record a requested but inactive ablation.
+    if args.spiking_mlp_exact_gelu_layers and model_backend != "spiking":
+        raise ValueError(
+            "per-layer exact-GELU ablation requires --model_backend spiking"
+        )
+    if args.spiking_mlp_exact_gelu_layers and not args.spiking_mlp:
+        raise ValueError(
+            "per-layer exact-GELU ablation requires --spiking-mlp"
+        )
+    if args.spiking_mlp_exact_gelu_layers and args.spiking_mlp_exact_gelu:
+        raise ValueError(
+            "choose either all-layer or per-layer exact-GELU ablation, not both"
+        )
+
+    # A process-wide generator cannot represent independent per-device replica
+    # streams under DataParallel, so reject that topology before external setup.
+    use_data_parallel = device.type == "cuda" and torch.cuda.device_count() > 1
+    if gaussian_enabled and use_data_parallel:
+        raise RuntimeError(
+            "Gaussian spike-time noise does not support DataParallel; "
+            "run one evaluation process per GPU"
+        )
+    if mismatch_enabled and use_data_parallel:
+        raise RuntimeError(
+            "static range mismatch does not support DataParallel; "
+            "run one evaluation process per GPU"
+        )
+    if calibration_mode is not None and use_data_parallel:
+        raise RuntimeError(
+            "layer-wise calibration does not support DataParallel; "
+            "run one evaluation process per GPU"
+        )
+    if args.report_clamp_stats and use_data_parallel:
+        raise RuntimeError(
+            "named clamp statistics do not support DataParallel; "
+            "run one evaluation process per GPU"
+        )
+    if clock_driven_enabled and use_data_parallel:
+        raise RuntimeError(
+            "clock-driven execution does not support DataParallel; "
+            "run one evaluation process per GPU"
+        )
+
+    # Installing a configuration starts one seeded measurement replica and clears
+    # prior Gaussian counters. HF evaluation installs the disabled state explicitly.
+    set_gaussian_time_noise(
+        enabled=gaussian_enabled,
+        time_std_fraction=float(args.time_noise_std_frac),
+        linear_time_std_fraction=linear_time_noise_std_frac,
+        log_time_std_fraction=log_time_noise_std_frac,
+        time_mean=args.time_noise_mean,
+        deadline_margin_std_ratio=float(args.time_noise_deadline_margin_std),
+        seed=args.time_noise_seed,
+        device=device,
+        explicit_scope_required=args.time_noise_vit_first_block_count is not None,
+    )
+    set_clock_driven(
+        enabled=clock_driven_enabled,
+        time_step=float(args.clock_time_step) if clock_driven_enabled else 0.0,
+        time_steps_per_window=(
+            int(args.clock_time_steps_per_window) if clock_driven_enabled else 0
+        ),
+    )
+
+    # Every encoder derives its absolute noise scale from its own declared window.
+    cfg = {
+        **vars(args),
+        "gaussian_time_noise_effective": gaussian_enabled,
+        "time_noise_window_normalization": "encoder_local",
+        "linear_time_noise_std_frac_effective": linear_time_noise_std_frac,
+        "log_time_noise_std_frac_effective": log_time_noise_std_frac,
+        "time_noise_scope": (
+            "vit_first_blocks"
+            if args.time_noise_vit_first_block_count is not None
+            else "model_wide"
+        ),
+        "mismatch_effective": mismatch_enabled,
+        "clock_driven_effective": clock_driven_enabled,
+    }
+    effective_attn_impl = "eager"
+    if model_backend == "spiking" and device.type != "cpu" and args.spiking_attention:
+        effective_attn_impl = "spiking_sdpa"
+    cfg["attn_impl"] = effective_attn_impl
+
+    wandb.init(project=f"vit-evaluation-{args.dataset_id}", config=cfg, name=args.experiment_name)
+    print(f"Using device: {device}")
+    print(f"Model backend: {model_backend}")
+    print(f"Model: {model_id}, Dataset: {dataset_id} ({split})")
+    print(
+        "Artifact identity — "
+        f"source_commit: {args.source_commit}, "
+        f"checkpoint_sha256: {args.checkpoint_sha256}"
+    )
+    if device.type == "cuda":
+        print(f"GPU model: {torch.cuda.get_device_name(device)}")
+    print(f"Precision: {args.precision}")
+    print(
+        "Gaussian time noise — "
+        f"enabled: {gaussian_enabled}, "
+        f"std_frac: {args.time_noise_std_frac}, "
+        f"linear_std_frac: {linear_time_noise_std_frac}, "
+        f"log_std_frac: {log_time_noise_std_frac}, "
+        "window_normalization: encoder_local, "
+        f"mean_abs: {args.time_noise_mean}, "
+        f"seed: {args.time_noise_seed}, "
+        f"deadline_margin_std: {args.time_noise_deadline_margin_std}, "
+        "exponential_difference_internal: enabled"
+    )
+    print(
+        "Gaussian time-noise scope — "
+        f"vit_first_block_count: {args.time_noise_vit_first_block_count}"
+    )
+    print(
+        "Static range-relative mismatch — "
+        f"enabled: {mismatch_enabled}, "
+        f"range_std_frac: {args.mismatch_range_std_frac}, "
+        f"seed: {args.mismatch_seed}"
+    )
+    print(
+        "Clock-driven execution — "
+        f"enabled: {clock_driven_enabled}, "
+        f"time_step: {args.clock_time_step}, "
+        f"time_steps_per_window: {args.clock_time_steps_per_window}, "
+        "gaussian_time_noise: false"
+    )
+    
+    if model_backend == "spiking":
+        print(f"Spiking LayerNorm: {args.spiking_layernorm}, Spiking Attention: {args.spiking_attention}")
+        if args.spiking_layernorm:
+            print(f"  LN stages — mul: {args.spiking_ln_mul}, log: {args.spiking_ln_log}, expdiff: {args.spiking_ln_expdiff}")
+        print(f"Spiking MLP: {args.spiking_mlp}")
+        print(
+            "Per-layer dense-formula GELU: "
+            f"{args.spiking_mlp_exact_gelu_layers or 'none'}"
+        )
+
+    # ---------------------------------------------------------
+    # 2. 데이터셋 및 전처리 도구 로드
+    # ---------------------------------------------------------
+    # Evaluation and calibration use disjoint dataset splits. Collection needs only
+    # the training subset, while validate/inference additionally load the untouched
+    # evaluation split used for task accuracy and clipping reports.
+    dataset = None
+    dataset_source = "none"
+    if calibration_mode is not CalibrationMode.COLLECT:
+        print(f"Loading evaluation dataset: {dataset_id} ({split})...")
+        dataset, split, dataset_source = load_evaluation_dataset(
+            args,
+            configured_split=ds_config["split"],
+        )
+        dataset = select_evaluation_examples(
+            dataset,
+            evaluation_samples=args.evaluation_samples,
+            quick_test=args.quick_test,
+        )
+        evaluation_population = len(dataset)
+        shard_start, shard_stop = evaluation_shard_bounds(
+            evaluation_population,
+            args.evaluation_shard_count,
+            args.evaluation_shard_index,
+        )
+        if args.evaluation_shard_count > 1:
+            dataset = dataset.select(range(shard_start, shard_stop))
+        print(
+            "Evaluation shard — "
+            f"index: {args.evaluation_shard_index}, "
+            f"count: {args.evaluation_shard_count}, "
+            f"start: {shard_start}, stop: {shard_stop}, "
+            f"population: {evaluation_population}",
+            flush=True,
+        )
+        print(
+            "Evaluation metadata — "
+            f"model: {model_id}, dataset: {dataset_id}, split: {split}, "
+            f"samples: {len(dataset)}, "
+            f"precision: {args.precision}, source: {dataset_source}, "
+            f"fingerprint: {dataset._fingerprint}"
+        )
+
+    calibration_dataset = None
+    if calibration_mode is not None:
+        print(
+            f"Loading calibration dataset: {dataset_id} "
+            f"({calibration_split})..."
+        )
+        training_dataset = load_dataset(
+            dataset_id,
+            split=calibration_split,
+            cache_dir="/data/nas/datasets/",
+        )
+        calibration_dataset = select_calibration_subset(
+            training_dataset,
+            sample_count=args.calibration_samples,
+            seed=args.calibration_seed,
+        )
+
+    # Calibration and evaluation share exactly one immutable preprocessing path.
+    processor = load_vit_image_processor(model_id, args.image_preprocessing_config)
+    print("Image preprocessing — " + json.dumps({
+        "backend": getattr(processor, "preprocessing_backend", "huggingface"),
+        "config_sha256": getattr(processor, "preprocessing_config_sha256", None),
+        "input_size": getattr(processor, "input_size", None),
+        "interpolation": getattr(processor, "interpolation", None),
+        "crop_pct": getattr(processor, "crop_pct", None),
+        "crop_mode": getattr(processor, "crop_mode", None),
+        "mean": getattr(processor, "image_mean", None),
+        "std": getattr(processor, "image_std", None),
+    }, sort_keys=True), flush=True)
+
+    # ---------------------------------------------------------
+    # 3. 데이터 전처리 함수 정의
+    # ---------------------------------------------------------
+    def transform(examples):
+        # 이미지 데이터를 RGB로 변환 (흑백 이미지가 섞여 있을 경우 대비)
+        images = [x.convert("RGB") for x in examples[image_key]]
+
+        # ViT 입력 형태에 맞게 리사이즈 및 정규화
+        inputs = processor(images, return_tensors="pt")
+
+        # 'pixel_values'는 모델의 입력, 'labels'는 정답
+        inputs["labels"] = examples[label_key]
+        return inputs
+
+    # Evaluation order does not affect accuracy, but sequential sampling makes smoke
+    # runs and clipping reports reproducible. The calibration loader must reuse the
+    # exact selected dataset object with shuffle disabled for both collection passes.
+    dataloader = None
+    if dataset is not None:
+        processed_dataset = dataset.with_transform(transform)
+        dataloader = DataLoader(
+            processed_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+        )
+    calibration_dataloader = None
+    if calibration_dataset is not None:
+        processed_calibration_dataset = calibration_dataset.with_transform(transform)
+        calibration_dataloader = DataLoader(
+            processed_calibration_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+        )
+
+    # ---------------------------------------------------------
+    # 4. 모델 로드
+    # ---------------------------------------------------------
+    print(f"Loading model: {model_id}...")
+    
+    if model_backend == "hf":
+        config = ViTConfig.from_pretrained(model_id, hidden_act=args.activation)
+        model = AutoModelForImageClassification.from_pretrained(model_id, torch_dtype=dtype, config=config)
+    else:
+        config = ViTConfig.from_pretrained(
+            model_id,
+            use_spiking_layernorm=args.spiking_layernorm,
+            spiking_ln_mul=args.spiking_ln_mul,
+            spiking_ln_log=args.spiking_ln_log,
+            spiking_ln_expdiff=args.spiking_ln_expdiff,
+            use_spiking_mlp=args.spiking_mlp,
+            spiking_mlp_exact_gelu=args.spiking_mlp_exact_gelu,
+            time_noise_vit_first_block_count=args.time_noise_vit_first_block_count,
+            hidden_act=args.activation,
+        )
+        pixel_domain = image_processor_pixel_bounds(
+            processor,
+            num_channels=int(config.num_channels),
+        )
+        config.pixel_value_min = pixel_domain.min
+        config.pixel_value_max = pixel_domain.max
+        model = ViTForImageClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl, torch_dtype=dtype)
+
+        configure_vit_exact_gelu_layers(
+            model,
+            args.spiking_mlp_exact_gelu_layers,
+        )
+    
+    # Build the clean artifact identity before applying any robustness perturbation.
+    # The selected dataset fingerprint includes the training data revision and exact
+    # seeded subset indices, while model options describe the converted architecture.
+    calibration_metadata = None
+    if calibration_mode is not None:
+        if calibration_dataset is None:
+            raise RuntimeError("active calibration requires a selected training subset")
+        calibration_metadata = build_vit_calibration_metadata(
+            model_id=model_id,
+            dataset_id=dataset_id,
+            calibration_split=calibration_split,
+            calibration_dataset_fingerprint=calibration_dataset._fingerprint,
+            calibration_samples=args.calibration_samples,
+            calibration_seed=args.calibration_seed,
+            processor=processor,
+            config=config,
+            dtype=args.precision,
+            attention_implementation=effective_attn_impl,
+        )
+
+    # Collection must observe the clean converted checkpoint. Frozen validation and
+    # inference deliberately apply independent parameter noise only after the clean
+    # metadata identity has been constructed.
+    if calibration_mode is not CalibrationMode.COLLECT:
+        apply_parameter_noise(model, args.weight_noise_std, args.bias_noise_std)
+
+    model.to(device)
+    model.eval()
+
+    # Static device mismatch (frozen per-neuron threshold offsets) via forward pre-hooks.
+    # Installed after .to(device) so offsets are sampled on the model's device.
+    if (
+        calibration_mode is not CalibrationMode.COLLECT
+        and model_backend == "spiking"
+        and mismatch_enabled
+    ):
+        handles = install_range_mismatch(
+            model,
+            range_std_fraction=args.mismatch_range_std_frac,
+            enabled=True,
+            seed=args.mismatch_seed,
+        )
+        print(
+            "Installed static device mismatch on "
+            f"{len(handles)} spiking modules "
+            f"(range std fraction={args.mismatch_range_std_frac}, seed={args.mismatch_seed})."
+        )
+
+    # Collection executes the deterministic training subset twice and terminates
+    # after atomically writing the artifact. No validation example or task metric is
+    # touched in this phase.
+    if calibration_mode is CalibrationMode.COLLECT:
+        if calibration_dataloader is None or calibration_metadata is None:
+            raise RuntimeError("calibration collection setup is incomplete")
+        specs = vit_calibration_specs(
+            model,
+            lower_quantile=args.calibration_lower_quantile,
+            upper_quantile=args.calibration_upper_quantile,
+            margin_fraction=args.calibration_margin_fraction,
+        )
+        collector = create_calibration_collector(
+            calibration_metadata,
+            specs,
+            bin_count=args.calibration_bins,
+        )
+        table = collect_vit_calibration_table(
+            model,
+            calibration_dataloader,
+            collector,
+            device=device,
+            dtype=dtype,
+            expected_samples=args.calibration_samples,
+        )
+        save_calibration_table(table, args.calibration_path)
+        print(
+            f"Saved calibration artifact with {len(table.layers)} layer ranges "
+            f"to {args.calibration_path}"
+        )
+        wandb.log({"Calibration/layer_ranges": len(table.layers)})
+        wandb.finish()
+        return
+
+    # Validation and inference reject any table collected under different data,
+    # preprocessing, numerical, capacity, or model-path metadata before binding the
+    # immutable ranges to their named ViT blocks.
+    calibration_state = None
+    if calibration_mode in (CalibrationMode.VALIDATE, CalibrationMode.INFERENCE):
+        if calibration_metadata is None:
+            raise RuntimeError("frozen calibration setup is incomplete")
+        table = load_calibration_table(args.calibration_path)
+        expected_specs = vit_calibration_specs(
+            model,
+            lower_quantile=args.calibration_lower_quantile,
+            upper_quantile=args.calibration_upper_quantile,
+            margin_fraction=args.calibration_margin_fraction,
+        )
+        validate_calibration_table_specs(table, expected_specs)
+        calibration_state = create_calibration_runtime(
+            calibration_mode,
+            table,
+            expected_metadata=calibration_metadata,
+        )
+        bind_model_calibration(model, calibration_state)
+
+    # GPU 병렬화 (DataParallel) 설정
+    if use_data_parallel:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        model = DataParallel(model)
+        
+    model.eval() # 평가 모드로 전환
+
+    # ---------------------------------------------------------
+    # 5. TensorBoard 히스토그램 훅 등록
+    # ---------------------------------------------------------
+    tb_writer = create_summary_writer(
+        log_dir=f"runs/{args.experiment_name}",
+        enabled=args.tensorboard,
+    )
+    log_step = [0]
+    hooks = []
+
+    def make_ln_hook(tag):
+        def hook_fn(module, inp, out):
+            if log_step[0] < _TB_LOG_BATCHES:
+                inp_val = inp[0].value if isinstance(inp[0], Potential) else inp[0]
+                out_val = out.value    if isinstance(out,    Potential) else out
+                
+                # Analysis of centered input (x_err)
+                x = inp_val.detach().float()
+                x_mean = x.mean(dim=-1, keepdim=True)
+                x_err = x - x_mean
+                max_abs_err = x_err.abs().max().item()
+                std_err = x_err.std().item()
+                
+                tb_writer.add_histogram(f"{tag}/input",  inp_val.detach().cpu().float(), log_step[0])
+                tb_writer.add_histogram(f"{tag}/output", out_val.detach().cpu().float(),  log_step[0])
+        return hook_fn
+
+    for name, module in model.named_modules():
+        if isinstance(module, (nn.LayerNorm, SpikingLayerNorm)):
+            hooks.append(module.register_forward_hook(make_ln_hook(name)))
+
+    # Attribute every explicit physical clamp to its leaf affine/normalization
+    # module while restoring the outer encoder or attention context after nested
+    # calls. Aggregate raw counts across batches for a reproducible per-site report.
+    clamp_totals = {}
+
+    def make_clamp_hook(name):
+        previous_names = []
+
+        def pre_hook(_module, _inp):
+            previous_names.append(transform_types.get_current_module_name())
+            transform_types.set_current_module_name(name)
+
+        def post_hook(_module, _inp, _out):
+            previous = previous_names.pop() if previous_names else None
+            transform_types.set_current_module_name(previous)
+
+        return pre_hook, post_hook
+
+    if model_backend == "spiking" and args.report_clamp_stats:
+        for name, module in model.named_modules():
+            if isinstance(
+                module,
+                (
+                    ViTEncoder,
+                    ViTSelfAttention,
+                    SpikingLayerNorm,
+                    SpikingLinear,
+                    SpikingConv2d,
+                ),
+            ):
+                pre_hook, post_hook = make_clamp_hook(name)
+                hooks.append(module.register_forward_pre_hook(pre_hook))
+                hooks.append(module.register_forward_hook(post_hook))
+        transform_types.clear_clamp_stats()
+        transform_types.set_current_module_name(None)
+        transform_types.set_clamp_log_enabled(True)
+
+    quantiles = []
+    def make_quantile_hook():
+        def hook_fn(module, inp, out):
+            val = out.value if isinstance(out, Potential) else out
+            if isinstance(val, torch.Tensor):
+                val_flat = val.detach().abs().float().view(-1)
+                if val_flat.numel() > 16000000:
+                    step = val_flat.numel() // 16000000 + 1
+                    val_flat = val_flat[::step]
+                q = torch.quantile(val_flat, 0.999).item()
+                quantiles.append(q)
+        return hook_fn
+
+    if args.collect_quantiles:
+        for name, module in model.named_modules():
+            if isinstance(module, (nn.Linear, nn.LayerNorm, nn.Conv2d, SpikingLayerNorm)):
+                hooks.append(module.register_forward_hook(make_quantile_hook()))
+
+    # ---------------------------------------------------------
+    # 6. 평가 루프 (Evaluation Loop)
+    # ---------------------------------------------------------
+    if dataloader is None:
+        raise RuntimeError("evaluation dataset setup is incomplete")
+    print("Starting evaluation...")
+
+    correct_count = 0
+    evaluated_count = 0
+    prediction_digest = hashlib.sha256()
+    benchmark_enabled = args.benchmark_measure_batches > 0
+    benchmark_started_at: float | None = None
+    benchmark_seconds: float | None = None
+    benchmark_images = 0
+    if benchmark_enabled and device.type != "cuda":
+        raise ValueError("benchmark measurement requires a CUDA device")
+
+    evaluation_total_batches = len(dataloader)
+    if not benchmark_enabled and args.max_eval_batches > 0:
+        evaluation_total_batches = min(evaluation_total_batches, args.max_eval_batches)
+    evaluation_expected_samples = min(
+        len(dataloader.dataset), evaluation_total_batches * batch_size,
+    )
+    evaluation_started_at = time.monotonic()
+    # Redirected logs need complete lines instead of terminal carriage returns.
+    for batch_index, batch in enumerate(tqdm(dataloader, disable=not sys.stderr.isatty())):
+        # 데이터를 디바이스(GPU/CPU)로 이동
+        pixel_values = batch["pixel_values"].to(device, dtype=dtype)
+        labels = batch["labels"].to(device)
+        
+        if log_step[0] == 0:
+            print(f"[DEBUG] Ground Truth Labels for Batch 0: {labels.tolist()}")
+
+        # 예측 (Gradients 계산 불필요)
+        if model_backend == "spiking" and args.report_clamp_stats:
+            transform_types.clear_clamp_stats()
+        with torch.no_grad():
+            outputs = model(pixel_values)
+
+        if model_backend == "spiking" and args.report_clamp_stats:
+            for tag, stats in transform_types.get_clamp_stats().items():
+                aggregate = clamp_totals.setdefault(
+                    tag,
+                    {"underflow": 0, "overflow": 0, "total": 0},
+                )
+                for field in ("underflow", "overflow", "total"):
+                    aggregate[field] += stats[field]
+            transform_types.set_current_module_name(None)
+
+        # Logits에서 가장 높은 확률을 가진 클래스 인덱스 추출
+        require_finite_logits(outputs.logits)
+        predictions = torch.argmax(outputs.logits, dim=-1)
+        measured_batch = (
+            not benchmark_enabled
+            or batch_index >= args.benchmark_warmup_batches
+        )
+        if (
+            benchmark_enabled
+            and batch_index == args.benchmark_warmup_batches
+        ):
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
+            benchmark_started_at = time.perf_counter()
+        if measured_batch:
+            predictions_cpu = predictions.detach().to("cpu", dtype=torch.int64)
+            labels_cpu = labels.detach().to("cpu", dtype=torch.int64)
+            correct_count += int((predictions_cpu == labels_cpu).sum().item())
+            evaluated_count += int(labels_cpu.numel())
+            prediction_digest.update(predictions_cpu.contiguous().numpy().tobytes())
+            if benchmark_enabled:
+                benchmark_images += int(labels_cpu.numel())
+
+        log_step[0] += 1
+        if measured_batch and evaluated_count:
+            # Keep progress I/O outside the dedicated GPU throughput benchmark.
+            if not benchmark_enabled:
+                log_evaluation_progress(
+                    experiment_name=args.experiment_name, backend=model_backend,
+                    completed_batches=batch_index + 1,
+                    total_batches=evaluation_total_batches, correct=correct_count,
+                    evaluated_samples=evaluated_count,
+                    expected_samples=evaluation_expected_samples,
+                    elapsed_seconds=time.monotonic() - evaluation_started_at,
+                )
+            wandb.log(
+                {"Intermediate accuracy": correct_count / evaluated_count}
+            )
+
+        if (
+            benchmark_enabled
+            and batch_index + 1
+            >= args.benchmark_warmup_batches + args.benchmark_measure_batches
+        ):
+            torch.cuda.synchronize(device)
+            if benchmark_started_at is None:
+                raise RuntimeError("benchmark timer was not initialized")
+            benchmark_seconds = time.perf_counter() - benchmark_started_at
+            break
+        if not benchmark_enabled and args.max_eval_batches > 0 and log_step[0] >= args.max_eval_batches:
+            break
+
+    for h in hooks:
+        h.remove()
+    tb_writer.close()
+    transform_types.set_current_module_name(None)
+    if model_backend == "spiking" and args.report_clamp_stats:
+        transform_types.set_clamp_log_enabled(False)
+
+    if args.collect_quantiles and quantiles:
+        max_q = max(quantiles)
+        print(f"RESULT_QUANTILE: {max_q}")
+        _QUANTILE_DIR.mkdir(parents=True, exist_ok=True)
+        with (_QUANTILE_DIR / f"quantile_vit_{args.model_id.replace('/', '_')}.txt").open("w") as f:
+            f.write(str(max_q))
+
+    # ---------------------------------------------------------
+    # 6. 최종 결과 계산 및 출력
+    # ---------------------------------------------------------
+    if evaluated_count <= 0:
+        raise RuntimeError("evaluation produced no measured examples")
+    final_accuracy = correct_count / evaluated_count
+    print("-" * 30)
+    print(f"Evaluation Results for {model_id}:")
+    print(f"Correct: {correct_count}")
+    print(f"Evaluated samples: {evaluated_count}")
+    print(f"Prediction SHA256: {prediction_digest.hexdigest()}")
+    print(f"Accuracy: {final_accuracy:.8f}")
+    wandb.log(
+        {
+            "Final Accuracy": final_accuracy,
+            "Correct": correct_count,
+            "Evaluated samples": evaluated_count,
+        }
+    )
+    if benchmark_enabled:
+        if benchmark_seconds is None or benchmark_seconds <= 0.0:
+            raise RuntimeError("benchmark did not produce a positive duration")
+        peak_bytes = int(torch.cuda.max_memory_allocated(device))
+        print(
+            "Benchmark — "
+            f"warmup_batches: {args.benchmark_warmup_batches}, "
+            f"measure_batches: {args.benchmark_measure_batches}, "
+            f"images: {benchmark_images}, seconds: {benchmark_seconds:.9g}, "
+            f"seconds_per_image: {benchmark_seconds / benchmark_images:.9g}, "
+            f"peak_memory_bytes: {peak_bytes}"
+        )
+
+    if clock_driven_enabled:
+        for kind, counts in sorted(get_clock_update_stats().items()):
+            print(
+                f"ClockUpdates[{kind}] calls={counts['calls']}, "
+                f"time_steps={counts['time_steps']}, "
+                f"element_updates={counts['element_updates']}"
+            )
+        for site, counts in sorted(get_clock_driven_stats().items()):
+            events = counts["events"]
+            mean_absolute_error = (
+                counts["absolute_error_sum"] / events if events else 0.0
+            )
+            minimum_window_steps = counts["minimum_window_steps"]
+            if minimum_window_steps == 2**63 - 1:
+                minimum_window_steps = 0
+            print(
+                f"Clock[{site}] events={events}, "
+                f"rounded_events={counts['rounded_events']}, "
+                f"mean_absolute_error={mean_absolute_error:.9g}, "
+                f"maximum_absolute_error={counts['absolute_error_max']:.9g}, "
+                f"windows={counts['windows']}, "
+                f"minimum_window_steps={minimum_window_steps}, "
+                f"maximum_window_steps={counts['maximum_window_steps']}"
+            )
+
+    # Report event delivery, nominal endpoint occupancy, numerical resolution, and
+    # physical rail saturation with their own denominators.
+    if gaussian_enabled:
+        for site, counts in sorted(get_gaussian_noise_stats().items()):
+            events = counts["events"]
+            outputs = counts["outputs"]
+            miss_rate = counts["misses"] / events if events else 0.0
+            underflow_rate = (
+                counts["output_underflows"] / outputs if outputs else 0.0
+            )
+            overflow_rate = (
+                counts["output_overflows"] / outputs if outputs else 0.0
+            )
+            deadline_rate = (
+                counts["deadline_events"] / events if events else 0.0
+            )
+            ulp_min = counts["deadline_ulp_min"]
+            if not math.isfinite(ulp_min):
+                ulp_min = 0.0
+            ulp_max = counts["deadline_ulp_max"]
+            print(
+                f"Gaussian[{site}] events={events}, misses={counts['misses']} "
+                f"(rate={miss_rate:.6g}), "
+                f"deadline_events={counts['deadline_events']} "
+                f"(rate={deadline_rate:.6g}), "
+                f"deadline_ulp_min={ulp_min:.9g}, "
+                f"deadline_ulp_max={ulp_max:.9g}, outputs={outputs}, "
+                f"underflows={counts['output_underflows']} "
+                f"(rate={underflow_rate:.6g}), "
+                f"overflows={counts['output_overflows']} "
+                f"(rate={overflow_rate:.6g})"
+            )
+            wandb.log({
+                f"Gaussian/{site}/events": events,
+                f"Gaussian/{site}/misses": counts["misses"],
+                f"Gaussian/{site}/miss_rate": miss_rate,
+                f"Gaussian/{site}/deadline_events": counts["deadline_events"],
+                f"Gaussian/{site}/deadline_event_rate": deadline_rate,
+                f"Gaussian/{site}/deadline_ulp_min": ulp_min,
+                f"Gaussian/{site}/deadline_ulp_max": ulp_max,
+                f"Gaussian/{site}/outputs": outputs,
+                f"Gaussian/{site}/output_underflows": counts["output_underflows"],
+                f"Gaussian/{site}/output_underflow_rate": underflow_rate,
+                f"Gaussian/{site}/output_overflows": counts["output_overflows"],
+                f"Gaussian/{site}/output_overflow_rate": overflow_rate,
+            })
+
+    # Analytic and calibrated rails use the same count schema. Conventional dense
+    # classifier outputs have no declared TTFS rail and are represented by accuracy,
+    # not by a fabricated clipping denominator.
+    for (module_name, clamp_name), stats in sorted(clamp_totals.items()):
+        total = stats["total"]
+        underflow_rate = stats["underflow"] / total if total else 0.0
+        overflow_rate = stats["overflow"] / total if total else 0.0
+        site = f"{module_name}/{clamp_name}"
+        print(
+            f"Clamp[{site}] values={total}, underflows={stats['underflow']} "
+            f"(rate={underflow_rate:.6g}), overflows={stats['overflow']} "
+            f"(rate={overflow_rate:.6g})"
+        )
+        wandb.log({
+            f"Clamp/{site}/values": total,
+            f"Clamp/{site}/underflows": stats["underflow"],
+            f"Clamp/{site}/underflow_rate": underflow_rate,
+            f"Clamp/{site}/overflows": stats["overflow"],
+            f"Clamp/{site}/overflow_rate": overflow_rate,
+        })
+
+    # Layer-wise clipping uses the number of tensor elements at each residual as its
+    # denominator. Report both counts and rates without changing the frozen table,
+    # then remove only model bindings while preserving the completed runtime snapshot.
+    if calibration_state is not None:
+        for item in get_calibration_clipping_report(calibration_state):
+            site = f"{item.module_name}/{item.tensor_name}"
+            print(
+                f"Calibration[{site}] values={item.num_values}, "
+                f"underflows={item.underflows} "
+                f"(rate={item.underflow_rate:.6g}), "
+                f"overflows={item.overflows} "
+                f"(rate={item.overflow_rate:.6g})"
+            )
+            wandb.log({
+                f"Calibration/{site}/values": item.num_values,
+                f"Calibration/{site}/underflows": item.underflows,
+                f"Calibration/{site}/underflow_rate": item.underflow_rate,
+                f"Calibration/{site}/overflows": item.overflows,
+                f"Calibration/{site}/overflow_rate": item.overflow_rate,
+            })
+        clear_model_calibration(model, expected_state=calibration_state)
+
+    print("-" * 30)
+    wandb.finish()
+
+if __name__ == "__main__":
+    args = parse_arguments()
+    evaluate_vit_model(args)
