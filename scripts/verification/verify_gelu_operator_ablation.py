@@ -15,9 +15,13 @@ import torch
 
 from scripts.analysis.gelu_operator_ablation_vit import (
     gelu_operator_ablation,
-    install_gelu_operator_ablation,
+    make_gelu_operator_ablation,
+    parse_arguments,
+    GeluDenseOperator,
 )
 from utils.transformers.models.spiking_vit import modeling_spiking_vit
+from transformers.models.vit.configuration_vit import ViTConfig
+from utils.transformers.models.spiking_vit.modeling_spiking_vit import ViTIntermediate
 from utils.transforms.functions import gelu_approximation
 from utils.transforms.noise import (
     get_gaussian_noise_stats,
@@ -27,11 +31,11 @@ from utils.transforms.noise import (
 from utils.transforms.types import PotentialBounds
 
 
-_OPERATORS = ("multiplication", "exponential", "division")
+_OPERATORS = tuple(GeluDenseOperator)
 
 
 def verify_gelu_operator_ablation() -> None:
-    """Check deterministic parity, selection validation, and patch isolation.
+    """Check deterministic parity, selection validation, and independent construction.
 
     Every dense-operator subset must reduce to the maintained temporal composition
     when Gaussian noise is disabled. This establishes that an accuracy difference
@@ -114,25 +118,20 @@ def verify_gelu_operator_ablation() -> None:
     # Reject misspelled selections before evaluating any operator; silently ignoring
     # one would mislabel an expensive model-scale run.
     try:
-        gelu_operator_ablation(
-            input_value,
-            domain,
-            dense_operators=frozenset({"multiplicaton"}),
-        )
-    except ValueError:
-        pass
+        parse_arguments(["--gelu-dense-operators", "multiplicaton"])
+    except SystemExit as error:
+        assert error.code == 2
     else:
         raise AssertionError("accepted an unknown GELU operator name")
 
-    # Installation must replace only the symbol resolved by the local ViT adapter.
-    # Restore it afterward so this verification has no process-wide residual effect.
-    original_vit_symbol = modeling_spiking_vit.gelu_approximation
-    try:
-        install_gelu_operator_ablation(frozenset({"division"}))
-        assert modeling_spiking_vit.gelu_approximation is not original_vit_symbol
-        assert gelu_approximation is original_vit_symbol
-    finally:
-        modeling_spiking_vit.gelu_approximation = original_vit_symbol
+    first = ViTIntermediate(
+        ViTConfig(hidden_size=4, intermediate_size=8),
+        gelu_operator=make_gelu_operator_ablation(frozenset({GeluDenseOperator.DIVISION})),
+    )
+    second = ViTIntermediate(ViTConfig(hidden_size=4, intermediate_size=8))
+    assert first.gelu_operator is not second.gelu_operator
+    assert second.gelu_operator is gelu_approximation
+    assert modeling_spiking_vit.gelu_approximation is gelu_approximation
 
 
 def verify_gelu_operator_event_selection() -> None:
@@ -163,10 +162,10 @@ def verify_gelu_operator_event_selection() -> None:
             # GELU contains three dynamic multiplication calls. Each samples one event
             # per tensor element plus one scalar reference shared by the call.
             expected_multiplication_events = (
-                0 if "multiplication" in selected else 3 * element_count
+                0 if GeluDenseOperator.MULTIPLICATION in selected else 3 * element_count
             )
             expected_multiplication_references = (
-                0 if "multiplication" in selected else 3
+                0 if GeluDenseOperator.MULTIPLICATION in selected else 3
             )
             assert stats.get("multiplication.data", {}).get("events", 0) == (
                 expected_multiplication_events
@@ -179,10 +178,10 @@ def verify_gelu_operator_event_selection() -> None:
             # complete division per element. Division selection also removes its
             # internal exponential-difference re-encoding event.
             expected_exponential_events = (
-                0 if "exponential" in selected else element_count
+                0 if GeluDenseOperator.EXPONENTIAL in selected else element_count
             )
             expected_division_events = (
-                0 if "division" in selected else element_count
+                0 if GeluDenseOperator.DIVISION in selected else element_count
             )
             assert stats.get("exponential.input", {}).get("events", 0) == (
                 expected_exponential_events
@@ -205,7 +204,7 @@ def verify_gelu_operator_event_selection() -> None:
     # Repeat with nonzero sigma and compare final generator states. Dense helpers
     # shadow their omitted draws, so every condition must leave later model sites at
     # the same point in the run-wide stream as the fully noisy GELU condition.
-    generator_states: dict[frozenset[str], torch.Tensor] = {}
+    generator_states: dict[frozenset[GeluDenseOperator], torch.Tensor] = {}
     for count in range(len(_OPERATORS) + 1):
         for selected_tuple in combinations(_OPERATORS, count):
             selected = frozenset(selected_tuple)

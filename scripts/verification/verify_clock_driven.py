@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 import sys
 import tempfile
@@ -20,6 +21,9 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from scripts.evaluation.error_analysis_vit import (
+    Arguments,
+    ModelBackend,
+    parse_arguments,
     evaluation_shard_bounds,
     validate_vit_runtime_arguments,
 )
@@ -355,31 +359,28 @@ def verify_disabled_mode_parity() -> None:
     assert get_clock_update_stats() == {}
 
 
-def _runtime_args(**overrides: object) -> SimpleNamespace:
-    defaults: dict[str, object] = {
-        "evaluation_samples": 0,
-        "quick_test": False,
-        "max_eval_batches": 0,
-        "benchmark_warmup_batches": 0,
-        "benchmark_measure_batches": 0,
-        "evaluation_dataset_path": "",
-        "evaluation_shard_count": 1,
-        "evaluation_shard_index": 0,
-        "image_preprocessing_config": "",
-        "clock_driven": True,
-        "clock_time_step": 0.25,
-        "clock_time_steps_per_window": 0,
-        "model_backend": "spiking",
-        "gaussian_time_noise": False,
-        "time_noise_std_frac": 0.0,
-        "linear_time_noise_std_frac": None,
-        "log_time_noise_std_frac": None,
-        "time_noise_mean": 0.0,
-        "time_noise_deadline_margin_std": 0.0,
-        "time_noise_vit_first_block_count": None,
-    }
-    defaults.update(overrides)
-    return SimpleNamespace(**defaults)
+def _runtime_args(
+    *,
+    model_backend: ModelBackend = ModelBackend.SPIKING,
+    clock_driven: bool = True,
+    clock_time_step: float = 0.25,
+    clock_time_steps_per_window: int = 0,
+    gaussian_time_noise: bool = False,
+    time_noise_std_frac: float = 0.0,
+    evaluation_shard_count: int = 1,
+    evaluation_shard_index: int = 0,
+) -> Arguments:
+    return replace(
+        parse_arguments([]),
+        model_backend=model_backend,
+        clock_driven=clock_driven,
+        clock_time_step=clock_time_step,
+        clock_time_steps_per_window=clock_time_steps_per_window,
+        gaussian_time_noise=gaussian_time_noise,
+        time_noise_std_frac=time_noise_std_frac,
+        evaluation_shard_count=evaluation_shard_count,
+        evaluation_shard_index=evaluation_shard_index,
+    )
 
 
 def verify_vit_runtime_isolation() -> None:
@@ -390,7 +391,7 @@ def verify_vit_runtime_isolation() -> None:
     invalid = (
         _runtime_args(clock_time_step=0.0),
         _runtime_args(clock_time_steps_per_window=64),
-        _runtime_args(model_backend="hf"),
+        _runtime_args(model_backend=ModelBackend.HF),
         _runtime_args(gaussian_time_noise=True),
         _runtime_args(time_noise_std_frac=1.0e-5),
         _runtime_args(clock_driven=False, clock_time_step=0.25),

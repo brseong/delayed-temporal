@@ -1,11 +1,12 @@
 from dataclasses import dataclass
+from enum import StrEnum
 import hashlib
 import json
 import math
 from pathlib import Path
 import sys
 import time
-from typing import Any, Literal
+from typing import Any, Callable, Sequence
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -20,6 +21,7 @@ from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
 from transformers import AttentionInterface, AutoModelForImageClassification
 from transformers.models.vit import ViTImageProcessor
 from utils.transformers.models.spiking_vit.modeling_spiking_vit import (
+    GeluOperator,
     ViTEncoder,
     ViTForImageClassification,
     ViTSelfAttention,
@@ -37,6 +39,7 @@ from utils.transforms.clock import (
 )
 from utils.transforms.types import Potential
 from utils.transforms.calibration import (
+    CalibrationMetadata,
     CalibrationMode,
     create_calibration_collector,
     create_calibration_runtime,
@@ -69,6 +72,46 @@ AttentionInterface.register("spiking_sdpa", spiking_sdpa_attention_forward)
 # import os
 # os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
+class ModelBackend(StrEnum):
+    HF = "hf"
+    SPIKING = "spiking"
+
+
+class DeviceKind(StrEnum):
+    CUDA = "cuda"
+    CPU = "cpu"
+
+
+class Precision(StrEnum):
+    FLOAT32 = "float32"
+    FLOAT64 = "float64"
+    BFLOAT16 = "bfloat16"
+    FLOAT16 = "float16"
+
+
+class Activation(StrEnum):
+    RELU = "relu"
+    GELU = "gelu"
+
+
+class GeluCubicImplementation(StrEnum):
+    MULTIPLICATION = "multiplication"
+    PHI_NL_PSI_ED = "phi_nl_psi_ed"
+
+
+class GeluDenseOperator(StrEnum):
+    MULTIPLICATION = "multiplication"
+    EXPONENTIAL = "exponential"
+    DIVISION = "division"
+
+
+@dataclass(frozen=True)
+class ViTCalibrationInputs:
+    dataset: Dataset
+    metadata_transform: Callable[[CalibrationMetadata], CalibrationMetadata]
+    on_batch: Callable[[int, int], None] | None = None
+
+
 @dataclass
 class Arguments:
     """Command-line configuration consumed by the ViT evaluator.
@@ -82,7 +125,7 @@ class Arguments:
     # Evaluation, backend, and model-conversion controls are independent of the
     # selected non-ideality experiments.
     experiment_name: str
-    model_backend: Literal["hf", "spiking"]
+    model_backend: ModelBackend
     model_id: str
     dataset_id: str
     evaluation_dataset_path: str
@@ -92,8 +135,8 @@ class Arguments:
     image_preprocessing_config: str
     batch_size: int
     evaluation_samples: int
-    device: Literal["cuda", "cpu"]
-    precision: Literal["float32", "float64", "bfloat16", "float16"]
+    device: DeviceKind
+    precision: Precision
     max_eval_batches: int
     benchmark_warmup_batches: int
     benchmark_measure_batches: int
@@ -105,7 +148,7 @@ class Arguments:
     spiking_mlp: bool
     spiking_mlp_exact_gelu: bool
     spiking_mlp_exact_gelu_layers: tuple[int, ...]
-    activation: Literal["relu", "gelu"]
+    activation: Activation
     clock_driven: bool
     clock_time_step: float
     clock_time_steps_per_window: int
@@ -113,7 +156,7 @@ class Arguments:
     # Layer-wise calibration is an explicit artifact lifecycle. Collection uses a
     # deterministic subset of the training split; frozen phases only load and apply
     # the resulting table while recording clipping statistics.
-    calibration_mode: Literal["none", "collect", "validate", "inference"]
+    calibration_mode: CalibrationMode | None
     calibration_path: str
     calibration_samples: int
     calibration_seed: int
@@ -148,8 +191,42 @@ class Arguments:
     tensorboard: bool
     source_commit: str
     checkpoint_sha256: str
+    gelu_cubic_implementation: GeluCubicImplementation | None = None
+    gelu_cubic_floor: float | None = None
+    gelu_dense_operators: tuple[GeluDenseOperator, ...] = ()
 
-def parse_arguments() -> Arguments:
+    def __post_init__(self) -> None:
+        for value, enum_type in (
+            (self.model_backend, ModelBackend),
+            (self.device, DeviceKind),
+            (self.precision, Precision),
+            (self.activation, Activation),
+        ):
+            if not isinstance(value, enum_type):
+                raise TypeError(f"expected {enum_type.__name__}")
+        if self.calibration_mode is not None and not isinstance(self.calibration_mode, CalibrationMode):
+            raise TypeError("expected CalibrationMode or None")
+        if self.gelu_cubic_implementation is not None and not isinstance(self.gelu_cubic_implementation, GeluCubicImplementation):
+            raise TypeError("expected GeluCubicImplementation or None")
+        if any(not isinstance(operator, GeluDenseOperator) for operator in self.gelu_dense_operators):
+            raise TypeError("expected GeluDenseOperator members")
+
+    def logging_config(self) -> dict[str, object]:
+        """Serialize enum fields only when publishing evaluation configuration."""
+        return {
+            **vars(self),
+            "model_backend": self.model_backend.value,
+            "device": self.device.value,
+            "precision": self.precision.value,
+            "activation": self.activation.value,
+            "calibration_mode": "none" if self.calibration_mode is None else self.calibration_mode.value,
+            "gelu_cubic_implementation": (
+                None if self.gelu_cubic_implementation is None else self.gelu_cubic_implementation.value
+            ),
+            "gelu_dense_operators": tuple(operator.value for operator in self.gelu_dense_operators),
+        }
+
+def parse_arguments(argv: Sequence[str] | None = None) -> Arguments:
     """Parse the ViT evaluator command line into its typed configuration.
 
     The maintained dynamic-noise interface exposes one direct Gaussian timing
@@ -166,7 +243,7 @@ def parse_arguments() -> Arguments:
     parser = argparse.ArgumentParser(description="Evaluate ViT model with Spiking SDPA attention.")
     parser.add_argument("--experiment_name", type=str,
                         help="Name of the experiment for logging purposes.")
-    parser.add_argument("--model_backend", type=str, choices=["hf", "spiking"], default="hf",
+    parser.add_argument("--model_backend", type=str, choices=[member.value for member in ModelBackend], default="hf",
                         help="Model backend to use (hf: vanilla HF ViT, spiking: spiking_vit class).")
     parser.add_argument("--model_id", type=str, default="/data/nas/vit_small_patch16_224.augreg_in21k_ft_in1k",
                         help="Pretrained ViT model ID from Hugging Face.")
@@ -222,9 +299,9 @@ def parse_arguments() -> Arguments:
         default=0,
         help="If > 0, time exactly this many batches after benchmark warm-up.",
     )
-    parser.add_argument("--device", type=str, choices=["cuda", "cpu"], default="cuda",
+    parser.add_argument("--device", type=str, choices=[member.value for member in DeviceKind], default="cuda",
                         help="Device to run the evaluation on (e.g., 'cuda' or 'cpu').")
-    parser.add_argument("--precision", type=str, choices=["float32", "float64", "bfloat16", "float16"], default="float32",
+    parser.add_argument("--precision", type=str, choices=[member.value for member in Precision], default="float32",
                         help="PyTorch precision (dtype) to use (default: float32).")
     parser.add_argument("--spiking-layernorm", action=argparse.BooleanOptionalAction, default=True,
                         help="Use SpikingLayerNorm instead of standard nn.LayerNorm.")
@@ -250,7 +327,7 @@ def parse_arguments() -> Arguments:
             "the same tanh formula evaluated densely."
         ),
     )
-    parser.add_argument("--activation", type=str, choices=["relu", "gelu"], default="gelu",
+    parser.add_argument("--activation", type=str, choices=[member.value for member in Activation], default="gelu",
                         help="Activation function to use when --no-spiking-mlp is set (default: gelu).")
     parser.add_argument(
         "--clock-driven",
@@ -299,7 +376,7 @@ def parse_arguments() -> Arguments:
     # training subset, while validate/inference only consume that frozen artifact.
     parser.add_argument(
         "--calibration-mode",
-        choices=("none", "collect", "validate", "inference"),
+        choices=("none", *(member.value for member in CalibrationMode)),
         default="none",
         help="Create or consume a layer-wise calibration artifact.",
     )
@@ -455,10 +532,10 @@ def parse_arguments() -> Arguments:
 
     # Parse once, then copy every field explicitly into the dataclass so omissions
     # or stale option names fail visibly during this staged interface migration.
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     return Arguments(
         experiment_name=args.experiment_name,
-        model_backend=args.model_backend,
+        model_backend=ModelBackend(args.model_backend),
         model_id=args.model_id,
         dataset_id=args.dataset_id,
         evaluation_dataset_path=args.evaluation_dataset_path,
@@ -468,8 +545,8 @@ def parse_arguments() -> Arguments:
         image_preprocessing_config=args.image_preprocessing_config,
         batch_size=args.batch_size,
         evaluation_samples=args.evaluation_samples,
-        device=args.device,
-        precision=args.precision,
+        device=DeviceKind(args.device),
+        precision=Precision(args.precision),
         max_eval_batches=args.max_eval_batches,
         benchmark_warmup_batches=args.benchmark_warmup_batches,
         benchmark_measure_batches=args.benchmark_measure_batches,
@@ -481,11 +558,11 @@ def parse_arguments() -> Arguments:
         spiking_mlp=args.spiking_mlp,
         spiking_mlp_exact_gelu=args.spiking_mlp_exact_gelu,
         spiking_mlp_exact_gelu_layers=tuple(args.spiking_mlp_exact_gelu_layers),
-        activation=args.activation,
+        activation=Activation(args.activation),
         clock_driven=args.clock_driven,
         clock_time_step=args.clock_time_step,
         clock_time_steps_per_window=args.clock_time_steps_per_window,
-        calibration_mode=args.calibration_mode,
+        calibration_mode=None if args.calibration_mode == "none" else CalibrationMode(args.calibration_mode),
         calibration_path=args.calibration_path,
         calibration_samples=args.calibration_samples,
         calibration_seed=args.calibration_seed,
@@ -536,17 +613,12 @@ def validate_vit_calibration_arguments(
         ValueError: If paths, counts, quantiles, margins, or backend combinations are
             invalid for the selected lifecycle phase.
     """
-    # Convert the user-facing disabled value separately because CalibrationMode has
-    # only the three active phases shared by collectors and frozen runtimes.
-    if not isinstance(args.calibration_mode, str):
-        raise TypeError("calibration_mode must be a string")
-    if args.calibration_mode == "none":
+    mode = args.calibration_mode
+    if mode is None:
         return None
-    try:
-        mode = CalibrationMode(args.calibration_mode)
-    except ValueError as error:
-        raise ValueError("unsupported calibration_mode") from error
-    if args.model_backend != "spiking":
+    if not isinstance(mode, CalibrationMode):
+        raise TypeError("expected CalibrationMode or None")
+    if args.model_backend is not ModelBackend.SPIKING:
         raise ValueError("layer-wise calibration requires model_backend=spiking")
     if not isinstance(args.calibration_path, str):
         raise TypeError("calibration_path must be a string")
@@ -633,7 +705,7 @@ def validate_vit_runtime_arguments(args: Arguments) -> None:
             raise TypeError("time_noise_vit_first_block_count must be an integer")
         if first_block_count < 0:
             raise ValueError("time_noise_vit_first_block_count must be non-negative")
-        if args.model_backend != "spiking" or not args.gaussian_time_noise:
+        if args.model_backend is not ModelBackend.SPIKING or not args.gaussian_time_noise:
             raise ValueError(
                 "ViT block-scoped timing noise requires a noisy spiking backend"
             )
@@ -672,7 +744,7 @@ def validate_vit_runtime_arguments(args: Arguments) -> None:
     ):
         raise TypeError("clock_time_steps_per_window must be an integer")
     if args.clock_driven:
-        if args.model_backend != "spiking":
+        if args.model_backend is not ModelBackend.SPIKING:
             raise ValueError("clock-driven execution requires model_backend=spiking")
         fixed_step = math.isfinite(clock_time_step) and clock_time_step > 0.0
         fixed_window = clock_time_steps_per_window > 0
@@ -983,7 +1055,12 @@ def apply_parameter_noise(model: nn.Module, weight_std: float, bias_std: float):
                 noise = torch.randn_like(param) * bias_std * param.abs().max() 
                 param.add_(noise)
 
-def evaluate_vit_model(args: Arguments) -> None:
+def evaluate_vit_model(
+    args: Arguments,
+    *,
+    gelu_operator: GeluOperator | None = None,
+    calibration_inputs: ViTCalibrationInputs | None = None,
+) -> None:
     """Evaluate one ViT backend under the requested non-idealities.
 
     The evaluator installs dimensionless timing-noise fractions once per replica;
@@ -993,6 +1070,8 @@ def evaluate_vit_model(args: Arguments) -> None:
 
     Args:
         args: Parsed ViT evaluation, conversion, and non-ideality settings.
+        gelu_operator: Optional composed GELU function used to construct the spiking model.
+        calibration_inputs: Verified local training data, metadata identity, and batch observer.
 
     Raises:
         RuntimeError: If Gaussian timing noise would execute through
@@ -1005,13 +1084,17 @@ def evaluate_vit_model(args: Arguments) -> None:
     torch.manual_seed(42)
     validate_vit_runtime_arguments(args)
     calibration_mode = validate_vit_calibration_arguments(args)
+    if gelu_operator is not None and args.model_backend is not ModelBackend.SPIKING:
+        raise ValueError("a GELU operator requires the spiking ViT backend")
+    if calibration_inputs is not None and calibration_mode is None:
+        raise ValueError("supplied calibration inputs require an active calibration mode")
     
     # Precision mapping
     dtype_map = {
-        "float32": torch.float32,
-        "float64": torch.float64,
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
+        Precision.FLOAT32: torch.float32,
+        Precision.FLOAT64: torch.float64,
+        Precision.BFLOAT16: torch.bfloat16,
+        Precision.FLOAT16: torch.float16,
     }
     dtype = dtype_map[args.precision]
     
@@ -1022,7 +1105,7 @@ def evaluate_vit_model(args: Arguments) -> None:
     model_id = args.model_id
     dataset_id = args.dataset_id
     batch_size = args.batch_size
-    device_str = args.device
+    device_kind = args.device
 
     ds_config = DATASET_CONFIGS.get(
         dataset_id,
@@ -1039,7 +1122,7 @@ def evaluate_vit_model(args: Arguments) -> None:
     label_key = ds_config["label_key"]
 
     # GPU 사용 가능 여부 확인
-    device = torch.device(device_str)
+    device = torch.device(device_kind.value)
 
     linear_time_noise_std_frac = (
         float(args.time_noise_std_frac)
@@ -1059,13 +1142,13 @@ def evaluate_vit_model(args: Arguments) -> None:
         if not math.isfinite(value) or value < 0.0:
             raise ValueError(f"{name} must be finite and non-negative")
     gaussian_enabled = bool(
-        model_backend == "spiking" and args.gaussian_time_noise
+        model_backend is ModelBackend.SPIKING and args.gaussian_time_noise
     )
     clock_driven_enabled = bool(
-        model_backend == "spiking" and args.clock_driven
+        model_backend is ModelBackend.SPIKING and args.clock_driven
     )
     mismatch_enabled = bool(
-        model_backend == "spiking"
+        model_backend is ModelBackend.SPIKING
         and args.mismatch_enabled
         and args.mismatch_range_std_frac > 0.0
     )
@@ -1095,7 +1178,7 @@ def evaluate_vit_model(args: Arguments) -> None:
 
     # Per-layer selection has meaning only inside the temporal MLP path. Reject
     # combinations that would otherwise record a requested but inactive ablation.
-    if args.spiking_mlp_exact_gelu_layers and model_backend != "spiking":
+    if args.spiking_mlp_exact_gelu_layers and model_backend is not ModelBackend.SPIKING:
         raise ValueError(
             "per-layer exact-GELU ablation requires --model_backend spiking"
         )
@@ -1110,7 +1193,7 @@ def evaluate_vit_model(args: Arguments) -> None:
 
     # A process-wide generator cannot represent independent per-device replica
     # streams under DataParallel, so reject that topology before external setup.
-    use_data_parallel = device.type == "cuda" and torch.cuda.device_count() > 1
+    use_data_parallel = device_kind is DeviceKind.CUDA and torch.cuda.device_count() > 1
     if gaussian_enabled and use_data_parallel:
         raise RuntimeError(
             "Gaussian spike-time noise does not support DataParallel; "
@@ -1160,7 +1243,7 @@ def evaluate_vit_model(args: Arguments) -> None:
 
     # Every encoder derives its absolute noise scale from its own declared window.
     cfg = {
-        **vars(args),
+        **args.logging_config(),
         "gaussian_time_noise_effective": gaussian_enabled,
         "time_noise_window_normalization": "encoder_local",
         "linear_time_noise_std_frac_effective": linear_time_noise_std_frac,
@@ -1174,7 +1257,7 @@ def evaluate_vit_model(args: Arguments) -> None:
         "clock_driven_effective": clock_driven_enabled,
     }
     effective_attn_impl = "eager"
-    if model_backend == "spiking" and device.type != "cpu" and args.spiking_attention:
+    if model_backend is ModelBackend.SPIKING and device_kind is not DeviceKind.CPU and args.spiking_attention:
         effective_attn_impl = "spiking_sdpa"
     cfg["attn_impl"] = effective_attn_impl
 
@@ -1187,7 +1270,7 @@ def evaluate_vit_model(args: Arguments) -> None:
         f"source_commit: {args.source_commit}, "
         f"checkpoint_sha256: {args.checkpoint_sha256}"
     )
-    if device.type == "cuda":
+    if device_kind is DeviceKind.CUDA:
         print(f"GPU model: {torch.cuda.get_device_name(device)}")
     print(f"Precision: {args.precision}")
     print(
@@ -1220,7 +1303,7 @@ def evaluate_vit_model(args: Arguments) -> None:
         "gaussian_time_noise: false"
     )
     
-    if model_backend == "spiking":
+    if model_backend is ModelBackend.SPIKING:
         print(f"Spiking LayerNorm: {args.spiking_layernorm}, Spiking Attention: {args.spiking_attention}")
         if args.spiking_layernorm:
             print(f"  LN stages — mul: {args.spiking_ln_mul}, log: {args.spiking_ln_log}, expdiff: {args.spiking_ln_expdiff}")
@@ -1279,16 +1362,21 @@ def evaluate_vit_model(args: Arguments) -> None:
             f"Loading calibration dataset: {dataset_id} "
             f"({calibration_split})..."
         )
-        training_dataset = load_dataset(
-            dataset_id,
-            split=calibration_split,
-            cache_dir="/data/nas/datasets/",
-        )
-        calibration_dataset = select_calibration_subset(
-            training_dataset,
-            sample_count=args.calibration_samples,
-            seed=args.calibration_seed,
-        )
+        if calibration_inputs is None:
+            training_dataset = load_dataset(
+                dataset_id,
+                split=calibration_split,
+                cache_dir="/data/nas/datasets/",
+            )
+            calibration_dataset = select_calibration_subset(
+                training_dataset,
+                sample_count=args.calibration_samples,
+                seed=args.calibration_seed,
+            )
+        else:
+            calibration_dataset = calibration_inputs.dataset
+            if len(calibration_dataset) != args.calibration_samples:
+                raise ValueError("supplied calibration dataset size differs from arguments")
 
     # Calibration and evaluation share exactly one immutable preprocessing path.
     processor = load_vit_image_processor(model_id, args.image_preprocessing_config)
@@ -1342,8 +1430,8 @@ def evaluate_vit_model(args: Arguments) -> None:
     # ---------------------------------------------------------
     print(f"Loading model: {model_id}...")
     
-    if model_backend == "hf":
-        config = ViTConfig.from_pretrained(model_id, hidden_act=args.activation)
+    if model_backend is ModelBackend.HF:
+        config = ViTConfig.from_pretrained(model_id, hidden_act=args.activation.value)
         model = AutoModelForImageClassification.from_pretrained(model_id, torch_dtype=dtype, config=config)
     else:
         config = ViTConfig.from_pretrained(
@@ -1355,7 +1443,7 @@ def evaluate_vit_model(args: Arguments) -> None:
             use_spiking_mlp=args.spiking_mlp,
             spiking_mlp_exact_gelu=args.spiking_mlp_exact_gelu,
             time_noise_vit_first_block_count=args.time_noise_vit_first_block_count,
-            hidden_act=args.activation,
+            hidden_act=args.activation.value,
         )
         pixel_domain = image_processor_pixel_bounds(
             processor,
@@ -1363,7 +1451,10 @@ def evaluate_vit_model(args: Arguments) -> None:
         )
         config.pixel_value_min = pixel_domain.min
         config.pixel_value_max = pixel_domain.max
-        model = ViTForImageClassification.from_pretrained(model_id, config=config, attn_implementation=effective_attn_impl, torch_dtype=dtype)
+        model = ViTForImageClassification.from_pretrained(
+            model_id, config=config, attn_implementation=effective_attn_impl,
+            torch_dtype=dtype, gelu_operator=gelu_operator,
+        )
 
         configure_vit_exact_gelu_layers(
             model,
@@ -1386,9 +1477,11 @@ def evaluate_vit_model(args: Arguments) -> None:
             calibration_seed=args.calibration_seed,
             processor=processor,
             config=config,
-            dtype=args.precision,
+            dtype=args.precision.value,
             attention_implementation=effective_attn_impl,
         )
+        if calibration_inputs is not None:
+            calibration_metadata = calibration_inputs.metadata_transform(calibration_metadata)
 
     # Collection must observe the clean converted checkpoint. Frozen validation and
     # inference deliberately apply independent parameter noise only after the clean
@@ -1399,14 +1492,14 @@ def evaluate_vit_model(args: Arguments) -> None:
     model.to(device)
     model.eval()
 
-    # Static device mismatch (frozen per-neuron threshold offsets) via forward pre-hooks.
+    # Static device mismatch uses frozen per-neuron offsets in module forwards.
     # Installed after .to(device) so offsets are sampled on the model's device.
     if (
         calibration_mode is not CalibrationMode.COLLECT
-        and model_backend == "spiking"
+        and model_backend is ModelBackend.SPIKING
         and mismatch_enabled
     ):
-        handles = install_range_mismatch(
+        mismatch_module_count = install_range_mismatch(
             model,
             range_std_fraction=args.mismatch_range_std_frac,
             enabled=True,
@@ -1414,7 +1507,7 @@ def evaluate_vit_model(args: Arguments) -> None:
         )
         print(
             "Installed static device mismatch on "
-            f"{len(handles)} spiking modules "
+            f"{mismatch_module_count} spiking modules "
             f"(range std fraction={args.mismatch_range_std_frac}, seed={args.mismatch_seed})."
         )
 
@@ -1442,6 +1535,7 @@ def evaluate_vit_model(args: Arguments) -> None:
             device=device,
             dtype=dtype,
             expected_samples=args.calibration_samples,
+            on_batch=calibration_inputs.on_batch if calibration_inputs is not None else None,
         )
         save_calibration_table(table, args.calibration_path)
         print(
@@ -1456,7 +1550,7 @@ def evaluate_vit_model(args: Arguments) -> None:
     # preprocessing, numerical, capacity, or model-path metadata before binding the
     # immutable ranges to their named ViT blocks.
     calibration_state = None
-    if calibration_mode in (CalibrationMode.VALIDATE, CalibrationMode.INFERENCE):
+    if calibration_mode is CalibrationMode.VALIDATE or calibration_mode is CalibrationMode.INFERENCE:
         if calibration_metadata is None:
             raise RuntimeError("frozen calibration setup is incomplete")
         table = load_calibration_table(args.calibration_path)
@@ -1530,7 +1624,7 @@ def evaluate_vit_model(args: Arguments) -> None:
 
         return pre_hook, post_hook
 
-    if model_backend == "spiking" and args.report_clamp_stats:
+    if model_backend is ModelBackend.SPIKING and args.report_clamp_stats:
         for name, module in model.named_modules():
             if isinstance(
                 module,
@@ -1581,7 +1675,7 @@ def evaluate_vit_model(args: Arguments) -> None:
     benchmark_started_at: float | None = None
     benchmark_seconds: float | None = None
     benchmark_images = 0
-    if benchmark_enabled and device.type != "cuda":
+    if benchmark_enabled and device_kind is not DeviceKind.CUDA:
         raise ValueError("benchmark measurement requires a CUDA device")
 
     evaluation_total_batches = len(dataloader)
@@ -1601,12 +1695,12 @@ def evaluate_vit_model(args: Arguments) -> None:
             print(f"[DEBUG] Ground Truth Labels for Batch 0: {labels.tolist()}")
 
         # 예측 (Gradients 계산 불필요)
-        if model_backend == "spiking" and args.report_clamp_stats:
+        if model_backend is ModelBackend.SPIKING and args.report_clamp_stats:
             transform_types.clear_clamp_stats()
         with torch.no_grad():
             outputs = model(pixel_values)
 
-        if model_backend == "spiking" and args.report_clamp_stats:
+        if model_backend is ModelBackend.SPIKING and args.report_clamp_stats:
             for tag, stats in transform_types.get_clamp_stats().items():
                 aggregate = clamp_totals.setdefault(
                     tag,
@@ -1644,7 +1738,7 @@ def evaluate_vit_model(args: Arguments) -> None:
             # Keep progress I/O outside the dedicated GPU throughput benchmark.
             if not benchmark_enabled:
                 log_evaluation_progress(
-                    experiment_name=args.experiment_name, backend=model_backend,
+                    experiment_name=args.experiment_name, backend=model_backend.value,
                     completed_batches=batch_index + 1,
                     total_batches=evaluation_total_batches, correct=correct_count,
                     evaluated_samples=evaluated_count,
@@ -1672,7 +1766,7 @@ def evaluate_vit_model(args: Arguments) -> None:
         h.remove()
     tb_writer.close()
     transform_types.set_current_module_name(None)
-    if model_backend == "spiking" and args.report_clamp_stats:
+    if model_backend is ModelBackend.SPIKING and args.report_clamp_stats:
         transform_types.set_clamp_log_enabled(False)
 
     if args.collect_quantiles and quantiles:

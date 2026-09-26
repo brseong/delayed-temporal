@@ -8,7 +8,7 @@ advancing generator per evaluation replica.
 
 Static range mismatch remains an independent experimental axis. It is sampled
 once per supported module, stored as a frozen non-persistent buffer, and applied by
-forward pre-hooks. Gaussian event timing and static mismatch therefore have distinct
+the module's explicit forward path. Gaussian event timing and static mismatch have distinct
 configuration, sampling, and reporting paths.
 
 This module also owns per-site Gaussian event and output-saturation counters. Its
@@ -20,11 +20,12 @@ import math
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from enum import Enum
 from functools import wraps
-from typing import Callable, Literal, TypedDict
+from typing import Callable, TypedDict
 
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 
 from .clock import get_clock_driven, quantize_encoder_output
 from .types import ClosedBounds, Potential, SpikeSample, TimeBounds
@@ -33,6 +34,11 @@ from .types import ClosedBounds, Potential, SpikeSample, TimeBounds
 # ---------------------------------------------------------------------------
 # Global configuration
 # ---------------------------------------------------------------------------
+
+class SpikeTimeEncoding(Enum):
+    LINEAR = "linear"
+    LOG = "log"
+
 
 @dataclass
 class GaussianTimeNoiseConfig:
@@ -246,7 +252,7 @@ def _stats_for(site: str) -> GaussianNoiseCounts:
 
     # Initialize every supported metric together, keeping a fixed schema across
     # sites even when a location has observed only events or only output values.
-    counts = {
+    new_counts: GaussianNoiseCounts = {
         "events": 0,
         "misses": 0,
         "deadline_events": 0,
@@ -256,11 +262,11 @@ def _stats_for(site: str) -> GaussianNoiseCounts:
         "output_underflows": 0,
         "output_overflows": 0,
     }
-    _GAUSSIAN_NOISE_STATS[site] = counts
+    _GAUSSIAN_NOISE_STATS[site] = new_counts
 
     # Writers intentionally receive the live mapping; public readers use the
     # detached snapshot returned by get_gaussian_noise_stats instead.
-    return counts
+    return new_counts
 
 
 def clamp_gaussian_output(
@@ -703,12 +709,12 @@ def _sample_gaussian_spike_time(
 # Gaussian encoder injection boundary
 # ---------------------------------------------------------------------------
 
-def inject_spike_time_noise[**P, OutT: ClosedBounds](
+def inject_spike_time_noise[**P](
     *,
-    encoding: Literal["linear", "log"],
+    encoding: SpikeTimeEncoding,
 ) -> Callable[
-    [Callable[P, tuple[Tensor, OutT]]],
-    Callable[P, tuple[Tensor, OutT] | SpikeSample],
+    [Callable[P, tuple[Tensor, TimeBounds]]],
+    Callable[P, tuple[Tensor, TimeBounds] | SpikeSample],
 ]:
     """Decorate a deterministic encoder with event-aware Gaussian time noise.
 
@@ -735,17 +741,17 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
         TypeError: If an event-aware encoder does not declare ``TimeBounds``.
     """
 
-    if encoding not in ("linear", "log"):
-        raise ValueError("encoding must be 'linear' or 'log'")
+    if not isinstance(encoding, SpikeTimeEncoding):
+        raise TypeError("expected SpikeTimeEncoding")
 
     def decorator(
-        func: Callable[P, tuple[Tensor, OutT]],
-    ) -> Callable[P, tuple[Tensor, OutT] | SpikeSample]:
+        func: Callable[P, tuple[Tensor, TimeBounds]],
+    ) -> Callable[P, tuple[Tensor, TimeBounds] | SpikeSample]:
         @wraps(func)
         def wrapper(
             *args: P.args,
             **kwargs: P.kwargs,
-        ) -> tuple[Tensor, OutT] | SpikeSample:
+        ) -> tuple[Tensor, TimeBounds] | SpikeSample:
             # Snapshot the process-wide configuration once so the parameters and
             # generator belong to the same replica for the complete encoder call.
             gaussian_cfg = get_gaussian_time_noise()
@@ -768,6 +774,8 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
                         "clock-driven spike encoders must return TimeBounds"
                     )
                 site = kwargs.get("noise_site", func.__name__)
+                if not isinstance(site, str):
+                    raise TypeError("noise site must be a string")
                 return quantize_encoder_output(output, out_domain, site=site)
 
             # Tensor-only consumers cannot represent a missed event, so they retain
@@ -800,7 +808,7 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
                 )
 
             # An omitted override preserves the historical shared-parameter path.
-            if encoding == "linear":
+            if encoding is SpikeTimeEncoding.LINEAR:
                 time_std_fraction = gaussian_cfg.linear_time_std_fraction
                 deadline_margin_std_ratio = gaussian_cfg.linear_deadline_margin_std_ratio
             else:
@@ -829,6 +837,8 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
 
             # Attribute sampled events to the physical values consumed downstream.
             site = kwargs.get("noise_site", func.__name__)
+            if not isinstance(site, str):
+                raise TypeError("noise site must be a string")
             counts = _stats_for(_scoped_statistics_site(site))
             deadline = nominal_time.new_tensor(float(out_domain.max))
             mask = _statistics_mask_for(sample.time)
@@ -874,21 +884,24 @@ def inject_spike_time_noise[**P, OutT: ClosedBounds](
 # C — static device mismatch (per-neuron frozen threshold offset)
 # ---------------------------------------------------------------------------
 
-def _range_mismatch_pre_hook(module, args):
-    """Add one frozen normalized offset scaled by the module's input range."""
-    pot: Potential = args[0]
+def apply_range_mismatch(
+    pot: Potential,
+    unit_offset: Tensor | None,
+) -> Potential:
+    """Apply a frozen normalized offset through an explicit module forward."""
+    if unit_offset is None:
+        return pot
     radius = 0.5 * (float(pot.domain.max) - float(pot.domain.min))
-    offset = module._range_mismatch_unit_offset * radius
-    return (Potential(pot.value + offset, pot.domain),) + tuple(args[1:])
+    return Potential(pot.value + unit_offset * radius, pot.domain)
 
 
 def install_range_mismatch(
-    model,
+    model: nn.Module,
     range_std_fraction: float,
     enabled: bool = True,
     *,
     seed: int = 0,
-):
+) -> int:
     """Attach static range-relative offsets to every spiking encoder module.
 
     A unit Gaussian offset is sampled once per supported module and multiplied by
@@ -896,10 +909,10 @@ def install_range_mismatch(
     frozen non-persistent buffer, is not resampled per forward, and remains
     independent of the caller's global RNG stream.
 
-    Returns the list of hook handles (for optional removal); empty when disabled.
+    Returns the number of configured spiking modules; zero when disabled.
     """
     if not enabled or range_std_fraction <= 0.0:
-        return []
+        return 0
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise TypeError("mismatch seed must be an integer")
     if seed < 0:
@@ -924,7 +937,7 @@ def install_range_mismatch(
         targets.append((m, shape))
 
     if not targets:
-        return []
+        return 0
 
     devices = {m.weight.device for m, _ in targets}
     if len(devices) != 1:
@@ -932,7 +945,6 @@ def install_range_mismatch(
     generator = torch.Generator(device=next(iter(devices)))
     generator.manual_seed(seed)
 
-    handles = []
     for m, shape in targets:
 
         w = m.weight
@@ -942,7 +954,6 @@ def install_range_mismatch(
             dtype=w.dtype,
             generator=generator,
         ) * float(range_std_fraction)
-        m.register_buffer("_range_mismatch_unit_offset", unit_offset, persistent=False)
-        handles.append(m.register_forward_pre_hook(_range_mismatch_pre_hook))
+        m._range_mismatch_unit_offset = unit_offset
 
-    return handles
+    return len(targets)

@@ -6,6 +6,9 @@ import ast
 import inspect
 import math
 from pathlib import Path
+from collections.abc import Callable
+from functools import partial
+from types import ModuleType
 import sys
 from unittest.mock import patch
 
@@ -29,25 +32,35 @@ from utils.transforms.noise import (
     set_gaussian_time_noise,
 )
 from utils.transforms.types import Potential, PotentialBounds
+from utils.transformers.models.spiking_vit.modeling_spiking_vit import GeluOperator
+from scripts.evaluation.error_analysis_vit import GeluDenseOperator
 
 
-def _variants():
-    """Return each GELU implementation and the module owning its output helper."""
+def _tanh_reference(value: torch.Tensor) -> torch.Tensor:
+    return torch.nn.functional.gelu(value, approximate="tanh")
+
+
+def _sigmoid_reference(value: torch.Tensor) -> torch.Tensor:
+    return value * torch.sigmoid(1.702 * value)
+
+
+def _variants() -> tuple[
+    tuple[ModuleType, GeluOperator, Callable[[torch.Tensor], torch.Tensor]], ...
+]:
+    """Pair actual implementations with independent reference calculations."""
     return (
-        (functions, functions.gelu_approximation, {}, "tanh"),
-        (functions, functions.gelu_approximation_sigmoid, {}, "sigmoid"),
-        (cubic_module, cubic_module.gelu_with_multiplication_cube, {}, "tanh"),
+        (functions, functions.gelu_approximation, _tanh_reference),
+        (functions, functions.gelu_approximation_sigmoid, _sigmoid_reference),
+        (cubic_module, cubic_module.gelu_with_multiplication_cube, _tanh_reference),
         (
             ablation_module,
-            ablation_module.gelu_operator_ablation,
-            {"dense_operators": frozenset()},
-            "tanh",
+            partial(ablation_module.gelu_operator_ablation, dense_operators=frozenset()),
+            _tanh_reference,
         ),
         (
             ablation_module,
-            ablation_module.gelu_operator_ablation,
-            {"dense_operators": frozenset({"multiplication", "exponential", "division"})},
-            "tanh",
+            partial(ablation_module.gelu_operator_ablation, dense_operators=frozenset(GeluDenseOperator)),
+            _tanh_reference,
         ),
     )
 
@@ -140,48 +153,44 @@ def verify_gelu_output_clamp_counts() -> None:
 def verify_gelu_variants() -> None:
     """Check clean parity and isolate the final clamp from internal event draws."""
     domain = PotentialBounds(-3.0, 3.0)
-    for owner, evaluate, options, approximation in _variants():
+    def unclamped(raw: torch.Tensor, input_domain: PotentialBounds) -> tuple[torch.Tensor, PotentialBounds]:
+        return raw, gelu_output_bounds(input_domain)
+
+    for owner, evaluate, reference in _variants():
         for dtype in (torch.float32, torch.float64):
             value = torch.linspace(-3.0, 3.0, 257, dtype=dtype)
-            expected = (
-                value * torch.sigmoid(1.702 * value)
-                if approximation == "sigmoid"
-                else torch.nn.functional.gelu(value, approximate="tanh")
-            )
+            expected = reference(value)
             set_gaussian_time_noise(enabled=False)
             with patch.object(
-                owner, "clamp_gelu_output", lambda raw, bounds: (raw, gelu_output_bounds(bounds))
+                owner, "clamp_gelu_output", unclamped
             ):
-                prior, _ = evaluate(value, domain, **options)
-            clean, clean_domain = evaluate(value, domain, **options)
+                prior, _ = evaluate(value, domain)
+            clean, clean_domain = evaluate(value, domain)
             assert torch.equal(clean, prior)
             # Identity-code subtraction retains its existing float32 roundoff.
             tolerance = 2.0e-5 if dtype == torch.float32 else 2.0e-12
             torch.testing.assert_close(clean, expected, rtol=tolerance, atol=tolerance)
             assert clean_domain == PotentialBounds(GELU_OUTPUT_MIN, 3.0)
             set_gaussian_time_noise(enabled=True, time_std_fraction=0.0, seed=92)
-            zero, zero_domain = evaluate(value, domain, **options)
+            zero, zero_domain = evaluate(value, domain)
             torch.testing.assert_close(zero, clean, rtol=tolerance, atol=tolerance)
             assert zero_domain == clean_domain
             set_gaussian_time_noise(enabled=False)
-            replay, replay_domain = evaluate(value, domain, **options)
+            replay, replay_domain = evaluate(value, domain)
             assert torch.equal(replay, clean) and replay_domain == clean_domain
 
         value = torch.linspace(-3.0, 3.0, 257, dtype=torch.float64)
-
-        def unclamped(raw, input_domain):
-            return raw, gelu_output_bounds(input_domain)
 
         try:
             # Both calls see the same random stream. Bypassing only the new output
             # clamp must retain every prior event counter and the final RNG state.
             set_gaussian_time_noise(enabled=True, time_std_fraction=0.2, seed=93)
             with patch.object(owner, "clamp_gelu_output", unclamped):
-                raw, raw_domain = evaluate(value, domain, **options)
+                raw, raw_domain = evaluate(value, domain)
             raw_stats = get_gaussian_noise_stats()
             raw_rng = get_gaussian_time_noise().generator.get_state().clone()
             set_gaussian_time_noise(enabled=True, time_std_fraction=0.2, seed=93)
-            noisy, noisy_domain = evaluate(value, domain, **options)
+            noisy, noisy_domain = evaluate(value, domain)
             stats = get_gaussian_noise_stats()
             assert torch.equal(raw_rng, get_gaussian_time_noise().generator.get_state())
             output_stats = stats.pop("gelu.output")

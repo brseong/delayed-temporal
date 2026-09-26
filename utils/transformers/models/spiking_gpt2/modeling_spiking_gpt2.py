@@ -94,6 +94,9 @@ def resolve_gpt2_mlp_activation_implementation(config) -> str:
 
 
 class SpikingConv1D(Conv1D):
+    _frozen_parameter_bounds: tuple[
+        tuple[int, int | None], dict[tuple[float, float], PotentialBounds]
+    ] | None = None
     def __init__(self, nf, nx, **kwargs):
         super().__init__(nf, nx, **kwargs)
 
@@ -142,7 +145,7 @@ class SpikingConv1D(Conv1D):
             self.weight._version,
             self.bias._version if self.bias is not None else None,
         )
-        cached = self.__dict__.get("_frozen_parameter_bounds")
+        cached = self._frozen_parameter_bounds
 
         # Reject an unapproved parameter transition. Explicit refresh begins a new
         # coherent generation and intentionally removes every older domain entry.
@@ -194,7 +197,7 @@ class SpikingConv1D(Conv1D):
         # Keep derived metadata outside the state dict and publish a fresh mapping so
         # every earlier immutable domain remains valid for this parameter generation.
         memoized_domains = {**memoized_domains, domain_key: output_domain}
-        self.__dict__["_frozen_parameter_bounds"] = (
+        self._frozen_parameter_bounds = (
             final_versions,
             memoized_domains,
         )
@@ -1104,6 +1107,9 @@ class GPT2DoubleHeadsModelOutput(ModelOutput):
 
 @auto_docstring
 class GPT2Model(GPT2PreTrainedModel):
+    _frozen_embedding_bounds: tuple[
+        tuple[int, int, int, int], tuple[PotentialBounds, PotentialBounds]
+    ] | None = None
     def __init__(self, config):
         super().__init__(config)
 
@@ -1164,7 +1170,7 @@ class GPT2Model(GPT2PreTrainedModel):
             id(self.wpe.weight),
             self.wpe.weight._version,
         )
-        cached = self.__dict__.get("_frozen_embedding_bounds")
+        cached = self._frozen_embedding_bounds
         if cached is not None and not refresh:
             cached_identity, cached_bounds = cached
             if identity != cached_identity:
@@ -1198,7 +1204,7 @@ class GPT2Model(GPT2PreTrainedModel):
             raise RuntimeError(
                 "GPT-2 embedding parameters changed while bounds were being frozen"
             )
-        self.__dict__["_frozen_embedding_bounds"] = (
+        self._frozen_embedding_bounds = (
             final_identity,
             frozen_bounds,
         )
@@ -1211,7 +1217,7 @@ class GPT2Model(GPT2PreTrainedModel):
         self.wte = new_embeddings
         # Public embedding replacement intentionally begins a new parameter regime.
         # Discard only derived metadata; the next setup/forward freezes the new table.
-        self.__dict__.pop("_frozen_embedding_bounds", None)
+        self._frozen_embedding_bounds = None
 
     @merge_with_config_defaults
     @capture_outputs

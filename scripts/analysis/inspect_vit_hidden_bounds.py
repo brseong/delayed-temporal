@@ -37,8 +37,8 @@ def main() -> None:
     os.environ.update(CUDA_VISIBLE_DEVICES='', WANDB_MODE='disabled', HF_HUB_OFFLINE='1')
     sys.path[:0] = [str(source), str(source / 'src/transformers/src'), str(source / 'src/spikingjelly')]
     import torch
-    from scripts.analysis.gelu_cubic_phi_nl_vit import install_phi_nl_psi_ed_cube
-    from scripts.evaluation.error_analysis_vit import ViTConfig, ViTForImageClassification, ViTImageProcessor, image_processor_pixel_bounds
+    from scripts.analysis.gelu_cubic_phi_nl_vit import make_gelu_cubic_implementation
+    from scripts.evaluation.error_analysis_vit import GeluCubicImplementation, ViTConfig, ViTForImageClassification, ViTImageProcessor, image_processor_pixel_bounds
     from utils.transforms.noise import set_gaussian_time_noise
     from utils.transforms.types import Potential
 
@@ -56,10 +56,10 @@ def main() -> None:
     processor = ViTImageProcessor.from_pretrained(checkpoint, local_files_only=True)
     pixel_domain = image_processor_pixel_bounds(processor, num_channels=config.num_channels)
     config.pixel_value_min, config.pixel_value_max = pixel_domain.min, pixel_domain.max
-    install_phi_nl_psi_ed_cube(magnitude_floor=1e-5)
     model = ViTForImageClassification.from_pretrained(
         checkpoint, config=config, attn_implementation='spiking_sdpa',
         torch_dtype=torch.float64, local_files_only=True,
+        gelu_operator=make_gelu_cubic_implementation(GeluCubicImplementation.PHI_NL_PSI_ED, magnitude_floor=1e-5),
     ).eval()
     assert model.config._attn_implementation == 'spiking_sdpa'
     assert all(p.device.type == 'cpu' and p.dtype == torch.float64 for p in model.parameters())
@@ -120,8 +120,8 @@ def main() -> None:
                 bounds = reference[(f'vit.encoder.layer.{layer}{suffix}', phase)]
                 writer.writerow([layer + 1, stage, *bounds])
     metadata = dict(source_commit=head, evaluator_sha256=experiment['evaluator_sha256'],
-                    experiment_sha256=sha256(args.experiment_json), checkpoint_identity=checkpoint_identity,
-                    diagnostic_sha256=sha256(Path(__file__)),
+                    experiment_sha256=identity.sha256_file(args.experiment_json), checkpoint_identity=checkpoint_identity,
+                    diagnostic_sha256=identity.sha256_file(Path(__file__)),
                     dtype='float64', calibration_mode='none', attention='spiking_sdpa',
                     device='cpu', sequence_length=197, samples_from_dataset=0,
                     checks=checks, module_bound_count=len(reference),

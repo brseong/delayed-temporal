@@ -1188,8 +1188,8 @@ def verify_vit_evaluator_artifact_lifecycle() -> None:
         _expect_raises(SystemExit, parse_arguments, "2")
 
     # Parsing exposes every artifact and statistical control without aliases to the
-    # legacy quantile diagnostic. The active string converts to the shared enum only
-    # after backend, path, population, and range-policy validation succeeds.
+    # legacy quantile diagnostic. Parsing converts the active value to the shared
+    # enum before backend, population, and range-policy validation.
     with patch(
         "sys.argv",
         [
@@ -1233,7 +1233,7 @@ def verify_vit_evaluator_artifact_lifecycle() -> None:
     )
     frozen_args = replace(
         args,
-        calibration_mode="validate",
+        calibration_mode=CalibrationMode.VALIDATE,
         gaussian_time_noise=True,
     )
     assert (
@@ -1241,7 +1241,7 @@ def verify_vit_evaluator_artifact_lifecycle() -> None:
         is CalibrationMode.VALIDATE
     )
     assert validate_vit_calibration_arguments(
-        replace(args, calibration_mode="none", calibration_path="")
+        replace(args, calibration_mode=None, calibration_path="")
     ) is None
 
     # Invalid active paths and statistical controls must fail before dataset loading.

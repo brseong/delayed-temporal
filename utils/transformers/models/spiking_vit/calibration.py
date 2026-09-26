@@ -4,7 +4,7 @@ import collections.abc
 import dataclasses
 import json
 import math
-from typing import Any
+from typing import Any, Callable
 
 import torch
 from torch import nn
@@ -620,6 +620,7 @@ def collect_vit_calibration_table(
     device: torch.device,
     dtype: torch.dtype,
     expected_samples: int,
+    on_batch: Callable[[int, int], None] | None = None,
 ) -> CalibrationTable:
     """Run deterministic ViT min-max and histogram passes and finalize a table.
 
@@ -635,6 +636,7 @@ def collect_vit_calibration_table(
         device: Device receiving each preprocessed pixel batch.
         dtype: Floating model input dtype.
         expected_samples: Exact subset population replayed in each pass.
+        on_batch: Optional observer receiving the pass index and batch size.
 
     Returns:
         Final immutable calibration table after identical two-pass populations.
@@ -696,6 +698,8 @@ def collect_vit_calibration_table(
                         raise RuntimeError("pixel_values must be floating point")
                     observed_samples += int(pixel_values.shape[0])
                     model(pixel_values.to(device=device, dtype=dtype))
+                    if on_batch is not None:
+                        on_batch(pass_index, int(pixel_values.shape[0]))
 
             # Each pass must consume exactly the selected dataset. This catches a
             # custom collator or iterable behavior that drops or duplicates examples.
