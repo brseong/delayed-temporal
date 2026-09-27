@@ -60,6 +60,10 @@ logger = logging.get_logger(__name__)
 class RobertaEmbeddings(nn.Module):
     """Construct the embeddings from word, position and token_type embeddings."""
 
+    _frozen_embedding_bounds: tuple[
+        tuple[int, int, int], tuple[PotentialBounds, PotentialBounds, PotentialBounds]
+    ] | None = None
+
     def __init__(self, config):
         super().__init__()
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
@@ -122,7 +126,7 @@ class RobertaEmbeddings(nn.Module):
             self.token_type_embeddings.weight._version,
             self.position_embeddings.weight._version,
         )
-        cached = self.__dict__.get("_frozen_embedding_bounds")
+        cached = self._frozen_embedding_bounds
         if cached is not None and not refresh:
             cached_identity, cached_bounds = cached
             if identity != cached_identity:
@@ -156,7 +160,7 @@ class RobertaEmbeddings(nn.Module):
             raise RuntimeError(
                 "RoBERTa embedding parameters changed while bounds were being frozen"
             )
-        self.__dict__["_frozen_embedding_bounds"] = (
+        self._frozen_embedding_bounds = (
             final_identity,
             frozen_bounds,
         )

@@ -250,10 +250,13 @@ def verify_centered_collection_and_reuse():
                                 0.0, 1.0, 0.05)
     values = torch.tensor([[-30, 30, 30, 30], [30, -30, -30, -30]], dtype=torch.float64)
     collector = create_calibration_collector(identity, (spec,), bin_count=16)
+    completed_batches: list[tuple[int, int]] = []
     table = collect_vit_calibration_table(
         model, DataLoader(FixedInputs(values), batch_size=1), collector,
         device=torch.device("cpu"), dtype=torch.float64, expected_samples=2,
+        on_batch=lambda pass_index, batch_size: completed_batches.append((pass_index, batch_size)),
     )
+    assert completed_batches == [(0, 1), (0, 1), (1, 1), (1, 1)]
     row = table.layers[0]
     assert row.num_values == 8 and row.observed_min == -45 and row.observed_max == 45
     assert row.bounds.min == -49.5 and row.bounds.max == 49.5

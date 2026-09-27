@@ -181,7 +181,7 @@ def estimate_vit_cost(checkpoint_config: dict) -> dict:
     linear("block.mlp.input_projection", n, d, m, depth)
     stage("block.mlp.gelu.cubic", 4 * n * m, 6 * n * m + 1,
           multiplicity=depth,
-          source="scripts/analysis/gelu_cubic_phi_nl_vit.py:phi_nl_psi_ed_cube",
+          source="utils/transforms/functions.py:gelu_cubic_power_operator",
           explanation="Each hidden activation has two signed log encoders and two "
                       "internal encoders. Each decoder receives the shared reference. "
                       "All four encoders receive synchronization; the reference "

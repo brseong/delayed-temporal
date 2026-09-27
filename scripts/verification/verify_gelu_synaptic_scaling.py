@@ -13,7 +13,6 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from scripts.analysis import gelu_cubic_phi_nl_vit as cubic
 from utils.transforms import functions, noise
 from utils.transforms.types import PotentialBounds
 
@@ -91,12 +90,12 @@ def verify_cubic_boundaries() -> None:
         outputs = []
         for enabled in (False, True):
             noise.set_gaussian_time_noise(enabled=enabled, time_std_fraction=0.0, seed=3, device="cpu")
-            actual_cube, cube_bounds = cubic.phi_nl_psi_ed_cube(
+            actual_cube, cube_bounds = functions.gelu_cubic_power_operator(
                 values, domain, tau_s=tau_s, magnitude_floor=floor,
             )
             torch.testing.assert_close(actual_cube, reference_cube, rtol=3.0e-13, atol=2.0e-20)
             assert cube_bounds == PotentialBounds(-512000.0, 512000.0)
-            actual, bounds = cubic.gelu_with_phi_nl_psi_ed_cube(
+            actual, bounds = functions.gelu_approximation(
                 values, domain, tau_s=tau_s, magnitude_floor=floor,
             )
             assert functions.OUTPUT_BOUNDS_VERSION == 4
@@ -112,28 +111,24 @@ def verify_dynamic_products() -> None:
     """Only data-dependent products enter the composed multiplication operator."""
     values = torch.linspace(-3.0, 3.0, 53, dtype=torch.float64)
     domain = PotentialBounds(-3.0, 3.0)
-    variants = (
-        (functions, functions.gelu_approximation, 1),
-        (functions, functions.gelu_approximation_sigmoid, 1),
-        (cubic, cubic.gelu_with_phi_nl_psi_ed_cube, 1),
-    )
-    for owner, evaluator, expected_count in variants:
-        calls = []
+    for evaluator in (functions.gelu_approximation, functions.gelu_approximation_sigmoid):
+        calls: list[tuple[torch.Tensor, PotentialBounds]] = []
         original = functions.multiplication_operator
 
-        def traced(value, value_domain, factor, factor_domain):
+        def traced(
+            value: torch.Tensor,
+            value_domain: PotentialBounds,
+            factor: torch.Tensor,
+            factor_domain: PotentialBounds,
+        ) -> tuple[torch.Tensor, PotentialBounds]:
             assert factor_domain.min < factor_domain.max, "a fixed gain entered multiplication"
             calls.append((factor.clone(), factor_domain))
             return original(value, value_domain, factor, factor_domain)
 
         noise.set_gaussian_time_noise(enabled=False)
         with patch.object(functions, "multiplication_operator", side_effect=traced):
-            if owner is cubic:
-                with patch.object(cubic, "multiplication_operator", side_effect=traced):
-                    result, _ = evaluator(values, domain)
-            else:
-                result, _ = evaluator(values, domain)
-        assert len(calls) == expected_count
+            result, _ = evaluator(values, domain)
+        assert len(calls) == 1
         assert calls[-1][1] == PotentialBounds(0.0, 1.0)
         assert bool(torch.isfinite(result).all())
     # The generic operator must still encode a caller-supplied constant operand.
@@ -171,7 +166,7 @@ def verify_gaussian_events_and_replay() -> None:
         with patch.object(
             noise, "_sample_gaussian_spike_time", wraps=noise._sample_gaussian_spike_time,
         ) as sampler:
-            output, _ = cubic.gelu_with_phi_nl_psi_ed_cube(values, domain)
+            output, _ = functions.gelu_approximation(values, domain)
         outputs.append(output)
         stats = noise.get_gaussian_noise_stats()
         events = {site: counts["events"] for site, counts in stats.items() if counts["events"]}

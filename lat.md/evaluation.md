@@ -68,6 +68,16 @@ The maintained defaults select observed min/max (`0/1`) without tail truncation,
 
 The artifact path is explicit through `--calibration-path`. ViT records image processing and geometry; GPT-2 records filtering of empty texts, tokenizer controls, padded sequence length, and dataset configuration. Both record the seeded training subset, checkpoint, TTFS constants, attention path, and supported ablation settings. The separate ViT cubic implementation and floor are not part of the current artifact identity; see [[calibration#Two-pass Collection#Deterministic Training Subset]].
 
+The ViT calibration wrapper supplies its verified training dataset, metadata identity, and progress callback through explicit evaluator parameters. Collection invokes the callback after each completed batch. The selected GELU function is passed through the ViT constructors when the model is built, including checkpoint loading.
+
+The analysis parsers return one evaluation configuration. Construction, validation and recorded metadata read the same fields. Tests call the shared implementation directly and compare its output against independent reference calculations.
+
+ViT evaluation converts external choices to enum members before validation and model construction. Disabled calibration uses `None`; active phases reuse [[utils/transforms/calibration.py#CalibrationMode]].
+
+[[scripts/evaluation/error_analysis_vit.py#Arguments]] declares the backend, device, precision, activation and GELU selection types. Internal callers and analysis factories accept enum members. [[scripts/evaluation/error_analysis_vit.py#Arguments#logging_config]] converts them to the existing strings for recorded configuration. Invalid external values fail during parsing, before data or checkpoint loading.
+
+[[scripts/verification/verify_calibrated_vit_evaluator.py#verify_enum_configuration]] checks input validation, typed selections, disabled and active calibration, and unchanged serialized values. The GELU verification scripts execute the selected functions and real checkpoint loading.
+
 ## Diagnostics and Instrumentation
 
 The runners collect internal evidence needed to interpret finite-domain and approximation failures rather than relying only on final task metrics.
@@ -477,6 +487,8 @@ The deterministic construction comparison keeps direct Gaussian timing error dis
 
 The Power path limits each signed magnitude to `theta` before log encoding, matching the bounded log domain used by LayerNorm and accepting wider analytic upstream bounds. [[scripts/verification/verify_gelu_cubic_phi_nl.py#verify_phi_nl_psi_ed_cube]] checks signed cubic values, invariance across positive time constants, finite domain floor behavior, threshold limiting, float32 GELU agreement, propagated bounds, parity without noise, seeded replay, seed independence, and shared ViT, RoBERTa, and GPT-2 ownership.
 
+[[scripts/verification/verify_gelu_cubic_phi_nl.py#verify_gelu_checkpoint_construction]] saves and loads a small real checkpoint with an explicitly supplied GELU function, executes every block, and checks parameter keys, values, prediction parity, and independence from a separately constructed model. Its observer calls the real selected function; it does not replace a projection or model forward method.
+
 #### Observed ViT-S Result
 
 On the fixed first 5,000 ImageNet-1k validation images, the alternative cubic construction produced six more correct predictions and did not reduce top-1 accuracy.
@@ -506,11 +518,11 @@ The dense helpers apply the production analytic endpoint clamp after the cubic i
 
 Selected operators shadow-consume the same Gaussian draws in the same tensor/scalar order but do not apply or count those events. This common-random-number coupling keeps every later GELU and non-GELU event aligned across variants, reducing paired seed variance without representing shadow draws as physical activity.
 
-The retired operator-ablation shell driver ran one condition per process and GPU while holding the model, 5,000-image subset, absolute timing scale, and seed fixed. [[scripts/analysis/gelu_operator_ablation_vit.py#install_gelu_operator_ablation]] remains an analysis helper, but it is no longer reachable from a maintained campaign.
+The retired operator ablation shell driver ran one condition per process and GPU while holding the model, 5,000-image subset, absolute timing scale, and seed fixed. [[scripts/analysis/gelu_operator_ablation_vit.py#make_gelu_operator_ablation]] builds an analysis function passed to each ViT block during construction through the shared `GeluOperator` type. The helper is no longer reachable from a maintained campaign.
 
 This scan deliberately leaves endpoint placement and calibration unchanged. At the existing float32 transition point it is an implementation-level attribution conditioned on [[noise#Numerical Precision and Endpoint Caveat]], not a calibrated continuous-noise robustness result. Repeating the matrix belongs to [[deferred-experiments#Mechanism and Operator Ablations]] and is needed only for a retained mechanism claim.
 
-[[scripts/verification/verify_gelu_operator_ablation.py#verify_gelu_operator_ablation]] checks all eight noise-off subsets for value parity, rejects unknown operator labels, and verifies that installation changes only the local ViT adapter symbol. [[scripts/verification/verify_gelu_operator_ablation.py#verify_gelu_operator_event_selection]] checks physical event topology and equal post-GELU generator state across all dense selections.
+[[scripts/verification/verify_gelu_operator_ablation.py#verify_gelu_operator_ablation]] checks all eight noise-off subsets for value parity, rejects unknown operator labels, and verifies that selection for one model leaves the shared GELU function unchanged. [[scripts/verification/verify_gelu_operator_ablation.py#verify_gelu_operator_event_selection]] checks physical event topology and equal post-GELU generator state across all dense selections.
 
 #### Observed ViT-S Result
 

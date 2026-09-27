@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from math import isfinite, log
 from pathlib import Path
 import sys
+from typing import Sequence
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -14,10 +16,10 @@ import torch
 
 from scripts.evaluation.error_analysis_vit import (
     Arguments,
+    GeluDenseOperator,
     evaluate_vit_model,
     parse_arguments as parse_vit_arguments,
 )
-from utils.transformers.models.spiking_vit import modeling_spiking_vit
 from utils.transforms.functions import (
     _constant_synaptic_scale,
     clamp_gelu_output,
@@ -32,9 +34,7 @@ from utils.transforms.noise import (
     get_gaussian_time_noise,
 )
 from utils.transforms.types import PotentialBounds, TimeBounds
-
-
-_OPERATOR_NAMES = frozenset({"multiplication", "exponential", "division"})
+from utils.transformers.models.spiking_vit.modeling_spiking_vit import GeluOperator
 
 
 def _consume_shadow_gaussian_event(
@@ -290,7 +290,7 @@ def gelu_operator_ablation(
     input_value: torch.Tensor,
     domain: PotentialBounds,
     *,
-    dense_operators: frozenset[str],
+    dense_operators: frozenset[GeluDenseOperator],
     tau_s: float = 1.0,
     **_: object,
 ) -> tuple[torch.Tensor, PotentialBounds]:
@@ -311,9 +311,8 @@ def gelu_operator_ablation(
     Returns:
         The ablated GELU value and its propagated production-compatible bounds.
     """
-    unknown = dense_operators - _OPERATOR_NAMES
-    if unknown:
-        raise ValueError(f"unknown GELU operator ablations: {sorted(unknown)}")
+    if any(not isinstance(operator, GeluDenseOperator) for operator in dense_operators):
+        raise TypeError("expected GeluDenseOperator members")
 
     # Route each product through either the ordinary sampled operator or the direct
     # rail-preserving counterpart without mutating process-wide noise state.
@@ -323,7 +322,7 @@ def gelu_operator_ablation(
         factor: torch.Tensor,
         factor_domain: PotentialBounds,
     ) -> tuple[torch.Tensor, PotentialBounds]:
-        if "multiplication" in dense_operators:
+        if GeluDenseOperator.MULTIPLICATION in dense_operators:
             return _dense_gelu_multiplication(
                 value,
                 value_domain,
@@ -388,7 +387,7 @@ def gelu_operator_ablation(
 
     # The exponential bypass removes only its encoder sample; otherwise the normal
     # event-aware implementation retains reset-on-opening-miss behavior.
-    if "exponential" in dense_operators:
+    if GeluDenseOperator.EXPONENTIAL in dense_operators:
         negative_exponential, negative_exponential_domain = (
             _dense_gelu_exponential(
                 scaled_tanh_input,
@@ -411,7 +410,7 @@ def gelu_operator_ablation(
         1.0 + negative_exponential_domain.max,
     )
     numerator = torch.ones_like(denominator)
-    if "division" in dense_operators:
+    if GeluDenseOperator.DIVISION in dense_operators:
         ratio, ratio_domain = _dense_gelu_division(
             numerator,
             denominator,
@@ -426,77 +425,68 @@ def gelu_operator_ablation(
             tau_s=tau_s,
         )
     # The normalized ratio is the GELU gate; no explicit tanh output is formed.
-    result, _ = multiply(input_clamped, domain, ratio, ratio_domain)
+    result, _product_bounds = multiply(input_clamped, domain, ratio, ratio_domain)
     return clamp_gelu_output(result, domain)
 
 
-def install_gelu_operator_ablation(dense_operators: frozenset[str]) -> None:
-    """Install the analysis GELU replacement in the local ViT module namespace."""
-    unknown = dense_operators - _OPERATOR_NAMES
-    if unknown:
-        raise ValueError(f"unknown GELU operator ablations: {sorted(unknown)}")
+def make_gelu_operator_ablation(
+    dense_operators: frozenset[GeluDenseOperator],
+) -> GeluOperator:
+    """Build a GELU variant for one ViT evaluation."""
+    if any(not isinstance(operator, GeluDenseOperator) for operator in dense_operators):
+        raise TypeError("expected GeluDenseOperator members")
 
-    # ViTIntermediate resolves gelu_approximation from this module namespace at
-    # forward time, so replacing only that symbol leaves every other model family
-    # and every non-GELU use of the atomic operators unchanged.
     def configured_gelu(
         input_value: torch.Tensor,
         domain: PotentialBounds,
-        **kwargs: object,
     ) -> tuple[torch.Tensor, PotentialBounds]:
         return gelu_operator_ablation(
             input_value,
             domain,
             dense_operators=dense_operators,
-            **kwargs,
         )
 
-    # This mutation is process-local and happens before model evaluation. The shell
-    # driver runs one condition per process, so variants never coexist in one RNG.
-    modeling_spiking_vit.gelu_approximation = configured_gelu
+    return configured_gelu
 
 
-def parse_arguments() -> tuple[Arguments, frozenset[str]]:
+def parse_arguments(argv: Sequence[str] | None = None) -> Arguments:
     """Parse analysis-only operator choices followed by the ordinary ViT CLI."""
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
         "--gelu-dense-operators",
         nargs="*",
-        choices=sorted(_OPERATOR_NAMES),
+        choices=sorted(member.value for member in GeluDenseOperator),
         default=(),
     )
 
     # Remove the analysis option before delegating all model, dataset, and Gaussian
     # controls to the maintained evaluator parser.
-    analysis_args, remaining = parser.parse_known_args()
-    original_argv = sys.argv
-    try:
-        sys.argv = [original_argv[0], *remaining]
-        vit_args = parse_vit_arguments()
-    finally:
-        sys.argv = original_argv
+    analysis_args, remaining = parser.parse_known_args(argv)
+    vit_args = parse_vit_arguments(remaining)
 
-    dense_operators = frozenset(analysis_args.gelu_dense_operators)
+    dense_operators = frozenset(GeluDenseOperator(value) for value in analysis_args.gelu_dense_operators)
     if vit_args.spiking_mlp_exact_gelu or vit_args.spiking_mlp_exact_gelu_layers:
         raise ValueError(
             "GELU operator ablation cannot be combined with another exact-GELU mode"
         )
 
-    # Dataclasses without slots permit the analysis identity to join vars(args), so
-    # the evaluator records it in W&B without widening the production Arguments API.
-    vit_args.gelu_dense_operators = tuple(sorted(dense_operators))
-    return vit_args, dense_operators
+    # Declared analysis fields are included in the evaluator's recorded arguments.
+    return replace(
+        vit_args,
+        gelu_dense_operators=tuple(sorted(dense_operators)),
+    )
 
 
 def main() -> None:
-    """Install one GELU-local operator variant and run the ordinary ViT evaluator."""
-    args, dense_operators = parse_arguments()
-    install_gelu_operator_ablation(dense_operators)
+    """Construct one GELU variant and run the ordinary ViT evaluator."""
+    args = parse_arguments()
+    dense_operators = frozenset(args.gelu_dense_operators)
+    gelu_operator = make_gelu_operator_ablation(dense_operators)
     print(
         "Dense GELU-local operators: "
-        + (", ".join(sorted(dense_operators)) if dense_operators else "none")
+        + (", ".join(operator.value for operator in sorted(dense_operators)) if dense_operators else "none")
     )
-    evaluate_vit_model(args)
+    evaluate_vit_model(args, gelu_operator=gelu_operator)
 
 
 if __name__ == "__main__":

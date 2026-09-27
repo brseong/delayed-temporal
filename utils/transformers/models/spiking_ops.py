@@ -2,6 +2,7 @@
 
 import math
 from typing import Optional
+from weakref import WeakKeyDictionary
 
 import torch
 from torch import nn
@@ -10,7 +11,7 @@ from utils.transforms import neg_identity_transform
 from utils.transforms.calibration import CalibrationCollectorState
 from utils.transforms.functions import multiplication_operator, division_function
 from utils.transforms.noise import (
-    clamp_gaussian_output, gaussian_time_noise_is_active,
+    apply_range_mismatch, clamp_gaussian_output, gaussian_time_noise_is_active,
     gaussian_noise_statistics_mask,
 )
 from utils.transforms.potential_to_spike import neg_log_transform
@@ -21,7 +22,15 @@ from utils.transformers.calibration import (
     calibrated_potential,
     validate_symmetric_encoder_bounds,
     calibration_uses_explicit_bounds,
+    get_model_calibration_binding,
 )
+
+AffineBoundsCache = tuple[
+    tuple[int, int | None], dict[tuple[float, float], PotentialBounds]
+]
+_DENSE_LAYER_NORM_BOUNDS: WeakKeyDictionary[
+    nn.LayerNorm, tuple[tuple[object, ...], PotentialBounds]
+] = WeakKeyDictionary()
 
 
 class SpikingLayerNorm(nn.Module):
@@ -38,6 +47,10 @@ class SpikingLayerNorm(nn.Module):
       use_spiking_log    : φ_NL for encoding  vs  τ·log(hi/x)
       use_spiking_expdiff: ψ_ED for division  vs  exp((t_σ - t_x)/τ)
     """
+
+    _frozen_parameter_bounds: tuple[
+        tuple[object, ...], tuple[PotentialBounds, PotentialBounds, PotentialBounds]
+    ] | None = None
 
     def __init__(
         self,
@@ -91,6 +104,8 @@ class SpikingLayerNorm(nn.Module):
         self.use_spiking_expdiff = use_spiking_expdiff
         self.weight = nn.Parameter(torch.ones(self.normalized_shape))
         self.bias = nn.Parameter(torch.zeros(self.normalized_shape))
+        self._range_mismatch_unit_offset: torch.Tensor | None
+        self.register_buffer("_range_mismatch_unit_offset", None, persistent=False)
 
     def freeze_parameter_bounds(
         self,
@@ -151,7 +166,7 @@ class SpikingLayerNorm(nn.Module):
             bool(self.use_spiking_log),
             bool(self.use_spiking_expdiff),
         )
-        cached = self.__dict__.get("_frozen_parameter_bounds")
+        cached = self._frozen_parameter_bounds
         if cached is not None and not refresh:
             cached_identity, cached_bounds = cached
             if identity != cached_identity:
@@ -227,7 +242,7 @@ class SpikingLayerNorm(nn.Module):
         # compatibility remains unchanged, while later calls reuse immutable scalar
         # metadata until an explicit refresh establishes a new inference regime.
         frozen_bounds = (weight_domain, bias_domain, output_domain)
-        self.__dict__["_frozen_parameter_bounds"] = (
+        self._frozen_parameter_bounds = (
             final_identity,
             frozen_bounds,
         )
@@ -251,15 +266,14 @@ class SpikingLayerNorm(nn.Module):
                 "LayerNorm incoming interval width must be finite and exceed the positive floor"
             )
         if calibration_uses_explicit_bounds(self):
-            name = (
-                f"{self.__dict__['_delayed_temporal_calibration_module_name']}"
-                ".centered_input"
-            )
+            binding = get_model_calibration_binding(self)
+            if binding is None:
+                raise RuntimeError("LayerNorm calibration binding disappeared")
+            name = f"{binding.module_name}.centered_input"
             # Both x and its mean lie in the incoming interval. Their difference
             # therefore lies within plus/minus its width in either collection pass.
             collection_bounds = None
-            state = self.__dict__["_delayed_temporal_calibration_state"]
-            if isinstance(state, CalibrationCollectorState):
+            if isinstance(binding.state, CalibrationCollectorState):
                 width = float(pot.domain.max) - float(pot.domain.min)
                 if not math.isfinite(width) or width <= self.clip_margin:
                     raise ValueError(
@@ -620,6 +634,7 @@ class SpikingLayerNorm(nn.Module):
         Returns:
             A normalized ``Potential`` with bounds synchronized to its output.
         """
+        pot = apply_range_mismatch(pot, self._range_mismatch_unit_offset)
         # Keep sampled timestamps and delivery masks confined to the dedicated
         # implementation so deterministic tensor arithmetic remains event-free.
         if gaussian_time_noise_is_active():
@@ -847,9 +862,13 @@ def _validate_pwm_input_domain(
 class SpikingLinear(nn.Linear):
     """Linear layer via ψ_PWM operator. Numerically identical to nn.Linear."""
 
+    _frozen_parameter_bounds: AffineBoundsCache | None = None
+
     def __init__(self, in_features: int, out_features: int, bias: bool = True,
                  device=None, dtype=None):
         super().__init__(in_features, out_features, bias=bias, device=device, dtype=dtype)
+        self._range_mismatch_unit_offset: torch.Tensor | None
+        self.register_buffer("_range_mismatch_unit_offset", None, persistent=False)
 
     def freeze_parameter_bounds(
         self,
@@ -901,7 +920,7 @@ class SpikingLinear(nn.Linear):
             self.weight._version,
             self.bias._version if self.bias is not None else None,
         )
-        cached = self.__dict__.get("_frozen_parameter_bounds")
+        cached = self._frozen_parameter_bounds
 
         # A parameter update invalidates every domain entry together. Explicit refresh
         # begins a new coherent generation; otherwise stale physical rails are rejected.
@@ -958,7 +977,7 @@ class SpikingLinear(nn.Linear):
         # Publish a fresh dictionary copy outside the state dict. Existing entries stay
         # immutable and checkpoint compatibility remains unchanged.
         memoized_domains = {**memoized_domains, domain_key: output_domain}
-        self.__dict__["_frozen_parameter_bounds"] = (
+        self._frozen_parameter_bounds = (
             final_versions,
             memoized_domains,
         )
@@ -1071,6 +1090,7 @@ class SpikingLinear(nn.Linear):
         Returns:
             The affine output paired with conservative ideal potential rails.
         """
+        input = apply_range_mismatch(input, self._range_mismatch_unit_offset)
         # The upstream Potential owns the physical input rail. Validate zero
         # containment before clamping so both data and reference events can share it.
         x: torch.Tensor = input.value
@@ -1129,12 +1149,16 @@ class SpikingLinear(nn.Linear):
 class SpikingConv2d(nn.Conv2d):
     """2D convolution via ψ_PWM operator. Numerically identical to nn.Conv2d."""
 
+    _frozen_parameter_bounds: AffineBoundsCache | None = None
+
     def __init__(self, in_channels: int, out_channels: int, kernel_size, stride=1,
                  padding=0, dilation=1, groups=1, bias=True,
                  device=None, dtype=None):
         super().__init__(in_channels, out_channels, kernel_size, stride=stride,
                          padding=padding, dilation=dilation, groups=groups,
                          bias=bias, device=device, dtype=dtype)
+        self._range_mismatch_unit_offset: torch.Tensor | None
+        self.register_buffer("_range_mismatch_unit_offset", None, persistent=False)
 
     def freeze_parameter_bounds(
         self,
@@ -1183,7 +1207,7 @@ class SpikingConv2d(nn.Conv2d):
             self.weight._version,
             self.bias._version if self.bias is not None else None,
         )
-        cached = self.__dict__.get("_frozen_parameter_bounds")
+        cached = self._frozen_parameter_bounds
 
         # Reject an unapproved parameter transition instead of pairing new kernels
         # with old physical rails. Explicit refresh clears every prior domain entry.
@@ -1240,7 +1264,7 @@ class SpikingConv2d(nn.Conv2d):
         # Publish a fresh dictionary outside the state dict. Existing immutable
         # entries remain reusable and checkpoint parameter keys stay unchanged.
         memoized_domains = {**memoized_domains, domain_key: output_domain}
-        self.__dict__["_frozen_parameter_bounds"] = (
+        self._frozen_parameter_bounds = (
             final_versions,
             memoized_domains,
         )
@@ -1359,6 +1383,7 @@ class SpikingConv2d(nn.Conv2d):
         Returns:
             The convolution output paired with conservative ideal potential rails.
         """
+        input = apply_range_mismatch(input, self._range_mismatch_unit_offset)
         # The upstream Potential owns the fixed encoder rail. Zero containment also
         # preserves the physical meaning of ordinary zero padding outside the image.
         x: torch.Tensor = input.value
@@ -1474,7 +1499,7 @@ def freeze_dense_layer_norm_bounds(
         bias._version if bias is not None else None,
         bias.dtype if bias is not None else None,
     )
-    cached = norm.__dict__.get("_delayed_temporal_frozen_output_bounds")
+    cached = _DENSE_LAYER_NORM_BOUNDS.get(norm)
     if cached is not None and not refresh:
         cached_identity, cached_bounds = cached
         if cached_identity != identity:
@@ -1528,7 +1553,7 @@ def freeze_dense_layer_norm_bounds(
     )
     if final_identity != identity:
         raise RuntimeError("LayerNorm parameters changed while bounds were frozen")
-    norm.__dict__["_delayed_temporal_frozen_output_bounds"] = (
+    _DENSE_LAYER_NORM_BOUNDS[norm] = (
         final_identity,
         output_domain,
     )

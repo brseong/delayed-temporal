@@ -12,6 +12,8 @@ Each generator advances across forward calls on its device. The first device kee
 
 Evaluation entry points expose a dimensionless standard-deviation fraction $r_t$. For an encoder with declared time-window length $T$, that invocation uses $\sigma_t=r_tT$; optional linear and logarithmic overrides follow the same local rule. There is no global absolute conversion scale.
 
+[[utils/transforms/noise.py#SpikeTimeEncoding]] selects the linear or logarithmic noise override in [[utils/transforms/noise.py#inject_spike_time_noise]]. Both mapping functions supply enum members when their decorators are constructed; internal strings are rejected. Noise sampling, counters and seeded behavior are unchanged.
+
 ## Direct Gaussian Spike-Time Noise
 
 One Gaussian timing sample jointly determines the delivered spike time and whether the event misses the observation deadline.
@@ -138,7 +140,7 @@ If a data event is absent, its contribution remains at the reset value. If the r
 
 Static range mismatch remains separate from trial-to-trial timing noise.
 
-[[utils/transforms/noise.py#install_range_mismatch]] samples one frozen normalized offset per supported spiking module from a dedicated seeded generator and scales it by the module's declared input range in a forward pre-hook. Equal seeds replay the complete draw without consuming the model's global RNG stream.
+[[utils/transforms/noise.py#install_range_mismatch]] samples one frozen normalized offset per supported spiking module from a dedicated seeded generator. Each module applies its offset in its own forward method using the declared input range. Equal seeds replay the complete draw without consuming the model's global RNG stream.
 
 This proxy is not Stanojevic-style neuron-slope perturbation and should not be reported as calibrated device mismatch. Timing noise and static range mismatch remain separate experiment axes and are not enabled in the same evaluation replica.
 

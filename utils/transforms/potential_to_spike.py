@@ -3,7 +3,7 @@ from jaxtyping import Float, Int
 from math import log, exp, isfinite, ulp
 from numbers import Real
 from .types import ClosedBounds, PotentialBounds, SpikeSample, TimeBounds, check_domain
-from .noise import inject_spike_time_noise
+from .noise import SpikeTimeEncoding, inject_spike_time_noise
 
 """
 domain: The range of possible values for the input potentials.
@@ -12,7 +12,7 @@ image_min: The minimum value in the output range of the transformation.
     This can be used to synchronize output spike times with global clock times, ensuring that spikes occur at the correct times relative to the input potentials.
 """
 
-@inject_spike_time_noise(encoding="linear")
+@inject_spike_time_noise(encoding=SpikeTimeEncoding.LINEAR)
 @check_domain
 def neg_linear_transform(
     input_value: Float[torch.Tensor, "*batch dims"],
@@ -127,7 +127,7 @@ def neg_identity_transform(
     # encoder boundary that owns sampling, deadline classification, and statistics.
     return neg_linear_transform(input_value, domain, **forwarded_kwargs)
 
-@inject_spike_time_noise(encoding="log")
+@inject_spike_time_noise(encoding=SpikeTimeEncoding.LOG)
 @check_domain
 def neg_log_transform(
     input_value: Float[torch.Tensor, "*batch dims"],

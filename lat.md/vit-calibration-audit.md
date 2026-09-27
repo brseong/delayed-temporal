@@ -251,7 +251,7 @@ Attention score calibration은 Q/K 제한 후의 score를 수집한다. 현재 f
 
 합의한 시간상수 기반 세제곱과 고정 상수의 시냅스 계수 처리는 현재 calibration 수집과 SNN 평가 양쪽에 적용되어 있다.
 
-`scripts/experiments/vit_comparison.py#evaluator_command`가 GELU wrapper와 `phi_nl_psi_ed`를 선택하며, [[scripts/analysis/gelu_cubic_phi_nl_vit.py#install_phi_nl_psi_ed_cube]]가 실제 ViT adapter의 GELU 함수를 교체한다. 실제 collection·SNN 명령과 로그, calibration metadata에서 동일 구현과 source·GELU hash를 확인했다.
+[[scripts/analysis/gelu_cubic_phi_nl_vit.py#make_gelu_cubic_implementation]]가 선택된 `phi_nl_psi_ed` GELU 함수를 만들고, ViT evaluator가 모델 생성자에 전달한다. 실제 collection·SNN 명령과 로그, calibration metadata에서 동일 구현과 source·GELU hash를 확인했다.
 
 | 항목 | 현재 구현 |
 |---|---|
@@ -261,9 +261,9 @@ Attention score calibration은 Q/K 제한 후의 score를 수집한다. 현재 f
 | 지수 입력 계수 | `2*tau_s`를 고정 시냅스 계수로 처리 |
 | 최종 GELU 곱 | 입력과 gate라는 두 변수의 곱셈은 유지; 시간 인코딩 피연산자는 gate |
 
-실제 함수는 [[scripts/analysis/gelu_cubic_phi_nl_vit.py#gelu_with_phi_nl_psi_ed_cube]]이며 공통 [[utils/transforms/functions.py#_constant_synaptic_scale]]는 값과 bound에 같은 상수를 적용한다. 상수용 별도 곱셈 피연산자나 잡음 주입 사건을 만들지 않는다. 이는 pretrained Linear weight를 재학습하거나 변경했다는 뜻이 아니다.
+실제 함수는 [[utils/transforms/functions.py#gelu_approximation]]이며 공통 [[utils/transforms/functions.py#_constant_synaptic_scale]]는 값과 bound에 같은 상수를 적용한다. 상수용 별도 곱셈 피연산자나 잡음 주입 사건을 만들지 않는다. 이는 pretrained Linear weight를 재학습하거나 변경했다는 뜻이 아니다.
 
-기본 GELU 함수에 남아 있는 일반 곱셈 두 번의 세제곱 구성은 이번 wrapper에서 호출하지 않는다. 시간상수 세제곱의 고정 magnitude 제한과 지수 입력 cap은 유지되며, 상수 계수 처리가 활성화됐다는 사실과 내부 상한 calibration 여부는 별개이다.
+일반 곱셈 두 번을 쓰는 세제곱 구성은 [[scripts/analysis/gelu_cubic_phi_nl_vit.py#gelu_with_multiplication_cube]]의 비교 조건에만 남긴다. 상수 계수 처리와 내부 상한 calibration 여부는 별개이다.
 
 ## Observed Clipping and Audit Limits
 

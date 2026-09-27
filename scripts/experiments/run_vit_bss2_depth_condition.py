@@ -260,14 +260,11 @@ def main() -> None:
         args, hostname=socket.gethostname(), environment=dict(os.environ)
     )
 
-    for name in (
-        "source_root",
-        "model_id",
-        "calibration_source",
-        "calibration_dataset_path",
-        "evaluation_dataset_path",
-    ):
-        setattr(args, name, getattr(args, name).resolve(strict=True))
+    args.source_root = args.source_root.resolve(strict=True)
+    args.model_id = args.model_id.resolve(strict=True)
+    args.calibration_source = args.calibration_source.resolve(strict=True)
+    args.calibration_dataset_path = args.calibration_dataset_path.resolve(strict=True)
+    args.evaluation_dataset_path = args.evaluation_dataset_path.resolve(strict=True)
     args.image_preprocessing_config = args.image_preprocessing_config.resolve(strict=True)
     args.hardware_summary = args.hardware_summary.resolve(strict=True)
     source_hashes = source_identity(args.source_root, args.expected_commit)

@@ -1,7 +1,9 @@
 """Bind layer-wise calibration state to explicit Transformer activation sites."""
 
 import math
+from dataclasses import dataclass
 from typing import Any
+from weakref import WeakKeyDictionary
 
 import torch
 from torch import Tensor, nn
@@ -19,8 +21,16 @@ from utils.transforms.calibration import (
 from utils.transforms.types import Potential, PotentialBounds
 
 
-_CALIBRATION_STATE_ATTRIBUTE = "_delayed_temporal_calibration_state"
-_CALIBRATION_NAME_ATTRIBUTE = "_delayed_temporal_calibration_module_name"
+CalibrationState = CalibrationCollectorState | CalibrationRuntimeState
+
+
+@dataclass(frozen=True)
+class CalibrationBinding:
+    state: CalibrationState
+    module_name: str
+
+
+_CALIBRATION_BINDINGS: WeakKeyDictionary[nn.Module, CalibrationBinding] = WeakKeyDictionary()
 VIT_CALIBRATION_POLICY_VERSION = 3
 TEXT_CALIBRATION_POLICY_VERSION = 2
 OPERATOR_BACKED_OUTPUT_HEAD_VERSION = 1
@@ -47,11 +57,10 @@ def _vit_calibration_policy_enabled(
 
 def vit_calibration_uses_explicit_bounds(module: nn.Module) -> bool:
     """Return whether the bound ViT table selects Q/K/V and LayerNorm ranges."""
-    if not model_calibration_is_bound(module):
+    binding = get_model_calibration_binding(module)
+    if binding is None:
         return False
-    return _vit_calibration_policy_enabled(
-        module.__dict__[_CALIBRATION_STATE_ATTRIBUTE]
-    )
+    return _vit_calibration_policy_enabled(binding.state)
 
 
 def _explicit_calibration_policy_enabled(
@@ -78,11 +87,10 @@ def _explicit_calibration_policy_enabled(
 
 def calibration_uses_explicit_bounds(module: nn.Module) -> bool:
     """Return whether this module owns versioned input-range calibration."""
-    if not model_calibration_is_bound(module):
+    binding = get_model_calibration_binding(module)
+    if binding is None:
         return False
-    return _explicit_calibration_policy_enabled(
-        module.__dict__[_CALIBRATION_STATE_ATTRIBUTE]
-    )
+    return _explicit_calibration_policy_enabled(binding.state)
 
 
 def _calibration_execution_dtype(module: nn.Module, tensor_name: str) -> torch.dtype:
@@ -277,8 +285,8 @@ def bind_model_calibration(
         RuntimeError: If ``DataParallel`` would replicate mutable collection or
             clipping state across devices.
 
-    Binding uses ordinary non-parameter attributes, so calibration state never enters
-    a model checkpoint or changes pretrained parameter keys. Callers must explicitly
+    Binding uses a typed weak-key registry, so calibration state never enters a
+    model checkpoint or changes pretrained parameter keys. Callers must explicitly
     clear a completed phase before installing another state object.
     """
     # Calibration observers and clipping counters are mutable by design. DataParallel
@@ -337,10 +345,7 @@ def bind_model_calibration(
     # mixing collection and inference states or silently reusing stale clipping counts.
     for module_name in target_names:
         module = modules_by_name[module_name]
-        if (
-            _CALIBRATION_STATE_ATTRIBUTE in module.__dict__
-            or _CALIBRATION_NAME_ATTRIBUTE in module.__dict__
-        ):
+        if module in _CALIBRATION_BINDINGS:
             raise ValueError(
                 f"model module {module_name!r} already has calibration state"
             )
@@ -349,13 +354,17 @@ def bind_model_calibration(
     # stored alongside it so later calls cannot infer identity from execution order.
     for module_name in target_names:
         module = modules_by_name[module_name]
-        module.__dict__[_CALIBRATION_STATE_ATTRIBUTE] = state
-        module.__dict__[_CALIBRATION_NAME_ATTRIBUTE] = module_name
+        _CALIBRATION_BINDINGS[module] = CalibrationBinding(state, module_name)
     return len(target_names)
 
 
 def model_calibration_is_bound(module: nn.Module) -> bool:
-    """Return whether a module owns one complete layer-wise calibration binding.
+    """Return whether a module owns one layer-wise calibration binding."""
+    return get_model_calibration_binding(module) is not None
+
+
+def get_model_calibration_binding(module: nn.Module) -> CalibrationBinding | None:
+    """Read the typed calibration binding for a module, if one is installed.
 
     Model adapters use this query to retain an operator-derived analytic range when
     calibration is not installed, while routing declared collection or runtime sites
@@ -365,39 +374,14 @@ def model_calibration_is_bound(module: nn.Module) -> bool:
         module: Transformer module that may own named calibration sites.
 
     Returns:
-        ``True`` only when both binding attributes are present and structurally valid.
+        The binding object, or ``None`` if the module is not bound.
 
     Raises:
-        TypeError: If ``module`` is not a PyTorch module or bound fields are malformed.
-        ValueError: If only one binding attribute is present.
+        TypeError: If ``module`` is not a PyTorch module.
     """
-    # A partial binding indicates external corruption or an interrupted unsupported
-    # mutation. Treat it as an error rather than silently selecting analytic fallback.
     if not isinstance(module, nn.Module):
         raise TypeError("module must be a torch.nn.Module")
-    has_state = _CALIBRATION_STATE_ATTRIBUTE in module.__dict__
-    has_name = _CALIBRATION_NAME_ATTRIBUTE in module.__dict__
-    if has_state != has_name:
-        raise ValueError("module contains an incomplete calibration binding")
-    if not has_state:
-        return False
-
-    # Bound values are normally installed only by ``bind_model_calibration``. Validate
-    # them here as well so a manual replacement cannot steer a forward pass into
-    # collection or clipping under an invalid identity.
-    state = module.__dict__[_CALIBRATION_STATE_ATTRIBUTE]
-    module_name = module.__dict__[_CALIBRATION_NAME_ATTRIBUTE]
-    if not isinstance(
-        state,
-        (CalibrationCollectorState, CalibrationRuntimeState),
-    ):
-        raise TypeError("bound calibration state has an invalid type")
-    # ``named_modules`` uses the empty string for the root module. Calibration keys
-    # and binding already preserve that canonical identity, so accept it here while
-    # continuing to reject non-string corruption.
-    if not isinstance(module_name, str):
-        raise TypeError("bound calibration module name must be a string")
-    return True
+    return _CALIBRATION_BINDINGS.get(module)
 
 
 def clear_model_calibration(
@@ -417,7 +401,7 @@ def clear_model_calibration(
 
     Raises:
         TypeError: If ``model`` or ``expected_state`` has an invalid type.
-        ValueError: If binding attributes are incomplete or the identity guard fails.
+        ValueError: If the identity guard fails.
     """
     # Validate the optional guard before scanning. Equality is inappropriate for
     # mutable observers and counters, so cleanup uses object identity exclusively.
@@ -431,26 +415,21 @@ def clear_model_calibration(
             "expected_state must be calibration state or None"
         )
 
-    # Gather and validate every binding first. A partially corrupted module or wrong
-    # state guard leaves all other modules untouched for deterministic diagnosis.
+    # Gather and validate every binding first. A wrong state guard leaves all other
+    # modules untouched for deterministic diagnosis.
     bound_modules: list[nn.Module] = []
     for module in model.modules():
-        has_state = _CALIBRATION_STATE_ATTRIBUTE in module.__dict__
-        has_name = _CALIBRATION_NAME_ATTRIBUTE in module.__dict__
-        if has_state != has_name:
-            raise ValueError("model contains an incomplete calibration binding")
-        if not has_state:
+        binding = _CALIBRATION_BINDINGS.get(module)
+        if binding is None:
             continue
-        state = module.__dict__[_CALIBRATION_STATE_ATTRIBUTE]
-        if expected_state is not None and state is not expected_state:
+        if expected_state is not None and binding.state is not expected_state:
             raise ValueError("model calibration binding does not match expected_state")
         bound_modules.append(module)
 
     # Cleanup changes only adapter attributes. The collector, frozen table, and
     # accumulated statistics remain available to the caller after unbinding.
     for module in bound_modules:
-        del module.__dict__[_CALIBRATION_STATE_ATTRIBUTE]
-        del module.__dict__[_CALIBRATION_NAME_ATTRIBUTE]
+        del _CALIBRATION_BINDINGS[module]
     return len(bound_modules)
 
 
@@ -482,28 +461,23 @@ def calibrated_potential(
         active calibration phase.
 
     Raises:
-        TypeError: If binding attributes, names, tensor, or safety bounds are invalid.
+        TypeError: If names, tensor, or safety bounds are invalid.
         ValueError: If collection output escapes its analytic safety rail, execution
             bounds are inconsistent, a frozen range exceeds that ceiling, or the site
             is not declared for the installed state.
-        RuntimeError: If the module has no complete calibration binding.
+        RuntimeError: If the module has no calibration binding.
 
     Collection never constructs a domain from the activation it is measuring. The
     analytic safety rail permits deterministic propagation until the completed table
     replaces it in validation and inference.
     """
-    # Require a complete explicit binding. Model forwards must not guess a module name
+    # Require an explicit binding. Model forwards must not guess a module name
     # or fall back to live tensor extrema when calibration configuration is missing.
-    if not isinstance(module, nn.Module):
-        raise TypeError("module must be a torch.nn.Module")
-    has_state = _CALIBRATION_STATE_ATTRIBUTE in module.__dict__
-    has_name = _CALIBRATION_NAME_ATTRIBUTE in module.__dict__
-    if not has_state or not has_name:
+    binding = get_model_calibration_binding(module)
+    if binding is None:
         raise RuntimeError("module has no complete calibration binding")
-    state = module.__dict__[_CALIBRATION_STATE_ATTRIBUTE]
-    module_name = module.__dict__[_CALIBRATION_NAME_ATTRIBUTE]
-    if not isinstance(module_name, str):
-        raise TypeError("bound calibration module name must be a string")
+    state = binding.state
+    module_name = binding.module_name
     if not isinstance(tensor_name, str):
         raise TypeError("tensor_name must be a string")
 

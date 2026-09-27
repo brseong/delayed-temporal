@@ -64,7 +64,9 @@ An explicit collector accepts only predeclared calibration sites, transitions on
 
 Calibration state binds to stable module names without entering checkpoints. Collection uses analytic safety rails; frozen execution clamps raw activations to persisted ranges before creating `Potential`.
 
-Binding rejects missing modules, undeclared tensor boundaries, repeated installation, and `DataParallel`. Adapters retain analytic bounds when unbound and query complete bindings before entering collection or frozen clipping. Phase cleanup preserves the completed state.
+Calibration bindings use one typed record per module in a weak reference registry. The record pairs the module name with the active collection or frozen state. Bind and clear validate all targets before changing the registry. No calibration attribute is inserted into a model object or checkpoint.
+
+Binding rejects missing modules, undeclared tensor boundaries, repeated installation, and `DataParallel`. Adapters retain analytic bounds when unbound and query the binding before entering collection or frozen clipping. Phase cleanup preserves the completed state.
 
 The empty module name is the canonical `named_modules()` identity of a bound root model and is valid for model-entry calibration; nested modules retain their ordinary dotted names.
 

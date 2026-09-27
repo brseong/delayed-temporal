@@ -2696,11 +2696,13 @@ def verify_static_mismatch_rng_contract() -> None:
     # data reproducibility. Equal dedicated seeds reproduce every module offset.
     torch.manual_seed(1701)
     global_state = torch.random.get_rng_state().clone()
-    handles_a = install_range_mismatch(same_a, 0.05, seed=11)
+    count_a = install_range_mismatch(same_a, 0.05, seed=11)
     assert torch.equal(global_state, torch.random.get_rng_state())
-    handles_b = install_range_mismatch(same_b, 0.05, seed=11)
-    handles_different = install_range_mismatch(different, 0.05, seed=12)
-    assert len(handles_a) == len(handles_b) == len(handles_different) == 2
+    count_b = install_range_mismatch(same_b, 0.05, seed=11)
+    count_different = install_range_mismatch(different, 0.05, seed=12)
+    assert count_a == count_b == count_different == 2
+    assert install_range_mismatch(torch.nn.Linear(3, 2), 0.05, seed=11) == 0
+    assert all(not module._forward_pre_hooks for module in same_a)
 
     offsets_a = [module._range_mismatch_unit_offset.clone() for module in same_a]
     offsets_b = [module._range_mismatch_unit_offset.clone() for module in same_b]
@@ -2724,13 +2726,14 @@ def verify_static_mismatch_rng_contract() -> None:
     first_output = same_a(potential)
     second_output = same_a(potential)
     assert torch.equal(first_output.value, second_output.value)
+    assert not torch.equal(first_output.value, base(potential).value)
     assert all(
         torch.equal(before, module._range_mismatch_unit_offset)
         for before, module in zip(offsets_a, same_a, strict=True)
     )
 
     # Disabled installation is a no-op, while malformed seeds fail before sampling.
-    assert install_range_mismatch(copy.deepcopy(base), 0.05, enabled=False) == []
+    assert install_range_mismatch(copy.deepcopy(base), 0.05, enabled=False) == 0
     for invalid_seed, expected_error in ((True, TypeError), (-1, ValueError)):
         try:
             install_range_mismatch(

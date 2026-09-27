@@ -60,6 +60,8 @@ def _interval_product(
 class LlamaRMSNorm(nn.Module):
     """Apply the RMSNorm operator composition and pretrained fixed gains."""
 
+    _frozen_output_bounds: tuple[tuple[object, ...], PotentialBounds] | None = None
+
     def __init__(
         self, hidden_size: int, eps: float = 1e-6, *,
         tau_s: float = 1.0, clip_margin: float = 1e-8,
@@ -79,7 +81,7 @@ class LlamaRMSNorm(nn.Module):
             float(self.tau_s),
             float(self.clip_margin),
         )
-        cached = self.__dict__.get("_frozen_output_bounds")
+        cached = self._frozen_output_bounds
         if cached is not None and not refresh:
             cached_identity, output_bounds = cached
             if identity != cached_identity:
@@ -111,7 +113,7 @@ class LlamaRMSNorm(nn.Module):
         )
         if final_identity != identity:
             raise RuntimeError("LlamaRMSNorm parameters changed while bounds were frozen")
-        self.__dict__["_frozen_output_bounds"] = (final_identity, output_bounds)
+        self._frozen_output_bounds = (final_identity, output_bounds)
         return output_bounds
 
     def forward(self, hidden_states: Potential) -> Potential:
@@ -456,6 +458,7 @@ class LlamaPreTrainedModel(PreTrainedModel):
 
 
 class LlamaModel(LlamaPreTrainedModel):
+    _frozen_embedding_bounds: tuple[tuple[int, int], PotentialBounds] | None = None
     def __init__(self, config: LlamaConfig) -> None:
         super().__init__(config)
         self.padding_idx = config.pad_token_id
@@ -479,7 +482,7 @@ class LlamaModel(LlamaPreTrainedModel):
 
     def freeze_embedding_bounds(self, *, refresh: bool = False) -> PotentialBounds:
         identity = (id(self.embed_tokens.weight), self.embed_tokens.weight._version)
-        cached = self.__dict__.get("_frozen_embedding_bounds")
+        cached = self._frozen_embedding_bounds
         if cached is not None and not refresh:
             cached_identity, bounds = cached
             if identity != cached_identity:
@@ -497,7 +500,7 @@ class LlamaModel(LlamaPreTrainedModel):
         final_identity = (id(self.embed_tokens.weight), self.embed_tokens.weight._version)
         if final_identity != identity:
             raise RuntimeError("Llama embedding parameters changed while bounds were frozen")
-        self.__dict__["_frozen_embedding_bounds"] = (final_identity, bounds)
+        self._frozen_embedding_bounds = (final_identity, bounds)
         return bounds
 
     def get_input_embeddings(self):
@@ -505,7 +508,7 @@ class LlamaModel(LlamaPreTrainedModel):
 
     def set_input_embeddings(self, value):
         self.embed_tokens = value
-        self.__dict__.pop("_frozen_embedding_bounds", None)
+        self._frozen_embedding_bounds = None
 
     @merge_with_config_defaults
     @capture_outputs

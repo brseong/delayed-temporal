@@ -61,10 +61,19 @@ from utils.transformers.models.spiking_ops import (
 )
 
 
+type GeluOperator = Callable[
+    [torch.Tensor, PotentialBounds], tuple[torch.Tensor, PotentialBounds]
+]
+
+
 class ViTEmbeddings(nn.Module):
     """
     Construct the CLS token, position and patch embeddings. Optionally, also the mask token.
     """
+
+    _frozen_embedding_bounds: tuple[
+        tuple[object, ...], PotentialBounds, PotentialBounds
+    ] | None = None
 
     def __init__(self, config: ViTConfig, use_mask_token: bool = False):
         super().__init__()
@@ -91,7 +100,7 @@ class ViTEmbeddings(nn.Module):
             int(self.position_embeddings._version),
             tuple(position.shape),
         )
-        cached = self.__dict__.get("_frozen_embedding_bounds")
+        cached = self._frozen_embedding_bounds
         if cached is not None and not refresh:
             cached_versions, token_bounds, position_bounds = cached
             if cached_versions != versions:
@@ -112,7 +121,7 @@ class ViTEmbeddings(nn.Module):
             float(position.detach().max().item()),
         )
         if not refresh:
-            self.__dict__["_frozen_embedding_bounds"] = (
+            self._frozen_embedding_bounds = (
                 versions,
                 token_bounds,
                 position_bounds,
@@ -220,6 +229,10 @@ class ViTPatchEmbeddings(nn.Module):
     Transformer.
     """
 
+    _frozen_parameter_bounds: tuple[
+        tuple[int, int | None], PotentialBounds
+    ] | None = None
+
     def __init__(self, config: ViTConfig):
         super().__init__()
         image_size, patch_size = config.image_size, config.patch_size
@@ -264,7 +277,7 @@ class ViTPatchEmbeddings(nn.Module):
             int(self.projection.weight._version),
             int(self.projection.bias._version) if self.projection.bias is not None else None,
         )
-        cached = self.__dict__.get("_frozen_parameter_bounds")
+        cached = self._frozen_parameter_bounds
         if cached is not None and not refresh:
             cached_versions, bounds = cached
             if cached_versions != versions:
@@ -289,7 +302,7 @@ class ViTPatchEmbeddings(nn.Module):
             min(0.0, float(lower.min().item())),
             max(0.0, float(upper.max().item())),
         )
-        self.__dict__["_frozen_parameter_bounds"] = (versions, bounds)
+        self._frozen_parameter_bounds = (versions, bounds)
         return bounds
 
     def forward(self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = False) -> Potential:
@@ -553,13 +566,18 @@ class ViTAttention(nn.Module):
 
 
 class ViTIntermediate(nn.Module):
-    def __init__(self, config: ViTConfig):
+    def __init__(
+        self, config: ViTConfig, *, gelu_operator: GeluOperator | None = None,
+    ) -> None:
         super().__init__()
         self.dense = SpikingLinear(config.hidden_size, config.intermediate_size)
         self._use_spiking_mlp = getattr(config, "use_spiking_mlp", True)
         self._spiking_mlp_exact_gelu = getattr(config, "spiking_mlp_exact_gelu", False)
         self._eps = 1e-5
         self._hidden_act_name = config.hidden_act if isinstance(config.hidden_act, str) else None
+        self.gelu_operator: GeluOperator = (
+            gelu_approximation if gelu_operator is None else gelu_operator
+        )
         # 항상 활성 함수 초기화 (spiking 경로도 GELU 먼저 적용)
         if isinstance(config.hidden_act, str):
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
@@ -610,7 +628,7 @@ class ViTIntermediate(nn.Module):
                 out = 0.5 * x * (1.0 + torch.tanh(sqrt_2_over_pi * (x + 0.044715 * x ** 3)))
                 return Potential(*clamp_gelu_output(out, pot_z.domain))
             else:
-                return Potential(*gelu_approximation(*pot_z))
+                return Potential(*self.gelu_operator(*pot_z))
 
         # GELU and SiLU use their fixed lower bounds and input upper endpoints.
         out = self.intermediate_act_fn(pot_z.value)
@@ -661,12 +679,14 @@ class ViTOutput(nn.Module):
 class ViTLayer(GradientCheckpointingLayer):
     """This corresponds to the Block class in the timm implementation."""
 
-    def __init__(self, config: ViTConfig):
+    def __init__(
+        self, config: ViTConfig, *, gelu_operator: GeluOperator | None = None,
+    ) -> None:
         super().__init__()
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
         self.attention = ViTAttention(config)
-        self.intermediate = ViTIntermediate(config)
+        self.intermediate = ViTIntermediate(config, gelu_operator=gelu_operator)
         self.output = ViTOutput(config)
         _tau_s = getattr(config, "tau_s", 1.0)
         _use_spiking_ln = getattr(config, "use_spiking_layernorm", True)
@@ -739,10 +759,15 @@ class ViTLayer(GradientCheckpointingLayer):
 
 
 class ViTEncoder(nn.Module):
-    def __init__(self, config: ViTConfig):
+    def __init__(
+        self, config: ViTConfig, *, gelu_operator: GeluOperator | None = None,
+    ) -> None:
         super().__init__()
         self.config = config
-        self.layer = nn.ModuleList([ViTLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layer = nn.ModuleList([
+            ViTLayer(config, gelu_operator=gelu_operator)
+            for _ in range(config.num_hidden_layers)
+        ])
         print("Number of layers:", config.num_hidden_layers)
         self.gradient_checkpointing = False
         first_block_count = getattr(config, "time_noise_vit_first_block_count", None)
@@ -827,18 +852,23 @@ class ViTPreTrainedModel(PreTrainedModel):
 
 @auto_docstring
 class ViTModel(ViTPreTrainedModel):
-    def __init__(self, config: ViTConfig, add_pooling_layer: bool = True, use_mask_token: bool = False):
+    def __init__(
+        self, config: ViTConfig, add_pooling_layer: bool = True,
+        use_mask_token: bool = False, *, gelu_operator: GeluOperator | None = None,
+    ) -> None:
         r"""
         add_pooling_layer (bool, *optional*, defaults to `True`):
             Whether to add a pooling layer
         use_mask_token (`bool`, *optional*, defaults to `False`):
             Whether to use a mask token for masked image modeling.
+        gelu_operator (`GeluOperator`, *optional*):
+            Composed GELU function passed to each block during construction.
         """
         super().__init__(config)
         self.config = config
 
         self.embeddings = ViTEmbeddings(config, use_mask_token=use_mask_token)
-        self.encoder = ViTEncoder(config)
+        self.encoder = ViTEncoder(config, gelu_operator=gelu_operator)
 
         if getattr(config, "use_spiking_layernorm", True):
             self.layernorm = SpikingLayerNorm(
@@ -1055,11 +1085,17 @@ class ViTForMaskedImageModeling(ViTPreTrainedModel):
     """
 )
 class ViTForImageClassification(ViTPreTrainedModel):
-    def __init__(self, config: ViTConfig):
+    def __init__(
+        self, config: ViTConfig, *, gelu_operator: GeluOperator | None = None,
+    ) -> None:
+        r"""
+        gelu_operator (`GeluOperator`, *optional*):
+            Composed GELU function passed to each block during construction.
+        """
         super().__init__(config)
 
         self.num_labels = config.num_labels
-        self.vit = ViTModel(config, add_pooling_layer=False)
+        self.vit = ViTModel(config, add_pooling_layer=False, gelu_operator=gelu_operator)
 
         # Classifier head
         self.classifier = (

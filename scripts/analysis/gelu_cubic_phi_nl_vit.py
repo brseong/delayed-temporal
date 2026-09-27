@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from math import isfinite
 from pathlib import Path
 import sys
+from typing import Sequence
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -16,10 +18,10 @@ import torch
 
 from scripts.evaluation.error_analysis_vit import (
     Arguments,
+    GeluCubicImplementation,
     evaluate_vit_model,
     parse_arguments as parse_vit_arguments,
 )
-from utils.transformers.models.spiking_vit import modeling_spiking_vit
 from utils.transforms.functions import (
     GELU_CUBIC_MAGNITUDE_FLOOR,
     _constant_synaptic_scale,
@@ -27,48 +29,10 @@ from utils.transforms.functions import (
     clamp_gelu_output,
     clamp_gelu_square_output,
     gelu_approximation,
-    gelu_cubic_power_operator,
     multiplication_operator,
 )
 from utils.transforms.types import PotentialBounds
-
-
-_CUBIC_IMPLEMENTATIONS = ("multiplication", "phi_nl_psi_ed")
-
-
-# @lat: [[evaluation#Evaluation and Verification#Historical Noise and Ablation Sweeps#GELU Cubic Construction Comparison]]
-def phi_nl_psi_ed_cube(
-    input_value: torch.Tensor,
-    domain: PotentialBounds,
-    *,
-    tau_s: float,
-    magnitude_floor: float,
-) -> tuple[torch.Tensor, PotentialBounds]:
-    """Compatibility entry point for the canonical signed cubic power operator."""
-    return gelu_cubic_power_operator(
-        input_value,
-        domain,
-        tau_s=tau_s,
-        magnitude_floor=magnitude_floor,
-    )
-
-
-def gelu_with_phi_nl_psi_ed_cube(
-    input_value: torch.Tensor,
-    domain: PotentialBounds,
-    *,
-    tau_s: float = 1.0,
-    magnitude_floor: float = GELU_CUBIC_MAGNITUDE_FLOOR,
-    **kwargs: object,
-) -> tuple[torch.Tensor, PotentialBounds]:
-    """Compatibility entry point for the canonical composed GELU."""
-    return gelu_approximation(
-        input_value,
-        domain,
-        tau_s=tau_s,
-        magnitude_floor=magnitude_floor,
-        **kwargs,
-    )
+from utils.transformers.models.spiking_vit.modeling_spiking_vit import GeluOperator
 
 
 def gelu_with_multiplication_cube(
@@ -111,7 +75,7 @@ def gelu_with_multiplication_cube(
         tanh_input_domain,
         tau_s=tau_s,
     )
-    result, _ = multiplication_operator(
+    result, _product_bounds = multiplication_operator(
         input_clamped,
         domain,
         gate,
@@ -120,47 +84,38 @@ def gelu_with_multiplication_cube(
     return clamp_gelu_output(result, domain)
 
 
-def install_gelu_cubic_implementation(
-    implementation: str,
+def make_gelu_cubic_implementation(
+    implementation: GeluCubicImplementation,
     *,
     magnitude_floor: float,
-) -> None:
-    """Install one explicitly selected comparison path in the local ViT adapter."""
-    if implementation not in _CUBIC_IMPLEMENTATIONS:
-        raise ValueError("unsupported GELU cubic implementation")
+) -> GeluOperator:
+    """Build one explicitly selected comparison path for a ViT instance."""
+    if not isinstance(implementation, GeluCubicImplementation):
+        raise TypeError("expected GeluCubicImplementation")
 
     def configured_gelu(
         input_value: torch.Tensor,
         domain: PotentialBounds,
-        **kwargs: object,
     ) -> tuple[torch.Tensor, PotentialBounds]:
-        if implementation == "multiplication":
-            return gelu_with_multiplication_cube(input_value, domain, **kwargs)
+        if implementation is GeluCubicImplementation.MULTIPLICATION:
+            return gelu_with_multiplication_cube(input_value, domain)
         return gelu_approximation(
             input_value,
             domain,
             magnitude_floor=magnitude_floor,
-            **kwargs,
         )
 
-    modeling_spiking_vit.gelu_approximation = configured_gelu
+    return configured_gelu
 
 
-def install_phi_nl_psi_ed_cube(*, magnitude_floor: float) -> None:
-    """Keep the archived analysis API while delegating to the canonical owner."""
-    install_gelu_cubic_implementation(
-        "phi_nl_psi_ed",
-        magnitude_floor=magnitude_floor,
-    )
-
-
-def parse_arguments() -> tuple[Arguments, str, float]:
+def parse_arguments(argv: Sequence[str] | None = None) -> Arguments:
     """Parse the cubic selection before delegating the ordinary ViT arguments."""
-    help_requested = any(arg in {"-h", "--help"} for arg in sys.argv[1:])
+    input_args = list(sys.argv[1:] if argv is None else argv)
+    help_requested = any(arg in {"-h", "--help"} for arg in input_args)
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
         "--gelu-cubic-implementation",
-        choices=_CUBIC_IMPLEMENTATIONS,
+        choices=[member.value for member in GeluCubicImplementation],
         required=not help_requested,
     )
     parser.add_argument(
@@ -168,37 +123,37 @@ def parse_arguments() -> tuple[Arguments, str, float]:
         type=float,
         default=GELU_CUBIC_MAGNITUDE_FLOOR,
     )
-    analysis_args, remaining = parser.parse_known_args()
+    analysis_args, remaining = parser.parse_known_args(input_args)
+    vit_args = parse_vit_arguments(remaining)
 
-    original_argv = sys.argv
-    try:
-        sys.argv = [original_argv[0], *remaining]
-        vit_args = parse_vit_arguments()
-    finally:
-        sys.argv = original_argv
-
-    implementation = str(analysis_args.gelu_cubic_implementation)
+    implementation = GeluCubicImplementation(analysis_args.gelu_cubic_implementation)
     magnitude_floor = float(analysis_args.gelu_cubic_floor)
     if vit_args.spiking_mlp_exact_gelu or vit_args.spiking_mlp_exact_gelu_layers:
         raise ValueError("GELU cubic comparison cannot be combined with exact GELU modes")
     if not isfinite(magnitude_floor) or magnitude_floor <= 0.0:
         raise ValueError("gelu-cubic-floor must be finite and positive")
 
-    vit_args.gelu_cubic_implementation = implementation
-    vit_args.gelu_cubic_floor = magnitude_floor
-    return vit_args, implementation, magnitude_floor
+    return replace(
+        vit_args,
+        gelu_cubic_implementation=implementation,
+        gelu_cubic_floor=magnitude_floor,
+    )
 
 
 def main() -> None:
-    """Install the selected analysis path and run the maintained ViT evaluator."""
-    args, implementation, magnitude_floor = parse_arguments()
-    install_gelu_cubic_implementation(
+    """Construct the selected analysis function and run the ViT evaluator."""
+    args = parse_arguments()
+    implementation = args.gelu_cubic_implementation
+    magnitude_floor = args.gelu_cubic_floor
+    if implementation is None or magnitude_floor is None:
+        raise ValueError("GELU cubic configuration is required")
+    gelu_operator = make_gelu_cubic_implementation(
         implementation,
         magnitude_floor=magnitude_floor,
     )
     print(f"GELU cubic implementation: {implementation}")
     print(f"GELU cubic magnitude floor: {magnitude_floor:.9g}")
-    evaluate_vit_model(args)
+    evaluate_vit_model(args, gelu_operator=gelu_operator)
 
 
 if __name__ == "__main__":
