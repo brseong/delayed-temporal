@@ -24,6 +24,7 @@ from scripts.experiments.screening_median_model_sweep import (
     HARDWARE_SUMMARY_SHA256,
     canonical_alpha,
 )
+from scripts.runtime.files import atomic_text
 from scripts.runtime.local_gpu import gpu_activity, gpu_available
 
 
@@ -43,13 +44,6 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def atomic_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
-    temporary.write_text(content, encoding="utf-8")
-    temporary.replace(path)
 
 
 def expected_identity(

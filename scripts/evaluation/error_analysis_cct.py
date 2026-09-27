@@ -22,6 +22,7 @@ from torchvision.datasets import CIFAR10
 from torchvision.transforms import Compose, Normalize, ToTensor
 from transformers import AttentionInterface
 
+from scripts.runtime.identity import sha256_file
 from utils.transforms.calibration import (
     CalibrationMetadata,
     CalibrationMode,
@@ -57,14 +58,6 @@ from utils.transformers.models.spiking_vit.calibration import vit_calibration_sp
 
 
 AttentionInterface.register("spiking_sdpa", spiking_sdpa_attention_forward)
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def json_finite(value: object) -> object:

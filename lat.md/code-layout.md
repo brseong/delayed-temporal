@@ -16,6 +16,8 @@ Atomic status replacement, immutable evidence writes, artifact identity, worker 
 
 The owners are `files.py`, `identity.py`, `environment.py`, `local_gpu.py`, and `slurm.py`, respectively. Content and source checks use `identity.py`; mutable and immutable output paths use `files.py`.
 
+The additional vision evaluator and language evaluation scripts use the shared content hash and atomic output helpers. This keeps checkpoint identity and durable file replacement under one runtime owner.
+
 ## Campaign and Artifact Boundary
 
 Experiment modules own manifests, scientific condition grids, scheduling, retries, and evidence validation; analysis modules read completed artifacts and create aggregate outputs.

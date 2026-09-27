@@ -14,6 +14,12 @@ Evaluation runners under `scripts/evaluation` are model-family-specific because 
 
 Shell drivers under `scripts/experiments` supply experiment matrices and use `scripts/lib/gpu_pool.sh` to distribute independent runs. They assume locally available checkpoints, datasets, GPUs, and logging credentials as specified by each script.
 
+### Local evaluator smoke check
+
+The setup helper creates a tiny random ViT checkpoint and two synthetic images so a fresh environment can exercise both dense and converted evaluation without external assets.
+
+[[scripts/setup/create_smoke_assets.py#create_smoke_assets]] writes the local inputs used by the setup check. The generated run verifies checkpoint loading, preprocessing, and one evaluation batch. Its weights, images, and accuracy are diagnostic inputs and outputs, not experimental evidence for the manuscript.
+
 ## Backend Comparison
 
 Every main runner selects either an upstream Hugging Face model or a local spiking model loaded from the same pretrained checkpoint.
@@ -220,6 +226,8 @@ It separates raw reruns at a fixed source revision from rendering verified artif
 The integrated driver binds active manuscript tables and figures to authenticated completed evidence without duplicating the scientific campaign contracts.
 
 [[scripts/experiments/reproduce_iclr_2027.py#main]] inventories every manuscript result and its experiment owner, verifies table values and publication figure hashes, invokes the focused campaign verifiers, rebuilds generated figures in an isolated artifact directory, promotes the verified PDF and PNG pairs, and compiles the manuscript.
+
+The inventory reads only the static manuscript result map and succeeds before external evidence is supplied. Validation and rebuilding require both input directories and report missing directories at the command boundary.
 
 The driver does not collapse raw experiments from multiple hosts into a second scheduler. Conversion, clock-driven, screening median, cumulative encoder block, and Appendix timing-noise reruns remain owned by their existing controllers and fixed source revisions. [[scripts/analysis/summarize_vit_bss2_depth.py#main]] accepts a separate output directory so paper reconstruction cannot rewrite its authenticated input tree.
 

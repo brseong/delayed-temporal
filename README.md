@@ -17,7 +17,7 @@ See [`scripts/README.md`](scripts/README.md) before adding an experiment. It dis
 
 ## Environment
 
-Use Python 3.12 and install the pinned dependencies:
+Use Python 3.12 and install the listed dependencies:
 
 ```bash
 conda create -n dt python=3.12
@@ -27,12 +27,42 @@ pip install -r requirements.txt
 
 Pretrained checkpoints and datasets are external assets. Existing experiment manifests record their paths and hashes; do not silently substitute another checkpoint or dataset cache.
 
+## Check a fresh clone locally
+
+A synthetic checkpoint and two synthetic images let you exercise both evaluation backends without downloading a model or dataset. Run this after installing the dependencies:
+
+```bash
+SMOKE_ROOT="$(mktemp -d)"
+python scripts/setup/create_smoke_assets.py "$SMOKE_ROOT"
+export WANDB_MODE=disabled HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1
+for BACKEND in hf spiking; do
+  CUDA_VISIBLE_DEVICES= python scripts/evaluation/error_analysis_vit.py \
+    --experiment_name "local-${BACKEND}" \
+    --model_backend "$BACKEND" \
+    --model_id "$SMOKE_ROOT/checkpoint" \
+    --dataset_id imagenet-1k \
+    --evaluation-dataset-path "$SMOKE_ROOT/dataset" \
+    --evaluation-split validation \
+    --device cpu --precision float64 \
+    --batch_size 2 --max_eval_batches 1 --no-tensorboard
+done
+```
+
+This checks that loading and evaluation work in the installed environment. The generated weights and scores are not paper results. On a machine without an accelerator, the converted model uses eager attention; the remaining selected operators still run.
+
+The paper reproduction commands below require the separately recorded checkpoints, datasets, experiment artifacts, and manuscript tree. A fresh clone cannot reconstruct those results without those inputs.
+
 ## Reproducing the ICLR 2027 experiments and figures
 
-The canonical entry point maps every active manuscript result to its experiment owner, verifies the completed evidence, rebuilds all publication figures, and compiles the paper. Run it from the repository root:
+The canonical entry point maps every active manuscript result to its experiment owner, verifies the completed evidence, rebuilds all publication figures, and compiles the paper. The inventory needs only the source tree:
 
 ```bash
 python3 scripts/experiments/reproduce_iclr_2027.py inventory
+```
+
+After supplying the completed experiment evidence and manuscript tree, verify them and rebuild the publication outputs:
+
+```bash
 python3 scripts/experiments/reproduce_iclr_2027.py check
 python3 scripts/experiments/reproduce_iclr_2027.py all
 ```

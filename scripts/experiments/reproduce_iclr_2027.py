@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import dataclass
+from enum import StrEnum
 import hashlib
 import json
 import os
@@ -24,6 +25,15 @@ MAINTAINED_PYTHON = Path("/opt/conda/envs/dt/bin/python")
 DEFAULT_PYTHON_BIN = str(
     MAINTAINED_PYTHON if MAINTAINED_PYTHON.is_file() else Path(sys.executable)
 )
+
+
+class ReproductionCommand(StrEnum):
+    INVENTORY = "inventory"
+    CHECK = "check"
+    VERIFY = "verify"
+    RENDER = "render"
+    BUILD = "build"
+    ALL = "all"
 
 
 @dataclass(frozen=True)
@@ -542,28 +552,39 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument(
         "command",
-        choices=("inventory", "check", "verify", "render", "build", "all"),
+        choices=[command.value for command in ReproductionCommand],
     )
     parser.add_argument("--artifacts-root", type=Path, default=DEFAULT_ARTIFACTS_ROOT)
     parser.add_argument("--paper-root", type=Path, default=DEFAULT_PAPER_ROOT)
     parser.add_argument("--python-bin", default=DEFAULT_PYTHON_BIN)
     parser.add_argument("--json", action="store_true", help="Emit inventory as JSON.")
     args = parser.parse_args()
+    command = ReproductionCommand(args.command)
+
+    if command is ReproductionCommand.INVENTORY:
+        print_inventory(as_json=args.json)
+        return
+
+    missing = [
+        str(path)
+        for path in (args.artifacts_root, args.paper_root)
+        if not path.is_dir()
+    ]
+    if missing:
+        parser.error("Missing required input directories: " + ", ".join(missing))
     artifacts_root = args.artifacts_root.resolve(strict=True)
     paper_root = args.paper_root.resolve(strict=True)
 
-    if args.command == "inventory":
-        print_inventory(as_json=args.json)
-    elif args.command == "check":
+    if command is ReproductionCommand.CHECK:
         verify_internal(artifacts_root, paper_root)
-    elif args.command == "verify":
+    elif command is ReproductionCommand.VERIFY:
         verify_all(artifacts_root, paper_root, args.python_bin)
-    elif args.command == "render":
+    elif command is ReproductionCommand.RENDER:
         render_figures(artifacts_root, paper_root, args.python_bin)
-    elif args.command == "build":
+    elif command is ReproductionCommand.BUILD:
         verify_internal(artifacts_root, paper_root)
         build_paper(artifacts_root, paper_root)
-    else:
+    elif command is ReproductionCommand.ALL:
         verify_all(artifacts_root, paper_root, args.python_bin)
         render_figures(artifacts_root, paper_root, args.python_bin)
         verify_all(artifacts_root, paper_root, args.python_bin)
