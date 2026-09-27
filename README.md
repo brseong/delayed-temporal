@@ -30,6 +30,31 @@ Evaluation requires the dependencies listed in `requirements.txt`. CUDA runs add
 
 Checkpoints and datasets are external inputs. For a reproducible run, record their exact identities and reuse the same preprocessing, calibration data, and evaluation split.
 
+## Check a fresh clone locally
+
+A synthetic checkpoint and two synthetic images let you exercise both evaluation backends without downloading a model or dataset. Run this after installing the dependencies:
+
+```bash
+SMOKE_ROOT="$(mktemp -d)"
+python scripts/setup/create_smoke_assets.py "$SMOKE_ROOT"
+export WANDB_MODE=disabled HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1
+for BACKEND in hf spiking; do
+  CUDA_VISIBLE_DEVICES= python scripts/evaluation/error_analysis_vit.py \
+    --experiment_name "local-${BACKEND}" \
+    --model_backend "$BACKEND" \
+    --model_id "$SMOKE_ROOT/checkpoint" \
+    --dataset_id imagenet-1k \
+    --evaluation-dataset-path "$SMOKE_ROOT/dataset" \
+    --evaluation-split validation \
+    --device cpu --precision float64 \
+    --batch_size 2 --max_eval_batches 1 --no-tensorboard
+done
+```
+
+This checks that loading and evaluation work in the installed environment. The generated weights and scores are not paper results. On a machine without an accelerator, the converted model uses eager attention; the remaining selected operators still run.
+
+The paper reproduction commands below require the separately recorded checkpoints, datasets, experiment artifacts, and manuscript tree. A fresh clone cannot reconstruct those results without those inputs.
+
 ## Quick evaluation
 
 The evaluation programs support dense Hugging Face models through `--model_backend hf` and converted models through `--model_backend spiking`. The following command runs a short ViT evaluation with placeholder asset paths:
@@ -68,10 +93,12 @@ The campaign controllers under `scripts/experiments/` bind source, checkpoint, d
 The top-level reproduction driver inventories the result owners, validates completed evidence, regenerates figures, and builds the manuscript:
 
 ```bash
-python scripts/experiments/reproduce_iclr_2027.py inventory \
-  --artifacts-root /path/to/artifacts \
-  --paper-root /path/to/iclr_2027
+python scripts/experiments/reproduce_iclr_2027.py inventory
+```
 
+The inventory needs only the source tree. Provide the separately distributed artifact and manuscript directories before checking or rebuilding the reported results:
+
+```bash
 python scripts/experiments/reproduce_iclr_2027.py check \
   --artifacts-root /path/to/artifacts \
   --paper-root /path/to/iclr_2027
@@ -82,7 +109,7 @@ python scripts/experiments/reproduce_iclr_2027.py all \
   --python-bin "$(command -v python)"
 ```
 
-These commands require the separately supplied artifact and manuscript trees. The driver validates their recorded identities and fails when required evidence is missing or inconsistent. Raw experimental reruns remain under their individual campaign controllers because the reported results span several models and execution environments.
+The driver validates their recorded identities and fails when required evidence is missing or inconsistent. Raw experimental reruns remain under their individual campaign controllers because the reported results span several models and execution environments.
 
 The principal campaign owners are:
 

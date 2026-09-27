@@ -9,7 +9,6 @@ from dataclasses import replace
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 import sys
 import time
@@ -25,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.runtime.files import atomic_json
 from scripts.experiments.screening_median_model_sweep import (
     DEADLINE_MARGIN_SIGMA_RATIO,
     canonical_alpha,
@@ -62,13 +62,6 @@ HARDWARE_PATH = ROOT / "artifacts/brainscales2-primitives/20260924T_best_median_
 EVALUATION_FINGERPRINT = "38d46c7ecf7254ca"
 CALIBRATION_FINGERPRINT = "f1506153809011c4"
 IMDB_TEST_FINGERPRINT = "0c4517be449a88ae"
-
-
-def atomic_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
-    temporary.replace(path)
 
 
 def serializable_noise_stats() -> dict:
